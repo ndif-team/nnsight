@@ -83,10 +83,7 @@ def generate_fast(
     if(type(prompts) == str):
         prompts = [prompts]
         
-    tokenized = tok(
-        prompts, 
-        padding=True, 
-        return_tensors="pt").to(
+    tokenized = tok(prompts, padding=True, return_tensors="pt").to(
         next(model.parameters()).device
     )
 
@@ -115,17 +112,11 @@ def generate_fast(
         max_out_len = input_ids.size(1) + max_new_tokens
     with torch.no_grad():
         while input_ids.size(1) < max_out_len:  # while not exceeding max output length
-            # print(cur_context)
-            # print(input_ids.shape)
-            # print(f"input >> {input_ids[:, cur_context].shape}, attention_mask >> {attention_mask[:, cur_context].shape}")
-            # print(f"past key values >> ", past_key_values)
-            if (past_key_values is not None):
-                check_structure_tree(past_key_values)
             model_out = model(
                 input_ids=input_ids[:, cur_context],
                 attention_mask=attention_mask[:, cur_context],
                 past_key_values=past_key_values,
-                use_cache=False,
+                use_cache= "galactica" not in model.config._name_or_path,
             )
             logits, past_key_values = model_out.logits, model_out.past_key_values
             # print(" ====> ", logits.shape)
@@ -198,8 +189,10 @@ def generate_fast(
                     input_ids[i][new_idx] = new_toks[i]
                     attention_mask[i][new_idx] = 1
 
-            # cur_context = slice(cur_context.stop, cur_context.stop + 1)
-            cur_context = slice(0, cur_context.stop + 1)
+            if("galactica" in model.config._name_or_path): # use_cache is not yet supported in galactica models
+                cur_context = slice(0, cur_context.stop + 1)
+            else:
+                cur_context = slice(cur_context.stop, cur_context.stop + 1)
 
 
     txt = [tok.decode(x) for x in input_ids.detach().cpu().numpy().tolist()]
@@ -218,7 +211,6 @@ def generate_fast(
         if(track_interesting_words is not None):
             ret_dict['p_interesting_words'] = p_interesting_words
     return txt, ret_dict
-
 
 import copy
 
@@ -250,7 +242,7 @@ def check_structure_tree(obj, key='#', level=0, level_info = {}, max_depth = 2):
         num_elem = f'[{len(obj)}]'
     print(type(obj), num_elem, end=" ")
     if(type(obj) is torch.Tensor):
-        print("[{}]".format(obj.shape))
+        print("[{}] {}".format(obj.shape, obj.device))
     else:
         print()
     if(isinstance(obj, tuple) or isinstance(obj, list) or isinstance(obj, dict)):
