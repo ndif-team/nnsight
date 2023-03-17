@@ -1,3 +1,4 @@
 *weights/*
 *__pycache__*
 *.ipynb_checkpoints*
+*job_results/*.json

@@ -17,8 +17,8 @@ class ModelLoader:
         )
         self.model.eval().cuda()
 
-        for n, p in self.model.named_parameters():
-            print(n, p.shape, p.device)
+        # for n, p in self.model.named_parameters():
+        #     print(n, p.shape, p.device)
 
         nethook.set_requires_grad(False, self.model)
         self.tokenizer.pad_token = self.tokenizer.eos_token

@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import json
+import time
 from threading import Thread
 
 from request_handler import RequestHandler
@@ -54,20 +55,28 @@ if __name__ == "__main__":
 
     mt = ModelLoader(MODEL_NAME="gpt2-medium")
 
-    job_queue = []
-    request_tracker = {}
-
     global request_handler 
-    request_handler = RequestHandler(job_queue=job_queue, request_tracker=request_tracker)
+    request_handler = RequestHandler()
 
     global job_manager 
     job_manager = JobManager(
         mt, 
-        job_queue=job_queue, request_tracker=request_tracker, 
+        request_handler,
         save_path= "job_results"
     )
     runner = Thread(target = job_manager.run)
     runner.start()
+
+    # def print_job_queue():
+    #     print("job_queue >> ", request_handler.job_queue, request_handler.request_tracker.keys())
+    #     print("processed >> ", request_handler.processed)
+    #     time.sleep(3)
+    #     print_job_queue()
+
+    # checker = Thread(target = print_job_queue)
+    # checker.start()
+
+
 
     app.run(
         host=os.getenv('IP', '0.0.0.0'), 
