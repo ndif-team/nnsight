@@ -21,8 +21,14 @@ class ModelLoader:
         #     print(n, p.shape, p.device)
 
         nethook.set_requires_grad(False, self.model)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-
+        if("gpt" in self.model.config.model_type):
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        elif(
+            "llama" in self.model.config._name_or_path or
+            "galactica" in self.model.config._name_or_path
+        ):
+            self.tokenizer.add_special_tokens({'pad_token': '[PAD]'}) 
+            
         print(f"{MODEL_NAME} ==> device: {self.model.device}, memory: {self.model.get_memory_footprint()}")
 
         self.layer_names = [

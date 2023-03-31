@@ -2,6 +2,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import re
 from baukit import nethook
+import warnings
 
 def untuple(x):
     if isinstance(x, tuple):
@@ -70,6 +71,8 @@ from typing import Optional, List
 import collections
 import numpy as np
 
+
+
 def generate_fast(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
@@ -83,6 +86,8 @@ def generate_fast(
     get_answer_tokens = False,      # returns the immediate next top token and `top_k` possible candidates
     track_interesting_words = None, # for each prompt tracks the p(token) of some interesting tokens as answer (the first generated token). 
                                     # `get_answer_tokens` must be true
+    unoptimized_models = ["llama", "galactica"], # models that don't support `use_cache = True` and thus can't use fast generation
+    use_cache = True
 ):
     # print(prompts)
     if(type(prompts) == str):
@@ -115,13 +120,20 @@ def generate_fast(
 
     if(max_new_tokens != None):
         max_out_len = input_ids.size(1) + max_new_tokens
+
+    for unop in unoptimized_models:
+        if(unop in model.config._name_or_path):
+            use_cache = False
+            warnings.warn(f"The model `{type(model)}` can't utilize `use_cache` for fast generation. Setting `use_cache = False`.")
+            break
+
     with torch.no_grad():
         while input_ids.size(1) < max_out_len:  # while not exceeding max output length
             model_out = model(
                 input_ids=input_ids[:, cur_context],
                 attention_mask=attention_mask[:, cur_context],
                 past_key_values=past_key_values,
-                use_cache= "galactica" not in model.config._name_or_path,
+                use_cache = use_cache,
             )
             logits, past_key_values = model_out.logits, model_out.past_key_values
             # print(" ====> ", logits.shape)
@@ -194,7 +206,7 @@ def generate_fast(
                     input_ids[i][new_idx] = new_toks[i]
                     attention_mask[i][new_idx] = 1
 
-            if("galactica" in model.config._name_or_path): # use_cache is not yet supported in galactica models
+            if(use_cache == False):
                 cur_context = slice(0, cur_context.stop + 1)
             else:
                 cur_context = slice(cur_context.stop, cur_context.stop + 1)
@@ -217,50 +229,3 @@ def generate_fast(
         if(track_interesting_words is not None):
             ret_dict['p_interesting_words'] = p_interesting_words
     return txt, ret_dict
-
-import copy
-
-child_last   = "└───"
-child_middle = "├───"
-space_pre    = "    "
-middle_pre   = "│   "
-def check_structure_tree(obj, key='#', level=0, level_info = {}, max_depth = 2):
-    if(level == max_depth+1):
-        return
-
-    if(level > 0):
-        for i in range(level-1):
-            if(level_info[i] == 'last'):
-                print(space_pre, end="")
-            else:
-                print(middle_pre, end="")
-        if(level_info[level-1] == 'last'):
-            child_pre = child_last
-        else:
-            child_pre = child_middle
-        print(child_pre, end="")
-    
-    if(key != '#'):
-        print(key, end=": ")
-    
-    num_elem = ""
-    if(isinstance(obj, tuple) or isinstance(obj, list)):
-        num_elem = f'[{len(obj)}]'
-    print(type(obj), num_elem, end=" ")
-    if(type(obj) is torch.Tensor):
-        print("[{}] {}".format(obj.shape, obj.device))
-    else:
-        print()
-    if(isinstance(obj, tuple) or isinstance(obj, list) or isinstance(obj, dict)):
-        if(isinstance(obj, dict)):
-            keys = list(obj.keys())
-        else:
-            keys = list(range(len(obj)))
-        
-        for idx in range(len(keys)):
-            li = copy.deepcopy(level_info)
-            if(idx == len(obj)-1):
-                li[level] = 'last'
-            else:
-                li[level] = 'middle'
-            check_structure_tree(obj[keys[idx]], key=keys[idx], level = level + 1, level_info = li, max_depth = max_depth)
