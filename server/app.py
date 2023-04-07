@@ -10,12 +10,12 @@ from utils import model_utils
 
 app = Flask(__name__)
 
-mt = ModelLoader(MODEL_NAME="gpt2-medium")
+model = ModelLoader(MODEL_NAME="gpt2-medium")
 
 request_handler = RequestHandler()
 
 job_manager = JobManager(
-    mt, 
+    model, 
     request_handler,
     save_path= "job_results"
 )
@@ -63,5 +63,4 @@ def get_results_for_request(jobid):
 
 if __name__ == "__main__":
 
-    app.run(
-    )
+    app.run()

@@ -102,6 +102,17 @@ def retrieve(
         jobid:str
         ):
     
+    """
+    
+    Retrives specified job/status from NDIF
+
+    Args:
+        jobid : ID used to retrive response from NDIF
+
+    Returns:
+        response : ...
+    """
+    
     url = f"{CONFIG['API']['HOST']}{CONFIG['API']['RETRIEVE_EP']}/{jobid}"
 
     logging.info(f"=> Retrieving job '{jobid}'...")
