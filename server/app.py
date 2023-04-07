@@ -2,12 +2,19 @@ from flask import Flask, request, jsonify
 import os
 import json
 import time
+# from multiprocessing import Process
 from threading import Thread
 
 from request_handler import RequestHandler
 from model_loader import ModelLoader
 from job_manager import JobManager
 from utils import model_utils
+
+#################################################
+MODEL_NAME = "LlaMa-30b"
+# MODEL_PATH = "/disk/u/mengk/llama/llama-13b"
+MODEL_PATH = "/disk/u/mengk/llama-30b"
+#################################################
 
 app = Flask(__name__)
 
@@ -18,10 +25,10 @@ def dir_last_updated(folder):
 
 @app.route("/")
 def intro():
-    msg = """
+    msg = f"""
     Hello!
     Welcome to the Deep Inference Service
-    Loaded model: gpt2-medium
+    Loaded model: {MODEL_NAME}
     """
     return msg
 
@@ -44,16 +51,19 @@ def get_results_for_request(jobid):
             "status": "fail",
             "reason": "not_processed_yet"
         })
-
+    
     with open(f"{save_path}/{jobid}.json") as f:
         result = json.load(f)
     
     return jsonify(result)
 
+import torch
 if __name__ == "__main__":
     print("Initializing stuffs")
+    print("num gpus >> ", torch.cuda.device_count())
 
-    mt = ModelLoader(MODEL_NAME="gpt2-medium")
+    # mt = ModelLoader(MODEL_NAME="gpt2-medium")
+    mt = ModelLoader(MODEL_NAME=MODEL_PATH)
 
     global request_handler 
     request_handler = RequestHandler()
@@ -64,7 +74,7 @@ if __name__ == "__main__":
         request_handler,
         save_path= "job_results"
     )
-    runner = Thread(target = job_manager.run)
+    runner = Thread(target = job_manager.polling)
     runner.start()
 
     # def print_job_queue():
@@ -72,11 +82,8 @@ if __name__ == "__main__":
     #     print("processed >> ", request_handler.processed)
     #     time.sleep(3)
     #     print_job_queue()
-
     # checker = Thread(target = print_job_queue)
     # checker.start()
-
-
 
     app.run(
         host=os.getenv('IP', '0.0.0.0'), 
