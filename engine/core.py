@@ -67,7 +67,7 @@ def submit(
     request = request._to_json()
 
     response = requests.post(url = url, json = request)
-    breakpoint()
+    
     if response.status_code != 200:
 
         return
