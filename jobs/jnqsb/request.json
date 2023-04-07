@@ -1,0 +1,1 @@
+{"submitted": "2023-04-07 16:40:24.444678", "request": {"prompt": ["asdasd"], "max_new_tokens": 1, "get_answers": false, "top_k": 1, "generate_greedy": true, "activation_requests": {"final_output": true, "layers": [], "intervention": null}}}

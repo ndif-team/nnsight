@@ -60,14 +60,14 @@ def submit(
             layers=layers
         )
 
-    url = f"{CONFIG['API']['HOST']}:{CONFIG['API']['PORT']}{CONFIG['API']['SUBMIT_EP']}"
+    url = f"{CONFIG['API']['HOST']}:{CONFIG['API']['PORT'] or ''}{CONFIG['API']['SUBMIT_EP']}"
 
     logging.info(f"=> Submitting request...")
 
     request = request._to_json()
 
     response = requests.post(url = url, json = request)
-
+    breakpoint()
     if response.status_code != 200:
 
         return
@@ -98,7 +98,7 @@ def retrieve(
         jobid:str
         ):
     
-    url = f"{CONFIG['API']['HOST']}:{CONFIG['API']['PORT']}{CONFIG['API']['RETRIEVE_EP']}/{jobid}"
+    url = f"{CONFIG['API']['HOST']}:{CONFIG['API']['PORT'] or ''}{CONFIG['API']['RETRIEVE_EP']}/{jobid}"
 
     logging.info(f"=> Retrieving job '{jobid}'...")
 
