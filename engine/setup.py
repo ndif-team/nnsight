@@ -8,7 +8,7 @@ setup(
     long_description='...',
     url='https://github.com/arnab-api/engine',
     python_requires='>=3.7',
-    packages=find_packages(include=['engine', 'engine.*']),
+    packages=find_packages(include=['.', '.*']),
     install_requires=[
         'pyyaml',
     ]
