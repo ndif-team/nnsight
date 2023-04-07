@@ -1,6 +1,6 @@
 API:
   HOST: http://127.0.0.1
-  PORT: 5555
+  PORT: 5550
   SUBMIT_EP: /request_submit
   RETRIEVE_EP: /request_result/
 

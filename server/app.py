@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 import os
 import json
-import time
 from threading import Thread
 
 from request_handler import RequestHandler
@@ -10,6 +9,18 @@ from job_manager import JobManager
 from utils import model_utils
 
 app = Flask(__name__)
+
+mt = ModelLoader(MODEL_NAME="gpt2-medium")
+
+request_handler = RequestHandler()
+
+job_manager = JobManager(
+    mt, 
+    request_handler,
+    save_path= "job_results"
+)
+runner = Thread(target = job_manager.run)
+runner.start()
 
 def dir_last_updated(folder):
     return str(max(os.path.getmtime(os.path.join(root_path, f))
@@ -51,32 +62,6 @@ def get_results_for_request(jobid):
     return jsonify(result)
 
 if __name__ == "__main__":
-    print("Initializing stuffs")
-
-    mt = ModelLoader(MODEL_NAME="gpt2-medium")
-
-    global request_handler 
-    request_handler = RequestHandler()
-
-    global job_manager 
-    job_manager = JobManager(
-        mt, 
-        request_handler,
-        save_path= "job_results"
-    )
-    runner = Thread(target = job_manager.run)
-    runner.start()
-
-    # def print_job_queue():
-    #     print("job_queue >> ", request_handler.job_queue, request_handler.request_tracker.keys())
-    #     print("processed >> ", request_handler.processed)
-    #     time.sleep(3)
-    #     print_job_queue()
-
-    # checker = Thread(target = print_job_queue)
-    # checker.start()
-
-
 
     app.run(
         host=os.getenv('IP', '0.0.0.0'), 
