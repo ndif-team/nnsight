@@ -49,6 +49,8 @@ def submit(
         jobid : ID used to retrive response from NDIF with the engine.retrieve method
     """
     
+    assert(prompt is not None or request is not None, "One of (prompt) or (request) must be specified.")
+
     if request is None:
 
         request = Request(
@@ -60,7 +62,7 @@ def submit(
             layers=layers
         )
 
-    url = f"{CONFIG['API']['HOST']}:{CONFIG['API']['PORT'] or ''}{CONFIG['API']['SUBMIT_EP']}"
+    url = f"{CONFIG['API']['HOST']}{CONFIG['API']['SUBMIT_EP']}"
 
     logging.info(f"=> Submitting request...")
 
@@ -69,6 +71,8 @@ def submit(
     response = requests.post(url = url, json = request)
     
     if response.status_code != 200:
+
+        logging.error("Error in request")
 
         return
   
@@ -87,10 +91,10 @@ def submit(
         'request' : request
     }
 
-    logging.info(f"=> Dumped request for job '{jobid}' to {job_dir}")
-
     with open(os.path.join(job_dir, 'request.json'), 'w') as file:
         json.dump(request, file)
+
+    logging.info(f"=> Dumped request for job '{jobid}' to {job_dir}")
 
     return jobid
 
@@ -98,11 +102,17 @@ def retrieve(
         jobid:str
         ):
     
-    url = f"{CONFIG['API']['HOST']}:{CONFIG['API']['PORT'] or ''}{CONFIG['API']['RETRIEVE_EP']}/{jobid}"
+    url = f"{CONFIG['API']['HOST']}{CONFIG['API']['RETRIEVE_EP']}/{jobid}"
 
     logging.info(f"=> Retrieving job '{jobid}'...")
 
     response = requests.get(url = url)
+
+    if response.status_code != 200:
+
+        logging.error("Error in response")
+
+        return
 
     logging.info(f"=> Retrieved job '{jobid}'")
 
@@ -115,9 +125,9 @@ def retrieve(
 
     job_dir = os.path.abspath(os.path.join(CONFIG['APP']['JOBS_DIR'], jobid))
 
-    logging.info(f"=> Dumped response for job '{jobid}' to {job_dir}")
-
     with open(os.path.join(job_dir, 'response.json'), 'w') as file:
         json.dump(response, file)
+
+    logging.info(f"=> Dumped response for job '{jobid}' to {job_dir}")
 
     return content
