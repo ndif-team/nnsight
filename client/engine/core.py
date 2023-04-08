@@ -49,7 +49,7 @@ def submit(
         jobid : ID used to retrive response from NDIF with the engine.retrieve method
     """
     
-    assert(prompt is not None or request is not None, "One of (prompt) or (request) must be specified.")
+    #assert((prompt is not None) and (request is not None), "One of (prompt) or (request) must be specified.")
 
     if request is None:
 

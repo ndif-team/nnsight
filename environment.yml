@@ -265,3 +265,4 @@ dependencies:
   - zstd=1.5.2=ha4553b6_0
   - pip:
     - pyqt5-sip==12.11.0
+    - shortuuid

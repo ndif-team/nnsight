@@ -1,45 +1,55 @@
-import torch
-import transformers
-from tqdm import tqdm
-import transformers
-from utils import model_utils
+
+import datetime
+import logging
+from multiprocessing import Process, Queue
+
+from jobstatus import JobStatus
 from baukit import nethook
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import re
-import os
-import json
-import time
+from model_loader import ModelLoader
+from utils import model_utils
 
-from request_handler import RequestHandler
 
-class JobManager:
+class JobManager(Process):
     def __init__(
-            self, mt,
-            request_handler, 
-            save_path,
+            self, 
+            model_name:str,
+            job_queue:Queue, 
+            results_dict:dict
         ):
-        self.model = mt.model
-        self.tokenizer = mt.tokenizer
-        self.request_handler = request_handler
-        self.save_path = save_path
-        os.makedirs(save_path, exist_ok=True)
-    
-    def run(self):
-        batch = self.request_handler.get_new_batch()
-        if(batch == None):
-            print("empty job queue, ", type(self.model))
-        else:
-            job_id, request = batch
-            prompt = request["prompt"]
-            print("running job with batch ==> ", job_id)
+        self.model_name = model_name
+        self.job_queue = job_queue
+        self.results_dict = results_dict
 
+        super().__init__()
+
+    def run(self):
+
+        ml = ModelLoader(MODEL_NAME=self.model_name)
+        self.model = ml.model
+        self.tokenizer = ml.tokenizer
+
+        while True:
+
+            request = self.job_queue.get()
+
+            self.submit(request)
+
+
+    def process(self, request):
+
+        prompts = request["prompt"]
+
+        job_result = []
+
+        for cur_propmt in prompts:
             txt, ret_dict = model_utils.generate_fast(
                 self.model, self.tokenizer,
-                prompt, max_new_tokens=request["max_new_tokens"],
+                [cur_propmt], max_new_tokens=request["max_new_tokens"],
                 argmax_greedy=request["generate_greedy"],
                 top_k = request["top_k"],
                 get_answer_tokens = True,
-            )
+            )  
+
             result = {
                 "generated_text": txt,
                 "answer": ret_dict["answer"]
@@ -49,7 +59,7 @@ class JobManager:
                 result["activations"] = {}
                 requested_modules = request["activation_requests"]["layers"]
 
-                tokenized = self.tokenizer(prompt, return_tensors="pt", padding = True).to(
+                tokenized = self.tokenizer([cur_propmt], return_tensors="pt", padding = True).to(
                     next(self.model.parameters()).device
                 )
                 with nethook.TraceDict(
@@ -60,14 +70,32 @@ class JobManager:
 
                 for module in requested_modules:
                     result["activations"][module] = model_utils.untuple(traces[module].output).cpu().numpy().tolist()
+                
+            job_result.append(result)
 
-            with open(f"{self.save_path}/{job_id}.json", "w") as f:
-                json.dump(result, f)
-            print("finished running current job ==> ", job_id)
-            self.request_handler.processed.append(job_id)
+        return job_result
 
-        time.sleep(5)   # add a delay
-        self.run()      # keep checking for jobs 
+    def submit(self, request):
+        job_id = request['job_id']
+
+        self.results_dict[job_id] = {
+            'status' : JobStatus.SUBMITTED.name,
+            'timestamp' : str(datetime.datetime.now()),
+            'description' : 'Your job has been submitted and is running!'
+        }
+        
+        logging.info(f"Job ID '{job_id}' running")
+
+        job_result = self.process(request)
+
+        self.results_dict[job_id] = {
+            'status' : JobStatus.COMPLETED.name,
+            'timestamp' : str(datetime.datetime.now()),
+            'description' : 'Your job has been completed',
+            'data' : job_result
+        }
+
+        logging.info(f"Job ID '{job_id}' completed")
 
 
             

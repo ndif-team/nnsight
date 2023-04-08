@@ -1,29 +1,56 @@
-import json
-import random
-import string
+import datetime
+import logging
+from multiprocessing import Process, Queue
+from typing import Dict
 
-class RequestHandler:
-    def __init__(self):
-        self.job_queue = []
-        self.request_tracker = {}
-        self.processed = []
+from jobstatus import JobStatus
 
-    def check_request(self):
-        raise NotImplementedError
 
-    def submit_request(self, current_request):
-        print(json.dumps(current_request, indent=2))
-        jobid = ''.join(random.choices(string.ascii_lowercase, k=5))
+class RequestHandler(Process):
+    def __init__(self,
+            request_queue:Queue,
+            job_queue:Queue,
+            results_dict:Dict):
+        
+        self.request_queue = request_queue
+        self.job_queue = job_queue
+        self.results_dict = results_dict
 
-        self.request_tracker[jobid] = current_request
-        self.job_queue.append(jobid)
-        return jobid
-    
-    def get_new_batch(self):
-        if( len(self.job_queue) == 0 ):
-            return None
-        job_id = self.job_queue[0]
-        self.job_queue = self.job_queue[1:]
-        batch = (job_id, self.request_tracker[job_id])
-        self.request_tracker.pop(job_id)
-        return batch
+        super().__init__()
+
+    def run(self) -> None:
+        
+        while True:
+
+            request = self.request_queue.get()
+
+            self.submit_request(request)
+
+    def validate_request(self, request):
+       return True
+
+    def submit_request(self, request):
+
+        job_id = request['job_id']
+
+        if not self.validate_request(request):
+
+            self.results_dict[job_id] = {
+                'status' : JobStatus.ERROR.name,
+                'timestamp' : str(datetime.datetime.now()),
+                'description' : 'Your job was not approved for <reason>'
+            }
+
+            logging.info(f"Job ID '{job_id}' NOT approved")
+
+            return
+        
+        logging.info(f"Job ID '{job_id}' approved")
+        
+        self.results_dict[job_id] = {
+            'status' : JobStatus.APPROVED.name,
+            'timestamp' : str(datetime.datetime.now()),
+            'description' : 'Your job was approved and is waiting to be run'
+        }
+
+        self.job_queue.put(request)
