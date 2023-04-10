@@ -4,5 +4,5 @@ API:
 
 APP:
   RESULTS_PATH: ./jobs
-  MODEL_PATH: gpt2-medium
-  MODEL_NAME: GPT2 Medium
+  MODEL_PATH: "/disk/projects/engine/weights/llama-hf/llama-30b"
+  MODEL_NAME: LLaMa-30b

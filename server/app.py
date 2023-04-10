@@ -60,11 +60,6 @@ app = Flask(__name__, template_folder='swagger/templates', static_folder='swagge
 
 @app.route("/")
 def intro():
-    msg = f"""
-    Hello!
-    Welcome to the Deep Inference Service
-    Loaded model: {MODEL_NAME}
-    """
     return jsonify(
         dict(INFO_DICT)
     )
@@ -115,4 +110,9 @@ def get_results_for_request(job_id):
 
 if __name__ == "__main__":
     
-    app.run()
+    app.run(
+        host=os.getenv('IP', '0.0.0.0'), 
+        port=int(os.getenv('PORT', 5000)), 
+        debug=True,
+        use_reloader = False
+    )

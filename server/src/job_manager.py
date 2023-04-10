@@ -7,7 +7,7 @@ from src.jobstatus import JobStatus
 from baukit import nethook
 from src.model_loader import ModelLoader
 from utils import model_utils
-
+import torch
 
 class JobManager(Process):
     def __init__(
@@ -74,11 +74,18 @@ class JobManager(Process):
                 with nethook.TraceDict(
                     self.model,
                     layers = requested_modules,
-                ) as traces:
+                ) as traces:  
                     outputs = self.model(**tokenized)
 
                 for module in requested_modules:
                     result["activations"][module] = model_utils.untuple(traces[module].output).cpu().numpy().tolist()
+                
+                # clear up the precious GPU memory as soon as the inference is done
+                # for k in traces:        
+                #     traces[k].output = model_utils.untuple(traces[k].output).cpu()
+                del(traces)
+                del(outputs)
+                torch.cuda.empty_cache()
                 
             job_result.append(result)
 

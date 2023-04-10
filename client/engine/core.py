@@ -147,4 +147,8 @@ def retrieve(
     return content
 
 def get_info():
-    url = f"{CONFIG['API']['HOST']}{CONFIG['API']['RETRIEVE_EP']}/"
+    url = f"{CONFIG['API']['HOST']}"
+    response = requests.get(url = url)
+    content = eval(response.content)
+
+    return content
