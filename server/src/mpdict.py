@@ -6,17 +6,26 @@ def aquire(function):
     def wrapper(self, *args,**kwargs):
 
         self.semaphore.acquire()
-        result = function(self, *args,**kwargs)
+        try:
+            result = function(self, *args,**kwargs)
+        except Exception as error:
+
+            self.semaphore.release()
+
+            raise error
+
+
         self.semaphore.release()
 
         return result
     
     return wrapper
 
-class MPDict(dict):
+class MPDiskDict(dict):
 
-
-    def __init__(self, results_path:str, semaphore:Semaphore):
+    def __init__(self, 
+                results_path:str, 
+                semaphore:Semaphore):
 
         self.results_path = results_path
         self.semaphore = semaphore
@@ -54,10 +63,6 @@ class MPDict(dict):
         
         return result
 
-    #TODO
-    def __repr__(self):
-        return repr(self.__dict__)
-
     def __len__(self):
         return len(os.listdir(self.results_path))
 
@@ -78,13 +83,8 @@ class MPDict(dict):
 
         os.rmdir(path)
 
-    #TODO
     def clear(self):
-        return self.__dict__.clear()
-
-    #TODO
-    def copy(self):
-        return self.__dict__.copy()
+        for key in self.keys(): self.__delitem__(key)
 
     #TODO
     def update(self, *args, **kwargs):
@@ -109,7 +109,6 @@ class MPDict(dict):
     def __cmp__(self, dict_):
         return self.__cmp__(self.__dict__, dict_)
 
-    #TODO
     def __contains__(self, key):
         
         path = os.path.join(self.results_path, key)
@@ -119,7 +118,3 @@ class MPDict(dict):
     #TODO
     def __iter__(self):
         return iter(self.__dict__)
-
-    #TODO
-    def __unicode__(self):
-        return unicode(repr(self.__dict__))

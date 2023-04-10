@@ -1,0 +1,8 @@
+API:
+  SUBMIT_EP: request_submit
+  RETRIEVE_EP: request_result
+
+APP:
+  RESULTS_PATH: ./jobs
+  MODEL_PATH: gpt2-medium
+  MODEL_NAME: GPT2 Medium

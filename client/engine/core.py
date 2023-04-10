@@ -13,10 +13,13 @@ from .request import Request
 
 logging.config.dictConfig({
     'version': 1,
-    'disable_existing_loggers': True
+    'disable_existing_loggers': True,
 })
 
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.basicConfig(
+    stream=sys.stdout, 
+    level=logging.DEBUG,
+    format='%(levelname)s: %(asctime)s - %(message)s')
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, 'config.yml'), 'r') as file:

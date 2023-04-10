@@ -1,0 +1,47 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "version": "1.0.0",
+    "title": "NDIF API",
+    "description": "An API for free and open access to large language models"
+  },
+  "paths": {
+    "/request_submit": {
+      "post": {
+        "tags": [
+          "Hello"
+        ],
+        "description": "Submits job for processing",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "./components/request.json#Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "hello in the requested language",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status":{
+                      "type":"string"
+                    },
+                    "jon_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
