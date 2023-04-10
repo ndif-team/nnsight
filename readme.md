@@ -12,4 +12,4 @@ python server/app.py
 Checkout the `demo.ipynb` to learn how to communicate with the server
 
 # Workflow
-![](flowchart.png)
+![](flowchart.gif)
