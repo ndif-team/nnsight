@@ -142,3 +142,6 @@ def retrieve(
     logging.info(f"=> Dumped response for job '{jobid}' to {job_dir}")
 
     return content
+
+def get_info():
+    url = f"{CONFIG['API']['HOST']}{CONFIG['API']['RETRIEVE_EP']}/"
