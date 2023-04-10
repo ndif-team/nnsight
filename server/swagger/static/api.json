@@ -11,7 +11,7 @@
         "tags": [
           "Hello"
         ],
-        "description": "Subits job for processing",
+        "description": "Submits job for processing",
         "requestBody": {
           "content": {
             "application/json": {
