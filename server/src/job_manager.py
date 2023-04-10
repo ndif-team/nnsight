@@ -95,7 +95,21 @@ class JobManager(Process):
         
         logging.info(f"Job ID '{job_id}' running")
 
-        job_result = self.process(request)
+        try: 
+
+            job_result = self.process(request)
+
+        except Exception as exception:
+
+            self.results_dict[job_id] = {
+                'status' : JobStatus.ERROR.name,
+                'timestamp' : str(datetime.datetime.now()),
+                'description' : 'Your job errored out'
+            }
+
+            logging.error(str(exception))
+
+
 
         self.results_dict[job_id] = {
             'status' : JobStatus.COMPLETED.name,
