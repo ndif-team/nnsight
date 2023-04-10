@@ -21,8 +21,8 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 #################################################
 MODEL_NAME = "LlaMa-30b"
-MODEL_PATH = "gpt2-medium"
-# MODEL_PATH = "/disk/u/mengk/llama-30b"
+# MODEL_PATH = "gpt2-medium"
+MODEL_PATH = "/disk/u/mengk/llama-30b"
 #################################################
 RESULTS_PATH = "job_results"
 
@@ -33,13 +33,15 @@ MP_MANAGER = Manager()
 REQUEST_QUEUE = MP_MANAGER.Queue()
 JOB_QUEUE = MP_MANAGER.Queue()
 RESULTS_DICT = MPDict(RESULTS_PATH, MP_MANAGER.Semaphore(1))
+INFO_DICT = MP_MANAGER.dict()
 
 REQUEST_HANDLER = RequestHandler(REQUEST_QUEUE, JOB_QUEUE, RESULTS_DICT)
 
 JOB_HANDLER = JobManager(
     MODEL_PATH, 
     JOB_QUEUE,
-    RESULTS_DICT
+    RESULTS_DICT,
+    INFO_DICT,
 )
 
 REQUEST_HANDLER.start()
@@ -52,7 +54,9 @@ def intro():
     Welcome to the Deep Inference Service
     Loaded model: {MODEL_NAME}
     """
-    return msg
+    return jsonify(
+
+    )
 
 @app.route("/request_submit", methods=['POST', 'GET'])
 def process_request():
@@ -95,5 +99,5 @@ def get_results_for_request(job_id):
     return jsonify(result)
 
 if __name__ == "__main__":
-
+    
     app.run()

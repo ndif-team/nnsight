@@ -11,27 +11,36 @@ from utils import model_utils
 
 class JobManager(Process):
     def __init__(
-            self, 
+            self,
             model_name:str,
             job_queue:Queue, 
-            results_dict:dict
+            results_dict:dict,
+            info_dict:dict,
         ):
         self.model_name = model_name
         self.job_queue = job_queue
         self.results_dict = results_dict
+        self.info_dict = info_dict
 
         super().__init__()
 
     def run(self):
 
         ml = ModelLoader(MODEL_NAME=self.model_name)
+
+        self.info_dict.update({
+            "num_layers": ml.num_layers,
+            "layer_name": ml.layer_name_format,
+            "mlp_module_name_format": ml.mlp_module_name_format,
+            "attn_module_name_format": ml.attn_module_name_format
+        })
+
         self.model = ml.model
         self.tokenizer = ml.tokenizer
 
         while True:
 
             request = self.job_queue.get()
-
             self.submit(request)
 
 
