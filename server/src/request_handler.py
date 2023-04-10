@@ -3,7 +3,7 @@ import logging
 from multiprocessing import Process, Queue
 from typing import Dict
 
-from jobstatus import JobStatus
+from src.jobstatus import JobStatus
 
 
 class RequestHandler(Process):

@@ -4,35 +4,42 @@ import logging.config
 import os
 import sys
 from multiprocessing import Manager
-from jobstatus import JobStatus
+
 import shortuuid
-from flask import Flask, jsonify, request, Response
-from job_manager import JobManager
-from mpdict import MPDict
-from request_handler import RequestHandler
+import yaml
+from flask import Flask, Response, jsonify, request, render_template
+from src.job_manager import JobManager
+from src.jobstatus import JobStatus
+from src.mpdict import MPDiskDict
+from src.request_handler import RequestHandler
+
+PATH = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(PATH, 'config.yml'), 'r') as file:
+    CONFIG = yaml.safe_load(file)
 
 logging.config.dictConfig({
     'version': 1,
     'disable_existing_loggers': True
 })
 
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.basicConfig(
+    stream=sys.stdout, 
+    level=logging.DEBUG,
+    format='%(levelname)s: %(asctime)s - %(message)s')
 
 
-#################################################
-MODEL_NAME = "LlaMa-30b"
-MODEL_PATH = "gpt2-medium"
-# MODEL_PATH = "/disk/u/mengk/llama-30b"
-#################################################
-RESULTS_PATH = "job_results"
+MODEL_NAME = CONFIG['APP']['MODEL_NAME']
+MODEL_PATH = CONFIG['APP']['MODEL_PATH']
+RESULTS_PATH = CONFIG['APP']['RESULTS_PATH']
+API = CONFIG['API']
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='swagger/templates', static_folder='swagger/static')
 
 MP_MANAGER = Manager()
 
 REQUEST_QUEUE = MP_MANAGER.Queue()
 JOB_QUEUE = MP_MANAGER.Queue()
-RESULTS_DICT = MPDict(RESULTS_PATH, MP_MANAGER.Semaphore(1))
+RESULTS_DICT = MPDiskDict(RESULTS_PATH, MP_MANAGER.Semaphore(1))
 
 REQUEST_HANDLER = RequestHandler(REQUEST_QUEUE, JOB_QUEUE, RESULTS_DICT)
 
@@ -54,7 +61,11 @@ def intro():
     """
     return msg
 
-@app.route("/request_submit", methods=['POST', 'GET'])
+@app.route('/api/docs')
+def get_docs():
+    return render_template('swaggerui.html')
+
+@app.route(f"/{API['SUBMIT_EP']}", methods=['POST', 'GET'])
 def process_request():
 
     job_id = shortuuid.uuid()
@@ -78,7 +89,7 @@ def process_request():
     })
 
 
-@app.route("/request_result/<job_id>", methods=['GET'])
+@app.route(f"/{API['RETRIEVE_EP']}/<job_id>", methods=['GET'])
 def get_results_for_request(job_id):
 
     if job_id not in RESULTS_DICT:

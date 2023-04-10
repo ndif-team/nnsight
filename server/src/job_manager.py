@@ -3,9 +3,9 @@ import datetime
 import logging
 from multiprocessing import Process, Queue
 
-from jobstatus import JobStatus
+from src.jobstatus import JobStatus
 from baukit import nethook
-from model_loader import ModelLoader
+from src.model_loader import ModelLoader
 from utils import model_utils
 
 
