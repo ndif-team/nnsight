@@ -30,9 +30,25 @@ class JobManager(Process):
 
         while True:
 
-            request = self.job_queue.get()
+            try:
 
-            self.submit(request)
+                request = self.job_queue.get()
+
+                self.submit(request)
+
+            except Exception as exception:
+
+                job_id = request['job_id']
+
+                self.results_dict[job_id] = {
+                    'status' : JobStatus.ERROR.name,
+                    'timestamp' : str(datetime.datetime.now()),
+                    'description' : 'Your job errored out'
+                }
+
+                logging.exception("Exception occured in job processing")
+
+                return
 
 
     def process(self, request):
@@ -86,21 +102,7 @@ class JobManager(Process):
         
         logging.info(f"Job ID '{job_id}' running")
 
-        try: 
-
-            job_result = self.process(request)
-
-        except Exception as exception:
-
-            self.results_dict[job_id] = {
-                'status' : JobStatus.ERROR.name,
-                'timestamp' : str(datetime.datetime.now()),
-                'description' : 'Your job errored out'
-            }
-
-            logging.error(str(exception))
-
-
+        job_result = self.process(request)
 
         self.results_dict[job_id] = {
             'status' : JobStatus.COMPLETED.name,
