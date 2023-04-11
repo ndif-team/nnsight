@@ -6,7 +6,8 @@
                 "type": "array",
                 "items": {
                     "type": "string"
-                }
+                },
+                "required": true
             },
             "max_new_tokens": {
                 "type": "integer"

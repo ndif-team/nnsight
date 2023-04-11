@@ -1,44 +1,192 @@
 {
-  "openapi": "3.0.0",
+  "openapi": "3.0.3",
   "info": {
-    "version": "1.0.0",
     "title": "NDIF API",
-    "description": "An API for free and open access to large language models"
+    "description": "An API for free and open access to large language models",
+    "version": "1.0.0"
   },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
   "paths": {
     "/request_submit": {
       "post": {
-        "tags": [
-          "Hello"
-        ],
-        "description": "Submits job for processing",
+        "summary": "Submits job for processing",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "./components/request.json#Request"
+                "$ref": "#/components/schemas/Request"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
               }
             }
           }
         },
+        "deprecated": false
+      }
+    },
+    "/request_result/{id}": {
+      "get": {
+        "summary": "Retrieves job stats/results",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "explode": false,
+            "allowReserved": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "hello in the requested language",
+            "description": "Success",
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "status":{
-                      "type":"string"
-                    },
-                    "jon_id": {
-                      "type": "string"
-                    }
-                  }
+                  "$ref": "#/components/schemas/Result"
                 }
               }
             }
+          }
+        },
+        "deprecated": false
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActivationRequest": {
+        "title": "ActivationRequest",
+        "required": [
+          "intervention"
+        ],
+        "type": "object",
+        "properties": {
+          "final_output": {
+            "title": "Final Output",
+            "type": "boolean",
+            "default": true
+          },
+          "layers": {
+            "title": "Layers",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "intervention": {
+            "title": "Intervention",
+            "type": "null"
+          }
+        }
+      },
+      "Request": {
+        "title": "Request",
+        "required": [
+          "prompt",
+          "activation_requests"
+        ],
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "title": "Prompt",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "max_new_tokens": {
+            "title": "Max New Tokens",
+            "type": "integer",
+            "default": 1
+          },
+          "get_answers": {
+            "title": "Get Answers",
+            "type": "boolean",
+            "default": false
+          },
+          "top_k": {
+            "title": "Top K",
+            "type": "integer",
+            "default": 1
+          },
+          "generate_greedy": {
+            "title": "Generate Greedy",
+            "type": "boolean",
+            "default": true
+          },
+          "activation_requests": {
+            "title": "Activation Requests",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivationRequest"
+            }
+          }
+        }
+      },
+      "JobStatus": {
+        "title": "JobStatus",
+        "enum": [
+          "RECIEVED",
+          "APPROVED",
+          "SUBMITTED",
+          "COMPLETED",
+          "ERROR"
+        ],
+        "description": "An enumeration."
+      },
+      "Result": {
+        "title": "Result",
+        "required": [
+          "job_id",
+          "status",
+          "timestamp",
+          "description"
+        ],
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
           }
         }
       }
