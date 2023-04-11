@@ -7,7 +7,7 @@
   },
   "servers": [
     {
-      "url": "/"
+      "url": "http://nagoya.research.khoury.northeastern.edu"
     }
   ],
   "paths": {
@@ -41,7 +41,7 @@
     },
     "/request_result/{id}": {
       "get": {
-        "summary": "Retrieves job stats/results",
+        "summary": "Retrieves job status/results",
         "parameters": [
           {
             "name": "job_id",
@@ -162,6 +162,103 @@
         ],
         "description": "An enumeration."
       },
+      "Candidate": {
+        "title": "Candidate",
+        "required": [
+          "token",
+          "token_id",
+          "p"
+        ],
+        "type": "object",
+        "properties": {
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "token_id": {
+            "title": "Token Id",
+            "type": "integer"
+          },
+          "p": {
+            "title": "P",
+            "type": "number"
+          }
+        }
+      },
+      "Answer": {
+        "title": "Answer",
+        "required": [
+          "top_token",
+          "candidates"
+        ],
+        "type": "object",
+        "properties": {
+          "top_token": {
+            "title": "Top Token",
+            "type": "string"
+          },
+          "candidates": {
+            "title": "Candidates",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            }
+          }
+        }
+      },
+      "Data": {
+        "title": "Data",
+        "required": [
+          "generated_text",
+          "answer",
+          "input_tokenized",
+          "generated_tokens",
+          "activations"
+        ],
+        "type": "object",
+        "properties": {
+          "generated_text": {
+            "title": "Generated Text",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "answer": {
+            "title": "Answer",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Answer"
+            }
+          },
+          "input_tokenized": {
+            "title": "Input Tokenized",
+            "type": "array",
+            "items": {}
+          },
+          "generated_tokens": {
+            "title": "Generated Tokens",
+            "type": "array",
+            "items": {}
+          },
+          "activations": {
+            "title": "Activations",
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "Result": {
         "title": "Result",
         "required": [
@@ -187,6 +284,13 @@
           "description": {
             "title": "Description",
             "type": "string"
+          },
+          "data": {
+            "title": "Data",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Data"
+            }
           }
         }
       }

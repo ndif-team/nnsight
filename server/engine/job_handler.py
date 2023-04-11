@@ -30,8 +30,12 @@ class JobManager(Process):
         ml = ModelLoader(MODEL_NAME=self.model_name)
 
         self.info_dict.update({
-            "num_layers": ml.num_layers,
-            "layer_name": ml.layer_name_format,
+            "n_layer": ml.n_layer,
+            "n_embd" : ml.n_embd,
+            "n_attn_head" : ml.n_attn_head,
+            "max_seq_length": ml.max_seq_length,
+            
+            "layer_name_format": ml.layer_name_format,
             "mlp_module_name_format": ml.mlp_module_name_format,
             "attn_module_name_format": ml.attn_module_name_format
         })
@@ -42,9 +46,8 @@ class JobManager(Process):
         while True:
 
             try:
-
+                # TODO: BATCHING! currently gets one request each time
                 request = self.job_queue.get()
-
                 self.submit(request)
 
             except Exception as exception:
@@ -65,6 +68,7 @@ class JobManager(Process):
 
         job_result = []
 
+        # ! Can't run multiple prompts due to limited support for newer models like `galactica` and `llama` on huggingface accelerate
         for cur_propmt in prompts:
             txt, ret_dict = model_utils.generate_fast(
                 self.model, self.tokenizer,
@@ -76,16 +80,18 @@ class JobManager(Process):
 
             result = {
                 "generated_text": txt,
-                "answer": ret_dict["answer"]
+                "generated_tokens": ret_dict["generated_tokens"],
+                "answer": ret_dict["answer"],
             }
 
             if(request["activation_requests"] is not None):
                 result["activations"] = {}
                 requested_modules = request["activation_requests"]["layers"]
 
-                tokenized = self.tokenizer([cur_propmt], return_tensors="pt", padding = True).to(
-                    next(self.model.parameters()).device
-                )
+                tokenized = self.tokenizer([cur_propmt], return_tensors="pt", padding = True).to(next(self.model.parameters()).device)
+                result["input_tokenized"] = [(self.tokenizer.decode(t), t.item()) for t in tokenized.input_ids[0]]
+                # print(result)
+
                 with nethook.TraceDict(
                     self.model,
                     layers = requested_modules,
@@ -96,8 +102,6 @@ class JobManager(Process):
                     result["activations"][module] = model_utils.untuple(traces[module].output).cpu().numpy().tolist()
                 
                 # clear up the precious GPU memory as soon as the inference is done
-                # for k in traces:        
-                #     traces[k].output = model_utils.untuple(traces[k].output).cpu()
                 del(traces)
                 del(outputs)
                 torch.cuda.empty_cache()
@@ -122,7 +126,7 @@ class JobManager(Process):
                     job_id = job_id,
                     status = JobStatus.COMPLETED,
                     description = "Your job has been completed",
-                    data = job_result
+                    data = job_result,
                 )
         
 

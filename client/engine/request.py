@@ -4,9 +4,9 @@ class Request:
 
     def __init__(self,
         prompt:Union[str, List[str]], 
-        max_new_tokens:int=1,
+        max_new_tokens:int=10,
         get_answers:bool=False,
-        top_k:int=1,
+        top_k:int=5,
         generate_greedy:bool=True,
         layers:Union[str, List[str]]=None) -> None:
 

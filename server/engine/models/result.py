@@ -31,6 +31,8 @@ class Data(BaseModel):
 
     generated_text: list[str]
     answer: list[Answer]
+    input_tokenized: list
+    generated_tokens: list
     activations: dict[str, list[list[list[float]]]]
 
 class Result(BaseModel):

@@ -85,6 +85,7 @@ def generate_fast(
             warnings.warn(f"The model `{type(model)}` can't utilize `use_cache` for fast generation. Setting `use_cache = False`.")
             break
 
+    generated_tokens = [[] for _ in range(input_ids.size(0))]
     with torch.no_grad():
         while input_ids.size(1) < max_out_len:  # while not exceeding max output length
             model_out = model(
@@ -94,7 +95,6 @@ def generate_fast(
                 use_cache = use_cache,
             )
             logits, past_key_values = model_out.logits, model_out.past_key_values
-            # print(" ====> ", logits.shape)
 
             softmax_out = torch.nn.functional.softmax(logits[:, -1, :], dim=1)
 
@@ -125,17 +125,21 @@ def generate_fast(
                                 p_interesting_words[i].append(
                                     {'token': tok.decode(token_id), 'token_id': token_id, 'p': round(float(softmax_out[i][token_id]), 4)}
                                 )
-                # print(answers)
 
+            for i in range(input_ids.size(0)):
+                generated_tokens[i].append(
+                    [
+                        {"token": tok.decode(t), "id": t.item(), "p": softmax_out[i][t.item()].item()}
+                        for t in tk[i]
+                    ]
+                )
 
             if(debug == True):
                 for i in range(input_ids.size(0)):
-                    # print(f"{i} => ", end="")
                     token_id = new_toks[i][0]
                     print(f"\'{tok.decode([token_id])}\'[{token_id}] -- {softmax_out[i][token_id]*100}", end=" ")
                     print("[", end="")
                     for t in tk[i]:
-                        # print(t)
                         print(f"\'{tok.decode(t)}\'({round(float(softmax_out[i][int(t)]*100), 3)})", end=" ")
                     print("]")
 
@@ -178,10 +182,7 @@ def generate_fast(
         for x in txt
     ]
 
-    # print(answers)
-
-    # ret_dict = {"past_key_values": past_key_values}
-    ret_dict = {}
+    ret_dict = {"generated_tokens": generated_tokens}
     if(get_answer_tokens == True):
         ret_dict['answer'] = answers
         if(track_interesting_words is not None):
