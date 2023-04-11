@@ -1,16 +1,14 @@
-import datetime
-import logging
 from multiprocessing import Process, Queue
-from typing import Dict
 
-from src.jobstatus import JobStatus
+from engine.models.result import JobStatus, Result
+from engine.results_dict import ResultsDict
 
 
 class RequestHandler(Process):
     def __init__(self,
             request_queue:Queue,
             job_queue:Queue,
-            results_dict:Dict):
+            results_dict:ResultsDict):
         
         self.request_queue = request_queue
         self.job_queue = job_queue
@@ -35,22 +33,18 @@ class RequestHandler(Process):
 
         if not self.validate_request(request):
 
-            self.results_dict[job_id] = {
-                'status' : JobStatus.ERROR.name,
-                'timestamp' : str(datetime.datetime.now()),
-                'description' : 'Your job was not approved for <reason>'
-            }
-
-            logging.info(f"Job ID '{job_id}' NOT approved")
+            self.results_dict[job_id] = Result(
+                job_id = job_id,
+                status = JobStatus.ERROR,
+                description = "Your job was not approved for <reason>"
+            )
 
             return
+                
+        self.results_dict[job_id] = Result(
+                job_id = job_id,
+                status = JobStatus.APPROVED,
+                description = "Your job was approved and is waiting to be run"
+            )
         
-        logging.info(f"Job ID '{job_id}' approved")
-        
-        self.results_dict[job_id] = {
-            'status' : JobStatus.APPROVED.name,
-            'timestamp' : str(datetime.datetime.now()),
-            'description' : 'Your job was approved and is waiting to be run'
-        }
-
         self.job_queue.put(request)

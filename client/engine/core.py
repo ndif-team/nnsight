@@ -81,11 +81,11 @@ def submit(
   
     content = eval(response.content)
 
-    jobid = content['jobid']
+    job_id = content['job_id']
 
-    logging.info(f"=> Successfully submitted job '{jobid}'")
+    logging.info(f"=> Successfully submitted job '{job_id}'")
 
-    job_dir = os.path.abspath(os.path.join(CONFIG['APP']['JOBS_DIR'], jobid))
+    job_dir = os.path.abspath(os.path.join(CONFIG['APP']['JOBS_DIR'], job_id))
 
     os.makedirs(job_dir, exist_ok=True)
 
@@ -97,9 +97,9 @@ def submit(
     with open(os.path.join(job_dir, 'request.json'), 'w') as file:
         json.dump(request, file)
 
-    logging.info(f"=> Dumped request for job '{jobid}' to {job_dir}")
+    logging.info(f"=> Dumped request for job '{job_id}' to {job_dir}")
 
-    return jobid
+    return job_id
 
 def retrieve(
         jobid:str
@@ -143,5 +143,12 @@ def retrieve(
         json.dump(response, file)
 
     logging.info(f"=> Dumped response for job '{jobid}' to {job_dir}")
+
+    return content
+
+def get_info():
+    url = f"{CONFIG['API']['HOST']}"
+    response = requests.get(url = url)
+    content = eval(response.content)
 
     return content

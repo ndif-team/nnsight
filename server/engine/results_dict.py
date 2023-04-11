@@ -2,6 +2,9 @@ import json
 import os
 from threading import Semaphore
 
+from engine.models.result import Result
+
+
 def aquire(function):
     def wrapper(self, *args,**kwargs):
 
@@ -14,14 +17,13 @@ def aquire(function):
 
             raise error
 
-
         self.semaphore.release()
 
         return result
     
     return wrapper
 
-class MPDiskDict(dict):
+class ResultsDict(dict):
 
     def __init__(self, 
                 results_path:str, 
@@ -35,7 +37,9 @@ class MPDiskDict(dict):
         super().__init__()
 
     @aquire
-    def __setitem__(self, key, item):
+    def __setitem__(self, key:str, item:Result):
+
+        item.log()
 
         path = os.path.join(self.results_path, key)
 
@@ -47,10 +51,10 @@ class MPDiskDict(dict):
 
         with open(path, 'w') as file:
 
-            json.dump(item, file)
+            file.write(item.json())
 
     @aquire
-    def __getitem__(self, key):
+    def __getitem__(self, key:str) -> Result:
 
         path = os.path.join(self.results_path, key, 'results.json')
 
@@ -59,7 +63,7 @@ class MPDiskDict(dict):
             raise KeyError(path)
         
         with open(path, 'r') as file:
-            result = json.load(file)
+            result = Result(**json.load(file))
         
         return result
 
