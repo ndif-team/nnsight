@@ -48,9 +48,6 @@ class JobManager(Process):
 
                 logging.exception("Exception occured in job processing")
 
-                return
-
-
     def process(self, request):
 
         prompts = request["prompt"]
