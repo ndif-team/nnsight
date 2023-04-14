@@ -6,7 +6,7 @@ import shortuuid
 class ActivationRequest(BaseModel):
     final_output: bool=True
     layers: list[str]=None
-    intervention=None
+    intervention:str=None
 
 class Request(BaseModel):
 

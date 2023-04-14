@@ -11,7 +11,8 @@ setup(
     packages=find_packages(include=['engine', 'engine.*']),
     install_requires=[
         'pyyaml',
-        'pydantic'
+        'pydantic',
+        'shortuuid'
     ],
     include_package_data=True,
     package_data={'': ['config.yml']},
