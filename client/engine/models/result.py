@@ -1,11 +1,11 @@
 
 
  
-from pydantic import BaseModel
-from typing import Union
+from pydantic import BaseModel, Field
 from enum import Enum
 from datetime import datetime
 import logging
+
 
 class JobStatus(Enum):
 
@@ -39,13 +39,9 @@ class Result(BaseModel):
 
     job_id: str
     status: JobStatus
-    timestamp: datetime
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
     description: str
     data:list[Data] = None
-
-    def __init__(self, **data):
-        if 'timestamp' not in data: data['timestamp'] = datetime.now()
-        super().__init__(**data)
 
     def log(self):
 

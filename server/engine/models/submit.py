@@ -1,6 +1,7 @@
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Union
+import shortuuid
 
 class ActivationRequest(BaseModel):
     final_output: bool=True
@@ -9,6 +10,7 @@ class ActivationRequest(BaseModel):
 
 class Request(BaseModel):
 
+    job_id:str = Field(default_factory=shortuuid.uuid)
     prompt: Union[str, list[str]]
     max_new_tokens:int=1
     get_answers:bool=False

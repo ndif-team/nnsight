@@ -5,6 +5,7 @@ from multiprocessing import Process, Queue
 import torch
 from baukit import nethook
 from engine.model_loader import ModelLoader
+from engine.models.submit import Request
 from engine.models.result import JobStatus, Result
 from engine.results_dict import ResultsDict
 from engine.utils import model_utils
@@ -52,7 +53,7 @@ class JobManager(Process):
 
             except Exception as exception:
 
-                job_id = request['job_id']
+                job_id = request.job_id
 
                 self.results_dict[job_id] = Result(
                     job_id = job_id,
@@ -62,9 +63,9 @@ class JobManager(Process):
 
                 logging.exception("Exception occured in job processing")
 
-    def process(self, request):
+    def process(self, request:Request):
 
-        prompts = request["prompt"]
+        prompts = request.prompt
 
         job_result = []
 
@@ -72,9 +73,9 @@ class JobManager(Process):
         for cur_propmt in prompts:
             txt, ret_dict = model_utils.generate_fast(
                 self.model, self.tokenizer,
-                [cur_propmt], max_new_tokens=request["max_new_tokens"],
-                argmax_greedy=request["generate_greedy"],
-                top_k = request["top_k"],
+                [cur_propmt], max_new_tokens=request.max_new_tokens,
+                argmax_greedy=request.generate_greedy,
+                top_k = request.top_k,
                 get_answer_tokens = True,
             )  
 
@@ -84,9 +85,9 @@ class JobManager(Process):
                 "answer": ret_dict["answer"],
             }
 
-            if(request.get("activation_requests", None) is not None):
+            if request.activation_requests is not None:
                 result["activations"] = {}
-                requested_modules = request["activation_requests"]["layers"]
+                requested_modules = request.activation_requests[0].layers
 
                 tokenized = self.tokenizer([cur_propmt], return_tensors="pt", padding = True).to(next(self.model.parameters()).device)
                 result["input_tokenized"] = [(self.tokenizer.decode(t), t.item()) for t in tokenized.input_ids[0]]
@@ -110,9 +111,9 @@ class JobManager(Process):
 
         return job_result
 
-    def submit(self, request):
+    def submit(self, request:Request):
         
-        job_id = request['job_id']
+        job_id = request.job_id
 
         self.results_dict[job_id] = Result(
             job_id = job_id,

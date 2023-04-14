@@ -1,6 +1,8 @@
 from multiprocessing import Process, Queue
 
 from engine.models.result import JobStatus, Result
+from engine.models.submit import Request
+
 from engine.results_dict import ResultsDict
 
 
@@ -27,9 +29,9 @@ class RequestHandler(Process):
     def validate_request(self, request):
        return True
 
-    def submit_request(self, request):
+    def submit_request(self, request:Request):
 
-        job_id = request['job_id']
+        job_id = request.job_id
 
         if not self.validate_request(request):
 

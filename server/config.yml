@@ -1,9 +1,10 @@
 API:
   SUBMIT_EP: request_submit
   RETRIEVE_EP: request_result
+  INFO_EP: ''
 
 APP:
   RESULTS_PATH: ./jobs
-  #MODEL_PATH: /disk/projects/engine/weights/llama-hf/llama-30b
+  #MODEL_PATH: /disk/projects/engine/weights/llama-hf/llama-65b
   MODEL_PATH: gpt2-medium
-  MODEL_NAME: LLaMa-30b
+  MODEL_NAME: LLaMa-65b

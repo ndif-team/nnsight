@@ -78,20 +78,17 @@ def intro():
 @app.route(f"/{API['SUBMIT_EP']}", methods=['POST'])
 def process_request():
 
-    job_id = shortuuid.uuid()
+    rquest = Request(**request.json)
 
-    result = request.json
-    result['job_id'] = job_id
-
-    REQUEST_QUEUE.put(result)
+    REQUEST_QUEUE.put(rquest)
 
     result = Result(
-        job_id = job_id,
+        job_id = rquest.job_id,
         status = JobStatus.RECIVED,
         description = "Your job has been recieved is is waiting approval"
     )
 
-    RESULTS_DICT[job_id] = result
+    RESULTS_DICT[rquest.job_id] = result
 
     return result.json(exclude_none=True)
 
@@ -120,7 +117,8 @@ def get_interface():
 
     interface = {
         'submit_endpoint' : API['SUBMIT_EP'],
-        'retrieve_endpoint' : API['RETRIEVE_EP']
+        'retrieve_endpoint' : API['RETRIEVE_EP'],
+        'info_endpoint': API['INFO_EP']
     }
 
     return jsonify(interface)
