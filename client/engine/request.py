@@ -1,4 +1,5 @@
-from typing import Union, List
+from typing import Union, List, Dict, Optional
+from engine.utils.intervention_utils import WriteIntervention
 
 class Request:
 
@@ -8,7 +9,8 @@ class Request:
         get_answers:bool=False,
         top_k:int=5,
         generate_greedy:bool=True,
-        layers:Union[str, List[str]]=None) -> None:
+        layers:Union[str, List[str]]=None,
+        intervention:Optional[WriteIntervention]=None) -> None:
 
         if isinstance(prompt, str): prompt = [prompt]
 
@@ -18,6 +20,7 @@ class Request:
         self.top_k = top_k
         self.generate_greedy = generate_greedy
         self.layers = layers or []
+        self.intervention = intervention
 
     def _to_json(self):
 
@@ -29,7 +32,7 @@ class Request:
             "generate_greedy": self.generate_greedy,
             "activation_requests": {
                 "final_output": True,
-                "layers": self.layers,
-                "intervention": None
-            }
+                "layers": self.layers,  
+            },
+            "intervention": self.intervention.to_json()
         }
