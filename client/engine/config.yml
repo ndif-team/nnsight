@@ -1,6 +1,6 @@
 API:
-  # HOST: http://nagoya.research.khoury.northeastern.edu
-  HOST: http://127.0.0.1:5000
+  HOST: http://nagoya.research.khoury.northeastern.edu
+  #HOST: http://127.0.0.1:5000
   INTERFACE_EP: /api/interface
 
 APP:
