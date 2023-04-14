@@ -1,6 +1,6 @@
 
 from pydantic import BaseModel, Field
-from typing import Union
+from typing import Union, Any
 import shortuuid
 
 class ActivationRequest(BaseModel):
@@ -10,10 +10,14 @@ class ActivationRequest(BaseModel):
 
 class Request(BaseModel):
 
-    job_id:str = Field(default_factory=shortuuid.uuid)
+    job_id:str
     prompt: Union[str, list[str]]
     max_new_tokens:int=1
     get_answers:bool=False
     top_k:int=1
     generate_greedy:bool=True
     activation_requests:list[ActivationRequest]=None
+
+    def __init__(__pydantic_self__, **data: Any) -> None:
+        data['job_id'] = shortuuid.uuid()
+        super().__init__(**data)
