@@ -7,12 +7,12 @@ from multiprocessing import Manager
 import shortuuid
 import yaml
 from engine.job_handler import JobManager
+from engine.models.submit import Request
 from engine.models.result import JobStatus, Result
 from engine.request_handler import RequestHandler
+from engine.results_dict import ResultsDict
 from engine.swagger import generate
 from flask import Flask, Response, jsonify, render_template, request
-
-from engine.results_dict import ResultsDict
 
 # Opens path to current file where the config is found, loads connfig
 PATH = os.path.dirname(os.path.abspath(__file__))
@@ -115,11 +115,21 @@ def get_results_for_request(job_id):
 def get_docs():
     return render_template('swaggerui.html')
 
+@app.route('/api/interface')
+def get_interface():
+
+    interface = {
+        'submit_endpoint' : API['SUBMIT_EP'],
+        'retrieve_endpoint' : API['RETRIEVE_EP']
+    }
+
+    return jsonify(interface)
+
 if __name__ == "__main__":
     
     app.run(
-        host=os.getenv('IP', '0.0.0.0'), 
-        port=int(os.getenv('PORT', 5000)), 
+        host="0.0.0.0",
+        port=5000,
         debug=True,
         use_reloader = False
     )

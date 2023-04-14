@@ -103,8 +103,7 @@
       "Request": {
         "title": "Request",
         "required": [
-          "prompt",
-          "activation_requests"
+          "prompt"
         ],
         "type": "object",
         "properties": {
@@ -211,9 +210,7 @@
         "required": [
           "generated_text",
           "answer",
-          "input_tokenized",
-          "generated_tokens",
-          "activations"
+          "generated_tokens"
         ],
         "type": "object",
         "properties": {

@@ -84,7 +84,7 @@ class JobManager(Process):
                 "answer": ret_dict["answer"],
             }
 
-            if(request["activation_requests"] is not None):
+            if(request.get("activation_requests", None) is not None):
                 result["activations"] = {}
                 requested_modules = request["activation_requests"]["layers"]
 

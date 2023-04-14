@@ -4,12 +4,12 @@ import logging
 import logging.config
 import os
 import sys
-from typing import List, Union
 
 import requests
 import yaml
-
-from .request import Request
+from engine.models.result import Result
+from engine.models.submit import Request
+from typing_extensions import Unpack
 
 logging.config.dictConfig({
     'version': 1,
@@ -24,15 +24,19 @@ logging.basicConfig(
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, 'config.yml'), 'r') as file:
     CONFIG = yaml.safe_load(file)
+    
+url = f"{CONFIG['API']['HOST']}{CONFIG['API']['INTERFACE_EP']}"
+
+response = requests.get(url = url)
+
+interface = json.loads(response.content)
+
+CONFIG['API']['RETRIEVE_EP'] = interface['retrieve_endpoint']
+CONFIG['API']['SUBMIT_EP'] = interface['submit_endpoint']
 
 def submit(
-        prompt:Union[str, List[str]]=None, 
-        max_new_tokens:int=1,
-        get_answers:bool=False,
-        top_k:int=1,
-        generate_greedy:bool=True,
-        layers:Union[str, List[str]]=None,
-        request:Request=None
+        request:Request=None,
+        **kwargs: Unpack[Request]
         ) -> str:
             
     """
@@ -52,24 +56,15 @@ def submit(
         jobid : ID used to retrive response from NDIF with the engine.retrieve method
     """
     
-    #assert((prompt is not None) and (request is not None), "One of (prompt) or (request) must be specified.")
-
     if request is None:
 
-        request = Request(
-            prompt=prompt,
-            max_new_tokens=max_new_tokens,
-            get_answers=get_answers,
-            top_k=top_k,
-            generate_greedy=generate_greedy,
-            layers=layers
-        )
+        request = Request.parse_obj(kwargs)
 
-    url = f"{CONFIG['API']['HOST']}{CONFIG['API']['SUBMIT_EP']}"
+    url = f"{CONFIG['API']['HOST']}/{CONFIG['API']['SUBMIT_EP']}"
 
     logging.info(f"=> Submitting request...")
 
-    request = request._to_json()
+    request = request.dict(exclude_none=True)
 
     response = requests.post(url = url, json = request)
     
@@ -78,10 +73,13 @@ def submit(
         logging.error("Error in request")
 
         return
+    
   
-    content = eval(response.content)
+    content = json.loads(response.content)
 
-    job_id = content['job_id']
+    result = Result(**content)
+
+    job_id = result.job_id
 
     logging.info(f"=> Successfully submitted job '{job_id}'")
 
@@ -99,7 +97,7 @@ def submit(
 
     logging.info(f"=> Dumped request for job '{job_id}' to {job_dir}")
 
-    return job_id
+    return result
 
 def retrieve(
         jobid:str
@@ -116,7 +114,7 @@ def retrieve(
         response : ...
     """
     
-    url = f"{CONFIG['API']['HOST']}{CONFIG['API']['RETRIEVE_EP']}/{jobid}"
+    url = f"{CONFIG['API']['HOST']}/{CONFIG['API']['RETRIEVE_EP']}/{jobid}"
 
     logging.info(f"=> Retrieving job '{jobid}'...")
 
@@ -130,7 +128,9 @@ def retrieve(
 
     logging.info(f"=> Retrieved job '{jobid}'")
 
-    content = eval(response.content)
+    content = json.loads(response.content)
+
+    result = Result(**content)
 
     response = {
         'received' : str(datetime.datetime.now()),
@@ -144,11 +144,11 @@ def retrieve(
 
     logging.info(f"=> Dumped response for job '{jobid}' to {job_dir}")
 
-    return content
+    return result
 
 def get_info():
     url = f"{CONFIG['API']['HOST']}"
     response = requests.get(url = url)
-    content = eval(response.content)
+    content = json.loads(response.content)
 
     return content
