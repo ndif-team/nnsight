@@ -29,11 +29,10 @@ class Answer(BaseModel):
 
 class Data(BaseModel):
 
-    generated_text: list[str]
-    answer: list[Answer]
+    generated_text: str
     input_tokenized: list=None
     generated_tokens: list
-    activations: dict[str, list[list[list[float]]]]=None
+    activations: dict[str, list[list[float]]]=None
 
 class Result(BaseModel):
 

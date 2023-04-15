@@ -79,21 +79,12 @@
         "title": "ActivationRequest",
         "type": "object",
         "properties": {
-          "final_output": {
-            "title": "Final Output",
-            "type": "boolean",
-            "default": true
-          },
           "layers": {
             "title": "Layers",
             "type": "array",
             "items": {
               "type": "string"
             }
-          },
-          "intervention": {
-            "title": "Intervention",
-            "type": "string"
           }
         }
       },
@@ -101,7 +92,7 @@
         "title": "Request",
         "required": [
           "job_id",
-          "prompt"
+          "prompts"
         ],
         "type": "object",
         "properties": {
@@ -109,34 +100,22 @@
             "title": "Job Id",
             "type": "string"
           },
-          "prompt": {
-            "title": "Prompt",
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            ]
+          "prompts": {
+            "title": "Prompts",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
-          "max_new_tokens": {
-            "title": "Max New Tokens",
+          "max_out_len": {
+            "title": "Max Out Len",
             "type": "integer",
-            "default": 1
-          },
-          "get_answers": {
-            "title": "Get Answers",
-            "type": "boolean",
-            "default": false
+            "default": 20
           },
           "top_k": {
             "title": "Top K",
             "type": "integer",
-            "default": 1
+            "default": 5
           },
           "generate_greedy": {
             "title": "Generate Greedy",
@@ -144,11 +123,7 @@
             "default": true
           },
           "activation_requests": {
-            "title": "Activation Requests",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ActivationRequest"
-            }
+            "$ref": "#/components/schemas/ActivationRequest"
           }
         }
       },
@@ -163,72 +138,17 @@
         ],
         "description": "An enumeration."
       },
-      "Candidate": {
-        "title": "Candidate",
-        "required": [
-          "token",
-          "token_id",
-          "p"
-        ],
-        "type": "object",
-        "properties": {
-          "token": {
-            "title": "Token",
-            "type": "string"
-          },
-          "token_id": {
-            "title": "Token Id",
-            "type": "integer"
-          },
-          "p": {
-            "title": "P",
-            "type": "number"
-          }
-        }
-      },
-      "Answer": {
-        "title": "Answer",
-        "required": [
-          "top_token",
-          "candidates"
-        ],
-        "type": "object",
-        "properties": {
-          "top_token": {
-            "title": "Top Token",
-            "type": "string"
-          },
-          "candidates": {
-            "title": "Candidates",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Candidate"
-            }
-          }
-        }
-      },
       "Data": {
         "title": "Data",
         "required": [
           "generated_text",
-          "answer",
           "generated_tokens"
         ],
         "type": "object",
         "properties": {
           "generated_text": {
             "title": "Generated Text",
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "answer": {
-            "title": "Answer",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Answer"
-            }
+            "type": "string"
           },
           "input_tokenized": {
             "title": "Input Tokenized",
@@ -248,10 +168,7 @@
               "items": {
                 "type": "array",
                 "items": {
-                  "type": "array",
-                  "items": {
-                    "type": "number"
-                  }
+                  "type": "number"
                 }
               }
             }
