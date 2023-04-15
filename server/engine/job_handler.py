@@ -65,7 +65,7 @@ class JobManager(Process):
 
     def process(self, request:Request):
 
-        prompts = request.prompt
+        prompts = request.prompts
 
         job_result = []
 
