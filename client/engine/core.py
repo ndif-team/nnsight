@@ -27,7 +27,7 @@ with open(os.path.join(PATH, 'config.yml'), 'r') as file:
     
 url = f"{CONFIG['API']['HOST']}{CONFIG['API']['INTERFACE_EP']}"
 
-response = requests.get(url = url)
+response = requests.get(url = url, allow_redirects=True)
 
 interface = json.loads(response.content)
 
@@ -66,15 +66,14 @@ def submit(
 
     request = request.dict(exclude_none=True)
 
-    response = requests.post(url = url, json = request)
+    response = requests.post(url = url, json = request, allow_redirects=True)
     
     if response.status_code != 200:
 
-        logging.error("Error in request")
+        logging.exception("Error in request")
 
         return
     
-  
     content = json.loads(response.content)
 
     result = Result(**content)
@@ -118,7 +117,7 @@ def retrieve(
 
     logging.info(f"=> Retrieving job '{jobid}'...")
 
-    response = requests.get(url = url)
+    response = requests.get(url = url, allow_redirects=True)
 
     if response.status_code != 200:
 
@@ -148,7 +147,7 @@ def retrieve(
 
 def get_info():
     url = f"{CONFIG['API']['HOST']}"
-    response = requests.get(url = url)
+    response = requests.get(url = url, allow_redirects=True)
     content = json.loads(response.content)
 
     return content

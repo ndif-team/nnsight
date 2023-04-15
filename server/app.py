@@ -4,7 +4,6 @@ import os
 import sys
 from multiprocessing import Manager
 
-import shortuuid
 import yaml
 from engine.job_handler import JobManager
 from engine.models.submit import Request

@@ -11,7 +11,7 @@ class ActivationRequest(BaseModel):
 class Request(BaseModel):
 
     job_id:str
-    prompt: Union[str, list[str]]
+    prompts: list[str]
     max_new_tokens:int=1
     get_answers:bool=False
     top_k:int=1

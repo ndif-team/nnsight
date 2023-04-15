@@ -77,9 +77,6 @@
     "schemas": {
       "ActivationRequest": {
         "title": "ActivationRequest",
-        "required": [
-          "intervention"
-        ],
         "type": "object",
         "properties": {
           "final_output": {
@@ -96,13 +93,14 @@
           },
           "intervention": {
             "title": "Intervention",
-            "type": "null"
+            "type": "string"
           }
         }
       },
       "Request": {
         "title": "Request",
         "required": [
+          "job_id",
           "prompt"
         ],
         "type": "object",
