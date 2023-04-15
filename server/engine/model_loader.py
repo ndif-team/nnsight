@@ -1,29 +1,57 @@
 import torch
 from baukit import nethook
-from transformers import AutoModelForCausalLM, AutoTokenizer
+#from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from accelerate import init_empty_weights, load_checkpoint_and_dispatch, infer_auto_device_map
 import warnings
+import time
 
 class ModelLoader:
     def __init__(self, MODEL_NAME, dtype = torch.float16, device_map = "balanced") -> None:
         self.MODEL_NAME = MODEL_NAME
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME) 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME, low_cpu_mem_usage=True, torch_dtype=dtype,
-            device_map = device_map
+       
+        #start_time = time.process_time_ns()
+        #self.model = AutoModelForCausalLM.from_pretrained(
+        #    MODEL_NAME, low_cpu_mem_usage=True, torch_dtype=dtype,
+        #    device_map = device_map
+        #)
+        #print(f"Original load: {time.process_time_ns() - start_time} ns")
+
+        ## Handled by accelerate:
+        #self.model.eval()
+        #if(device_map is None):
+        #    self.model.cuda()
+        
+        ## ACCELERATE LOAD
+
+        config = AutoConfig.from_pretrained(MODEL_NAME)
+
+        with init_empty_weights():
+           model = AutoModelForCausalLM.from_config(config, torch_dtype=dtype)
+        
+        self.model = model
+        self.extract_relavent_fields_from_config()
+
+        # must tie weights before loading
+        model.tie_weights()
+        
+        start_time = time.process_time_ns()
+        self.model = load_checkpoint_and_dispatch(
+                model, MODEL_NAME, device_map='auto',
+            no_split_module_classes = self.no_split_module_classes
         )
-        self.model.eval()
-        if(device_map is None):
-            self.model.cuda()
+        print(f"Load time: {time.process_time_ns()-start_time} ns") 
+
         nethook.set_requires_grad(False, self.model)
 
-        self.extract_relavent_fields_from_config()
 
         for n, p in self.model.named_parameters():
             print(n, p.shape, p.device)
 
-        if(self.model_type in ["gpt2", "gpt_neox"]):
+        if(self.model_type in ["gpt2", "gpt_neox", "llama"]):
             self.tokenizer.pad_token = self.tokenizer.eos_token            
-        elif(self.model_type in ["llama", "galactica"]):
+        elif(self.model_type in [ "galactica"]):
             self.tokenizer.add_special_tokens({'pad_token': '[PAD]'}) 
             
         print(f"{MODEL_NAME} ==> device: {self.model.device}, memory: {self.model.get_memory_footprint()}")    
@@ -39,12 +67,16 @@ class ModelLoader:
         model_type = None
         if(hasattr(self.model, "transformer")):
             model_type = "gpt2"
+            no_split_module_classes = ["GPT2Block"]
         elif(hasattr(self.model, "gpt_neox")):
             model_type = "gpt-neox"
+            no_split_module_classes = ["GPTNeoXLayer"]
         elif("llama" in config._name_or_path):
             model_type = "llama"
+            no_split_module_classes = ["LlamaDecoderLayer"]
         elif("galactica" in config._name_or_path):
             model_type = "galactica"
+            no_split_module_classes  = ["OPTDecoderLayer"]
         else:
             warnings.warn("unknown model type >> unable to extract relavent fields from config")
 
@@ -62,7 +94,7 @@ class ModelLoader:
         self.embedder_name = None
         
         self.model_type = model_type
-
+        self.no_split_module_classes = no_split_module_classes
 
         if(model_type in ["llama", "galactica"]):
             self.n_layer = config.num_hidden_layers
