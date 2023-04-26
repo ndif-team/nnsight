@@ -1,6 +1,11 @@
 import torch
 import matplotlib.pyplot as plt
 
+def untuple(x):
+    if isinstance(x, tuple):
+        return x[0]
+    return x
+
 def visualize_matrix(weight, limit_dim = 100):
     weight = torch.stack([w[:limit_dim] for w in weight[:limit_dim]]).cpu()
     limit = max(abs(weight.min().item()), abs(weight.max().item()))

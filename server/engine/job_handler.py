@@ -2,13 +2,10 @@
 import logging
 from multiprocessing import Process, Queue
 
-import torch
-from baukit import nethook
-from engine.model_loader import ModelLoader
+from engine.model_manager import ModelManager
 from engine.models.submit import Request
 from engine.models.result import JobStatus, Result
 from engine.results_dict import ResultsDict
-from engine.utils import model_utils
 
 
 class JobManager(Process):
@@ -28,21 +25,20 @@ class JobManager(Process):
 
     def run(self):
 
-        ml = ModelLoader(MODEL_NAME=self.model_name)
+        model_manager = ModelManager(MODEL_PATH=self.model_name)
+        self.model_manager = model_manager
 
         self.info_dict.update({
-            "n_layer": ml.n_layer,
-            "n_embd" : ml.n_embd,
-            "n_attn_head" : ml.n_attn_head,
-            "max_seq_length": ml.max_seq_length,
+            "n_layer": model_manager.n_layer,
+            "n_embd" : model_manager.n_embd,
+            "n_attn_head" : model_manager.n_attn_head,
+            "max_seq_length": model_manager.max_seq_length,
             
-            "layer_name_format": ml.layer_name_format,
-            "mlp_module_name_format": ml.mlp_module_name_format,
-            "attn_module_name_format": ml.attn_module_name_format
+            "layer_name_format": model_manager.layer_name_format,
+            "mlp_module_name_format": model_manager.mlp_module_name_format,
+            "attn_module_name_format": model_manager.attn_module_name_format
         })
 
-        self.model = ml.model
-        self.tokenizer = ml.tokenizer
 
         while True:
 
@@ -64,52 +60,36 @@ class JobManager(Process):
                 logging.exception("Exception occured in job processing")
 
     def process(self, request:Request):
+        
+        print(request)
 
         prompts = request.prompts
 
-        job_result = []
+        response = []
 
         # ! Can't run multiple prompts due to limited support for newer models like `galactica` and `llama` on huggingface accelerate
         for cur_propmt in prompts:
-            txt, ret_dict = model_utils.generate_fast(
-                self.model, self.tokenizer,
-                [cur_propmt], max_new_tokens=request.max_new_tokens,
+            txt, ret_dict = self.model_manager.generate(
+                [cur_propmt], 
+                max_out_len=request.max_out_len,
                 argmax_greedy=request.generate_greedy,
                 top_k = request.top_k,
-                get_answer_tokens = True,
+                request_activations=request.activation_requests.layers
             )  
 
+            # ! technically `generate` can accept a batch of prompts and return a batch of results
             result = {
-                "generated_text": txt,
-                "generated_tokens": ret_dict["generated_tokens"],
-                "answer": ret_dict["answer"],
+                "generated_text": txt[0],
+                "input_tokenized": ret_dict["input_tokenized"][0],
+                "generated_tokens": ret_dict["generated_tokens"][0],
             }
-
-            if request.activation_requests is not None:
-                result["activations"] = {}
-                requested_modules = request.activation_requests[0].layers
-
-                tokenized = self.tokenizer([cur_propmt], return_tensors="pt", padding = True).to(next(self.model.parameters()).device)
-                result["input_tokenized"] = [(self.tokenizer.decode(t), t.item()) for t in tokenized.input_ids[0]]
-                # print(result)
-
-                with nethook.TraceDict(
-                    self.model,
-                    layers = requested_modules,
-                ) as traces:  
-                    outputs = self.model(**tokenized)
-
-                for module in requested_modules:
-                    result["activations"][module] = model_utils.untuple(traces[module].output).cpu().numpy().tolist()
-                
-                # clear up the precious GPU memory as soon as the inference is done
-                del(traces)
-                del(outputs)
-                torch.cuda.empty_cache()
-                
-            job_result.append(result)
-
-        return job_result
+            if("activations" in ret_dict):
+                result["activations"] = {
+                    k: ret_dict["activations"][k][0].tolist() for k in ret_dict["activations"]
+                }
+            response.append(result)
+        
+        return response
 
     def submit(self, request:Request):
         
