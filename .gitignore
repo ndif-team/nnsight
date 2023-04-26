@@ -3,3 +3,4 @@
 *.ipynb_checkpoints*
 job_results/
 jobs/
+client/engine.egg-info/
