@@ -74,7 +74,7 @@ class JobManager(Process):
                 max_out_len=request.max_out_len,
                 argmax_greedy=request.generate_greedy,
                 top_k = request.top_k,
-                request_activations=request.activation_requests.layers
+                request_activations=request.activation_requests.layers if request.activation_requests is not None else None
             )  
 
             # ! technically `generate` can accept a batch of prompts and return a batch of results
