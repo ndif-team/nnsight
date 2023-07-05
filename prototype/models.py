@@ -1,7 +1,10 @@
 import torch
 from enum import Enum
 import sys
+import gc
 from .util import apply
+
+
 
 def get_shape(data):
 
@@ -12,9 +15,13 @@ def hook(module, input, output):
     module.input_shape = apply(input, get_shape)
     module.output_shape = apply(output, get_shape)
 
-class ModelState(list):
+class Promise(list):
 
     promises = set()
+
+    @classmethod
+    def clear(cls):
+        Promise.promises.clear()
 
     def __init__(self, args, shape, command='GET') -> None:
 
@@ -22,13 +29,7 @@ class ModelState(list):
         self._shape = shape
         self._command = f"{command}({','.join([str(arg) for arg in args])})"
 
-        ModelState.promises.add(self)
-
-        for arg in args:
-
-            if isinstance(arg, ModelState):
-
-                pass
+        self.promise()
 
     def __repr__(self) -> str:
         return self._command
@@ -40,27 +41,50 @@ class ModelState(list):
 
         output = torch.zeros(self._shape, device='meta')[key]
 
-        return ModelState([self, key], output.shape, command='SLC')
+        return Promise([self, key], output.shape, command='SLC')
     
     def __add__(self, other):
 
+        self.check_dependancy()
+        other.check_dependancy()
+
         output = torch.zeros(self._shape, device='meta') + torch.zeros(other._shape, device='meta')
 
-        model_state = ModelState([self, other], output.shape, command='ADD')
+        model_state = Promise([self, other], output.shape, command='ADD')
 
         return model_state
+    
+    def promise(self):
+        Promise.promises.add(self)
 
-    def __get__(self):
+    def promised(self):
+        return self in Promise.promises
 
-        return self._value if self._value is not None else str(self)
+    def remove(self):
+        Promise.promises.remove(self)
+
+    def check_dependancy(self):
+
+        refcount = sys.getrefcount(self)
+
+        if refcount == 7:
+            self.remove()
     
     @property
     def shape(self):
 
         return self._shape
     
+    @property
+    def value(self):
 
+        return self._value or str(self)
+    
+    @value.setter
+    def value(self, value): 
 
+        self._value = value 
+    
 class NDIFModule(torch.nn.Module):
 
     def __init__(self, *args, **kwargs) -> None:
@@ -79,25 +103,27 @@ class NDIFModule(torch.nn.Module):
     def input(self):
 
         if self._input is None:
-            self._input = ModelState([f"{self.module_path}.input"], self.input_shape)
-
+            self._input = Promise([f"{self.module_path}.input"], self.input_shape)
+        elif not self._input.promised():
+            self._input.promise()
         return self._input
     
     @property
     def output(self):
 
         if self._output is None:
-            self._output = ModelState([f"{self.module_path}.output"], self.output_shape)
-
+            self._output = Promise([f"{self.module_path}.output"], self.output_shape)
+        elif not self._output.promised():
+            self._output.promise()
         return self._output
     
     @input.setter
     def input(self, value):
-        self._input = ModelState([self.input, value], value._shape, command='SET')
+        self._input = Promise([self.input, value], value._shape, command='SET')
 
     @output.setter
     def output(self, value):
-        self._output = ModelState([self.output, value], value._shape, command='SET')
+        self._output = Promise([self.output, value], value._shape, command='SET')
 
 TorchModule = torch.nn.Module
 
@@ -109,6 +135,21 @@ class NDIFModel:
     def __exit__(self, exc_type, exc_val, exc_tb):
         torch.set_default_device('cpu')
         torch.nn.Module = TorchModule
+
+class NDIFInvoker:
+
+    def __init__(self, model, *args, **kwargs) -> None:
+
+        self.model = model
+        self.args = args
+        self.kwargs = kwargs
+
+    def __enter__(self): 
+        
+        self.model(*self.args, **self.kwargs)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 def llm(model_name):
 
@@ -131,19 +172,3 @@ def llm(model_name):
         module.module_path = name
 
     return model, tokenizer
-
-class NDIFInvoker:
-
-    def __init__(self, model, *args, **kwargs) -> None:
-
-        self.model = model
-        self.args = args
-        self.kwargs = kwargs
-
-    def __enter__(self): 
-        
-        self.model(*self.args, **self.kwargs)
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-
