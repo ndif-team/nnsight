@@ -1,13 +1,11 @@
-from .models import llm, NDIFInvoker
+from .models import NDIFModel
 
-model, tokenizer = llm('gpt2')
+model = NDIFModel('gpt2')
 
-input_ids = tokenizer("Hello world", return_tensors='pt')["input_ids"]
 
-with NDIFInvoker(model, input_ids) as invoker:
+with model.invoke(['Hello world'], device='cuda:0') as invoker:
 
-    mzzz = model.h[0].mlp.output
+    mmlp0 = model.h[0].mlp.output.save()
+    mmlp1 = model.h[1].mlp.output
 
-    mmlp = mzzz + model.h[1].mlp.output
-
-    model.h[0].mlp.output = mmlp
+    model.h[2].mlp.output = mmlp0

@@ -1,9 +1,10 @@
-import torch
-from enum import Enum
-import sys
-import gc
-from .util import apply
+from __future__ import annotations
 
+from typing import Union
+
+import torch
+
+from .util import apply
 
 
 def get_shape(data):
@@ -17,25 +18,49 @@ def hook(module, input, output):
 
 class Promise(list):
 
-    promises = set()
+    promises = dict()
 
     @classmethod
     def clear(cls):
         Promise.promises.clear()
 
-    def __init__(self, args, shape, command='GET') -> None:
+    #maybe just see if any promises are substrings of other promises at the end...
+    @staticmethod
+    def operation(func):
+        def wrapper(*args, **kwargs):
+            
+            for arg in args:
+
+                if isinstance(arg, Promise) and arg.promised() and not arg._command.startswith('SAVE'):
+
+                    arg.remove()
+
+            func(*args, **kwargs)
+
+        return wrapper
+
+    def __init__(self, shape, command) -> None:
 
         self._value = None
         self._shape = shape
-        self._command = f"{command}({','.join([str(arg) for arg in args])})"
+        self._command = command
 
-        self.promise()
+        if not command.startswith('GET'):
+
+            self.promise()
+
+    def __new__(cls, args, shape, command='GET'):
+
+        _command = f"{command}({','.join([str(arg) for arg in args])})"
+
+        if _command in Promise.promises:
+
+            return Promise.promises[_command]
+        
+        return super().__new__(cls, args, shape, _command)
 
     def __repr__(self) -> str:
         return self._command
-
-    def __hash__(self):
-        return hash(str(self))
     
     def __getitem__(self, key):
 
@@ -43,33 +68,31 @@ class Promise(list):
 
         return Promise([self, key], output.shape, command='SLC')
     
-    def __add__(self, other):
+    @operation
+    def __add__(self: Promise, other: Union[Promise, torch.Tensor]):
 
-        self.check_dependancy()
-        other.check_dependancy()
-
-        output = torch.zeros(self._shape, device='meta') + torch.zeros(other._shape, device='meta')
+        output = torch.zeros(self.shape, device='meta') + torch.zeros(other.shape, device='meta')
 
         model_state = Promise([self, other], output.shape, command='ADD')
 
         return model_state
     
+    def save(self):
+
+        self.remove()
+
+        return Promise([self], self.shape, command='SAVE')
+
     def promise(self):
-        Promise.promises.add(self)
+        Promise.promises[str(self)] = self
 
     def promised(self):
         return self in Promise.promises
 
     def remove(self):
-        Promise.promises.remove(self)
+        if self.promised():
+            del Promise.promises[self]
 
-    def check_dependancy(self):
-
-        refcount = sys.getrefcount(self)
-
-        if refcount == 7:
-            self.remove()
-    
     @property
     def shape(self):
 
@@ -104,8 +127,6 @@ class NDIFModule(torch.nn.Module):
 
         if self._input is None:
             self._input = Promise([f"{self.module_path}.input"], self.input_shape)
-        elif not self._input.promised():
-            self._input.promise()
         return self._input
     
     @property
@@ -113,8 +134,6 @@ class NDIFModule(torch.nn.Module):
 
         if self._output is None:
             self._output = Promise([f"{self.module_path}.output"], self.output_shape)
-        elif not self._output.promised():
-            self._output.promise()
         return self._output
     
     @input.setter
@@ -127,37 +146,94 @@ class NDIFModule(torch.nn.Module):
 
 TorchModule = torch.nn.Module
 
-class NDIFModel:
-    def __enter__(self): 
-        torch.set_default_device('meta')
-        torch.nn.Module = NDIFModule
+class NDIFModel(torch.nn.Module):
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        torch.set_default_device('cpu')
-        torch.nn.Module = TorchModule
+    class GraphModel:
+        def __enter__(self): 
+            torch.set_default_device('meta')
+            torch.nn.Module = NDIFModule
 
-class NDIFInvoker:
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            torch.set_default_device('cpu')
+            torch.nn.Module = TorchModule
 
-    def __init__(self, model, *args, **kwargs) -> None:
+    class Invoker:
 
-        self.model = model
-        self.args = args
-        self.kwargs = kwargs
-
-    def __enter__(self): 
+        def __init__(self, model: NDIFModel, prompts:list[str], *args, device='server', **kwargs) -> None:
         
-        self.model(*self.args, **self.kwargs)
+            self.model = model
+            self.device = device
+            self.prompts = prompts
+            self.args = args
+            self.kwargs = kwargs
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+        def __enter__(self):
+
+            self.model.run_graph(self.prompts, *self.args, **self.kwargs)
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+        
+            self.model(self.prompts, *self.args, **self.kwargs) 
+
+
+    def __init__(self, model_name) -> None:
+
+        self.model_name = model_name
+
+        with NDIFModel.GraphModel():
+
+            self.graph, self.tokenizer = self.get_model()
+
+            self.init_graph()
+
+        self.local_model = None
+
+        self.output = None
+
+
+        self.__dict__ = self.graph.__dict__
+
+    def __call__(self, prompts:list[str], *args, device='server', **kwargs):
+
+        if device == 'server':
+
+            self.output = self.submit_to_server(*args, **kwargs)
+
+        else:
+
+            if self.local_model is None:
+
+                self.local_model, _ = self.get_model()
+
+            self.local_model = self.local_model.to(device)
+
+            self.output = self.run_model(prompts, *args, **kwargs)
+
+    def init_graph(self):
+
+        for name, module in self.graph.named_modules():
+
+            module.module_path = name
+
+    def run_graph(self, prompts:list[str], *args, **kwargs):
+
+        tokens = self.tokenizer(prompts, return_tensors='pt')["input_ids"]
+
+        self.graph(tokens, *args, **kwargs)
+
+    def run_model(self, prompts:list[str], *args, **kwargs):
+        
+        tokens = self.tokenizer(prompts, return_tensors='pt')["input_ids"]
+
+        self.output = self.local_model(tokens, *args, **kwargs)
+
+    def submit_to_server(self, prompts:list[str], *args, **kwargs):
+
         pass
 
-def llm(model_name):
+    def get_model(self):
 
-    model_name = model_name.lower()
-    
-    with NDIFModel() as ndifmodel:
-
-        if model_name == 'gpt2':
+        if self.model_name == 'gpt2':
 
             from transformers import GPT2Config, GPT2Model, GPT2Tokenizer
 
@@ -167,8 +243,9 @@ def llm(model_name):
 
             tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
      
-    for name, module in model.named_modules():
+        return model, tokenizer
 
-        module.module_path = name
+    def invoke(self, prompts:list[str], *args, device='server', **kwargs):
 
-    return model, tokenizer
+        return NDIFModel.Invoker(self, prompts, *args, device=device **kwargs)
+
