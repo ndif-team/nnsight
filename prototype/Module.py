@@ -8,12 +8,14 @@ from .util import apply
 
 def get_shape(data):
 
-    return data.shape
+    return data.shape[0]
 
 def hook(module, input, output):
 
     module.input_shape = apply(input, get_shape)
     module.output_shape = apply(output, get_shape)
+    module._output = None
+    module._input = None
 
 
 class Module(torch.nn.Module):

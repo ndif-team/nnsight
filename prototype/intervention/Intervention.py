@@ -10,8 +10,12 @@ class Intervention:
     interventions:Dict[str, Intervention] = dict()
 
     @classmethod
-    def parse(cls, arg, promises):
+    def clear(self):
 
+        Intervention.interventions.clear()
+
+    @classmethod
+    def parse(cls, arg, promises):
 
         if isinstance(arg, str) and arg in promises:
 
@@ -52,6 +56,7 @@ class Intervention:
 
             intervention = Intervention.interventions[id]
             intervention.subscribe(subscriber)
+            intervention._n_subscribers += 1
 
             return intervention
                 
@@ -124,34 +129,53 @@ class Add(Intervention):
 
 class Get(Intervention):
 
-    gets:Dict[str, Get] = dict()
+    gets:Dict[str, List[Get]] = dict()
 
     @classmethod
     def layers(cls):
 
         return [layer.replace('.input', '').replace('.output', '') for layer in list(Get.gets.keys())]
     
-    def __init__(self, module_name:str, *args, **kwargs) -> None:
+    def __init__(self, module_name:str, prompt_index:int, *args, **kwargs) -> None:
 
         super().__init__(*args,**kwargs)
 
         self.module_name = module_name
+        self.prompt_index = prompt_index
 
-        Get.gets[module_name] = self
+        if module_name in Get.gets:
 
-    @Intervention.value.setter
+            Get.gets[module_name].append(self)
+
+        else:
+
+            Get.gets[module_name] = [self]
+
+        self._n_subscribers += 1
+
+    @property
+    def value(self): 
+
+        if self._value is None:
+
+            raise ValueError(f"Module {self.module_name} referenced before assignment")
+
+        return super().value
+
+    @value.setter
     def value(self, value): 
 
-        print(f"GSetting {self.module_name}")
-        self._value = value 
-
+        print(f"GSetting {self.module_name}[{self.prompt_index}]")
+        self._value = value[self.prompt_index]
 
         self()
+
+        value[self.prompt_index] = self.value
 
 class Set(Intervention):
 
     def __init__(self, arg1:Intervention, arg2:Intervention, *args, **kwargs) -> None:
-
+        
         super().__init__(*args,**kwargs)
 
         self.arg1 = Intervention.create(**arg1, subscriber=self)
@@ -161,12 +185,11 @@ class Set(Intervention):
 
         if self.arg1._value is not None:
 
-            print(f"Setting {self.arg1.module_name}")
+            print(f"Setting {self.arg1.module_name}[{self.arg1.prompt_index}]")
 
             self._subscribing = False
     
             self.arg1.value = self.arg2.value
-            self.arg1.reference()
 
             super().__call__()
 
@@ -227,12 +250,10 @@ def intervene(activations, module_name):
 
     if module_name in Get.gets:
 
-        get = Get.gets[module_name]
+        for get in Get.gets[module_name]:
 
-        get.value = activations
+            get.value = activations
 
-        return get._value
-    
     return activations
 
 

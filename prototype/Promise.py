@@ -65,7 +65,7 @@ class Promise(list):
     
     @property
     def value(self):
-        return self._value or str(self)
+        return self._value if self._value is not None else str(self)
     
     @value.setter
     def value(self, value): 
