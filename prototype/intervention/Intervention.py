@@ -334,6 +334,9 @@ class Tensor(Intervention):
 
         self._value = value if isinstance(value, torch.Tensor) else eval(value)
 
+    def __repr__(self) -> str:
+        return f"TENSOR({self.id})"
+
 INTERVENTIONS.update({'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor})
 
 def intervene(activations, module_name):
