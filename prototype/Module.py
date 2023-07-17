@@ -19,7 +19,24 @@ def hook(module, input, output):
 
 
 class Module(torch.nn.Module):
-
+    '''
+    A Module represents a replacement for torch.nn.Module that keeps track of input
+    and output operations as Promises. 
+    
+    Attributes
+    ----------
+    _input : Promise
+        Promise encapsulating the value of the Module's input. None before referencing
+    _output : Promise
+        Promise encapsulating the value of the Module's output. None before referencing
+    output_shape : torch.Size
+        shape of Module output
+    input_shape : torch.Size
+        shape of Module input
+    module_path : str
+        path of Module in Model tree
+    '''
+    
     def __init__(self, *args, **kwargs) -> None:
 
         self._output = None
@@ -30,6 +47,7 @@ class Module(torch.nn.Module):
 
         super().__init__(*args, **kwargs)
 
+        # Hook Module forward to get input and output shape on first pass
         self.register_forward_hook(hook)
 
     @property

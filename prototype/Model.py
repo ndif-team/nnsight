@@ -52,7 +52,7 @@ class Model(torch.nn.Module):
 
             Model.Invoker.execution_graphs.append(execution_graph)
             Model.Invoker.prompts.append(self.prompt)
-            Model.Invoker.promises.update(promises)
+            Model.Invoker.promises = {**promises, **Model.Invoker.promises}
             Promise.execution_graph.clear()
 
     def __init__(self, model_name) -> None:
@@ -116,7 +116,7 @@ class Model(torch.nn.Module):
             self.output = self.local_model(tokens, *args, **kwargs)
 
         for key, intervention in Intervention.interventions.items():
-            Promise.promises[key].value = intervention.value
+            Promise.promises[key].value = intervention._value
 
         Model.Invoker.clear()
         Promise.clear()

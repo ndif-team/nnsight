@@ -30,7 +30,7 @@ class Promise(list):
         Promise.promises[self._id] = self
             
     def __repr__(self) -> str:
-        return f"{self._command}({','.join([str(arg) for arg in self._args])})"
+        return f"{self._command}({','.join([str(arg) for arg in self._args])})" if self._value is None else str(self.value)
     
     def __getitem__(self, key):
 
