@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from typing import List
-from .intervention.Intervention import Intervention, Get, output_intervene
+from .intervention.Intervention import Intervention, Get, Tensor, output_intervene
 from .Promise import Promise
 from .Module import Module
 import baukit
@@ -109,6 +109,8 @@ class Model(torch.nn.Module):
         for execution_graph in execution_graphs:
 
             Intervention.from_execution_graph(execution_graph, promises)
+
+        Tensor.to(self.local_model.device)
         
         tokens = self.tokenizer(prompts, padding=True, return_tensors='pt')["input_ids"].to(self.local_model.device)
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections import OrderedDict
-from typing import Any, Dict, List, overload
+from typing import Any, Dict, List, Union, overload
+
+import torch
 
 INTERVENTIONS = {}
 
@@ -318,8 +320,21 @@ class Slice(Intervention):
 
         super().__call__()
 
+class Tensor(Intervention):
 
-INTERVENTIONS.update({'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add})
+    @classmethod
+    def to(cls, device):
+        for intervention in Intervention.interventions.values():
+            if isinstance(intervention, Tensor):
+                intervention._value = intervention._value.to(device)
+
+    def __init__(self, value:Union[torch.Tensor,str], *args, **kwargs) -> None:
+
+        super().__init__(*args,**kwargs)
+
+        self._value = value if isinstance(value, torch.Tensor) else eval(value)
+
+INTERVENTIONS.update({'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor})
 
 def intervene(activations, module_name):
 
