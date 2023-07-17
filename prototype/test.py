@@ -13,6 +13,6 @@ with model.invoke('Goodbye world'):
 
     model.h[1].mlp.output = mmlp1
 
-model(device='cuda:0')
+output = model(device='cuda:0')
 
 breakpoint()

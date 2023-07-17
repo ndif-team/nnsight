@@ -1,7 +1,7 @@
 import torch
 from typing import Union
 
-Primative = Union[str,int,str,float]
+Primative = Union[str,int,float,bool]
 Value = Union[Primative, torch.Tensor]
 
 def apply(data, fn):

@@ -9,7 +9,7 @@ import baukit
 
 TorchModule = torch.nn.Module
 
-class Model(torch.nn.Module):
+class Model:
 
     class GraphModel:
         def __enter__(self): 
@@ -45,19 +45,14 @@ class Model(torch.nn.Module):
 
         def __exit__(self, exc_type, exc_val, exc_tb):
         
+            Promise.update_prompt_index(len(Model.Invoker.execution_graphs))
             execution_graph, promises = Promise.compile()
-            for promise in promises.values():
-                if promise['command'] == 'GET':
-                    promise['args'].append(len(Model.Invoker.execution_graphs))
-
             Model.Invoker.execution_graphs.append(execution_graph)
             Model.Invoker.prompts.append(self.prompt)
             Model.Invoker.promises = {**promises, **Model.Invoker.promises}
             Promise.execution_graph.clear()
 
     def __init__(self, model_name) -> None:
-
-        super().__init__()
 
         self.model_name = model_name
 
@@ -73,7 +68,10 @@ class Model(torch.nn.Module):
 
         self.local_model = None
         self.output = None
-        
+
+    def __repr__(self) -> str:
+        return repr(self.graph)
+
     def __call__(self, *args, device='server', **kwargs):
 
         if device == 'server':
@@ -90,18 +88,22 @@ class Model(torch.nn.Module):
 
             self.output = self.run_model(*args, **kwargs)
 
+            return self.output
+
     def init_graph(self):
 
         for name, module in self.graph.named_modules():
 
             module.module_path = name
-
+            
+    @torch.no_grad()
     def run_graph(self, prompt:str, *args, **kwargs):
 
         tokens = self.tokenizer([prompt], return_tensors='pt')["input_ids"]
 
         self.graph(tokens, *args, **kwargs)
 
+    @torch.no_grad()
     def run_model(self, *args, **kwargs):
 
         execution_graphs, promises, prompts = Model.Invoker.execution_graphs, Model.Invoker.promises, Model.Invoker.prompts
@@ -115,7 +117,7 @@ class Model(torch.nn.Module):
         tokens = self.tokenizer(prompts, padding=True, return_tensors='pt')["input_ids"].to(self.local_model.device)
 
         with baukit.TraceDict(self.local_model, Get.layers(), retain_output=False, edit_output=output_intervene):
-            self.output = self.local_model(tokens, *args, **kwargs)
+            output = self.local_model(tokens, *args, **kwargs)
 
         for key, intervention in Intervention.interventions.items():
             Promise.promises[key].value = intervention._value
@@ -123,6 +125,8 @@ class Model(torch.nn.Module):
         Model.Invoker.clear()
         Promise.clear()
         Intervention.clear()
+
+        return output
 
     def submit_to_server(self, prompts:list[str], *args, **kwargs):
 
@@ -144,7 +148,7 @@ class Model(torch.nn.Module):
      
         return model, tokenizer
 
-    def invoke(self, prompt:str, *args, **kwargs):
+    def invoke(self, prompt:str, *args, **kwargs) -> Model.Invoker:
 
         return Model.Invoker(self, prompt, *args, **kwargs)
 

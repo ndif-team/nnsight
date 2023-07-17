@@ -4,8 +4,7 @@ from typing import Dict, List, Tuple, Union
 
 import torch
 import uuid
-
-Value = Union[torch.Tensor,int,float]
+from .util import Value
 
 class Promise(list):
     '''
@@ -53,7 +52,7 @@ class Promise(list):
         return list(reversed(Promise.execution_graph)), {id: promise.to_dict() for id, promise in Promise.promises.items()}
 
     @classmethod
-    def clear(cls):
+    def clear(cls) -> None:
         '''
         Class method to clear class attributes after completed run.
         '''
@@ -69,6 +68,13 @@ class Promise(list):
             value = torch.Tensor([value])
 
         return Promise([value], value.shape, command='TNS')
+
+    @classmethod
+    def update_prompt_index(self, prompt_index:int) -> None:
+
+        for promise in Promise.promises.values():
+            if promise.command == 'GET':
+                promise.args.append(prompt_index)
 
     def __init__(self, args, shape, command='GET') -> None:
 
