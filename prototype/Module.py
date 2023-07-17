@@ -1,16 +1,17 @@
 from __future__ import annotations
+from typing import Union
 
 from .Promise import Promise
 import torch
 
-from .util import apply
+from .util import Value, apply
 
 
-def get_shape(data):
+def get_shape(data:torch.Tensor):
 
     return data.shape[0]
 
-def hook(module, input, output):
+def hook(module:Module, input, output):
 
     module.input_shape = apply(input, get_shape)
     module.output_shape = apply(output, get_shape)
@@ -65,11 +66,13 @@ class Module(torch.nn.Module):
         return self._output
     
     @input.setter
-    def input(self, value):
+    def input(self, value:Union[Promise,Value]):
+        value = Promise.wrap(value)
         self._input = Promise([self.input, value], value._shape, command='SET')
         self._input.execute()
 
     @output.setter
-    def output(self, value):
+    def output(self, value:Union[Promise,Value]):
+        value = Promise.wrap(value)
         self._output = Promise([self.output, value], value._shape, command='SET')
         self._output.execute()

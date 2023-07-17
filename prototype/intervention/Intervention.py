@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections import OrderedDict
-from typing import Any, Dict, List, Union, overload
-
+from typing import Any, Dict, List, Union
+from typing_extensions import override
+from ..util import Value
 import torch
 
 INTERVENTIONS = {}
@@ -15,6 +16,11 @@ class Intervention:
     An Intervention represents an action that needs to be carried out
     during the execution of a Model, and a store of value for those actions.
     
+    Class Attributes
+    ----------
+    interventions : Dict[str, Intervention]
+        stores a mapping between an Intervention's unique id and the Intervention.
+
     Attributes
     ----------
     _value : str
@@ -26,8 +32,6 @@ class Intervention:
         this Interventions
     '''
 
-    # Class attribute that stores a mapping between an Intervention's unique id
-    # and the Intervention.
     interventions:Dict[str, Intervention] = OrderedDict()
 
     @classmethod
@@ -36,7 +40,7 @@ class Intervention:
         Intervention.interventions.clear()
 
     @classmethod
-    def parse(cls, arg, promises:Dict[str, Dict]):
+    def parse(cls, arg:Value, promises:Dict[str, Dict]) -> Union[Intervention,Value]:
         '''
         Parses a promise and it's args into Interventions
         '''
@@ -79,14 +83,14 @@ class Intervention:
         Intervention.interventions[self.id] = self
 
     @classmethod
-    def create(cls, args:List, id:str, command:str) -> Intervention:
+    def create(cls, args:List[Union[Intervention,Value]], id:str, command:str) -> Intervention:
         '''
         If an Intervention with the given id already exists, return it.
         Otherwise create a new Intervention with subtype depending on command.
 
         Parameters
         ----------
-            args : List
+            args : List[Union[Intervention,Value]]
                 List of arguments for Intervention. Can be anything
             id : str
                 id of Intervention
@@ -101,7 +105,7 @@ class Intervention:
         return INTERVENTIONS[command](*args,id)
     
     @abstractmethod
-    def __call__(self):
+    def __call__(self) -> None:
         '''
         Abstract method that attempts to signal listners that it's value is changed.
         Inheritors should perform Intervention subtype specific actions then call super().__call__()
@@ -114,7 +118,7 @@ class Intervention:
 
             listener()
 
-    def listen(self, listener:Intervention):
+    def listen(self, listener:Intervention) -> None:
         '''
         Adds listener to listeners
 
@@ -157,7 +161,7 @@ class Intervention:
 
             self.destroy()
 
-    def get_value(self, listener_id:str):
+    def get_value(self, listener_id:str) -> torch.Tensor:
         '''
         Gets the Intervention's value. Requires an Intervention id in listeners.
         Removes the listener with id listener_id from listeners.
@@ -182,8 +186,18 @@ class Intervention:
 
         return value
     
-    def set_value(self, value, listener_id):
+    def set_value(self, value:torch.Tensor, listener_id:str) -> None:
+        '''
+        Sets the Intervention's value. Requires an Intervention id in listeners.
+        Removes the listener with id listener_id from listeners.
 
+        Parameters
+        ----------
+            value : torch.Tensor
+                value to set
+            listener_id : str
+                id of Intervention that requests to set value
+        '''
         if listener_id not in self.listeners:
 
             return None
@@ -299,6 +313,7 @@ class Copy(Intervention):
 
             super().__call__()
 
+    @override
     def destroy(self) -> None:
         pass
 
@@ -314,9 +329,7 @@ class Slice(Intervention):
 
     def __call__(self):
 
-        self._value = self.get.value[self.slice]
-
-        self._subscribing = False
+        self._value = self.arg1.get_value(self.id)[self.slice]
 
         super().__call__()
 
@@ -328,11 +341,11 @@ class Tensor(Intervention):
             if isinstance(intervention, Tensor):
                 intervention._value = intervention._value.to(device)
 
-    def __init__(self, value:Union[torch.Tensor,str], *args, **kwargs) -> None:
+    def __init__(self, value:torch.Tensor, *args, **kwargs) -> None:
 
         super().__init__(*args,**kwargs)
 
-        self._value = value if isinstance(value, torch.Tensor) else eval(value)
+        self._value = value
 
     def __repr__(self) -> str:
         return f"TENSOR({self.id})"
