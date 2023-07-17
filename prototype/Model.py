@@ -63,11 +63,11 @@ class Model(torch.nn.Module):
 
         with Model.GraphModel():
 
-            graph, tokenizer = self.get_model()
+            self.graph, self.tokenizer = self.get_model()
 
-            self.__dict__.update(graph.__dict__)
+            for name, module in self.graph.named_children():
 
-            self.graph, self.tokenizer = graph, tokenizer
+                setattr(self, name, module)
 
             self.init_graph()
 
