@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections import OrderedDict
 from typing import Any, Dict, List, overload
 
 INTERVENTIONS = {}
@@ -25,7 +26,7 @@ class Intervention:
 
     # Class attribute that stores a mapping between an Intervention's unique id
     # and the Intervention.
-    interventions:Dict[str, Intervention] = dict()
+    interventions:Dict[str, Intervention] = OrderedDict()
 
     @classmethod
     def clear(self) -> None:
@@ -35,17 +36,16 @@ class Intervention:
     @classmethod
     def parse(cls, arg, promises:Dict[str, Dict]):
         '''
-        Parses the args of a promise to replace an id reference of a Promise with 
-        the promise itself.
+        Parses a promise and it's args into Interventions
         '''
         if isinstance(arg, str) and arg in promises:
 
             promise = promises[arg]
             promise['args'] = [Intervention.parse(arg, promises) for arg in promise['args']]
+            promise = Intervention.create(**promise)
 
             return promise
         return arg
-
 
     @classmethod
     def from_execution_graph(cls, execution_graph:List[str], promises:Dict[str, Dict]) -> None:
@@ -64,25 +64,23 @@ class Intervention:
 
         for id in execution_graph:
 
-            promise = Intervention.parse(id, promises)
+            intervention = Intervention.parse(id, promises)
+            intervention.listen(listener)
+            listener = intervention
 
-            listener = Intervention.create(**promise, listener=listener)
-
-
-    def __init__(self, id:str, listener:Intervention=None) -> None:
+    def __init__(self, id:str) -> None:
 
         self._value = None
         self.id = id
         self.listeners = {}
-        self.listen(listener)
 
         Intervention.interventions[self.id] = self
 
     @classmethod
-    def create(cls, args:List, id:str, command:str, listener:Intervention=None) -> Intervention:
+    def create(cls, args:List, id:str, command:str) -> Intervention:
         '''
-        If an Intervention with the given id already exists, return it and add listener
-        to it's listeners. Otherwise create a new Intervention with subtype depending on command.
+        If an Intervention with the given id already exists, return it.
+        Otherwise create a new Intervention with subtype depending on command.
 
         Parameters
         ----------
@@ -92,18 +90,13 @@ class Intervention:
                 id of Intervention
             command : str
                 String denoting what kind of Intervention
-            listener : Intervention
-                parent Intervention to add to listeners
         '''
 
         if id in Intervention.interventions:
 
-            intervention = Intervention.interventions[id]
-            intervention.listen(listener)
-
-            return intervention
+            return Intervention.interventions[id]
                 
-        return INTERVENTIONS[command](*args,id, listener=listener)
+        return INTERVENTIONS[command](*args,id)
     
     @abstractmethod
     def __call__(self):
@@ -199,12 +192,14 @@ class Intervention:
 
 class Add(Intervention):
 
-    def __init__(self, arg1:Dict, arg2:Dict, *args, **kwargs) -> None:
+    def __init__(self, arg1:Intervention, arg2:Intervention, *args, **kwargs) -> None:
 
         super().__init__(*args,**kwargs)
 
-        self.arg1:Intervention = Intervention.create(**arg1, listener=self)
-        self.arg2:Intervention = Intervention.create(**arg2, listener=self)
+        self.arg1 = arg1
+        self.arg2 = arg2
+        self.arg1.listen(self)
+        self.arg2.listen(self)
 
     def __repr__(self) -> str:
         return f"ADD({str(self.arg1)},{self.arg2})"
@@ -260,12 +255,14 @@ class Get(Intervention):
 
 class Set(Intervention):
 
-    def __init__(self, arg1:Dict, arg2:Dict, *args, **kwargs) -> None:
+    def __init__(self, arg1:Intervention, arg2:Intervention, *args, **kwargs) -> None:
         
         super().__init__(*args,**kwargs)
 
-        self.arg1:Intervention = Intervention.create(**arg1, listener=self)
-        self.arg2:Intervention = Intervention.create(**arg2, listener=self)
+        self.arg1 = arg1
+        self.arg2 = arg2
+        self.arg1.listen(self)
+        self.arg2.listen(self)
 
     def __repr__(self) -> str:
         return f"SET({str(self.arg1)},{self.arg2})"
@@ -282,20 +279,21 @@ class Set(Intervention):
         
 class Copy(Intervention):
 
-    def __init__(self, get:Dict, *args, **kwargs) -> None:
+    def __init__(self, arg1:Intervention, *args, **kwargs) -> None:
 
         super().__init__(*args,**kwargs)
 
-        self.get:Get = Intervention.create(**get, listener=self)
+        self.arg1 = arg1
+        self.arg1.listen(self)
 
     def __repr__(self) -> str:
-        return f"COPY({str(self.get)})"
+        return f"COPY({str(self.arg1)})"
 
     def __call__(self):
 
-        if self.get._value is not None:
+        if self.arg1._value is not None:
 
-            self._value = self.get.get_value(self.id)
+            self._value = self.arg1.get_value(self.id)
 
             super().__call__()
 
@@ -304,11 +302,12 @@ class Copy(Intervention):
 
 class Slice(Intervention):
 
-    def __init__(self, arg1:Dict, slice, *args, **kwargs) -> None:
+    def __init__(self, arg1:Intervention, slice, *args, **kwargs) -> None:
 
         super().__init__(*args,**kwargs)
 
-        self.arg1 = Intervention.create(**arg1, listener=self)
+        self.arg1 = arg1
+        self.arg1.listen(self)
         self.slice = slice
 
     def __call__(self):
