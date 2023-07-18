@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import torch
 from typing import List
-from .intervention.Intervention import Intervention, Get, Tensor, output_intervene
-from .Promise import Promise
-from .Module import Module
+
 import baukit
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+from .intervention.Intervention import (Get, Intervention, Tensor,
+                                        output_intervene)
+from .Module import Module
+from .Promise import Promise
 
 TorchModule = torch.nn.Module
 
@@ -95,13 +99,13 @@ class Model:
         for name, module in self.graph.named_modules():
 
             module.module_path = name
-            
+
     @torch.no_grad()
     def run_graph(self, prompt:str, *args, **kwargs):
 
-        tokens = self.tokenizer([prompt], return_tensors='pt')["input_ids"]
+        tokens = self.tokenizer([prompt], return_tensors='pt').to('meta')
 
-        self.graph(tokens, *args, **kwargs)
+        self.graph( *args, **tokens, **kwargs)
 
     @torch.no_grad()
     def run_model(self, *args, **kwargs):
@@ -114,10 +118,10 @@ class Model:
 
         Tensor.to(self.local_model.device)
         
-        tokens = self.tokenizer(prompts, padding=True, return_tensors='pt')["input_ids"].to(self.local_model.device)
+        inputs = self.tokenizer(prompts, padding=True, return_tensors='pt').to(self.local_model.device)
 
         with baukit.TraceDict(self.local_model, Get.layers(), retain_output=False, edit_output=output_intervene):
-            output = self.local_model(tokens, *args, **kwargs)
+            output = self.local_model.generate(*args, **inputs, **kwargs)
 
         for key, intervention in Intervention.interventions.items():
             Promise.promises[key].value = intervention._value
@@ -134,17 +138,14 @@ class Model:
 
     def get_model(self):
 
-        if self.model_name == 'gpt2':
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
-            from transformers import GPT2Config, GPT2Model, GPT2Tokenizer
+        config = AutoConfig.from_pretrained(self.model_name)
 
-            configuration = GPT2Config()
+        model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.float16)
+        model.eval()
 
-            model = GPT2Model(configuration)
-
-            tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-
-            tokenizer.pad_token = tokenizer.eos_token 
+        tokenizer.pad_token = tokenizer.eos_token 
      
         return model, tokenizer
 
