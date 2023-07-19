@@ -9,7 +9,7 @@ from .util import Value, apply
 
 def get_shape(data:torch.Tensor):
 
-    return data.shape[0]
+    return data.shape
 
 def hook(module:Module, input, output):
 

@@ -13,7 +13,7 @@ class Promise(list):
     Class Attributes
     ----------
     execution_graph : List[str]
-        list of ids of promises that need to be executed in reverse order. These should only
+        list of ids of promises that need to be executed in order. These should only
         be ids of Copy and Set Promises as only they actually effect Model inference.
     promises : Dict[str,Promise]
         Mapping of id to Promise to de-reference ids and to find and update Promises
@@ -49,7 +49,7 @@ class Promise(list):
             Mapping of id to Dict where Dict are the keys and values needed to build an Intervention.
 
         '''
-        return list(reversed(Promise.execution_graph)), {id: promise.to_dict() for id, promise in Promise.promises.items()}
+        return list(Promise.execution_graph), {id: promise.to_dict() for id, promise in Promise.promises.items()}
 
     @classmethod
     def clear(cls) -> None:

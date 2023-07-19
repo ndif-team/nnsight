@@ -6,7 +6,7 @@ import baukit
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from .intervention.Intervention import (Get, Intervention, Tensor,
+from .intervention.Intervention import (Get, Copy, Intervention, Tensor,
                                         output_intervene)
 from .Module import Module
 from .Promise import Promise
@@ -87,6 +87,8 @@ class Model:
             if self.local_model is None:
 
                 self.local_model, _ = self.get_model()
+                # add back if we want interventions applied every token (max_new_token > 1)
+                #self.local_model.register_forward_hook(lambda module,input,output: Intervention.reset())
 
             self.local_model = self.local_model.to(device)
 
@@ -117,14 +119,17 @@ class Model:
             Intervention.from_execution_graph(execution_graph, promises)
 
         Tensor.to(self.local_model.device)
+
+        Intervention.reset()
         
         inputs = self.tokenizer(prompts, padding=True, return_tensors='pt').to(self.local_model.device)
 
         with baukit.TraceDict(self.local_model, Get.layers(), retain_output=False, edit_output=output_intervene):
             output = self.local_model.generate(*args, **inputs, **kwargs)
 
-        for key, intervention in Intervention.interventions.items():
-            Promise.promises[key].value = intervention._value
+        for id in Copy.copies:
+            # Might not be index 0 if there are multiple copies  (from max_new_token > 1)
+            Promise.promises[id].value = Intervention.interventions[id].copies[0]
 
         Model.Invoker.clear()
         Promise.clear()
