@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Union
 
 import torch
-
 from .Promise import Promise
 from .util import Value, apply
 
@@ -40,6 +39,7 @@ class Module(torch.nn.Module):
             path of Module in Model tree
     '''
 
+
     def __init__(self, *args, **kwargs) -> None:
 
         self._output = None
@@ -72,12 +72,9 @@ class Module(torch.nn.Module):
     @input.setter
     def input(self, value: Union[Promise, Value]):
         value = Promise.wrap(value)
-        self._input = Promise([self.input, value], value._shape, command='SET')
-        self._input.execute()
+        Promise([self.input, value], value._shape, command='SET').execute()
 
     @output.setter
     def output(self, value: Union[Promise, Value]):
         value = Promise.wrap(value)
-        self._output = Promise([self.output, value],
-                               value._shape, command='SET')
-        self._output.execute()
+        Promise([self.output, value],value._shape, command='SET').execute()

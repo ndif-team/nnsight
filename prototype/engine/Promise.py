@@ -5,9 +5,8 @@ from typing import Dict, List, Tuple, Union
 
 import torch
 from typing_extensions import override
-
+import numpy as np
 from .util import Value
-
 
 class Promise(list):
     '''
@@ -38,6 +37,23 @@ class Promise(list):
 
     execution_graph: List[str] = list()
     promises: Dict[str, Promise] = dict()
+
+    class Tokens(dict):
+
+        tokens:Dict[str,int] = None
+
+        def __init__(self, promise:Promise) -> None:
+            
+            self.promise = promise
+
+        def __getitem__(self, key):
+            
+            return self.promise[:, Promise.Tokens.tokens[key]]
+
+    @classmethod
+    def set_tokens(cls, tokenized:List[str]) -> None:
+
+        Promise.Tokens.tokens = dict(zip(tokenized, np.arange(start=0, stop=len(tokenized))))
 
     @classmethod
     def compile(cls) -> Tuple[List[str], Dict[str, Dict]]:
@@ -151,6 +167,14 @@ class Promise(list):
 
     def to_dict(self) -> Dict[str, Value]:
         return {'command': self.command, 'id': self.id, 'args': [arg.id if isinstance(arg, Promise) else arg for arg in self.args]}
+
+    @property
+    def token(self) -> Promise:
+        return Promise.Tokens(self)
+    
+    @property
+    def t(self) -> Promise:
+        return self.token
 
     @property
     def shape(self) -> torch.Size:

@@ -170,7 +170,7 @@ class Intervention:
 
         for listener_id in list(self.current_listeners):
 
-            if listener_id != self.id:
+            if listener_id != self.id and listener_id in self.current_listeners:
 
                 intervention = Intervention.interventions[listener_id]
                 intervention.remove_dependency(self.id)

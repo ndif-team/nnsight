@@ -14,6 +14,7 @@ from .Promise import Promise
 
 TorchModule = torch.nn.Module
 
+# NEED TO HANDLE SHAPE CHANGE DUE TO PADDING
 
 class Model:
 
@@ -48,10 +49,19 @@ class Model:
             self.args = args
             self.kwargs = kwargs
 
-        @override
-        def __enter__(self) -> None:
+        @property
+        def tokens(self):
 
-            self.model.run_graph(self.prompt, *self.args, **self.kwargs)
+            return list(Promise.Tokens.tokens.keys())
+
+        @override
+        def __enter__(self) -> Model.Invoker:
+
+            inputs = self.model.run_graph(self.prompt, *self.args, **self.kwargs)
+            tokenized = [self.model.tokenizer.decode(token) for token in inputs['input_ids'][0]]
+            Promise.set_tokens(tokenized)
+            
+            return self
 
         @override
         def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -117,11 +127,11 @@ class Model:
             module.module_path = name
 
     @torch.no_grad()
-    def run_graph(self, prompt: str, *args, **kwargs) -> None:
+    def run_graph(self, prompt: str, *args, **kwargs):
 
-        inputs = self.tokenizer([prompt], return_tensors='pt').to('meta')
+        inputs = self.tokenizer([prompt], return_tensors='pt').to('cpu')
 
-        self.graph(*args, **inputs, **kwargs)
+        self.graph(*args, **inputs.copy().to('meta'), **kwargs)
 
         return inputs
 
@@ -140,7 +150,7 @@ class Model:
 
         inputs = self.tokenizer(prompts, padding=True, return_tensors='pt').to(
             self.local_model.device)
-
+        
         with baukit.TraceDict(self.local_model, Get.layers(), retain_output=False, edit_output=output_intervene):
             output = self.local_model.generate(*args, **inputs, **kwargs)
 
