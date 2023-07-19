@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import uuid
 from typing import Dict, List, Tuple, Union
 
 import torch
-import uuid
+from typing_extensions import override
+
 from .util import Value
+
 
 class Promise(list):
     '''
@@ -12,42 +15,41 @@ class Promise(list):
 
     Class Attributes
     ----------
-    execution_graph : List[str]
-        list of ids of promises that need to be executed in order. These should only
-        be ids of Copy and Set Promises as only they actually effect Model inference.
-    promises : Dict[str,Promise]
-        Mapping of id to Promise to de-reference ids and to find and update Promises
-        after Model execution.
+        execution_graph : List[str]
+            list of ids of promises that need to be executed in order. These should only
+            be ids of Copy and Set Promises as only they actually effect Model inference.
+        promises : Dict[str,Promise]
+            Mapping of id to Promise to de-reference ids and to find and update Promises
+            after Model execution.
 
     Attributes
     ----------
-    _input : Promise
-        Promise encapsulating the value of the Module's input. None before referencing
-    _output : Promise
-        Promise encapsulating the value of the Module's output. None before referencing
-    output_shape : torch.Size
-        shape of Module output
-    input_shape : torch.Size
-        shape of Module input
-    module_path : str
-        path of Module in Model tree
+        _value : torch.Tensor
+            value tensor
+        _shape : torch.Size
+            size of value tensor if set
+        command : str
+            which command this Promise represents
+        args : List[Union[Promise,Value]]
+            list of arguments
+        id : str
+            unique uuid4 of Promise
     '''
 
-    execution_graph:List[str] = list()
-    promises:Dict[str,Promise] = dict()
+    execution_graph: List[str] = list()
+    promises: Dict[str, Promise] = dict()
 
     @classmethod
-    def compile(cls) -> Tuple[List[str],Dict[str,Dict]]:
+    def compile(cls) -> Tuple[List[str], Dict[str, Dict]]:
         '''
         Class method to return necessary information for parsing into Interventions.
 
         Returns
         ----------
-        execution_graph : List[str]
-            execution graph of ids in execution order.
-        promises : Dict[str,Dict]
-            Mapping of id to Dict where Dict are the keys and values needed to build an Intervention.
-
+            List[str]
+                execution graph of ids in execution order.
+            Dict[str,Dict]
+                Mapping of id to Dict where Dict are the keys and values needed to build an Intervention.
         '''
         return list(Promise.execution_graph), {id: promise.to_dict() for id, promise in Promise.promises.items()}
 
@@ -59,9 +61,12 @@ class Promise(list):
         Promise.promises.clear()
         Promise.execution_graph.clear()
 
-    @classmethod 
-    def wrap(cls, value:Union[Promise,Value]):
-
+    @classmethod
+    def wrap(cls, value: Union[Promise, Value]) -> Promise:
+        '''
+        Wraps a Value in a Promise. If already a Promise, return it.
+        If not a torch.Tensor, make it a tensor.
+        '''
         if isinstance(value, Promise):
             return value
         if not isinstance(value, torch.Tensor):
@@ -70,13 +75,13 @@ class Promise(list):
         return Promise([value], value.shape, command='TNS')
 
     @classmethod
-    def update_prompt_index(self, prompt_index:int) -> None:
+    def update_batch_index(self, batch_index: int) -> None:
 
         for promise in Promise.promises.values():
             if promise.command == 'GET':
-                promise.args.append(prompt_index)
+                promise.args.append(batch_index)
 
-    def __init__(self, args, shape, command='GET') -> None:
+    def __init__(self, args: List[Union[Promise, Value]], shape: torch.Size, command: str = 'GET') -> None:
 
         self._value = None
         self._shape = shape
@@ -85,32 +90,35 @@ class Promise(list):
         self.id = str(uuid.uuid4())
 
         Promise.promises[self.id] = self
-            
+
+    @override
     def __repr__(self) -> str:
         return f"{self.command}({','.join([str(arg) for arg in self.args])})" if self._value is None else str(self.value)
-    
+
+    @override
     def __getitem__(self, key) -> Promise:
         '''
         Overridden method that creates a Promise to slice/access values from another Promise
-        
+
         Parameters
         ----------
-        key : 
-            key or slice
+            key : 
+                key or slice
 
         Returns
         ----------
-        promise : Promise
-            a Slice Promise
+            Promise
+                a Slice Promise
         '''
         output = torch.zeros(self._shape, device='meta')[key]
 
         return Promise([self, key], output.shape, command='SLC')
-    
-    def __add__(self, other: Union[Promise,Value]) -> Promise:
+
+    @override
+    def __add__(self, other: Union[Promise, Value]) -> Promise:
         '''
         Overridden method that creates a Promise to add two Promises.
-        
+
         Parameters
         ----------
         other : Union[Promise,Value]
@@ -118,40 +126,40 @@ class Promise(list):
 
         Returns
         ----------
-        promise : Promise
+        Promise
             an Add Promise
         '''
 
         other = Promise.wrap(other)
 
-        output = torch.zeros(self.shape, device='meta') + torch.zeros(other.shape, device='meta')
+        output = torch.zeros(self.shape, device='meta') + \
+            torch.zeros(other.shape, device='meta')
 
         model_state = Promise([self, other], output.shape, command='ADD')
 
         return model_state
-    
-    def copy(self):
+
+    def copy(self) -> Promise:
 
         promise = Promise([self], self.shape, command='CPY')
         promise.execute()
 
         return promise
 
-    def execute(self):
+    def execute(self) -> None:
         Promise.execution_graph.append(self.id)
 
-    def to_dict(self):
-        return {'command' : self.command, 'id': self.id, 'args' : [arg.id if isinstance(arg, Promise) else arg for arg in self.args]}
+    def to_dict(self) -> Dict[str, Value]:
+        return {'command': self.command, 'id': self.id, 'args': [arg.id if isinstance(arg, Promise) else arg for arg in self.args]}
 
     @property
-    def shape(self):
+    def shape(self) -> torch.Size:
         return self._shape
-    
+
     @property
-    def value(self):
+    def value(self) -> Union[torch.Tensor, str]:
         return self._value if self._value is not None else str(self)
-    
+
     @value.setter
-    def value(self, value): 
-        self._value = value 
-    
+    def value(self, value) -> None:
+        self._value = value

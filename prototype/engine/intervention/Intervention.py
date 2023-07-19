@@ -1,70 +1,93 @@
 from __future__ import annotations
 
-from abc import abstractmethod
+import uuid
+from abc import abstractclassmethod, abstractmethod
 from collections import OrderedDict
 from typing import Any, Dict, List, Union
-from typing_extensions import override
-import uuid
-from ..util import Value
+
 import torch
+from typing_extensions import override
+
+from ..util import Value
 
 INTERVENTIONS_TYPES = {}
+
 
 class Intervention:
     '''
     An Intervention represents an action that needs to be carried out
     during the execution of a Model, and a store of value for those actions.
-    
+
     Class Attributes
     ----------
-    interventions : Dict[str, Intervention]
-        stores a mapping between an Intervention's unique id and the Intervention.
+        interventions : Dict[str, Intervention]
+            stores a mapping between an Intervention's unique id and the Intervention.
 
     Attributes
     ----------
-    _value : str
-        value store of Intervention
-    id : str
-        unique id of Intervention
-    listeners : Dict[str, Intervention]
-        mapping from id to Intervention for parent Interventions that depend on
-        this Interventions
+        _value : str
+            value store of Intervention
+        id : str
+            unique id of Intervention
+        listeners : Set
+            ids of Interventions that wish to be notified of a value change
+        current_listeners : Set
+            ids of listeners that have yet to be notified
+        dependencies : Set
+            ids of Interventions that this Intervention depends on having a value
+        current_dependencies : Set
+            ids of dependencies that have yet to be fufilled
     '''
 
-    interventions:Dict[str, Intervention] = OrderedDict()
+    interventions: Dict[str, Intervention] = OrderedDict()
 
     @classmethod
     def clear(cls) -> None:
-        '''Clears the Intervention class attribute mapping'''
+        '''Clears the Intervention class attributes and clears subtypes'''
         Intervention.interventions.clear()
 
         for type in Intervention.__subclasses__():
-         
+
             type._clear()
 
-    @classmethod 
-    def _clear(cls):
+    @abstractclassmethod
+    def _clear(cls) -> None:
+        '''Abstract method for subtypes to set when clearing information'''
         pass
 
     @classmethod
-    def parse(cls, arg:Value, promises:Dict[str, Dict]) -> Union[Intervention,Value]:
+    def parse(cls, arg: Value, promises: Dict[str, Dict]) -> Union[Intervention, Value]:
         '''
         Parses a promise and it's args into Interventions
+
+        Parameters
+        ----------
+            arg : Value
+                Value as argument of Intervention or id of arg Intervention to be converted into an Intervention
+            promises : Dict
+                Mapping of Promise id to Dict of attributes that make up a promise: 'args', 'command', and 'id'. Returned from Promise.compile()
+        Returns
+        ----------
+            Union[Intervention,Value]
+                arg Value or converted Intervention
+
         '''
         if isinstance(arg, str) and arg in promises:
 
             promise = promises[arg]
-            promise['args'] = [Intervention.parse(arg, promises) for arg in promise['args']]
+            promise['args'] = [Intervention.parse(
+                arg, promises) for arg in promise['args']]
             promise = Intervention.create(**promise)
 
             return promise
         return arg
 
     @classmethod
-    def from_execution_graph(cls, execution_graph:List[str], promises:Dict[str, Dict]) -> None:
+    def from_execution_graph(cls, execution_graph: List[str], promises: Dict[str, Dict]) -> None:
         '''
         Parses the information from Promises into Interventions.
-        
+        Chains dependant Interventions
+
         Parameters
         ----------
             execution_graph : List[str]
@@ -83,7 +106,7 @@ class Intervention:
             dependancy = intervention
 
     @classmethod
-    def create(cls, args:List[Union[Intervention,Value]], id:str, command:str) -> Intervention:
+    def create(cls, args: List[Union[Intervention, Value]], id: str, command: str) -> Intervention:
         '''
         If an Intervention with the given id already exists, return it.
         Otherwise create a new Intervention with subtype depending on command.
@@ -101,25 +124,26 @@ class Intervention:
         if id in Intervention.interventions:
 
             return Intervention.interventions[id]
-                
-        return INTERVENTIONS_TYPES[command](*args,id)
-    
-    @classmethod
-    def reset(cls):
 
+        return INTERVENTIONS_TYPES[command](*args, id)
+
+    @classmethod
+    def reset(cls) -> None:
+        '''Resets class attributes and resets subtypes'''
         for intervention in Intervention.interventions.values():
-            intervention.current_listeners.update(intervention.listeners)    
-            intervention.current_dependencies.update(intervention.dependencies) 
+            intervention.current_listeners.update(intervention.listeners)
+            intervention.current_dependencies.update(intervention.dependencies)
 
         for type in Intervention.__subclasses__():
-         
+
             type._reset()
 
-    @classmethod 
-    def _reset(cls):
+    @abstractclassmethod
+    def _reset(cls) -> None:
+        '''Abstract method for subtypes to set when resetting information'''
         pass
 
-    def __init__(self, id:str=None) -> None:
+    def __init__(self, id: str = None) -> None:
 
         self._value = None
         self.id = id or str(uuid.uuid4())
@@ -131,44 +155,65 @@ class Intervention:
         Intervention.interventions[self.id] = self
 
         self.listen(self)
-    
+
     @abstractmethod
     def __call__(self):
+        '''Abstract method for subtypes to set when performing their intervention'''
         pass
 
     def notify_listeners(self) -> None:
         '''
-        Abstract method that attempts to signal listners that it's value is changed.
-        Inheritors should perform Intervention subtype specific actions then call super().__call__()
-        if value is updated.
+        Abstract method that attempts to signal listener that it's value is changed.
+        If the dependencies of a listener are fufilled, call the Intervention.
+        Removes dependencies of listeners.
         '''
-        
+
         for listener_id in list(self.current_listeners):
 
             if listener_id != self.id:
 
                 intervention = Intervention.interventions[listener_id]
                 intervention.remove_dependency(self.id)
-                
+
                 if intervention.fufilled():
                     intervention()
 
-    def fufilled(self):
+    def fufilled(self) -> bool:
+        '''
+        Returns wheather all dependencies have been fufilled, thefore the 
+        Intervention is ready to be executed.
+        '''
 
         return len(self.current_dependencies) == 0
 
-    def remove_dependency(self, id:str):
+    def remove_dependency(self, id: str):
+        '''
+        Removes a dependency if it exists
 
+        Parameters
+        ----------
+            id : str
+                id of Intervention to remove from dependencies
+        '''
         if id in self.current_dependencies:
 
             self.current_dependencies.remove(id)
 
-    def depend(self, dependency:Intervention):
+    def depend(self, dependency: Intervention):
+        '''
+        Adds Intervention to dependencies and adds this Intervention to
+        it's listeners.
+
+        Parameters
+        ----------
+            dependency : Intervention
+                dependency to add to dependencies
+        '''
 
         self.dependencies.add(dependency.id)
         dependency.listen(self)
 
-    def listen(self, listener:Intervention) -> None:
+    def listen(self, listener: Intervention) -> None:
         '''
         Adds listener to listeners
 
@@ -190,7 +235,7 @@ class Intervention:
 
         self._value = None
 
-    def stop_listening(self, id:str) -> None:
+    def stop_listening(self, id: str) -> None:
         '''
         Removes Intervention with id from listeners. If there exist no more listeners,
         destory self.
@@ -207,35 +252,45 @@ class Intervention:
 
             self.destroy()
 
-    def get_value(self, listener_id:str) -> torch.Tensor:
+    def get_value(self, listener_id: str) -> torch.Tensor:
         '''
         Gets the Intervention's value. Requires an Intervention id in listeners.
         Removes the listener with id listener_id from listeners.
+        If listener_id is not in current_listeners, raise ValueError
         If value is None, raise ValueError.
 
         Parameters
         ----------
             listener_id : str
                 id of Intervention that requests value
+
+        Returns
+        ----------
+            torch.Tensor
+                value of Intervention
         '''
+
         if listener_id not in self.current_listeners:
 
-            raise ValueError(f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
+            raise ValueError(
+                f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
 
         if self._value is None:
 
-            raise ValueError(f"Listener '{str(Intervention.interventions[listener_id])}' referenced value '{str(self)}' before assignment") 
+            raise ValueError(
+                f"Listener '{str(Intervention.interventions[listener_id])}' referenced value '{str(self)}' before assignment")
 
         value = self._value
 
         self.stop_listening(listener_id)
 
         return value
-    
-    def set_value(self, value:torch.Tensor, listener_id:str) -> None:
+
+    def set_value(self, value: torch.Tensor, listener_id: str) -> None:
         '''
         Sets the Intervention's value. Requires an Intervention id in listeners.
         Removes the listener with id listener_id from listeners.
+        Notifies listeners.
 
         Parameters
         ----------
@@ -244,10 +299,11 @@ class Intervention:
             listener_id : str
                 id of Intervention that requests to set value
         '''
-        
+
         if listener_id is not None and listener_id not in self.current_listeners:
 
-            raise ValueError(f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners") 
+            raise ValueError(
+                f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
 
         print(f"Setting {self}")
 
@@ -257,12 +313,21 @@ class Intervention:
 
         self.notify_listeners()
 
-        
-        
 
 class Chain(Intervention):
+    '''
+    An Intervention to make one Intervention depandant on anothers fufillment.
 
-    def __init__(self, arg1:Intervention, arg2:Intervention, *args, **kwargs) -> None:
+    Attributes
+    ----------
+        arg1 : Intervention
+            Intervention that is dependant on another Intervention
+        arg2 : Intervention
+            dependant Intervention
+
+    '''
+
+    def __init__(self, arg1: Intervention, arg2: Intervention, *args, **kwargs) -> None:
 
         super().__init__(*args, **kwargs)
 
@@ -277,12 +342,23 @@ class Chain(Intervention):
 
         self.notify_listeners()
 
-        
+
 class Add(Intervention):
+    '''
+    An Intervention to add two Interventions.
 
-    def __init__(self, arg1:Intervention, arg2:Intervention, *args, **kwargs) -> None:
+    Attributes
+    ----------
+        arg1 : Intervention
+            first Intervention to add
+        arg2 : Intervention
+            second Intervention to add
 
-        super().__init__(*args,**kwargs)
+    '''
+
+    def __init__(self, arg1: Intervention, arg2: Intervention, *args, **kwargs) -> None:
+
+        super().__init__(*args, **kwargs)
 
         self.arg1 = arg1
         self.arg2 = arg2
@@ -298,10 +374,29 @@ class Add(Intervention):
 
         self.set_value(value, self.id)
 
-class Get(Intervention):
 
-    modules:Dict[str,Dict[str,Get]] = dict()
-    current_modules:Dict[str,Dict[str,Get]] = dict()
+class Get(Intervention):
+    '''
+    An Intervention to get and store activations of a Module.
+
+    Class Attributes
+    ----------
+        modules : Dict[str,Dict[str,Get]]
+            mapping of module_name to: mapping of id to self. Used by intervention method to
+            retrieve the correct Get Interventions that use a module
+        current_modules : Dict[str,Dict[str,Get]]
+            module mappings that haven't been removed for a run
+
+    Attributes
+    ----------
+        module_name : str
+            module path requested for input or output
+        batch_index : index
+            index of Intervention within current batch
+
+    '''
+    modules: Dict[str, Dict[str, Get]] = dict()
+    current_modules: Dict[str, Dict[str, Get]] = dict()
 
     @classmethod
     def _clear(cls) -> None:
@@ -313,16 +408,16 @@ class Get(Intervention):
         Get.current_modules.update(Get.modules)
 
     @classmethod
-    def layers(cls):
+    def layers(cls) -> List[str]:
 
         return [module_name.replace('.input', '').replace('.output', '') for module_name in list(Get.modules.keys())]
-    
-    def __init__(self, module_name:str, prompt_index:int, *args, **kwargs) -> None:
 
-        super().__init__(*args,**kwargs)
+    def __init__(self, module_name: str, batch_index: int, *args, **kwargs) -> None:
+
+        super().__init__(*args, **kwargs)
 
         self.module_name = module_name
-        self.prompt_index = prompt_index
+        self.batch_index = batch_index
 
         if module_name in Get.modules:
 
@@ -333,25 +428,26 @@ class Get(Intervention):
             Get.modules[module_name] = {self.id: self}
 
     def __repr__(self) -> str:
-        return f"GET({self.module_name}[{self.prompt_index}])"
+        return f"GET({self.module_name}[{self.batch_index}])"
 
     def __call__(self, value: Tensor) -> None:
 
-        print(f'Reached {self.module_name}[{self.prompt_index}]')
+        print(f'Reached {self.module_name}[{self.batch_index}]')
 
-        self._value = value[[self.prompt_index]]
+        self._value = value[[self.batch_index]]
 
         self.notify_listeners()
-        
-        value[[self.prompt_index]] = self.get_value(self.id)
+
+        value[[self.batch_index]] = self.get_value(self.id)
 
         del Get.current_modules[self.module_name][self.id]
-   
+
+
 class Set(Intervention):
 
-    def __init__(self, arg1:Intervention, arg2:Intervention, *args, **kwargs) -> None:
-        
-        super().__init__(*args,**kwargs)
+    def __init__(self, arg1: Intervention, arg2: Intervention, *args, **kwargs) -> None:
+
+        super().__init__(*args, **kwargs)
 
         self.arg1 = arg1
         self.arg2 = arg2
@@ -367,9 +463,10 @@ class Set(Intervention):
 
         self.notify_listeners()
 
+
 class Copy(Intervention):
 
-    copies:Dict[str,Copy] = dict()
+    copies: Dict[str, Copy] = dict()
 
     @classmethod
     def _clear(cls) -> None:
@@ -377,9 +474,9 @@ class Copy(Intervention):
             copy.copies = None
         Copy.copies.clear()
 
-    def __init__(self, arg1:Intervention, *args, **kwargs) -> None:
+    def __init__(self, arg1: Intervention, *args, **kwargs) -> None:
 
-        super().__init__(*args,**kwargs)
+        super().__init__(*args, **kwargs)
 
         self.arg1 = arg1
         self.depend(self.arg1)
@@ -398,11 +495,12 @@ class Copy(Intervention):
 
         self.copies.append(value)
 
+
 class Slice(Intervention):
 
-    def __init__(self, arg1:Intervention, slice, *args, **kwargs) -> None:
+    def __init__(self, arg1: Intervention, slice, *args, **kwargs) -> None:
 
-        super().__init__(*args,**kwargs)
+        super().__init__(*args, **kwargs)
 
         self.arg1 = arg1
         self.depend(self.arg1)
@@ -417,11 +515,10 @@ class Slice(Intervention):
         value = self.arg1.get_value(self.id)[self.slice]
         self.set_value(value, self.id)
 
-        
 
 class Tensor(Intervention):
 
-    tensors:Dict[str,Tensor] = dict()
+    tensors: Dict[str, Tensor] = dict()
 
     @classmethod
     def _clear(cls) -> None:
@@ -435,9 +532,9 @@ class Tensor(Intervention):
             # need to actually move tensors to model dtype
             tensor._value = tensor._value.to(device).half()
 
-    def __init__(self, value:torch.Tensor, *args, **kwargs) -> None:
+    def __init__(self, value: torch.Tensor, *args, **kwargs) -> None:
 
-        super().__init__(*args,**kwargs)
+        super().__init__(*args, **kwargs)
 
         self._value = value
 
@@ -445,20 +542,23 @@ class Tensor(Intervention):
 
     def __repr__(self) -> str:
         return f"TENSOR({self.id})"
-    
+
     def listen(self, listener: Intervention) -> None:
         super().listen(listener)
         if self is not listener:
             listener.dependencies.remove(self.id)
-    
-INTERVENTIONS_TYPES.update({'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice})
+
+
+INTERVENTIONS_TYPES.update(
+    {'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice})
+
 
 def intervene(activations, module_name):
 
     if module_name in Get.current_modules:
 
         for get in list(Get.current_modules[module_name].values()):
-        
+
             get(activations)
 
     return activations
@@ -475,4 +575,4 @@ def input_intervene(activations, module_name):
 
     module_name = f"{module_name}.input"
 
-    return intervene(activations,module_name)
+    return intervene(activations, module_name)
