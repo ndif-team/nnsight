@@ -8,6 +8,7 @@ print(model)
 with model.invoke('Hello world'):
 
     # Grab the output 
+    sl = model.transformer.h[0].mlp.output[:,0].copy()
     mmlp0 = model.transformer.h[0].mlp.output.copy()
     mmlp1 = model.transformer.h[1].mlp.output.copy() + 2
 

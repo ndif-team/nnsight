@@ -409,10 +409,15 @@ class Slice(Intervention):
 
         self.slice = slice
 
+    def __repr__(self) -> str:
+        return f"Slice({self.arg1},{self.slice})"
+
     def __call__(self):
 
         value = self.arg1.get_value(self.id)[self.slice]
         self.set_value(value, self.id)
+
+        
 
 class Tensor(Intervention):
 
@@ -446,7 +451,7 @@ class Tensor(Intervention):
         if self is not listener:
             listener.dependencies.remove(self.id)
     
-INTERVENTIONS_TYPES.update({'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor})
+INTERVENTIONS_TYPES.update({'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice})
 
 def intervene(activations, module_name):
 
