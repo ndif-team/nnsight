@@ -40,6 +40,7 @@ with model.invoke('Hello world') as invoker:
 
     # See the before and after the intervation
     mmlp2_after = model.transformer.h[2].mlp.output.copy()
+    layer3 = model.transformer.h[2].output[0].copy()
 
 with model.invoke('Goodbye world') as invoker:
 
@@ -53,6 +54,9 @@ with model.invoke('Goodbye world') as invoker:
 # Output is the same as output for AutoModelForCausalLM.generate()
 
 # Will print all interventions as they happen for debugging ( will move to log file/debug flag)
-output = model(device='cuda:0', max_new_tokens=1)
+output = model(device='cuda:0', max_new_tokens=1, return_dict_in_generate=True, output_scores=True)
 
+breakpoint()
+logits = output.scores[0]
+probs = torch.nn.functional.softmax(output.scores[0], dim=1)
 breakpoint()

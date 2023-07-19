@@ -126,9 +126,13 @@ class Promise(list):
             Promise
                 a Slice Promise
         '''
-        output = torch.zeros(self._shape, device='meta')[key]
 
-        return Promise([self, key], output.shape, command='SLC')
+        if isinstance(self._shape, torch.Size):
+            shape = torch.zeros(self._shape, device='meta')[key].shape
+        else:
+            shape = self.shape[key]
+
+        return Promise([self, key], shape, command='SLC')
 
     @override
     def __add__(self, other: Union[Promise, Value]) -> Promise:

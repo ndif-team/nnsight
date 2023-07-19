@@ -434,13 +434,27 @@ class Get(Intervention):
 
         print(f'Reached {self.module_name}[{self.batch_index}]')
 
-        self._value = value[[self.batch_index]]
+        self._value = self.batch_index_get(value)
 
         self.notify_listeners()
 
-        value[[self.batch_index]] = self.get_value(self.id)
+        self.batch_index_set(value, self.get_value(self.id))
 
         del Get.current_modules[self.module_name][self.id]
+
+
+    def batch_index_set(self, value1, value2) -> None:
+        if isinstance(value1, torch.Tensor):
+            value1[[self.batch_index]] = value2
+        elif isinstance(value1, list) or isinstance(value1, tuple):
+            for value_idx in range(len(value1)):
+                self.batch_index_set(value1[value_idx], value2[value_idx])
+
+    def batch_index_get(self, value):
+        if isinstance(value, torch.Tensor):
+            return value[[self.batch_index]]
+        elif isinstance(value, list) or isinstance(value, tuple):
+            return [self.batch_index_get(_value) for _value in value]
 
 
 class Set(Intervention):
