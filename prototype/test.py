@@ -1,4 +1,5 @@
-from engine.Model import Model
+# The library is called engine
+from engine import Model
 import torch
 # Get model wrapper for any model you can get with AutoConfig.from_pretrained(model_name)
 model = Model('gpt2')
