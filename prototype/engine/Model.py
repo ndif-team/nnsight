@@ -7,7 +7,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from typing_extensions import override
 
-from .intervention.Intervention import (Copy, Get, Intervention, Tensor,
+from .intervention.Intervention import (Copy, Get, Intervention, Tensor, Adhoc,
                                         output_intervene)
 from .Module import Module
 from .Promise import Promise
@@ -60,6 +60,9 @@ class Model:
             inputs = self.model.run_graph(self.prompt, *self.args, **self.kwargs)
             tokenized = [self.model.tokenizer.decode(token) for token in inputs['input_ids'][0]]
             Promise.set_tokens(tokenized)
+
+            Module.adhoc_mode = True
+            torch.set_grad_enabled(False)
             
             return self
 
@@ -72,6 +75,9 @@ class Model:
             Model.Invoker.prompts.append(self.prompt)
             Model.Invoker.promises = {**promises, **Model.Invoker.promises}
             Promise.execution_graph.clear()
+
+            Module.adhoc_mode = False
+            torch.set_grad_enabled(True)
 
     def __init__(self, model_name: str) -> None:
 
@@ -88,7 +94,7 @@ class Model:
             # can be accessed directly.
             for name, module in self.graph.named_children():
 
-                setattr(self, name, module)
+                setattr(self, name, Module.wrap(module, f"{name}"))
 
             # Save model path to each Module
             self.init_graph()
@@ -147,6 +153,7 @@ class Model:
         Tensor.to(self.local_model.device)
 
         Intervention.reset()
+        Adhoc.model = self.local_model
 
         inputs = self.tokenizer(prompts, padding=True, return_tensors='pt').to(
             self.local_model.device)

@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple, Union
 import torch
 from typing_extensions import override
 import numpy as np
-from .util import Value
+from .util import Value, apply
 
 class Promise(list):
     '''
@@ -47,8 +47,14 @@ class Promise(list):
             self.promise = promise
 
         def __getitem__(self, key):
+
+            if isinstance(key, str):
             
-            return self.promise[:, Promise.Tokens.tokens[key]]
+                return self.promise[:, Promise.Tokens.tokens[key]]
+            
+            if isinstance(key, int):
+
+                return self.promise[:, key]
 
     @classmethod
     def set_tokens(cls, tokenized:List[str]) -> None:
@@ -107,6 +113,10 @@ class Promise(list):
 
         Promise.promises[self.id] = self
 
+    def get_meta(self):
+
+        return apply(self.shape, lambda x : torch.zeros(x, device='meta'), torch.Size)
+
     @override
     def __repr__(self) -> str:
         return f"{self.command}({','.join([str(arg) for arg in self.args])})" if self._value is None else str(self.value)
@@ -128,7 +138,7 @@ class Promise(list):
         '''
 
         if isinstance(self._shape, torch.Size):
-            shape = torch.zeros(self._shape, device='meta')[key].shape
+            shape = self.get_meta()[key].shape
         else:
             shape = self.shape[key]
 
@@ -152,8 +162,7 @@ class Promise(list):
 
         other = Promise.wrap(other)
 
-        output = torch.zeros(self.shape, device='meta') + \
-            torch.zeros(other.shape, device='meta')
+        output = self.get_meta() + other.get_meta()
 
         model_state = Promise([self, other], output.shape, command='ADD')
 

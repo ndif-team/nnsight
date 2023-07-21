@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from abc import abstractclassmethod, abstractmethod
 from collections import OrderedDict
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, MutableMapping, Union
 
 import torch
 from typing_extensions import override
@@ -562,14 +562,64 @@ class Tensor(Intervention):
         if self is not listener:
             listener.dependencies.remove(self.id)
 
+class Adhoc(Intervention):
+
+    model:torch.nn.Module = None
+    adhoc_mode:bool = False
+
+    @classmethod
+    def _clear(cls) -> None:
+        Adhoc.model = None
+
+    def __init__(self, module_path:str, arg1:Intervention, *args, **kwargs) -> None:
+
+        super().__init__(*args, **kwargs)
+
+        self.arg1 = arg1
+        self.depend(arg1)
+
+        self.module_keys = module_path.replace('[', '.').replace(']','').split('.')
+
+    def __call__(self):
+        
+        value = self.get_module()(self.arg1.get_value(self.id))
+
+        self.set_value(value, self.id)
+
+    @override
+    def __enter__(self) -> None:
+        Adhoc.adhoc_mode = True
+
+    @override
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        Adhoc.adhoc_mode = False
+
+    def get_module(self) -> torch.nn.Module:
+
+        module = Adhoc.model
+
+        for key in self.module_keys:
+
+            if isinstance(module, list):
+                module = module[int(key)]
+
+            else:
+                module = getattr(module, key)
+
+        return module
+
+
+
+
+
 
 INTERVENTIONS_TYPES.update(
-    {'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice})
+    {'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice, 'ADH' : Adhoc})
 
 
 def intervene(activations, module_name):
 
-    if module_name in Get.current_modules:
+    if not Adhoc.adhoc_mode and module_name in Get.current_modules:
 
         for get in list(Get.current_modules[module_name].values()):
 

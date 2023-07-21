@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Union
+from typing import Any, Union
 
 import torch
 from .Promise import Promise
@@ -14,10 +14,12 @@ def get_shape(data: torch.Tensor):
 
 def hook(module: Module, input, output):
 
-    module.input_shape = apply(input, get_shape)
-    module.output_shape = apply(output, get_shape)
-    module._output = None
-    module._input = None
+    if not Module.adhoc_mode:
+
+        module.input_shape = apply(input, get_shape, torch.Tensor)
+        module.output_shape = apply(output, get_shape, torch.Tensor)
+        module._output = None
+        module._input = None
 
 
 class Module(torch.nn.Module):
@@ -39,6 +41,7 @@ class Module(torch.nn.Module):
             path of Module in Model tree
     '''
 
+    adhoc_mode:bool = False
 
     def __init__(self, *args, **kwargs) -> None:
 
@@ -52,6 +55,23 @@ class Module(torch.nn.Module):
 
         # Hook Module forward to get input and output shape on first pass
         self.register_forward_hook(hook)
+
+        for name, module in self.named_modules():
+
+            Module.wrap(module, f"{self.module_path}.{name}")
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+
+        if Module.adhoc_mode:
+
+            inp = Promise.wrap(args[0])
+
+            output = super().__call__(inp.get_meta(), **kwds)
+
+            return Promise([self.module_path, inp], apply(output, get_shape, torch.Tensor), command='ADH')
+        
+        return super()._call_impl(*args, **kwds)
+            
 
     @property
     def input(self) -> Promise:
@@ -78,3 +98,25 @@ class Module(torch.nn.Module):
     def output(self, value: Union[Promise, Value]):
         value = Promise.wrap(value)
         Promise([self.output, value],value._shape, command='SET').execute()
+
+    @staticmethod
+    def wrap(module, module_path):
+
+        if isinstance(module, Module):
+
+            return module
+
+        wrapper = Module()
+        wrapper.module_path = module_path
+
+        wrapper.__class__ = type(module.__class__.__name__,
+                            (wrapper.__class__, module.__class__),
+                            {})
+
+        wrapper.__dict__ = {**wrapper.__dict__,  **module.__dict__}
+
+        for name, module in wrapper.named_modules():
+
+            Module.wrap(module, f"{module_path}.{name}")
+
+        return wrapper
