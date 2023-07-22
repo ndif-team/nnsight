@@ -57,6 +57,8 @@ class Model:
         @override
         def __enter__(self) -> Model.Invoker:
 
+            Module.generation_idx = 0
+
             inputs = self.model.run_graph(self.prompt, *self.args, **self.kwargs)
             tokenized = [self.model.tokenizer.decode(token) for token in inputs['input_ids'][0]]
             Promise.set_tokens(tokenized)
@@ -69,15 +71,32 @@ class Model:
         @override
         def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
-            Promise.update_batch_index(len(Model.Invoker.execution_graphs))
             execution_graph, promises = Promise.compile()
             Model.Invoker.execution_graphs.append(execution_graph)
             Model.Invoker.prompts.append(self.prompt)
             Model.Invoker.promises = {**promises, **Model.Invoker.promises}
             Promise.execution_graph.clear()
 
+            Module.batch_idx += 1
+
             Module.adhoc_mode = False
             torch.set_grad_enabled(True)
+
+        def next(self):
+
+            Module.generation_idx += 1
+            Promise.set_tokens(f'<P{Module.generation_idx}>')
+
+
+            Module.adhoc_mode = False
+            
+            self.model.run_graph('_', *self.args, **self.kwargs)
+
+            Module.adhoc_mode = True
+
+            
+
+            
 
     def __init__(self, model_name: str) -> None:
 
@@ -94,8 +113,11 @@ class Model:
             # can be accessed directly.
             for name, module in self.graph.named_children():
 
-                setattr(self, name, Module.wrap(module, f"{name}"))
+                module = Module.wrap(module)
 
+                setattr(self.graph, name, module)
+                setattr(self, name, module)
+                
             # Save model path to each Module
             self.init_graph()
 
@@ -117,8 +139,7 @@ class Model:
 
                 self.local_model, _ = self.get_model()
 
-                # add back if we want interventions applied every token (max_new_token > 1)
-                #self.local_model.register_forward_hook(lambda module,input,output: Intervention.reset())
+                self.local_model.register_forward_hook(lambda module,input,output: Intervention.increment())
 
             self.local_model = self.local_model.to(device)
 
@@ -152,22 +173,24 @@ class Model:
 
         Tensor.to(self.local_model.device)
 
-        Intervention.reset()
         Adhoc.model = self.local_model
 
         inputs = self.tokenizer(prompts, padding=True, return_tensors='pt').to(
             self.local_model.device)
+
+             
         
         with baukit.TraceDict(self.local_model, Get.layers(), retain_output=False, edit_output=output_intervene):
             output = self.local_model.generate(*args, **inputs, **kwargs)
 
         for id in Copy.copies:
             # Might not be index 0 if there are multiple copies  (from max_new_token > 1)
-            Promise.promises[id].value = Intervention.interventions[id].copies[0]
+            Promise.promises[id].value = Intervention.interventions[id]._value
 
         Model.Invoker.clear()
         Promise.clear()
         Intervention.clear()
+        Module.batch_idx = 0
 
         return output
 
@@ -179,11 +202,8 @@ class Model:
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
-        config = AutoConfig.from_pretrained(self.model_name)
-
-        model = AutoModelForCausalLM.from_config(
-            config, torch_dtype=torch.float16)
-        model.eval()
+        model = AutoModelForCausalLM.from_pretrained(self.model_name, pad_token_id=tokenizer.eos_token_id)
+        model = model.eval()
 
         tokenizer.pad_token = tokenizer.eos_token
 
