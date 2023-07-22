@@ -41,6 +41,8 @@ class Module(torch.nn.Module):
             path of Module in Model tree
     '''
 
+    generation_idx:int  = 0
+    batch_idx:int = 0
     adhoc_mode:bool = False
 
     def __init__(self, *args, **kwargs) -> None:
@@ -55,10 +57,6 @@ class Module(torch.nn.Module):
 
         # Hook Module forward to get input and output shape on first pass
         self.register_forward_hook(hook)
-
-        for name, module in self.named_modules():
-
-            Module.wrap(module, f"{self.module_path}.{name}")
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
 
@@ -78,7 +76,7 @@ class Module(torch.nn.Module):
 
         if self._input is None:
             self._input = Promise(
-                [f"{self.module_path}.input"], self.input_shape)
+                [f"{self.module_path}.input", Module.batch_idx, Module.generation_idx], self.input_shape)
         return self._input
 
     @property
@@ -86,7 +84,7 @@ class Module(torch.nn.Module):
 
         if self._output is None:
             self._output = Promise(
-                [f"{self.module_path}.output"], self.output_shape)
+                [f"{self.module_path}.output", Module.batch_idx, Module.generation_idx], self.output_shape)
         return self._output
 
     @input.setter
@@ -100,23 +98,20 @@ class Module(torch.nn.Module):
         Promise([self.output, value],value._shape, command='SET').execute()
 
     @staticmethod
-    def wrap(module, module_path):
+    def wrap(module):
+
+        for name, _module in module.named_children():
+
+            setattr(module, name, Module.wrap(_module))
 
         if isinstance(module, Module):
 
             return module
 
         wrapper = Module()
-        wrapper.module_path = module_path
-
         wrapper.__class__ = type(module.__class__.__name__,
                             (wrapper.__class__, module.__class__),
                             {})
-
         wrapper.__dict__ = {**wrapper.__dict__,  **module.__dict__}
-
-        for name, module in wrapper.named_modules():
-
-            Module.wrap(module, f"{module_path}.{name}")
 
         return wrapper

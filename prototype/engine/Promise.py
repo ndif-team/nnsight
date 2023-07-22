@@ -96,13 +96,6 @@ class Promise(list):
 
         return Promise([value], value.shape, command='TNS')
 
-    @classmethod
-    def update_batch_index(self, batch_index: int) -> None:
-
-        for promise in Promise.promises.values():
-            if promise.command == 'GET':
-                promise.args.append(batch_index)
-
     def __init__(self, args: List[Union[Promise, Value]], shape: torch.Size, command: str = 'GET') -> None:
 
         self._value = None
