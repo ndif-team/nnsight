@@ -3,10 +3,12 @@ from __future__ import annotations
 import uuid
 from typing import Dict, List, Tuple, Union
 
+import numpy as np
 import torch
 from typing_extensions import override
-import numpy as np
+
 from .util import Value, apply
+
 
 class Promise(list):
     '''
@@ -40,26 +42,27 @@ class Promise(list):
 
     class Tokens(dict):
 
-        tokens:Dict[str,int] = None
+        tokens: Dict[str, int] = None
 
-        def __init__(self, promise:Promise) -> None:
-            
+        def __init__(self, promise: Promise) -> None:
+
             self.promise = promise
 
         def __getitem__(self, key):
 
             if isinstance(key, str):
-            
+
                 return self.promise[:, Promise.Tokens.tokens[key]]
-            
+
             if isinstance(key, int):
 
                 return self.promise[:, key]
 
     @classmethod
-    def set_tokens(cls, tokenized:List[str]) -> None:
+    def set_tokens(cls, tokenized: List[str]) -> None:
 
-        Promise.Tokens.tokens = dict(zip(tokenized, np.arange(start=0, stop=len(tokenized))))
+        Promise.Tokens.tokens = dict(
+            zip(tokenized, np.arange(start=0, stop=len(tokenized))))
 
     @classmethod
     def compile(cls) -> Tuple[List[str], Dict[str, Dict]]:
@@ -108,7 +111,7 @@ class Promise(list):
 
     def get_meta(self):
 
-        return apply(self.shape, lambda x : torch.zeros(x, device='meta'), torch.Size)
+        return apply(self.shape, lambda x: torch.zeros(x, device='meta'), torch.Size)
 
     @override
     def __repr__(self) -> str:
@@ -177,7 +180,7 @@ class Promise(list):
     @property
     def token(self) -> Promise:
         return Promise.Tokens(self)
-    
+
     @property
     def t(self) -> Promise:
         return self.token

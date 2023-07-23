@@ -7,14 +7,13 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from typing_extensions import override
 
-from .intervention.Intervention import (Copy, Get, Intervention, Tensor, Adhoc,
+from .intervention.Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
                                         output_intervene)
 from .Module import Module
 from .Promise import Promise
 
 TorchModule = torch.nn.Module
 
-# NEED TO HANDLE SHAPE CHANGE DUE TO PADDING
 
 class Model:
 
@@ -42,6 +41,10 @@ class Model:
             Model.Invoker.promises.clear()
             Model.Invoker.prompts.clear()
 
+        @classmethod
+        def compile(cls) -> None:
+            return Model.Invoker.execution_graphs, Model.Invoker.promises, Model.Invoker.prompts
+
         def __init__(self, model: Model, prompt: str, *args, **kwargs) -> None:
 
             self.model = model
@@ -59,13 +62,15 @@ class Model:
 
             Module.generation_idx = 0
 
-            inputs = self.model.run_graph(self.prompt, *self.args, **self.kwargs)
-            tokenized = [self.model.tokenizer.decode(token) for token in inputs['input_ids'][0]]
+            inputs = self.model.run_graph(
+                self.prompt, *self.args, **self.kwargs)
+            tokenized = [self.model.tokenizer.decode(
+                token) for token in inputs['input_ids'][0]]
             Promise.set_tokens(tokenized)
 
             Module.adhoc_mode = True
             torch.set_grad_enabled(False)
-            
+
             return self
 
         @override
@@ -85,18 +90,21 @@ class Model:
         def next(self):
 
             Module.generation_idx += 1
-            Promise.set_tokens(f'<P{Module.generation_idx}>')
-
+            Promise.set_tokens([f'<P{Module.generation_idx}>'])
 
             Module.adhoc_mode = False
-            
+
             self.model.run_graph('_', *self.args, **self.kwargs)
 
             Module.adhoc_mode = True
 
-            
+    @classmethod
+    def clear(cls) -> None:
 
-            
+        Model.Invoker.clear()
+        Promise.clear()
+        Intervention.clear()
+        Module.batch_idx = 0
 
     def __init__(self, model_name: str) -> None:
 
@@ -117,7 +125,7 @@ class Model:
 
                 setattr(self.graph, name, module)
                 setattr(self, name, module)
-                
+
             # Save model path to each Module
             self.init_graph()
 
@@ -139,7 +147,8 @@ class Model:
 
                 self.local_model, _ = self.get_model()
 
-                self.local_model.register_forward_hook(lambda module,input,output: Intervention.increment())
+                self.local_model.register_forward_hook(
+                    lambda module, input, output: Intervention.increment())
 
             self.local_model = self.local_model.to(device)
 
@@ -165,7 +174,7 @@ class Model:
     @torch.no_grad()
     def run_model(self, *args, **kwargs):
 
-        execution_graphs, promises, prompts = Model.Invoker.execution_graphs, Model.Invoker.promises, Model.Invoker.prompts
+        execution_graphs, promises, prompts = Model.Invoker.compile()
 
         for execution_graph in execution_graphs:
 
@@ -178,19 +187,13 @@ class Model:
         inputs = self.tokenizer(prompts, padding=True, return_tensors='pt').to(
             self.local_model.device)
 
-             
-        
         with baukit.TraceDict(self.local_model, Get.layers(), retain_output=False, edit_output=output_intervene):
             output = self.local_model.generate(*args, **inputs, **kwargs)
 
         for id in Copy.copies:
-            # Might not be index 0 if there are multiple copies  (from max_new_token > 1)
             Promise.promises[id].value = Intervention.interventions[id]._value
 
-        Model.Invoker.clear()
-        Promise.clear()
-        Intervention.clear()
-        Module.batch_idx = 0
+        Model.clear()
 
         return output
 
@@ -202,8 +205,9 @@ class Model:
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
-        model = AutoModelForCausalLM.from_pretrained(self.model_name, pad_token_id=tokenizer.eos_token_id)
-        model = model.eval()
+        model = AutoModelForCausalLM.from_pretrained(
+            self.model_name, pad_token_id=tokenizer.eos_token_id)
+        model.eval()
 
         tokenizer.pad_token = tokenizer.eos_token
 
