@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Union
 
 import torch
+
 from .Promise import Promise
 from .util import Value, apply
 
@@ -41,9 +42,9 @@ class Module(torch.nn.Module):
             path of Module in Model tree
     '''
 
-    generation_idx:int  = 0
-    batch_idx:int = 0
-    adhoc_mode:bool = False
+    generation_idx: int = 0
+    batch_idx: int = 0
+    adhoc_mode: bool = False
 
     def __init__(self, *args, **kwargs) -> None:
 
@@ -67,9 +68,8 @@ class Module(torch.nn.Module):
             output = super().__call__(inp.get_meta(), **kwds)
 
             return Promise([self.module_path, inp], apply(output, get_shape, torch.Tensor), command='ADH')
-        
-        return super()._call_impl(*args, **kwds)
-            
+
+        return super().__call__(*args, **kwds)
 
     @property
     def input(self) -> Promise:
@@ -95,7 +95,7 @@ class Module(torch.nn.Module):
     @output.setter
     def output(self, value: Union[Promise, Value]):
         value = Promise.wrap(value)
-        Promise([self.output, value],value._shape, command='SET').execute()
+        Promise([self.output, value], value._shape, command='SET').execute()
 
     @staticmethod
     def wrap(module):
@@ -110,8 +110,8 @@ class Module(torch.nn.Module):
 
         wrapper = Module()
         wrapper.__class__ = type(module.__class__.__name__,
-                            (wrapper.__class__, module.__class__),
-                            {})
+                                 (wrapper.__class__, module.__class__),
+                                 {})
         wrapper.__dict__ = {**wrapper.__dict__,  **module.__dict__}
 
         return wrapper

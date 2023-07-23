@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from abc import abstractclassmethod, abstractmethod
 from collections import OrderedDict
-from typing import Any, Dict, List, MutableMapping, Union
+from typing import Any, Dict, List, Union
 
 import torch
 from typing_extensions import override
@@ -36,7 +36,7 @@ class Intervention:
     '''
 
     interventions: Dict[str, Intervention] = OrderedDict()
-    generation_idx:int = 0
+    generation_idx: int = 0
 
     @classmethod
     def increment(cls) -> None:
@@ -129,7 +129,6 @@ class Intervention:
 
         return INTERVENTIONS_TYPES[command](*args, id)
 
-
     def __init__(self, id: str = None) -> None:
 
         self._value = None
@@ -148,7 +147,7 @@ class Intervention:
 
     def notify_listeners(self) -> None:
         '''
-        Abstract method that attempts to signal listener that it's value is changed.
+        Attempts to signal listener that it's value is changed.
         If the dependencies of a listener are fufilled, call the Intervention.
         Removes dependencies of listeners.
         '''
@@ -171,7 +170,7 @@ class Intervention:
 
         return len(self.dependencies) == 0
 
-    def remove_dependency(self, id: str):
+    def remove_dependency(self, id: str) -> None:
         '''
         Removes a dependency if it exists
 
@@ -184,7 +183,7 @@ class Intervention:
 
             self.dependencies.remove(id)
 
-    def depend(self, dependency: Intervention):
+    def depend(self, dependency: Intervention) -> None:
         '''
         Adds Intervention to dependencies and adds this Intervention to
         it's listeners.
@@ -321,7 +320,7 @@ class Chain(Intervention):
         self.arg1.depend(self)
         self.depend(self.arg2)
 
-    def __call__(self):
+    def __call__(self) -> None:
 
         self.arg2.stop_listening(self.id)
 
@@ -353,7 +352,7 @@ class Add(Intervention):
     def __repr__(self) -> str:
         return f"ADD({str(self.arg1)},{self.arg2})"
 
-    def __call__(self):
+    def __call__(self) -> None:
 
         value = self.arg1.get_value(self.id) + self.arg2.get_value(self.id)
 
@@ -389,7 +388,7 @@ class Get(Intervention):
 
         return [module_name.replace('.input', '').replace('.output', '') for module_name in list(Get.modules.keys())]
 
-    def __init__(self, module_name: str, batch_index: int, generation_idx:int, *args, **kwargs) -> None:
+    def __init__(self, module_name: str, batch_index: int, generation_idx: int, *args, **kwargs) -> None:
 
         super().__init__(*args, **kwargs)
 
@@ -420,7 +419,6 @@ class Get(Intervention):
 
         del Get.modules[self.module_name][self.id]
 
-
     def batch_index_set(self, value1, value2) -> None:
         if isinstance(value1, torch.Tensor):
             value1[[self.batch_index]] = value2
@@ -449,7 +447,7 @@ class Set(Intervention):
     def __repr__(self) -> str:
         return f"SET({str(self.arg1)},{self.arg2})"
 
-    def __call__(self) -> Any:
+    def __call__(self) -> None:
 
         self.arg1.set_value(self.arg2.get_value(self.id), self.id)
 
@@ -478,7 +476,7 @@ class Copy(Intervention):
     def __repr__(self) -> str:
         return f"COPY({str(self.arg1)})"
 
-    def __call__(self):
+    def __call__(self) -> None:
 
         value = self.arg1.get_value(self.id)
         self.set_value(value, self.id)
@@ -518,7 +516,7 @@ class Tensor(Intervention):
         Tensor.tensors.clear()
 
     @classmethod
-    def to(cls, device):
+    def to(cls, device) -> None:
         for tensor in Tensor.tensors.values():
             # need to actually move tensors to model dtype
             tensor._value = tensor._value.to(device)
@@ -539,26 +537,28 @@ class Tensor(Intervention):
         if self is not listener:
             listener.dependencies.remove(self.id)
 
+
 class Adhoc(Intervention):
 
-    model:torch.nn.Module = None
-    adhoc_mode:bool = False
+    model: torch.nn.Module = None
+    adhoc_mode: bool = False
 
     @classmethod
     def _clear(cls) -> None:
         Adhoc.model = None
 
-    def __init__(self, module_path:str, arg1:Intervention, *args, **kwargs) -> None:
+    def __init__(self, module_path: str, arg1: Intervention, *args, **kwargs) -> None:
 
         super().__init__(*args, **kwargs)
 
         self.arg1 = arg1
         self.depend(arg1)
 
-        self.module_keys = module_path.replace('[', '.').replace(']','').split('.')
+        self.module_keys = module_path.replace(
+            '[', '.').replace(']', '').split('.')
 
-    def __call__(self):
-        
+    def __call__(self) -> None:
+
         value = self.get_module()(self.arg1.get_value(self.id))
 
         self.set_value(value, self.id)
@@ -585,8 +585,9 @@ class Adhoc(Intervention):
 
         return module
 
+
 INTERVENTIONS_TYPES.update(
-    {'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice, 'ADH' : Adhoc})
+    {'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice, 'ADH': Adhoc})
 
 
 def intervene(activations, module_name):
