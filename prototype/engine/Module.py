@@ -46,19 +46,6 @@ class Module(torch.nn.Module):
     batch_idx: int = 0
     adhoc_mode: bool = False
 
-    def __init__(self, *args, **kwargs) -> None:
-
-        self._output = None
-        self._input = None
-        self.output_shape = None
-        self.input_shape = None
-        self.module_path = None
-
-        super().__init__(*args, **kwargs)
-
-        # Hook Module forward to get input and output shape on first pass
-        self.register_forward_hook(hook)
-
     def __call__(self, *args: Any, **kwds: Any) -> Any:
 
         if Module.adhoc_mode:
@@ -108,10 +95,10 @@ class Module(torch.nn.Module):
 
             return module
 
-        wrapper = Module()
-        wrapper.__class__ = type(module.__class__.__name__,
-                                 (wrapper.__class__, module.__class__),
+        module.__class__ = type(module.__class__.__name__,
+                                 (Module, module.__class__),
                                  {})
-        wrapper.__dict__ = {**wrapper.__dict__,  **module.__dict__}
+        
+        module.register_forward_hook(hook)
 
-        return wrapper
+        return module

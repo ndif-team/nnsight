@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import baukit
 import torch
@@ -12,8 +12,6 @@ from .intervention.Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
 from .Module import Module
 from .Promise import Promise
 
-TorchModule = torch.nn.Module
-
 
 class Model:
 
@@ -22,18 +20,16 @@ class Model:
         @override
         def __enter__(self) -> None:
             torch.set_default_device('meta')
-            torch.nn.Module = Module
 
         @override
         def __exit__(self, exc_type, exc_val, exc_tb) -> None:
             torch.set_default_device('cpu')
-            torch.nn.Module = TorchModule
 
     class Invoker:
 
         execution_graphs: List[List[str]] = list()
         prompts: List[str] = list()
-        promises = dict()
+        promises: Dict[str, Promise] = dict()
 
         @classmethod
         def clear(cls) -> None:
@@ -42,7 +38,7 @@ class Model:
             Model.Invoker.prompts.clear()
 
         @classmethod
-        def compile(cls) -> None:
+        def compile(cls) -> Tuple[List[str], Dict[str, Promise], List[str]]:
             return Model.Invoker.execution_graphs, Model.Invoker.promises, Model.Invoker.prompts
 
         def __init__(self, model: Model, prompt: str, *args, **kwargs) -> None:
@@ -53,7 +49,7 @@ class Model:
             self.kwargs = kwargs
 
         @property
-        def tokens(self):
+        def tokens(self) -> List[str]:
 
             return list(Promise.Tokens.tokens.keys())
 
@@ -216,3 +212,5 @@ class Model:
     def invoke(self, prompt: str, *args, **kwargs) -> Model.Invoker:
 
         return Model.Invoker(self, prompt, *args, **kwargs)
+    
+
