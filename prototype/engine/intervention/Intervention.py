@@ -22,6 +22,8 @@ class Intervention:
     ----------
         interventions : Dict[str, Intervention]
             stores a mapping between an Intervention's unique id and the Intervention.
+        generation_idx : int
+            index of what generation were currently on for multi token generation
 
     Attributes
     ----------
@@ -32,7 +34,7 @@ class Intervention:
         listeners : Set
             ids of Interventions that wish to be notified of a value change
         dependencies : Set
-            ids of Interventions that this Intervention depends on having a value
+            ids of Interventions that this Intervention depends on having a set value
     '''
 
     interventions: Dict[str, Intervention] = OrderedDict()
@@ -40,22 +42,10 @@ class Intervention:
 
     @classmethod
     def increment(cls) -> None:
+        '''Increments Intervention.generation_idx by one.'''
         Intervention.generation_idx += 1
 
-    @classmethod
-    def clear(cls) -> None:
-        '''Clears the Intervention class attributes and clears subtypes'''
-        Intervention.interventions.clear()
-        Intervention.generation_idx = 0
 
-        for type in Intervention.__subclasses__():
-
-            type._clear()
-
-    @abstractclassmethod
-    def _clear(cls) -> None:
-        '''Abstract method for subtypes to set when clearing information'''
-        pass
 
     @classmethod
     def parse(cls, arg: Value, promises: Dict[str, Dict]) -> Union[Intervention, Value]:
@@ -88,7 +78,7 @@ class Intervention:
     def from_execution_graph(cls, execution_graph: List[str], promises: Dict[str, Dict]) -> None:
         '''
         Parses the information from Promises into Interventions.
-        Chains dependant Interventions
+        Chains dependant Interventions.
 
         Parameters
         ----------
@@ -128,6 +118,24 @@ class Intervention:
             return Intervention.interventions[id]
 
         return INTERVENTIONS_TYPES[command](*args, id)
+    
+    @classmethod
+    def clear(cls) -> None:
+        '''
+        Clears the Intervention class attributes and clears subtypes.
+        Sets Intervention.generation_idx to zero.
+        '''
+        Intervention.interventions.clear()
+        Intervention.generation_idx = 0
+
+        for type in Intervention.__subclasses__():
+
+            type._clear()
+    
+    @abstractclassmethod
+    def _clear(cls) -> None:
+        '''Abstract method for subtypes to set when clearing information'''
+        pass
 
     def __init__(self, id: str = None) -> None:
 
@@ -164,7 +172,7 @@ class Intervention:
 
     def fufilled(self) -> bool:
         '''
-        Returns wheather all dependencies have been fufilled, thefore the 
+        Returns whether all dependencies have been fufilled, thefore if the 
         Intervention is ready to be executed.
         '''
 
@@ -375,6 +383,8 @@ class Get(Intervention):
             module path requested for input or output
         batch_index : index
             index of Intervention within current batch
+        generation_idx : index
+            generation index that this Intervention should be executed
 
     '''
     modules: Dict[str, Dict[str, Get]] = dict()
