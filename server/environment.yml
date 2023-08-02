@@ -8,5 +8,4 @@ dependencies:
     - openapi_schema_pydantic
     - flask
     - flask-socketio
-    - python-socketio[client]
     - ../
