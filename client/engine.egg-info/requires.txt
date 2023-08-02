@@ -1,3 +1,0 @@
-pyyaml
-pydantic
-shortuuid

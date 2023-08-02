@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Union
 import torch
 from typing_extensions import override
 
-from ..util import Value
+from .util import Value
 
 INTERVENTIONS_TYPES = {}
 

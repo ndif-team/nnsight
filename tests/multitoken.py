@@ -18,8 +18,8 @@ with model.invoke('Madison square garden is located in the city of New') as invo
 
     tokenized = invoker.tokens
     
-    # Reference the hidden states of the last layer for each token of the nine tokens (shape: (1,9, 768))
-    # Apply lm_head (decode into vocabulary space) and copy and return value (shape: (1,9, 50257))    
+    # Reference the hidden states of the last layer for each token of the nine tokens (shape: (1,9,768))
+    # Apply lm_head (decode into vocabulary space) and copy and return value (shape: (1,9,50257))    
     logits1 = get_scores().copy()
 
     # Denote that you are generating a token and subsequent interventions will apply to that generation
@@ -35,7 +35,7 @@ with model.invoke('Madison square garden is located in the city of New') as invo
 
     logits3 = get_scores().copy()
 
-output = model(device='cuda:0', max_new_tokens=3, return_dict_in_generate=True, output_scores=True)
+output = model(device='server', max_new_tokens=3, return_dict_in_generate=True, output_scores=True)
 
 pred1 = decode(logits1.value)
 pred2 = decode(logits2.value)

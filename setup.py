@@ -11,8 +11,13 @@ setup(
     packages=find_packages(include=['engine', 'engine.*']),
     install_requires=[
         "baukit @ git+https://github.com/davidbau/baukit.git@e14a18a6ad6cf9e0d6a5dc7a97e671e393c01682",
+        "transformers @ git+https://github.com/huggingface/transformers.git",
+        "protobuf==3.13.0",
+        "tokenizers",
+        "pydantic",
         "torch",
         "torchvision",
         "transformers",
-        "accelerate"
+        "accelerate",
+        "websockets"
     ])

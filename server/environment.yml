@@ -1,0 +1,11 @@
+name: ndif
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - openapi_schema_pydantic
+    - flask
+    - flask-socketio
+    - ./engine

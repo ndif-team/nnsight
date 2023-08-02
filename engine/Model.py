@@ -4,14 +4,17 @@ from typing import Dict, List, Tuple, Union
 
 import accelerate
 import baukit
+import socketio
 import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
                           PreTrainedModel, PreTrainedTokenizer)
 from transformers.generation.utils import GenerateOutput
 from typing_extensions import override
 
-from .intervention.Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
-                                        output_intervene)
+from . import CONFIG
+from .Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
+                           output_intervene)
+from .models.Request import RequestModel
 from .Module import Module
 from .Promise import Promise
 
@@ -28,7 +31,6 @@ class Model:
             model with weights not initialized 
         tokenizer : PreTrainedTokenizer
         local_model : PreTrainedModel
-        output : Union[GenerateOutput, torch.LongTensor]
     '''
 
     class Invoker:
@@ -67,15 +69,15 @@ class Model:
             Model.Invoker.prompts.clear()
 
         @classmethod
-        def compile(cls) -> Tuple[List[str], Dict[str, Promise], List[str]]:
+        def compile(cls) -> Tuple[List[List[str]], Dict[str, Dict], List[str]]:
             '''
             Returns everything needed to convert all invocations into interventions.
 
             Returns
             ----------
-                List[str]
+                List[List[str]]
                     execution graphs
-                Dict[str, Promise]
+                Dict[str, Dict]
                     promises
                 List[str]
                     prompts
@@ -174,7 +176,7 @@ class Model:
         Intervention.clear()
         Module.batch_idx = 0
 
-    def __init__(self, model_name_or_path: str) -> None:
+    def __init__(self, model_name_or_path: str, dispatch=False) -> None:
 
         self.model_name_or_path = model_name_or_path
 
@@ -197,33 +199,7 @@ class Model:
 
             self.init_graph()
 
-        self.local_model = None
-        self.output = None
-
-    def __repr__(self) -> str:
-        return repr(self.graph)
-
-    def __call__(self, *args, device='server', **kwargs):
-
-        if device == 'server':
-
-            self.output = self.submit_to_server(*args, **kwargs)
-
-        else:
-
-            if self.local_model is None:
-
-                self.local_model, _ = self.get_model()
-
-                # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
-                self.local_model.register_forward_hook(
-                    lambda module, input, output: Intervention.increment())
-
-            self.local_model = self.local_model.to(device)
-
-            self.output = self.run_model(*args, **kwargs)
-
-            return self.output
+        self.local_model = self.get_model()[0] if dispatch else None
 
     def init_graph(self) -> None:
         '''
@@ -244,10 +220,41 @@ class Model:
         
         return inputs
 
-    @torch.inference_mode()
-    def run_model(self, *args, **kwargs) -> Union[GenerateOutput, torch.LongTensor]:
+    def __repr__(self) -> str:
+        return repr(self.graph)
+
+    def __call__(self, *args, device='server', **kwargs) -> Union[GenerateOutput, torch.LongTensor]:
 
         execution_graphs, promises, prompts = Model.Invoker.compile()
+
+        if device == 'server':
+
+            self.output = self.submit_to_server(execution_graphs, promises, prompts, *args, **kwargs)
+
+        else:
+
+            if self.local_model is None:
+
+                self.local_model, _ = self.get_model()
+
+                # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
+                self.local_model.register_forward_hook(
+                    lambda module, input, output: Intervention.increment())
+
+            self.local_model = self.local_model.to(device)
+
+            output = self.run_model(execution_graphs, promises, prompts, *args, **kwargs)
+         
+            for id in Copy.copies:
+                Promise.promises[id].value = Intervention.interventions[id]._value
+
+            Model.clear()
+
+            return output
+
+   
+    @torch.inference_mode()
+    def run_model(self, execution_graphs:List[List[str]], promises:Dict[str,Dict], prompts:List[str], *args, **kwargs) -> Union[GenerateOutput, torch.LongTensor]:
 
         for execution_graph in execution_graphs:
 
@@ -263,14 +270,36 @@ class Model:
         with baukit.TraceDict(self.local_model, Get.layers(), retain_output=False, edit_output=output_intervene):
             output = self.local_model.generate(*args, **inputs, **kwargs)
 
-        for id in Copy.copies:
-            Promise.promises[id].value = Intervention.interventions[id]._value
-
-        Model.clear()
-
         return output
 
-    def submit_to_server(self, prompts: list[str], *args, **kwargs):
+    def submit_to_server(self, execution_graphs, promises, prompts, *args, blocking=True, **kwargs):
+
+        request = RequestModel(
+            args=args,
+            kwargs=kwargs,
+            model_name=self.model_name_or_path,
+            execution_graphs=execution_graphs,
+            promises=promises,
+            prompts=prompts
+            )
+        
+        if blocking:
+
+
+            sio = socketio.Client()
+            sio.connect(f"ws://{CONFIG['API']['HOST']}")
+            pickle.dumps(request)
+            sio.send(request.model_dump_json(exclude_none=True))
+
+            breakpoint()
+            
+            # with connect() as socket:
+
+            #     socket.send()
+
+            #     message = socket.recv()
+
+
 
         pass
 

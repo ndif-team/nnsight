@@ -1,132 +1,75 @@
-import logging
-import logging.config
-import os
-import sys
+import json
+import pickle
 from multiprocessing import Manager
+from uuid import uuid4
 
-import yaml
-from engine.job_handler import JobManager
-from engine.models.submit import Request
-from engine.models.result import JobStatus, Result
-from engine.request_handler import RequestHandler
-from engine.results_dict import ResultsDict
-from engine.swagger import generate
-from flask import Flask, Response, jsonify, render_template, request
+import socketio
+from blinker import Namespace
+from engine.models import JobStatus, RequestModel, ResponseModel
+from flask import Flask, request
+from flask_socketio import SocketIO, join_room
 
-# Opens path to current file where the config is found, loads connfig
-PATH = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(PATH, 'config.yml'), 'r') as file:
-    CONFIG = yaml.safe_load(file)
+from . import CONFIG
+from .InferenceHandler import InferenceHandler
+from .RequestHandler import RequestHandler
+from .ResponseDict import ResponseDict
 
-# Disable existing loggers
-logging.config.dictConfig({
-    'version': 1,
-    'disable_existing_loggers': True
-})
+signals = Namespace()
 
-# Create our logger
-logging.basicConfig(
-    stream=sys.stdout, 
-    level=logging.DEBUG,
-    format='%(levelname)s: %(asctime)s - %(message)s')
+blocking_response_signal = signals.signal("blocking_response")
 
-# Get attributes from config
-MODEL_NAME = CONFIG['APP']['MODEL_NAME']
-MODEL_PATH = CONFIG['APP']['MODEL_PATH']
-RESULTS_PATH = CONFIG['APP']['RESULTS_PATH']
-API = CONFIG['API']
+app = Flask(__name__)
+socketio_app = SocketIO(app)
 
-# Create multiprocessing manager and multiprocessing data structures
+
 MP_MANAGER = Manager()
-
-JH_INFO_DICT = MP_MANAGER.dict({"model_name": MODEL_NAME})
+zzz = MP_MANAGER.Event()
+zzz.
 REQUEST_QUEUE = MP_MANAGER.Queue()
-JOB_QUEUE = MP_MANAGER.Queue()
-RESULTS_DICT = ResultsDict(RESULTS_PATH, MP_MANAGER.Semaphore(1))
-
-# Create request handler process
-REQUEST_HANDLER = RequestHandler(REQUEST_QUEUE, JOB_QUEUE, RESULTS_DICT)
-
-# Create job handler process
-JOB_HANDLER = JobManager(
-    MODEL_PATH, 
-    JOB_QUEUE,
-    RESULTS_DICT,
-    JH_INFO_DICT,
+INFERENCE_QUEUES = {"gpt2": MP_MANAGER.Queue()}
+RESPONSE_DICT = ResponseDict(
+    CONFIG["RESPONSE_PATH"],
+    MP_MANAGER.Semaphore(1),
+    blocking_response_signal=blocking_response_signal,
 )
 
-# Start handlers
+REQUEST_HANDLER = RequestHandler(REQUEST_QUEUE, INFERENCE_QUEUES, RESPONSE_DICT)
+INFERENCE_HANDLERS = [
+    InferenceHandler(model_name, RESPONSE_DICT, queue)
+    for model_name, queue in INFERENCE_QUEUES.items()
+]
+
 REQUEST_HANDLER.start()
-JOB_HANDLER.start()
+[inference_handler.start() for inference_handler in INFERENCE_HANDLERS]
 
-# Generate api for swagger ui and save it
-openapi = generate(API)
-with open('swagger/static/api.json', 'w') as file:
-    file.write(openapi)
 
-app = Flask(__name__, 
-            template_folder='swagger/templates', 
-            static_folder='swagger/static')
+@socketio_app.on("message")
+def blocking_request(data):
+    rquest = RequestModel.model_validate(json.loads(data))
+    rquest.id = str(uuid4())
 
-@app.route("/")
-def intro():
-    return jsonify(
-        dict(JH_INFO_DICT)
-    )
-
-@app.route(f"/{API['SUBMIT_EP']}", methods=['POST'])
-def process_request():
-
-    rquest = Request(**request.json)
+    join_room(rquest.id)
 
     REQUEST_QUEUE.put(rquest)
 
-    result = Result(
-        job_id = rquest.job_id,
-        status = JobStatus.RECIVED,
-        description = "Your job has been recieved is is waiting approval"
+    response = ResponseModel(
+        id=rquest.id,
+        blocking=True,
+        status=JobStatus.RECIEVED,
+        description="Your job has been recieved and is waiting approval",
     )
 
-    RESULTS_DICT[rquest.job_id] = result
+    RESPONSE_DICT[rquest.id] = response
 
-    return result.json(exclude_none=True)
+@blocking_response_signal.connect_via(socketio_app)
+def blocking_response(id):
+    breakpoint()
+    data = RESPONSE_DICT[id]
+    data = pickle.dumps(data)
 
-@app.route(f"/{API['RETRIEVE_EP']}/<job_id>", methods=['GET'])
-def get_results_for_request(job_id):
+    socketio_app.send(data, to=id)
 
-    if job_id not in RESULTS_DICT:
 
-        logging.error(f"Job ID '{job_id}' not found")
-
-        return Response(
-            f"Job ID '{job_id}' not found",
-            status=400
-        )
-    
-    result = RESULTS_DICT[job_id]
-    
-    return result.json(exclude_none=True)
-
-@app.route('/api/docs')
-def get_docs():
-    return render_template('swaggerui.html')
-
-@app.route('/api/interface')
-def get_interface():
-
-    interface = {
-        'submit_endpoint' : API['SUBMIT_EP'],
-        'retrieve_endpoint' : API['RETRIEVE_EP'],
-        'info_endpoint': API['INFO_EP']
-    }
-
-    return jsonify(interface)
 
 if __name__ == "__main__":
-    
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=True,
-        use_reloader = False
-    )
+    socketio_app.run(app, host="0.0.0.0", port=5000, debug=True, use_reloader=False)
