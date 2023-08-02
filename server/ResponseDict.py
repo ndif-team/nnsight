@@ -1,22 +1,22 @@
 import os
 import pickle
-from threading import Semaphore
-import socketio
+from multiprocessing import Queue
+from threading import Lock
 
 from engine.models import ResponseModel
 
 
 def aquire(function):
     def wrapper(self, *args, **kwargs):
-        self.semaphore.acquire()
+        self.lock.acquire()
         try:
             result = function(self, *args, **kwargs)
         except Exception as error:
-            self.semaphore.release()
+            self.lock.release()
 
             raise error
 
-        self.semaphore.release()
+        self.lock.release()
 
         return result
 
@@ -24,11 +24,10 @@ def aquire(function):
 
 
 class ResponseDict(dict):
-    def __init__(self, results_path: str, semaphore: Semaphore, blocking_response_signal):
-        
+    def __init__(self, results_path: str, lock: Lock, signal_queue: Queue):
         self.results_path = results_path
-        self.semaphore = semaphore
-        self.blocking_response_signal = blocking_response_signal
+        self.lock = lock
+        self.signal_queue = signal_queue
 
         os.makedirs(self.results_path, exist_ok=True)
 
@@ -36,9 +35,6 @@ class ResponseDict(dict):
 
     @aquire
     def __setitem__(self, key: str, item: ResponseModel):
-
-        print('SETTT')
-
         path = os.path.join(self.results_path, key)
 
         if not os.path.exists(path):
@@ -50,7 +46,7 @@ class ResponseDict(dict):
             pickle.dump(item, file)
 
         if item.blocking:
-            self.blocking_response_signal.send(self, id=item.id)
+            self.signal_queue.put(("blocking_response", key))
 
     @aquire
     def __getitem__(self, key: str) -> ResponseModel:

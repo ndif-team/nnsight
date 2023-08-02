@@ -1,35 +1,25 @@
-from multiprocessing import Process, Queue
+from multiprocessing import Queue
 from typing import Dict
 
 from engine.models import JobStatus, RequestModel, ResponseModel
 
-from .ResponseDict import ResponseDict
+from ..ResponseDict import ResponseDict
+from . import Processor
 
 
-class RequestHandler(Process):
+class RequestProcessor(Processor):
     def __init__(
-        self,
-        request_queue: Queue,
-        job_queues: Dict[str, Queue],
-        response_dict: ResponseDict,
+        self, job_queues: Dict[str, Queue], response_dict: ResponseDict, *args, **kwargs
     ):
-        self.request_queue = request_queue
         self.job_queues = job_queues
         self.response_dict = response_dict
 
-        super().__init__()
-
-    def run(self) -> None:
-        while True:
-            request = self.request_queue.get()
-
-            self.submit_request(request)
+        super().__init__(*args, **kwargs)
 
     def validate_request(self, request):
         return True
 
-    def submit_request(self, request: RequestModel):
-
+    def process(self, request: RequestModel):
         id = request.id
 
         if not self.validate_request(request):

@@ -1,2 +1,4 @@
-build
-*egg
+build/
+*.egg-info/
+.installed.cfg
+*.egg__pycache__/

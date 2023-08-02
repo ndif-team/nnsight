@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 from typing import Dict, List, Tuple, Union
 
 import accelerate
@@ -14,7 +15,7 @@ from typing_extensions import override
 from . import CONFIG
 from .Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
                            output_intervene)
-from .models.Request import RequestModel
+from .models import RequestModel, ResponseModel, JobStatus
 from .Module import Module
 from .Promise import Promise
 
@@ -200,6 +201,7 @@ class Model:
             self.init_graph()
 
         self.local_model = self.get_model()[0] if dispatch else None
+        self.output = None
 
     def init_graph(self) -> None:
         '''
@@ -229,7 +231,7 @@ class Model:
 
         if device == 'server':
 
-            self.output = self.submit_to_server(execution_graphs, promises, prompts, *args, **kwargs)
+            return self.submit_to_server(execution_graphs, promises, prompts, *args, **kwargs)
 
         else:
 
@@ -285,21 +287,43 @@ class Model:
         
         if blocking:
 
-
-            sio = socketio.Client()
-            sio.connect(f"ws://{CONFIG['API']['HOST']}")
-            pickle.dumps(request)
-            sio.send(request.model_dump_json(exclude_none=True))
-
-            breakpoint()
+            return self.blocking_request(request)
+        
+        return self.non_blocking_request(request)
             
-            # with connect() as socket:
+    def blocking_request(self, request: RequestModel):
 
-            #     socket.send()
+        sio = socketio.Client()
+        sio.connect(f"ws://{CONFIG['API']['HOST']}")
 
-            #     message = socket.recv()
+        @sio.on('blocking_response')
+        def blocking_response(data):
 
+            data: ResponseModel = pickle.loads(data)
 
+            print(str(data))
+
+            if data.status == JobStatus.COMPLETED:
+
+                for id, value in data.copies.items():
+
+                    Promise.promises[id].value = value
+
+                self.output = data.output
+
+                sio.disconnect()    
+
+            elif data.status == JobStatus.ERROR:
+
+                sio.disconnect()   
+
+        sio.emit('blocking_request', pickle.dumps(request))
+
+        sio.wait()
+
+        return self.output
+    
+    def non_blocking_request(self, request:RequestModel):
 
         pass
 

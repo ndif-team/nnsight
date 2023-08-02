@@ -1,7 +1,6 @@
 from enum import Enum
-from typing import Any, Dict, Union
+from typing import Any, Dict
 
-import torch
 from pydantic import BaseModel
 from transformers.generation.utils import GenerateOutput
 
@@ -23,3 +22,6 @@ class ResponseModel(BaseModel):
     output: Any = None
     copies: Dict[str, Any] = None
     blocking: bool = False
+
+    def __str__(self) -> str:
+        return f"{self.id} - {self.status.name}: {self.description}"

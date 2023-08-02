@@ -20,4 +20,6 @@ setup(
         "transformers",
         "accelerate",
         "websockets"
-    ])
+    ],
+    include_package_data=True,
+    package_data={'': ['config.yaml']})
