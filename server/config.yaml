@@ -1,2 +1,3 @@
 RESPONSE_PATH: ./responses
 PORT: 5000
+MODEL_CACHE_PATH: ./model_checkpoints

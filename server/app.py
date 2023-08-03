@@ -6,23 +6,24 @@ from engine.models import JobStatus, RequestModel, ResponseModel
 from flask import Flask, request, session
 from flask_socketio import SocketIO, close_room, join_room
 
-from . import (
-    CONFIG,
-    InferenceProcessor,
-    RequestProcessor,
-    ResponseDict,
-    SignalProcessor,
-)
+from . import CONFIG
+from .inference_configurations import inference_configurations
+from .processors.InferenceProcessor import InferenceProcessor
+from .processors.RequestProcessor import RequestProcessor
+from .processors.SignalProcessor import SignalProcessor
+from .ResponseDict import ResponseDict
 
 app = Flask(__name__)
 socketio_app = SocketIO(app)
-
 
 MP_MANAGER = Manager()
 
 REQUEST_QUEUE = MP_MANAGER.Queue()
 SIGNAL_QUEUE = MP_MANAGER.Queue()
-INFERENCE_QUEUES = {"gpt2": MP_MANAGER.Queue()}
+INFERENCE_QUEUES = {
+    inference_configuration.repo_id: MP_MANAGER.Queue()
+    for inference_configuration in inference_configurations
+}
 
 RESPONSE_DICT = ResponseDict(CONFIG["RESPONSE_PATH"], MP_MANAGER.Lock(), SIGNAL_QUEUE)
 
@@ -34,9 +35,12 @@ REQUEST_PROCESSOR = RequestProcessor(
 )
 INFERENCE_PROCESSORS = [
     InferenceProcessor(
-        model_name_or_path=model_name, response_dict=RESPONSE_DICT, queue=queue
+        model_name_or_path=inference_configuration.checkpoint_path,
+        max_memory=inference_configuration.max_memory,
+        response_dict=RESPONSE_DICT,
+        queue=INFERENCE_QUEUES[inference_configuration.repo_id],
     )
-    for model_name, queue in INFERENCE_QUEUES.items()
+    for inference_configuration in inference_configurations
 ]
 
 
@@ -61,7 +65,7 @@ def blocking_request(data: str) -> None:
 
 
 @socketio_app.on("blocking_response")
-def blocking_response(id:str) -> None:
+def blocking_response(id: str) -> None:
     response: ResponseModel = RESPONSE_DICT[id]
 
     socketio_app.emit("blocking_response", pickle.dumps(response), to=id)
@@ -75,9 +79,3 @@ REQUEST_PROCESSOR.start()
 
 with app.app_context():
     SIGNAL_PROCESSOR.start()
-
-
-if __name__ == "__main__":
-    socketio_app.run(
-        app, host="0.0.0.0", port=CONFIG["PORT"], debug=True, use_reloader=False
-    )

@@ -3,6 +3,7 @@ import pickle
 from multiprocessing import Queue
 from threading import Lock
 from typing import List
+from collections.abc import MutableMapping
 
 from engine.models import ResponseModel
 
@@ -24,7 +25,7 @@ def aquire(function):
     return wrapper
 
 
-class ResponseDict(dict):
+class ResponseDict(MutableMapping):
     def __init__(self, results_path: str, lock: Lock, signal_queue: Queue):
         self.results_path = results_path
         self.lock = lock
@@ -33,6 +34,15 @@ class ResponseDict(dict):
         os.makedirs(self.results_path, exist_ok=True)
 
         super().__init__()
+
+    def __getstate__(self):
+        return (self.results_path, self.lock, self.signal_queue)
+
+    def __setstate__(self, state):
+
+        self.results_path = state[0]
+        self.lock = state[1]
+        self.signal_queue = state[2]
 
     @aquire
     def __setitem__(self, key: str, item: ResponseModel) -> None:
