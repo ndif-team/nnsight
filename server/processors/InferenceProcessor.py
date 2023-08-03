@@ -1,21 +1,35 @@
+from typing import Dict
+
+import accelerate
 from engine import Intervention, Model
 from engine.models import JobStatus, RequestModel, ResponseModel
-
+from huggingface_hub import try_to_load_from_cache
 from ..ResponseDict import ResponseDict
 from . import Processor
 
 
 class InferenceProcessor(Processor):
     def __init__(
-        self, model_name_or_path: str, response_dict: ResponseDict, *args, **kwargs
+        self,
+        model_name_or_path: str,
+        max_memory: Dict[int, str],
+        response_dict: ResponseDict,
+        *args,
+        **kwargs
     ):
         self.model_name_or_path = model_name_or_path
+        self.max_memory = max_memory
         self.response_dict = response_dict
 
         super().__init__(*args, **kwargs)
 
     def initialize(self) -> None:
-        self.model = Model(self.model_name_or_path, dispatch=True)
+        self.model = Model(self.model_name_or_path)
+        self.model.graph.tie_weights()
+        device_map = accelerate.infer_auto_device_map(
+            self.model.graph, max_memory=self.max_memory
+        )
+        self.model.dispatch(device_map=device_map)
 
         super().initialize()
 

@@ -6,6 +6,6 @@ with model.invoke('Hello world') as invoker:
     
     zzz = model.transformer.h[2].output[0].copy()
 
-output = model(device='server')
+output = model(device_map='server')
 
 breakpoint()

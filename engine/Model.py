@@ -8,14 +8,14 @@ import baukit
 import socketio
 import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
-                          PreTrainedModel, PreTrainedTokenizer)
+                          PreTrainedModel, PreTrainedTokenizer, AutoConfig)
 from transformers.generation.utils import GenerateOutput
 from typing_extensions import override
 
 from . import CONFIG
 from .Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
                            output_intervene)
-from .models import RequestModel, ResponseModel, JobStatus
+from .models import JobStatus, RequestModel, ResponseModel
 from .Module import Module
 from .Promise import Promise
 
@@ -177,31 +177,32 @@ class Model:
         Intervention.clear()
         Module.batch_idx = 0
 
-    def __init__(self, model_name_or_path: str, dispatch=False) -> None:
+    def __init__(self, model_name_or_path: str) -> None:
 
         self.model_name_or_path = model_name_or_path
 
         # Use init_empty_weights to create graph i.e the specified model with no loaded parameters,
         # to use for finding shapes of Module inputs and outputs, as well as replacing torch.nn.Module
         # with our Module.
+
         with accelerate.init_empty_weights(include_buffers=True):
 
-            self.graph, self.tokenizer = self.get_model()
+            self.graph, self.tokenizer = self.get_model() 
 
-            # Set immediate graph childen modules as Models children so sub-modules
-            # can be accessed directly.
-            for name, module in self.graph.named_children():
+        # Set immediate graph childen modules as Models children so sub-modules
+        # can be accessed directly.
+        for name, module in self.graph.named_children():
 
-                # Wrap all modules in our Module class.
-                module = Module.wrap(module)
+            # Wrap all modules in our Module class.
+            module = Module.wrap(module)
 
-                setattr(self.graph, name, module)
-                setattr(self, name, module)
+            setattr(self.graph, name, module)
+            setattr(self, name, module)
 
-            self.init_graph()
+        self.init_graph()
 
-        self.local_model = self.get_model()[0] if dispatch else None
         self.output = None
+        self.local_model = None
 
     def init_graph(self) -> None:
         '''
@@ -225,25 +226,17 @@ class Model:
     def __repr__(self) -> str:
         return repr(self.graph)
 
-    def __call__(self, *args, device='server', **kwargs) -> Union[GenerateOutput, torch.LongTensor]:
+    def __call__(self, *args, device_map='server', **kwargs) -> Union[GenerateOutput, torch.LongTensor]:
 
         execution_graphs, promises, prompts = Model.Invoker.compile()
 
-        if device == 'server':
+        if device_map == 'server':
 
             return self.submit_to_server(execution_graphs, promises, prompts, *args, **kwargs)
 
         else:
 
-            if self.local_model is None:
-
-                self.local_model, _ = self.get_model()
-
-                # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
-                self.local_model.register_forward_hook(
-                    lambda module, input, output: Intervention.increment())
-
-            self.local_model = self.local_model.to(device)
+            self.dispatch(device_map=device_map)
 
             output = self.run_model(execution_graphs, promises, prompts, *args, **kwargs)
          
@@ -327,15 +320,25 @@ class Model:
 
         pass
 
-    def get_model(self) -> Tuple[PreTrainedTokenizer, PreTrainedModel]:
+    def dispatch(self, device_map='auto'):
+
+        if self.local_model is None:
+
+            self.local_model = self.get_model(device_map=device_map)[0]
+
+            # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
+            self.local_model.register_forward_hook(
+                lambda module, input, output: Intervention.increment())
+            
+
+    def get_model(self, device_map: Dict = None) -> Tuple[PreTrainedTokenizer, PreTrainedModel]:
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
-
-        model = AutoModelForCausalLM.from_pretrained(
-            self.model_name_or_path, pad_token_id=tokenizer.eos_token_id)
-        model.eval()
-
         tokenizer.pad_token = tokenizer.eos_token
+
+        model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, device_map=device_map, pad_token_id=tokenizer.eos_token_id)
+                
+        model.eval()
 
         return model, tokenizer
 
