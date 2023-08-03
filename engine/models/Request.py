@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict
 
 from ..util import Value
 
@@ -12,7 +12,8 @@ class PromiseModel(BaseModel):
 
 
 class RequestModel(BaseModel):
-    
+    model_config = ConfigDict(protected_namespaces=())
+
     args: List
     kwargs: Dict
     model_name: str
