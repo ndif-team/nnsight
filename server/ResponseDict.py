@@ -2,6 +2,7 @@ import os
 import pickle
 from multiprocessing import Queue
 from threading import Lock
+from typing import List
 
 from engine.models import ResponseModel
 
@@ -34,7 +35,7 @@ class ResponseDict(dict):
         super().__init__()
 
     @aquire
-    def __setitem__(self, key: str, item: ResponseModel):
+    def __setitem__(self, key: str, item: ResponseModel) -> None:
         path = os.path.join(self.results_path, key)
 
         if not os.path.exists(path):
@@ -64,7 +65,7 @@ class ResponseDict(dict):
         return len(os.listdir(self.results_path))
 
     @aquire
-    def __delitem__(self, key):
+    def __delitem__(self, key: str) -> None:
         path = os.path.join(self.results_path, key)
 
         if not os.path.exists(path):
@@ -77,7 +78,7 @@ class ResponseDict(dict):
 
         os.rmdir(path)
 
-    def clear(self):
+    def clear(self) -> None:
         for key in self.keys():
             self.__delitem__(key)
 
@@ -85,7 +86,7 @@ class ResponseDict(dict):
     def update(self, *args, **kwargs):
         return self.__dict__.update(*args, **kwargs)
 
-    def keys(self):
+    def keys(self) -> List[str]:
         return os.listdir(self.results_path)
 
     # TODO

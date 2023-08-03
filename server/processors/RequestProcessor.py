@@ -16,10 +16,10 @@ class RequestProcessor(Processor):
 
         super().__init__(*args, **kwargs)
 
-    def validate_request(self, request):
+    def validate_request(self, request) -> bool:
         return True
 
-    def process(self, request: RequestModel):
+    def process(self, request: RequestModel) -> None:
         id = request.id
 
         if not self.validate_request(request):

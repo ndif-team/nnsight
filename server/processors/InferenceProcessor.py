@@ -14,12 +14,12 @@ class InferenceProcessor(Processor):
 
         super().__init__(*args, **kwargs)
 
-    def initialize(self):
+    def initialize(self) -> None:
         self.model = Model(self.model_name_or_path, dispatch=True)
 
         super().initialize()
 
-    def process(self, request: RequestModel):
+    def process(self, request: RequestModel) -> None:
         execution_graphs, promises, prompts = (
             request.execution_graphs,
             request.promises,

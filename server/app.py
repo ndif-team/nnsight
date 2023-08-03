@@ -41,7 +41,7 @@ INFERENCE_PROCESSORS = [
 
 
 @socketio_app.on("blocking_request")
-def blocking_request(data):
+def blocking_request(data: str) -> None:
     rquest: RequestModel = pickle.loads(data)
     rquest.blocking = True
     rquest.id = str(uuid4())
@@ -61,7 +61,7 @@ def blocking_request(data):
 
 
 @socketio_app.on("blocking_response")
-def blocking_response(id):
+def blocking_response(id:str) -> None:
     response: ResponseModel = RESPONSE_DICT[id]
 
     socketio_app.emit("blocking_response", pickle.dumps(response), to=id)

@@ -308,7 +308,7 @@ class Intervention:
 
 class Chain(Intervention):
     '''
-    An Intervention to make one Intervention depandant on anothers fufillment.
+    An Intervention to make one Intervention dependant on anothers fufillment.
 
     Attributes
     ----------
