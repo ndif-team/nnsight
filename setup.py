@@ -17,6 +17,7 @@ setup(
         "tokenizers",
         "pydantic",
         "torch",
+        "sentencepiece",
         "torchvision",
         "accelerate"
     ],

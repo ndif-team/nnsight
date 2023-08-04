@@ -37,6 +37,7 @@ INFERENCE_PROCESSORS = [
     InferenceProcessor(
         model_name_or_path=inference_configuration.checkpoint_path,
         max_memory=inference_configuration.max_memory,
+        device_map=inference_configuration.device_map,
         response_dict=RESPONSE_DICT,
         queue=INFERENCE_QUEUES[inference_configuration.repo_id],
     )

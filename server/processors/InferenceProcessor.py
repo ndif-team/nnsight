@@ -12,6 +12,7 @@ class InferenceProcessor(Processor):
     def __init__(
         self,
         model_name_or_path: str,
+        device_map: Dict,
         max_memory: Dict[int, str],
         response_dict: ResponseDict,
         *args,
@@ -19,17 +20,22 @@ class InferenceProcessor(Processor):
     ):
         self.model_name_or_path = model_name_or_path
         self.max_memory = max_memory
+        self.device_map = device_map
         self.response_dict = response_dict
 
         super().__init__(*args, **kwargs)
 
     def initialize(self) -> None:
         self.model = Model(self.model_name_or_path)
-        self.model.graph.tie_weights()
-        device_map = accelerate.infer_auto_device_map(
-            self.model.graph, max_memory=self.max_memory
-        )
-        self.model.dispatch(device_map=device_map)
+
+        if self.max_memory is not None:
+
+            self.model.graph.tie_weights()
+            self.device_map = accelerate.infer_auto_device_map(
+                self.model.graph, max_memory=self.max_memory
+            )
+
+        self.model.dispatch(device_map=self.device_map)
 
         super().initialize()
 
@@ -53,7 +59,7 @@ class InferenceProcessor(Processor):
             description="Your job has been completed.",
             output=output,
             copies={
-                id: Intervention.Intervention.interventions[id]._value
+                id: Intervention.Intervention.interventions[id].cpu().value
                 for id in Intervention.Copy.copies
             },
         )
