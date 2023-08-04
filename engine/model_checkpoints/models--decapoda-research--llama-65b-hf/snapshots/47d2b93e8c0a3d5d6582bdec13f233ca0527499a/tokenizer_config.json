@@ -1,1 +1,7 @@
-../../blobs/1aabb918c81c56bcb61ba76e6f93dc3ff601ee1a
+{
+    "bos_token": "<s>",
+    "eos_token": "</s>",
+    "model_max_length": 1000000000000000019884624838656,
+    "tokenizer_class": "LlamaTokenizer",
+    "unk_token": "<unk>"
+}

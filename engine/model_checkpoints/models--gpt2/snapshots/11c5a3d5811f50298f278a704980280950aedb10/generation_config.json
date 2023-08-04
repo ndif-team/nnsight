@@ -1,1 +1,6 @@
-../../blobs/3dc481ecc3b2c47a06ab4e20dba9d7f4b447bdf3
+{
+  "bos_token_id": 50256,
+  "eos_token_id": 50256,
+  "transformers_version": "4.26.0.dev0",
+  "_from_model_config": true
+}

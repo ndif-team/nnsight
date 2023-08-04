@@ -187,9 +187,9 @@ class Model:
 
         with accelerate.init_empty_weights(include_buffers=True):
 
-            self.config = AutoConfig.from_pretrained(self.model_name_or_path)
+            self.config = AutoConfig.from_pretrained(self.model_name_or_path, cache_dir=CONFIG['APP']['MODEL_CACHE_PATH'])
 
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path, config=self.config)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path, config=self.config, cache_dir=CONFIG['APP']['MODEL_CACHE_PATH'])
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
             self.graph = AutoModelForCausalLM.from_config(self.config)
@@ -331,7 +331,7 @@ class Model:
 
         if self.local_model is None:
 
-            self.local_model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, config=self.config, device_map=device_map)
+            self.local_model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, config=self.config, device_map=device_map, cache_dir=CONFIG['APP']['MODEL_CACHE_PATH'])
 
             # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
             self.local_model.register_forward_hook(

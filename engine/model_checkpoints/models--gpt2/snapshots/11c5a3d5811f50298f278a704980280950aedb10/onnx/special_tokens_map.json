@@ -1,1 +1,5 @@
-../../../blobs/0204ed10c186a4c7c68f55dff8f26087a45898d6
+{
+  "bos_token": "<|endoftext|>",
+  "eos_token": "<|endoftext|>",
+  "unk_token": "<|endoftext|>"
+}
