@@ -18,5 +18,8 @@ def apply(data: Any, fn: Callable, cls: type):
 
     if isinstance(data, dict):
         return {key: apply(value, fn, cls) for key, value in data.items()}
-
+    
+    if data is None:
+        return
+    
     raise ValueError()

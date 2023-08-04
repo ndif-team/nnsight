@@ -7,8 +7,8 @@ import accelerate
 import baukit
 import socketio
 import torch
-from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
-                          PreTrainedModel, PreTrainedTokenizer, AutoConfig)
+from transformers import (AutoModelForCausalLM, AutoTokenizer,
+                          BatchEncoding, PreTrainedModel, PreTrainedTokenizer, AutoConfig)
 from transformers.generation.utils import GenerateOutput
 from typing_extensions import override
 
@@ -187,7 +187,12 @@ class Model:
 
         with accelerate.init_empty_weights(include_buffers=True):
 
-            self.graph, self.tokenizer = self.get_model() 
+            self.config = AutoConfig.from_pretrained(self.model_name_or_path)
+
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path, config=self.config)
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            self.graph = AutoModelForCausalLM.from_config(self.config)
 
         # Set immediate graph childen modules as Models children so sub-modules
         # can be accessed directly.
@@ -232,6 +237,8 @@ class Model:
 
         if device_map == 'server':
 
+            print(kwargs)
+
             return self.submit_to_server(execution_graphs, promises, prompts, *args, **kwargs)
 
         else:
@@ -241,7 +248,7 @@ class Model:
             output = self.run_model(execution_graphs, promises, prompts, *args, **kwargs)
          
             for id in Copy.copies:
-                Promise.promises[id].value = Intervention.interventions[id]._value
+                Promise.promises[id].value = Intervention.interventions[id].value
 
             Model.clear()
 
@@ -324,23 +331,11 @@ class Model:
 
         if self.local_model is None:
 
-            self.local_model = self.get_model(device_map=device_map)[0]
+            self.local_model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, config=self.config, device_map=device_map)
 
             # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
             self.local_model.register_forward_hook(
                 lambda module, input, output: Intervention.increment())
-            
-
-    def get_model(self, device_map: Dict = None) -> Tuple[PreTrainedTokenizer, PreTrainedModel]:
-
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
-        tokenizer.pad_token = tokenizer.eos_token
-
-        model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, device_map=device_map, pad_token_id=tokenizer.eos_token_id)
-                
-        model.eval()
-
-        return model, tokenizer
 
     def invoke(self, prompt: str, *args, **kwargs) -> Model.Invoker:
 

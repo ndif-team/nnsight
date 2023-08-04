@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Union
 import torch
 from typing_extensions import override
 
-from .util import Value
+from .util import Value, apply
 
 INTERVENTIONS_TYPES = {}
 
@@ -139,7 +139,7 @@ class Intervention:
 
     def __init__(self, id: str = None) -> None:
 
-        self._value = None
+        self.value = None
         self.id = id or str(uuid.uuid4())
         self.listeners = set()
         self.dependencies = set()
@@ -147,6 +147,16 @@ class Intervention:
         Intervention.interventions[self.id] = self
 
         self.listen(self)
+
+    def cpu(self):
+
+        def to_cpu(tensor: torch.Tensor):
+
+            return tensor.cpu()
+
+        self.value = apply(self.value, to_cpu, torch.Tensor)
+
+        return self
 
     @abstractmethod
     def __call__(self):
@@ -219,13 +229,13 @@ class Intervention:
 
     def destroy(self) -> None:
         '''
-        Removes reference to self from id to Intervention mapping and sets its self._value 
+        Removes reference to self from id to Intervention mapping and sets its self.value 
         to None.
         '''
 
         print(f"Destroying {str(self)}")
 
-        self._value = None
+        self.value = None
 
     def stop_listening(self, id: str) -> None:
         '''
@@ -267,12 +277,12 @@ class Intervention:
             raise ValueError(
                 f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
 
-        if self._value is None:
+        if self.value is None:
 
             raise ValueError(
                 f"Listener '{str(Intervention.interventions[listener_id])}' referenced value '{str(self)}' before assignment")
 
-        value = self._value
+        value = self.value
 
         self.stop_listening(listener_id)
 
@@ -299,7 +309,7 @@ class Intervention:
 
         print(f"Setting {self}")
 
-        self._value = value
+        self.value = value
 
         self.stop_listening(listener_id)
 
@@ -421,7 +431,7 @@ class Get(Intervention):
 
         print(f'Reached {self.module_name}[{self.batch_index}]')
 
-        self._value = self.batch_index_get(value)
+        self.value = self.batch_index_get(value)
 
         self.notify_listeners()
 
@@ -535,7 +545,7 @@ class Tensor(Intervention):
 
         super().__init__(*args, **kwargs)
 
-        self._value = value
+        self.value = value
 
         Tensor.tensors[self.id] = self
 
