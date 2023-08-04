@@ -9,7 +9,7 @@ The `engine/` directory contains the engine package for interpreting and manipul
 
 Install this package through pip by running:
 
-`pip install git+https://github.com/JadenFiotto-Kaufman/ndif/tree/prototype`
+`pip install git+https://github.com/JadenFiotto-Kaufman/ndif`
 
 #### Examples
 
