@@ -2,7 +2,7 @@ import pickle
 from multiprocessing import Manager
 from uuid import uuid4
 
-from engine.models import JobStatus, RequestModel, ResponseModel
+from engine.modeling import JobStatus, RequestModel, ResponseModel
 from flask import Flask, request, session
 from flask_socketio import SocketIO, close_room, join_room
 

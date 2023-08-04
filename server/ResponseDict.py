@@ -5,7 +5,7 @@ from threading import Lock
 from typing import List
 from collections.abc import MutableMapping
 
-from engine.models import ResponseModel
+from engine.modeling import ResponseModel
 
 
 def aquire(function):

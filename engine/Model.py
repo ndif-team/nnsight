@@ -15,7 +15,7 @@ from typing_extensions import override
 from . import CONFIG
 from .Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
                            output_intervene)
-from .models import JobStatus, RequestModel, ResponseModel
+from .modeling import JobStatus, RequestModel, ResponseModel
 from .Module import Module
 from .Promise import Promise
 

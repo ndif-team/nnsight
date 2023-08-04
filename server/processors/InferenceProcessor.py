@@ -2,7 +2,7 @@ from typing import Dict
 
 import accelerate
 from engine import Intervention, Model
-from engine.models import JobStatus, RequestModel, ResponseModel
+from engine.modeling import JobStatus, RequestModel, ResponseModel
 from huggingface_hub import try_to_load_from_cache
 from ..ResponseDict import ResponseDict
 from . import Processor

@@ -1,7 +1,7 @@
 from multiprocessing import Queue
 from typing import Dict
 
-from engine.models import JobStatus, RequestModel, ResponseModel
+from engine.modeling import JobStatus, RequestModel, ResponseModel
 
 from ..ResponseDict import ResponseDict
 from . import Processor
