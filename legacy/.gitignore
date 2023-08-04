@@ -1,8 +1,0 @@
-*weights/*
-*__pycache__*
-*.ipynb_checkpoints*
-job_results/
-jobs/
-client/engine.egg-info/
-prototype/engine.egg-info/
-prototype/engine.egg-info/

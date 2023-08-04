@@ -1,8 +1,0 @@
-API:
-  #HOST: http://nagoya.research.khoury.northeastern.edu
-  HOST: https://ndif.baulab.us
-  # HOST: http://127.0.0.1:5000
-  INTERFACE_EP: /api/interface
-
-APP:
-  JOBS_DIR: ./jobs
