@@ -9,9 +9,11 @@ The `engine/` directory contains the engine package for interpreting and manipul
 
 Install this package through pip by running:
 
-`pip install git+https://github.com/JadenFiotto-Kaufman/ndif/tree/prototype`
+`pip install git+https://github.com/JadenFiotto-Kaufman/ndif`
 
 #### Examples
+
+Running the engine API locally on gpt2 and saving the hidden states of the last layer:
 
 ```python
 from engine import Model
@@ -20,14 +22,24 @@ model = Model('gpt2')
 
 with model.invoke('The Eiffel Tower is in the city of') as invoker:
 
-    hidden_states = model.transformer.h[-1].output[0]
+    hidden_states = model.transformer.h[-1].output[0].copy()
 
 output = model(device_map='cuda', max_new_tokens=1)
 
 ```
 
+Running the engine API remotely on LLaMA 65b and saving the hidden states of the last layer:
+
 ```python
-<insert server example>
+from engine import Model
+
+model = Model('decapoda-research/llama-65b-hf')
+
+with model.invoke('The Eiffel Tower is in the city of') as invoker:
+
+    hidden_states = model.model.layers[-1].output[0].copy()
+
+output = model(device_map='server', max_new_tokens=1)
 ```
 
 More examples can be found in `engine/examples/`
