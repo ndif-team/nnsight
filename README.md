@@ -4,6 +4,7 @@
 The `engine/` directory contains the engine package for interpreting and manipulating the internals of large language models.
 
 - `engine/model_checkpoints` is set to be the default huggingface hub cache directory. Contains by default models found on the NDIF server with their respective configurations.
+- Calling the model ends up calling [AutoModelForCausalLM.generate(...)](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationMixin.generate) and **kwargs passed to the call will be passed to generate. Refer to the linked docs for reference.
 
 #### Installation
 
