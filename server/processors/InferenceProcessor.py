@@ -3,12 +3,26 @@ from typing import Dict
 import accelerate
 from engine import Intervention, Model
 from engine.modeling import JobStatus, RequestModel, ResponseModel
-from huggingface_hub import try_to_load_from_cache
+
 from ..ResponseDict import ResponseDict
 from . import Processor
 
 
 class InferenceProcessor(Processor):
+    """
+    Handles the LLM inference processing.
+
+    Attributes
+    ----------
+        model_name_or_path : str
+            repo id of hugging face LLM model repository or path to pre-cached checkpoint directory.
+        device_map : Dict
+            mapping of model modules to specific devices. To be used by accelerate if max_memory is None.
+        max_memory : Dict[int,str]
+            mapping of device to max allowed memory. To be used by accelerate to generate device_map.
+        response_dict : ResponseDict
+    """
+
     def __init__(
         self,
         model_name_or_path: str,
@@ -26,44 +40,52 @@ class InferenceProcessor(Processor):
         super().__init__(*args, **kwargs)
 
     def initialize(self) -> None:
+        # Create Model
         self.model = Model(self.model_name_or_path)
 
+        # If max_memory is set, use accelerate.infer_auto_device_map to get a device_map
         if self.max_memory is not None:
-
             self.model.graph.tie_weights()
             self.device_map = accelerate.infer_auto_device_map(
                 self.model.graph, max_memory=self.max_memory
             )
 
+        # Actually load the parameters of the model according to device_map
         self.model.dispatch(device_map=self.device_map)
 
         super().initialize()
 
     def process(self, request: RequestModel) -> None:
+        # Parse out data needed for inference
         execution_graphs, promises, prompts = (
             request.execution_graphs,
             request.promises,
             request.prompts,
         )
+        # Promises are expected to be dictionary objects
         promises = {id: value.model_dump() for id, value in promises.items()}
         args, kwargs = request.args, request.kwargs
 
+        # Run model with paramters and interventions
         output = self.model.run_model(
             execution_graphs, promises, prompts, *args, **kwargs
         )
 
+        # Create response
         response = ResponseModel(
             id=request.id,
             blocking=request.blocking,
             status=JobStatus.COMPLETED,
             description="Your job has been completed.",
             output=output,
+            # Move all copied data to cpu
             copies={
                 id: Intervention.Intervention.interventions[id].cpu().value
                 for id in Intervention.Copy.copies
             },
         )
 
+        # Reset the model of all state data
         Model.clear()
 
         self.response_dict[response.id] = response
