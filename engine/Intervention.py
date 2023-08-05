@@ -27,7 +27,7 @@ class Intervention:
 
     Attributes
     ----------
-        _value : str
+        value : str
             value store of Intervention
         id : str
             unique id of Intervention
@@ -532,14 +532,14 @@ class Tensor(Intervention):
     @classmethod
     def _clear(cls) -> None:
         for tensor in Tensor.tensors.values():
-            tensor._value = None
+            tensor.value = None
         Tensor.tensors.clear()
 
     @classmethod
     def to(cls, device) -> None:
         for tensor in Tensor.tensors.values():
             # need to actually move tensors to model dtype
-            tensor._value = tensor._value.to(device)
+            tensor.value = tensor.value.to(device)
 
     def __init__(self, value: torch.Tensor, *args, **kwargs) -> None:
 
