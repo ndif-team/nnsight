@@ -237,8 +237,6 @@ class Model:
 
         if device_map == 'server':
 
-            print(kwargs)
-
             return self.submit_to_server(execution_graphs, promises, prompts, *args, **kwargs)
 
         else:
