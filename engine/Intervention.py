@@ -233,7 +233,8 @@ class Intervention:
         to None.
         '''
 
-        print(f"Destroying {str(self)}")
+        # Add back for debugging
+        # print(f"Destroying {str(self)}")
 
         self.value = None
 
@@ -306,8 +307,8 @@ class Intervention:
 
             raise ValueError(
                 f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
-
-        print(f"Setting {self}")
+        # Add back for debugging
+        # print(f"Setting {self}")
 
         self.value = value
 
@@ -429,7 +430,8 @@ class Get(Intervention):
 
     def __call__(self, value: Tensor) -> None:
 
-        print(f'Reached {self.module_name}[{self.batch_index}]')
+        # Add back for debugging
+        # print(f'Reached {self.module_name}[{self.batch_index}]')
 
         self.value = self.batch_index_get(value)
 
