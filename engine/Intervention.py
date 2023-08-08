@@ -9,7 +9,7 @@ import torch
 from typing_extensions import override
 
 from .util import Value, apply
-
+from . import logger
 INTERVENTIONS_TYPES = {}
 
 
@@ -233,8 +233,7 @@ class Intervention:
         to None.
         '''
 
-        # Add back for debugging
-        # print(f"Destroying {str(self)}")
+        logger.debug(f"Destroying {str(self)}")
 
         self.value = None
 
@@ -307,9 +306,9 @@ class Intervention:
 
             raise ValueError(
                 f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
-        # Add back for debugging
-        # print(f"Setting {self}")
-
+        
+        logger.debug(f"Setting {self}")
+        
         self.value = value
 
         self.stop_listening(listener_id)
@@ -430,8 +429,7 @@ class Get(Intervention):
 
     def __call__(self, value: Tensor) -> None:
 
-        # Add back for debugging
-        # print(f'Reached {self.module_name}[{self.batch_index}]')
+        logger.debug(f"Reached {self.module_name}[{self.batch_index}]")
 
         self.value = self.batch_index_get(value)
 

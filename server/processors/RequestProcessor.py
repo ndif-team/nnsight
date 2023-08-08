@@ -20,23 +20,37 @@ class RequestProcessor(Processor):
         return True
 
     def process(self, request: RequestModel) -> None:
-        id = request.id
 
-        if not self.validate_request(request):
+        try: 
+
+            id = request.id
+
+            if not self.validate_request(request):
+                self.response_dict[id] = ResponseModel(
+                    id=id,
+                    blocking=request.blocking,
+                    status=JobStatus.ERROR,
+                    description="Your job was not approved for <reason>",
+                )
+
+                return
+
             self.response_dict[id] = ResponseModel(
                 id=id,
                 blocking=request.blocking,
-                status=JobStatus.ERROR,
-                description="Your job was not approved for <reason>",
+                status=JobStatus.APPROVED,
+                description="Your job was approved and is waiting to be run",
             )
 
-            return
+            self.job_queues[request.model_name].put(request)
 
-        self.response_dict[id] = ResponseModel(
-            id=id,
-            blocking=request.blocking,
-            status=JobStatus.APPROVED,
-            description="Your job was approved and is waiting to be run",
-        )
+        except Exception as exception:
 
-        self.job_queues[request.model_name].put(request)
+            self.response_dict[request.id] = ResponseModel(
+                id=request.id,
+                blocking=request.blocking,
+                status=JobStatus.ERROR,
+                description=str(exception),
+            )
+
+            raise exception

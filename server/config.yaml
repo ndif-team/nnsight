@@ -1,2 +1,3 @@
 RESPONSE_PATH: ./responses
 PORT: 5000
+LOG_PATH: ./logs

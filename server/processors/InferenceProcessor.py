@@ -1,7 +1,7 @@
 from typing import Dict
 
 import accelerate
-from engine import Intervention, Model
+from engine import Intervention, Model, logger as engine_logger
 from engine.modeling import JobStatus, RequestModel, ResponseModel
 
 from ..ResponseDict import ResponseDict
@@ -53,39 +53,57 @@ class InferenceProcessor(Processor):
         # Actually load the parameters of the model according to device_map
         self.model.dispatch(device_map=self.device_map)
 
+        engine_logger.addHandler(self.logging_handler)
+
         super().initialize()
 
     def process(self, request: RequestModel) -> None:
-        # Parse out data needed for inference
-        execution_graphs, promises, prompts = (
-            request.execution_graphs,
-            request.promises,
-            request.prompts,
-        )
-        # Promises are expected to be dictionary objects
-        promises = {id: value.model_dump() for id, value in promises.items()}
-        args, kwargs = request.args, request.kwargs
 
-        # Run model with paramters and interventions
-        output = self.model.run_model(
-            execution_graphs, promises, prompts, *args, **kwargs
-        )
+        try:
 
-        # Create response
-        response = ResponseModel(
-            id=request.id,
-            blocking=request.blocking,
-            status=JobStatus.COMPLETED,
-            description="Your job has been completed.",
-            output=output,
-            # Move all copied data to cpu
-            copies={
-                id: Intervention.Intervention.interventions[id].cpu().value
-                for id in Intervention.Copy.copies
-            },
-        )
+            # Parse out data needed for inference
+            execution_graphs, promises, prompts = (
+                request.execution_graphs,
+                request.promises,
+                request.prompts,
+            )
+            # Promises are expected to be dictionary objects
+            promises = {id: value.model_dump() for id, value in promises.items()}
+            args, kwargs = request.args, request.kwargs
 
-        # Reset the model of all state data
-        Model.clear()
+            # Run model with paramters and interventions
+            output = self.model.run_model(
+                execution_graphs, promises, prompts, *args, **kwargs
+            )
 
-        self.response_dict[response.id] = response
+            # Create response
+            self.response_dict[request.id] = ResponseModel(
+                id=request.id,
+                blocking=request.blocking,
+                status=JobStatus.COMPLETED,
+                description="Your job has been completed.",
+                output=output,
+                # Move all copied data to cpu
+                copies={
+                    id: Intervention.Intervention.interventions[id].cpu().value
+                    for id in Intervention.Copy.copies
+                },
+            )
+
+            # Reset the model of all state data
+            Model.clear()
+
+        except Exception as exception:
+
+            self.response_dict[request.id] = ResponseModel(
+                id=request.id,
+                blocking=request.blocking,
+                status=JobStatus.ERROR,
+                description=str(exception),
+            )
+
+            raise exception
+
+
+
+
