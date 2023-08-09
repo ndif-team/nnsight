@@ -16,38 +16,29 @@ class RequestProcessor(Processor):
 
         super().__init__(*args, **kwargs)
 
-    def validate_request(self, request) -> bool:
-        return True
+    def validate_request(self, request: RequestModel) -> None:
+        if request.model_name not in self.job_queues:
+            raise ValueError(
+                f"Requested model '{request.model_name}' not among hosted models: '{','.join(list(self.job_queues.keys()))}'"
+            )
 
     def process(self, request: RequestModel) -> None:
-
-        try: 
-
+        try:
             id = request.id
 
-            if not self.validate_request(request):
-                self.response_dict[id] = ResponseModel(
-                    id=id,
-                    recieved=request.recieved,
-                    blocking=request.blocking,
-                    status=JobStatus.ERROR,
-                    description="Your job was not approved for <reason>",
-                ).log(self.logger)
-
-                return
+            self.validate_request(request)
 
             self.response_dict[id] = ResponseModel(
                 id=id,
                 recieved=request.recieved,
                 blocking=request.blocking,
                 status=JobStatus.APPROVED,
-                description="Your job was approved and is waiting to be run",
+                description="Your job was approved and is waiting to be run.",
             ).log(self.logger)
 
             self.job_queues[request.model_name].put(request)
 
         except Exception as exception:
-
             self.response_dict[request.id] = ResponseModel(
                 id=request.id,
                 recieved=request.recieved,
