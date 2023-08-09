@@ -21,5 +21,7 @@ class SignalProcessor(Processor):
         if not self.sio.connected:
             self.sio.connect(self.url)
 
+        super().maintenance()
+
     def process(self, signal: List[Any]) -> None:
         self.sio.emit(signal[0], signal[1:])

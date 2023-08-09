@@ -1,8 +1,7 @@
-from typing import Any, Dict, List, Union
+from datetime import datetime
+from typing import Dict, List
 
 from pydantic import BaseModel, ConfigDict
-
-from ..util import Value
 
 
 class PromiseModel(BaseModel):
@@ -22,4 +21,5 @@ class RequestModel(BaseModel):
     prompts: List[str]
 
     id: str = None
-    blocking:bool = False
+    recieved: datetime = None
+    blocking: bool = False

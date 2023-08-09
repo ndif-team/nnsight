@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from multiprocessing import Process, Queue
 from typing import Any
 
+from engine.util import timed
+
 from .. import CONFIG
 
 
@@ -21,7 +23,7 @@ class Processor(Process, ABC):
             queue to wait on for incoming data to process.
     """
 
-    def __init__(self, queue: Queue, timeout: float = 30):
+    def __init__(self, queue: Queue, timeout: float = 10):
         self.timeout = timeout
         self.queue = queue
         self.logging_handler = None
@@ -42,6 +44,8 @@ class Processor(Process, ABC):
         self.logger = logging.getLogger("NDIF")
         self.logger.addHandler(self.logging_handler)
         self.logger.setLevel(logging.DEBUG)
+
+        self.process = timed(self.process, self.logger)
     
     def initialize(self) -> None:
         """Called on process start."""
@@ -49,7 +53,8 @@ class Processor(Process, ABC):
 
     def maintenance(self) -> None:
         """Called on end of processing loop."""
-        pass
+        
+        self.logger.debug(f"Queue size: {self.queue.qsize()}.")
 
     @abstractmethod
     def process(self, data: Any) -> None:

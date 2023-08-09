@@ -19,19 +19,19 @@ class InferenceConfiguration:
 
 inference_configurations = [
     InferenceConfiguration("gpt2"),
-    InferenceConfiguration(
-        "decapoda-research/llama-65b-hf",
-        # {
-        #     0: "0GiB",
-        #     1: "0GiB",
-        #     2: "0GiB",
-        #     3: "0GiB",
-        #     4: "86GiB",
-        #     5: "86GiB",
-        #     6: "86GiB",
-        #     7: "86GiB",
-        # },
-    ),
+    # InferenceConfiguration(
+    #     "decapoda-research/llama-65b-hf",
+    #     # {
+    #     #     0: "0GiB",
+    #     #     1: "0GiB",
+    #     #     2: "0GiB",
+    #     #     3: "0GiB",
+    #     #     4: "86GiB",
+    #     #     5: "86GiB",
+    #     #     6: "86GiB",
+    #     #     7: "86GiB",
+    #     # },
+    # ),
 ]
 
 for inference_configuration in inference_configurations:

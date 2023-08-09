@@ -28,19 +28,21 @@ class RequestProcessor(Processor):
             if not self.validate_request(request):
                 self.response_dict[id] = ResponseModel(
                     id=id,
+                    recieved=request.recieved,
                     blocking=request.blocking,
                     status=JobStatus.ERROR,
                     description="Your job was not approved for <reason>",
-                )
+                ).log(self.logger)
 
                 return
 
             self.response_dict[id] = ResponseModel(
                 id=id,
+                recieved=request.recieved,
                 blocking=request.blocking,
                 status=JobStatus.APPROVED,
                 description="Your job was approved and is waiting to be run",
-            )
+            ).log(self.logger)
 
             self.job_queues[request.model_name].put(request)
 
@@ -48,9 +50,10 @@ class RequestProcessor(Processor):
 
             self.response_dict[request.id] = ResponseModel(
                 id=request.id,
+                recieved=request.recieved,
                 blocking=request.blocking,
                 status=JobStatus.ERROR,
                 description=str(exception),
-            )
+            ).log(self.logger)
 
             raise exception

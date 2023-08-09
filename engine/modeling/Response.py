@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import logging
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict
 
@@ -20,8 +24,17 @@ class ResponseModel(BaseModel):
     description: str
 
     output: Any = None
+    recieved: datetime = None
     copies: Dict[str, Any] = None
     blocking: bool = False
 
     def __str__(self) -> str:
         return f"{self.id} - {self.status.name}: {self.description}"
+
+    def log(self, logger: logging.Logger) -> ResponseModel:
+        if self.status == JobStatus.ERROR:
+            logger.error(str(self))
+        else:
+            logger.info(str(self))
+
+        return self

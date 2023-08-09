@@ -1,14 +1,17 @@
 import os
 import pickle
+from collections.abc import MutableMapping
+from functools import wraps
 from multiprocessing import Queue
 from threading import Lock
 from typing import List
-from collections.abc import MutableMapping
 
 from engine.modeling import ResponseModel
 
 
 def aquire(function):
+
+    @wraps(function)
     def wrapper(self, *args, **kwargs):
         self.lock.acquire()
         try:

@@ -1,4 +1,7 @@
+import logging
+import os
 import pickle
+from datetime import datetime
 from multiprocessing import Manager
 from uuid import uuid4
 
@@ -18,6 +21,14 @@ app = Flask(__name__)
 # SocketIO Flask wrapper
 socketio_app = SocketIO(app)
 
+logging_handler = logging.FileHandler(os.path.join(CONFIG["LOG_PATH"], "app.log"), "a")
+logging_handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s %(processName)-10s %(name)s %(levelname)-8s %(message)s"
+    )
+)
+app.logger.addHandler(logging_handler)
+app.logger.setLevel(logging.DEBUG)
 
 MP_MANAGER = Manager()
 
@@ -74,20 +85,19 @@ def blocking_request(data: str) -> None:
     rquest.blocking = True
     # Give the request a unique id
     rquest.id = str(uuid4())
-
-    response = ResponseModel(
-        id=rquest.id,
-        blocking=True,
-        status=JobStatus.RECIEVED,
-        description="Your job has been recieved and is waiting approval",
-    )
-
+    rquest.recieved = datetime.now()
     # Add this websocket session to a room with id the same as the request id. That way we
     # can respond to this specific request by emiting to this specific room.
     join_room(rquest.id)
 
     # Set the recieved response
-    RESPONSE_DICT[rquest.id] = response
+    RESPONSE_DICT[rquest.id] = ResponseModel(
+        id=rquest.id,
+        recieved=rquest.recieved,
+        blocking=True,
+        status=JobStatus.RECIEVED,
+        description="Your job has been recieved and is waiting approval",
+    ).log(app.logger)
 
     # Put the request on the queue
     REQUEST_QUEUE.put(rquest)
@@ -105,16 +115,20 @@ def blocking_response(id: str) -> None:
     """
     response: ResponseModel = RESPONSE_DICT[id]
 
+    app.logger.info(f"Responding to: {str(response)}.")
+
     # Emit to the room associated with the id using (to=id).
     socketio_app.emit("blocking_response", pickle.dumps(response), to=id)
 
     # If the request is completed or errored out, close the associated room.
     if response.status == JobStatus.COMPLETED or response.status == JobStatus.ERROR:
+        app.logger.info(
+            f"Closing id: {response.id}. Total procssing time: {(datetime.now() - response.recieved).total_seconds()}s"
+        )
         close_room(id)
-
 
 REQUEST_PROCESSOR.start()
 [inference_processor.start() for inference_processor in INFERENCE_PROCESSORS]
-
 with app.app_context():
+
     SIGNAL_PROCESSOR.start()

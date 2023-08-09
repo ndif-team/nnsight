@@ -79,6 +79,7 @@ class InferenceProcessor(Processor):
             # Create response
             self.response_dict[request.id] = ResponseModel(
                 id=request.id,
+                recieved=request.recieved,
                 blocking=request.blocking,
                 status=JobStatus.COMPLETED,
                 description="Your job has been completed.",
@@ -88,7 +89,7 @@ class InferenceProcessor(Processor):
                     id: Intervention.Intervention.interventions[id].cpu().value
                     for id in Intervention.Copy.copies
                 },
-            )
+            ).log(self.logger)
 
             # Reset the model of all state data
             Model.clear()
@@ -97,10 +98,11 @@ class InferenceProcessor(Processor):
 
             self.response_dict[request.id] = ResponseModel(
                 id=request.id,
+                recieved=request.recieved,
                 blocking=request.blocking,
                 status=JobStatus.ERROR,
                 description=str(exception),
-            )
+            ).log(self.logger)
 
             raise exception
 
