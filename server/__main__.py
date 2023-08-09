@@ -8,5 +8,5 @@ if __name__ == "__main__":
     from . import CONFIG
 
     socketio_app.run(
-        app, host="0.0.0.0", port=CONFIG["PORT"], debug=True, use_reloader=False
+        app, host="0.0.0.0", port=CONFIG.PORT, debug=True, use_reloader=False
     )

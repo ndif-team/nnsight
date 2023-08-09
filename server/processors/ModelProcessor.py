@@ -8,7 +8,7 @@ from ..ResponseDict import ResponseDict
 from . import Processor
 
 
-class InferenceProcessor(Processor):
+class ModelProcessor(Processor):
     """
     Handles the LLM inference processing.
 
