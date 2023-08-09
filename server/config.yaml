@@ -2,20 +2,16 @@ RESPONSE_PATH: ./responses
 PORT: 5000
 LOG_PATH: ./logs
 MODEL_CONFIGURATIONS:
-  [
-    { repo_id: gpt2 },
-    {
-      repo_id: decapoda-research/llama-65b-hf,
-      max_memory:
-        {
-          0: "0GiB",
-          1: "0GiB",
-          2: "0GiB",
-          3: "0GiB",
-          4: "86GiB",
-          5: "86GiB",
-          6: "86GiB",
-          7: "86GiB",
-        },
-    },
-  ]
+  - repo_id: gpt2
+  # - repo_id: decapoda-research/llama-65b-hf
+  #   max_memory:
+  #     {
+  #       0: "0GiB",
+  #       1: "0GiB",
+  #       2: "0GiB",
+  #       3: "0GiB",
+  #       4: "86GiB",
+  #       5: "86GiB",
+  #       6: "86GiB",
+  #       7: "86GiB",
+  #     }

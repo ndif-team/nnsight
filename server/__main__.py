@@ -1,9 +1,10 @@
-import multiprocessing
 
 if __name__ == "__main__":
     # Pytorch/cuda requires 'spawn' instead of 'fork' for multiprocessing
+    import multiprocessing
     multiprocessing.set_start_method("spawn")
 
+    from .import download_models
     from .app import app, socketio_app
     from . import CONFIG
 
