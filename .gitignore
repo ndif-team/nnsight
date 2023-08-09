@@ -1,4 +1,7 @@
 build/
+logs/
+responses/
+engine/model_checkpoints/**/.no_exist/
 *.egg-info/
 .installed.cfg
 __pycache__/
