@@ -1,7 +1,8 @@
 from typing import Dict
 
 import accelerate
-from engine import Intervention, Model, logger as engine_logger
+from engine import Intervention, Model
+from engine import logger as engine_logger
 from engine.modeling import JobStatus, RequestModel, ResponseModel
 
 from ..ResponseDict import ResponseDict
@@ -58,9 +59,7 @@ class ModelProcessor(Processor):
         super().initialize()
 
     def process(self, request: RequestModel) -> None:
-
         try:
-
             # Parse out data needed for inference
             execution_graphs, promises, prompts = (
                 request.execution_graphs,
@@ -95,7 +94,6 @@ class ModelProcessor(Processor):
             Model.clear()
 
         except Exception as exception:
-
             self.response_dict[request.id] = ResponseModel(
                 id=request.id,
                 recieved=request.recieved,
@@ -105,7 +103,3 @@ class ModelProcessor(Processor):
             ).log(self.logger)
 
             raise exception
-
-
-
-

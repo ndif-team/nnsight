@@ -22,7 +22,7 @@ json_file_paths = glob(
     os.path.join(ENGINE_CONFIG.APP.MODEL_CACHE_PATH, "**/*.json"), recursive=True
 )
 
-# Remove all softlinks and replace the with the actual file.
+# Remove all softlinks and replace them with the actual file.
 for json_file_path in json_file_paths:
     real_path = os.path.realpath(json_file_path)
     abs_path = os.path.abspath(json_file_path)
