@@ -30,8 +30,8 @@ with model.invoke('Hello world') as invoker:
     mmlp0 = model.transformer.h[0].mlp.output
     mmlp1 = model.transformer.h[1].mlp.output 
     # Addition works like you normally would either with tensors or primatives ( will add other operations later)
-    noise = (0.001**0.5)*torch.randn(mmlp1.t[_world].shape)
-    mmlp1 = mmlp1.t[_world] + noise
+    noise = (0.001**0.5)*torch.randn(mmlp1.t[1].shape)
+    mmlp1 = mmlp1.t[1] + noise
 
     mmlp2_before = model.transformer.h[2].mlp.output.copy()
 
@@ -46,13 +46,6 @@ with model.invoke('Goodbye world') as invoker:
     # Operations work cross-prompt!
     model.transformer.h[1].mlp.output = mmlp0
 
-# As of now, intervention will only happen on the first token generation even if max_new_tokens > 1
-# Set device of model, will actually load and execute the model at this call
-# If already loaded from a previous call, it wont do it again
-# Can add any *args and **kwargs you would normally pass to AutoModelForCausalLM.generate()
-# Output is the same as output for AutoModelForCausalLM.generate()
-
-# Will print all interventions as they happen for debugging ( will move to log file/debug flag)
 output = model(device_map='server', max_new_tokens=3)
 
 breakpoint()
