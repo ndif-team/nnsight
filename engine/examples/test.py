@@ -53,6 +53,6 @@ with model.invoke('Goodbye world') as invoker:
 # Output is the same as output for AutoModelForCausalLM.generate()
 
 # Will print all interventions as they happen for debugging ( will move to log file/debug flag)
-output = model(device='cuda:0', max_new_tokens=3)
+output = model(device_map='server', max_new_tokens=3)
 
 breakpoint()

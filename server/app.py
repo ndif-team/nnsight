@@ -10,8 +10,7 @@ from flask import Flask, request, session
 from flask_socketio import SocketIO, close_room, join_room
 
 from . import CONFIG
-from .inference_configurations import inference_configurations
-from .processors.InferenceProcessor import InferenceProcessor
+from .processors.ModelProcessor import ModelProcessor
 from .processors.RequestProcessor import RequestProcessor
 from .processors.SignalProcessor import SignalProcessor
 from .ResponseDict import ResponseDict
@@ -21,7 +20,7 @@ app = Flask(__name__)
 # SocketIO Flask wrapper
 socketio_app = SocketIO(app)
 
-logging_handler = logging.FileHandler(os.path.join(CONFIG["LOG_PATH"], "app.log"), "a")
+logging_handler = logging.FileHandler(os.path.join(CONFIG.LOG_PATH, "app.log"), "a")
 logging_handler.setFormatter(
     logging.Formatter(
         "%(asctime)s %(processName)-10s %(name)s %(levelname)-8s %(message)s"
@@ -36,34 +35,34 @@ MP_MANAGER = Manager()
 REQUEST_QUEUE = MP_MANAGER.Queue()
 SIGNAL_QUEUE = MP_MANAGER.Queue()
 # Mapping from repo_id to Queue
-INFERENCE_QUEUES = {
-    inference_configuration.repo_id: MP_MANAGER.Queue()
-    for inference_configuration in inference_configurations
+MODEL_QUEUES = {
+    model_configuration.repo_id: MP_MANAGER.Queue()
+    for model_configuration in CONFIG.MODEL_CONFIGURATIONS
 }
 
 # Create disk offloaded response dictionary
-RESPONSE_DICT = ResponseDict(CONFIG["RESPONSE_PATH"], MP_MANAGER.Lock(), SIGNAL_QUEUE)
+RESPONSE_DICT = ResponseDict(CONFIG.RESPONSE_PATH, MP_MANAGER.Lock(), SIGNAL_QUEUE)
 
 # Create processor that signals the Flask app
 SIGNAL_PROCESSOR = SignalProcessor(
-    url=f"ws://localhost:{CONFIG['PORT']}", queue=SIGNAL_QUEUE
+    url=f"ws://localhost:{CONFIG.PORT}", queue=SIGNAL_QUEUE
 )
 
 # Create processor to handle incoming requests
 REQUEST_PROCESSOR = RequestProcessor(
-    job_queues=INFERENCE_QUEUES, response_dict=RESPONSE_DICT, queue=REQUEST_QUEUE
+    job_queues=MODEL_QUEUES, response_dict=RESPONSE_DICT, queue=REQUEST_QUEUE
 )
 
-# Create inference processor for every specified inference configuration
-INFERENCE_PROCESSORS = [
-    InferenceProcessor(
-        model_name_or_path=inference_configuration.checkpoint_path,
-        max_memory=inference_configuration.max_memory,
-        device_map=inference_configuration.device_map,
+# Create model processor for every specified model configuration
+MODEL_PROCESSORS = [
+    ModelProcessor(
+        model_name_or_path=model_configuration.checkpoint_path,
+        max_memory=model_configuration.max_memory,
+        device_map=model_configuration.device_map,
         response_dict=RESPONSE_DICT,
-        queue=INFERENCE_QUEUES[inference_configuration.repo_id],
+        queue=MODEL_QUEUES[model_configuration.repo_id],
     )
-    for inference_configuration in inference_configurations
+    for model_configuration in CONFIG.MODEL_CONFIGURATIONS
 ]
 
 
@@ -128,7 +127,7 @@ def blocking_response(id: str) -> None:
         close_room(id)
 
 REQUEST_PROCESSOR.start()
-[inference_processor.start() for inference_processor in INFERENCE_PROCESSORS]
+[model_processor.start() for model_processor in MODEL_PROCESSORS]
 with app.app_context():
 
     SIGNAL_PROCESSOR.start()

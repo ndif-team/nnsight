@@ -33,7 +33,7 @@ class Processor(Process, ABC):
 
     def init_logging(self):
         self.logging_handler = logging.FileHandler(
-            os.path.join(CONFIG["LOG_PATH"], f"{self.name}.log"), "a"
+            os.path.join(CONFIG.LOG_PATH, f"{self.name}.log"), "a"
         )
         self.logging_handler.setFormatter(
             logging.Formatter(

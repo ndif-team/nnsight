@@ -3,15 +3,14 @@ import os
 
 import yaml
 
+from .modeling import ConfigModel
 from .monkey_patching import *
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
-    CONFIG = yaml.safe_load(file)
+    CONFIG = ConfigModel(**yaml.safe_load(file))
 
-CONFIG["APP"]["MODEL_CACHE_PATH"] = os.path.join(
-    PATH, CONFIG["APP"]["MODEL_CACHE_PATH"]
-)
+CONFIG.APP.MODEL_CACHE_PATH = os.path.join(PATH, CONFIG.APP.MODEL_CACHE_PATH)
 
 logging_handler = logging.FileHandler(os.path.join(PATH, f"engine.log"), "a")
 logging_handler.setFormatter(
