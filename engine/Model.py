@@ -106,7 +106,7 @@ class Model:
                     tokens
 
             """
-            return list(Promise.Tokens.tokens.keys())
+            return Promise.Tokens.tokens
 
         @override
         def __enter__(self) -> Model.Invoker:
