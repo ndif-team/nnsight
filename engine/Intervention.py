@@ -429,7 +429,7 @@ class Get(Intervention):
 
     def __call__(self, value: Tensor) -> None:
 
-        logger.debug(f"Reached {self.module_name}[{self.batch_index}]")
+        logger.debug(f"Setting {str(self)}")
 
         self.value = self.batch_index_get(value)
 
