@@ -7,17 +7,17 @@ import accelerate
 import baukit
 import socketio
 import torch
+import torch.fx
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, PreTrainedModel, PreTrainedTokenizer)
 from transformers.generation.utils import GenerateOutput
-from typing_extensions import override
 
 from . import CONFIG
-from .Intervention import (Adhoc, Copy, Get, Intervention, Tensor,
-                           output_intervene)
+from .fx import Proxy
+from .Intervention import InterventionTree, intervene
+from .Invoker import Invoker
 from .modeling import JobStatus, RequestModel, ResponseModel
-from .Module import Module
-from .Promise import Promise
+from .Module import IdxTracker, Module
 
 
 class Model:
@@ -34,154 +34,15 @@ class Model:
         local_model : PreTrainedModel
     """
 
-    class Invoker:
-        """
-        An Invoker represents a context window for running a single prompt which tracks
-        all requested interventions applied during the invokation of the prompt
-
-        Class Attributes
-        ----------
-            execution_graphs : List[List[str]]
-                a list of all invocation execution_graph
-            prompts : List[str]
-                list of all invocation prompts
-            promises : Dict[str, Promise]
-                dict of all promises for all invocations
-
-        Attributes
-        ----------
-            model : PreTrainedModel
-            prompt : str
-            args : List
-            kwargs : Dict
-        """
-
-        execution_graphs: List[List[str]] = list()
-        prompts: List[str] = list()
-        promises: Dict[str, Promise] = dict()
-
-        @classmethod
-        def clear(cls) -> None:
-            """
-            Clears everything. To be called after model execution and promise fulfillment.
-            """
-            Model.Invoker.execution_graphs.clear()
-            Model.Invoker.promises.clear()
-            Model.Invoker.prompts.clear()
-
-        @classmethod
-        def compile(cls) -> Tuple[List[List[str]], Dict[str, Dict], List[str]]:
-            """
-            Returns everything needed to convert all invocations into interventions.
-
-            Returns
-            ----------
-                List[List[str]]
-                    execution graphs
-                Dict[str, Dict]
-                    promises
-                List[str]
-                    prompts
-            """
-            return (
-                Model.Invoker.execution_graphs,
-                Model.Invoker.promises,
-                Model.Invoker.prompts,
-            )
-
-        def __init__(self, model: Model, prompt: str, *args, **kwargs) -> None:
-            self.model = model
-            self.prompt = prompt
-            self.args = args
-            self.kwargs = kwargs
-
-        @property
-        def tokens(self) -> List[str]:
-            """
-            Gets a list of the current prompt split into tokens.
-
-            Returns
-            ----------
-                List[str]
-                    tokens
-
-            """
-            return Promise.Tokens.tokens
-
-        @override
-        def __enter__(self) -> Model.Invoker:
-            """
-            Denotes you are entering a context window cented around applying interventions to the LLM processing of
-            the specified prompt.
-            """
-
-            # New prompt invocation means the generation context is set back to the first generated token.
-            Module.generation_idx = 0
-
-            # Run the prompt through the empty grapgh model to reset all Modules and set their shapes to the correct sizes.
-            inputs = self.model.run_graph(self.prompt, *self.args, **self.kwargs)
-            # Gets the tokenized version of the prompt to QOL features.
-            tokenized = [
-                self.model.tokenizer.decode(token) for token in inputs["input_ids"][0]
-            ]
-            Promise.set_tokens(tokenized)
-
-            # If in an invocation context window, running components of the model should be seen as an AdHoc intervention,
-            # not actually running the model.
-            Module.adhoc_mode = True
-            torch.set_grad_enabled(False)
-
-            return self
-
-        @override
-        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-            """
-            Denotes you are exiting a context window cented around applying interventions to the LLM processing of
-            the specified prompt.
-            """
-
-            # Get compiled Promise data and store them in class attributes.
-            execution_graph, promises = Promise.compile()
-            Model.Invoker.execution_graphs.append(execution_graph)
-            Model.Invoker.prompts.append(self.prompt)
-            Model.Invoker.promises = {**promises, **Model.Invoker.promises}
-
-            # Clear Promise to allow for new invocations.
-            Promise.execution_graph.clear()
-
-            # Batch_idx denotes the index of invocation for multiple invocation runs so increment.
-            Module.batch_idx += 1
-
-            # Were leaving the Promise generation context window.
-            Module.adhoc_mode = False
-            torch.set_grad_enabled(True)
-
-        def next(self) -> None:
-            """
-            Denotes the context window is moving to the next token generation for multiple token generation runs.
-            """
-
-            Module.generation_idx += 1
-            Promise.set_tokens([f"<P{Module.generation_idx}>"])
-
-            Module.adhoc_mode = False
-
-            self.model.run_graph("_", *self.args, **self.kwargs)
-
-            Module.adhoc_mode = True
-
-    @classmethod
-    def clear(cls) -> None:
-        """
-        Clears everything. To be called after model execution and promise fulfillment.
-        """
-        Model.Invoker.clear()
-        Promise.clear()
-        Intervention.clear()
-        Module.batch_idx = 0
-
     def __init__(self, model_name_or_path: str) -> None:
         self.model_name_or_path = model_name_or_path
+        self.output = None
+        self.local_model = None
+        self.intervention_graph = None
+        self.idx_tracker = IdxTracker()
+        self.intervention_tree = InterventionTree()
+        self.prompts = []
+        self.invokers = []
 
         # Use init_empty_weights to create graph i.e the specified model with no loaded parameters,
         # to use for finding shapes of Module inputs and outputs, as well as replacing torch.nn.Module
@@ -199,21 +60,34 @@ class Model:
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.graph = AutoModelForCausalLM.from_config(self.config)
+            self.graph_model: PreTrainedModel = AutoModelForCausalLM.from_config(
+                self.config
+            )
 
         # Set immediate graph childen modules as Models children so sub-modules
         # can be accessed directly.
-        for name, module in self.graph.named_children():
+        for name, module in self.graph_model.named_children():
             # Wrap all modules in our Module class.
-            module = Module.wrap(module)
+            module = Module.wrap(module, self)
 
-            setattr(self.graph, name, module)
+            setattr(self.graph_model, name, module)
             setattr(self, name, module)
 
         self.init_graph()
 
-        self.output = None
-        self.local_model = None
+        self.reset()
+
+    def reset(self) -> None:
+        """Resets attributes after inference"""
+        self.intervention_graph = torch.fx.graph.Graph(owning_module=self.graph_model)
+
+        self.prompts = []
+        self.invokers = []
+
+        self.intervention_tree.reset()
+        self.idx_tracker.reset()
+
+        Proxy.reset()
 
     def init_graph(self) -> None:
         """
@@ -221,25 +95,41 @@ class Model:
         """
 
         # Set module_path attribute so Modules know their path.
-        for name, module in self.graph.named_modules():
+        for name, module in self.graph_model.named_modules():
             module.module_path = name
 
     @torch.inference_mode()
     def run_graph(self, prompt: str, *args, **kwargs) -> BatchEncoding:
+        """Runs meta version of model given prompt and return the tokenized inputs.
+
+        Args:
+            prompt (str): _description_
+
+        Returns:
+            BatchEncoding: _description_
+        """
         inputs = self.tokenizer([prompt], return_tensors="pt").to("cpu")
 
-        self.graph(*args, **inputs.copy().to("meta"), **kwargs)
+        self.graph_model(*args, **inputs.copy().to("meta"), **kwargs)
 
         return inputs
 
     def __repr__(self) -> str:
-        return repr(self.graph)
+        return repr(self.graph_model)
 
     def __call__(
         self, *args, device_map="server", **kwargs
     ) -> Union[GenerateOutput, torch.LongTensor]:
-        execution_graphs, promises, prompts = Model.Invoker.compile()
+        """
+        Calls the model to run locally or on device.
+        If local and first time running the mode, it will load and sipatch the actual paramters.
 
+        Args:
+            device_map (str, optional): _description_. Defaults to "server".
+
+        Returns:
+            Union[GenerateOutput, torch.LongTensor]: _description_
+        """
         if device_map == "server":
             return self.submit_to_server(
                 execution_graphs, promises, prompts, *args, **kwargs
@@ -248,42 +138,44 @@ class Model:
         else:
             self.dispatch(device_map=device_map)
 
-            output = self.run_model(
-                execution_graphs, promises, prompts, *args, **kwargs
-            )
+            output = self.run_model(*args, **kwargs)
 
-            for id in Copy.copies:
-                Promise.promises[id].value = Intervention.interventions[id].value
+            for name in Proxy.save_proxies:
+                Proxy.save_proxies[name].set_result(
+                    self.intervention_tree.interventions[name].value()
+                )
 
-            Model.clear()
+            self.reset()
 
             return output
 
     @torch.inference_mode()
     def run_model(
         self,
-        execution_graphs: List[List[str]],
-        promises: Dict[str, Dict],
-        prompts: List[str],
         *args,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
-        for execution_graph in execution_graphs:
-            Intervention.from_execution_graph(execution_graph, promises)
+        """_summary_
 
-        Tensor.to(self.local_model.device)
+        Returns:
+            Union[GenerateOutput, torch.LongTensor]: _description_
+        """
+        tree = self.intervention_tree.from_graph(self.intervention_graph)
 
-        Adhoc.model = self.local_model
-
-        inputs = self.tokenizer(prompts, padding=True, return_tensors="pt").to(
+        # Tokenize inputs
+        inputs = self.tokenizer(self.prompts, padding=True, return_tensors="pt").to(
             self.local_model.device
         )
 
+        # Run the model generate method with a baukit.TraceDict. tree.modules has all of the module names involved in Interventions.
+        # output_intervene is called when module from tree.modules is ran and is the entry point for the Intervention tree
         with baukit.TraceDict(
             self.local_model,
-            Get.layers(),
+            list(tree.modules),
             retain_output=False,
-            edit_output=output_intervene,
+            edit_output=lambda activation, module_path: intervene(
+                activation, module_path, tree, "output"
+            ),
         ):
             output = self.local_model.generate(*args, **inputs, **kwargs)
 
@@ -337,6 +229,11 @@ class Model:
         pass
 
     def dispatch(self, device_map="auto"):
+        """Actually loades the model paramaters to devices specified by device_map
+
+        Args:
+            device_map (str, optional): _description_. Defaults to "auto".
+        """
         if self.local_model is None:
             self.local_model = AutoModelForCausalLM.from_pretrained(
                 self.model_name_or_path,
@@ -347,8 +244,19 @@ class Model:
 
             # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
             self.local_model.register_forward_hook(
-                lambda module, input, output: Intervention.increment()
+                lambda module, input, output: self.intervention_tree.increment()
             )
 
-    def invoke(self, prompt: str, *args, **kwargs) -> Model.Invoker:
-        return Model.Invoker(self, prompt, *args, **kwargs)
+            self.intervention_tree.model = self.local_model
+
+    def invoke(self, prompt: str, *args, **kwargs) -> Invoker:
+        """Creates an Invoker context.
+
+        Args:
+            prompt (str): _description_
+
+        Returns:
+            Invoker: _description_
+        """
+
+        return Invoker(self, prompt, *args, **kwargs)

@@ -25,4 +25,3 @@ logger.setLevel(logging.DEBUG)
 
 
 from .Model import Model
-from .Module import Module

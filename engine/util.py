@@ -3,7 +3,7 @@ from functools import wraps
 from typing import Any, Callable, Union
 
 import torch
-
+from typing import Type
 Primative = Union[str, int, float, bool]
 Value = Union[Primative, torch.Tensor]
 
@@ -21,11 +21,28 @@ def apply(data: Any, fn: Callable, cls: type):
     if isinstance(data, dict):
         return {key: apply(value, fn, cls) for key, value in data.items()}
 
-    if data is None:
-        return
+    return data
 
-    raise ValueError()
+def fetch_attr(object:object, target: str):
+    target_atoms = target.split(".")
+    for i, atom in enumerate(target_atoms):
+        if not hasattr(object, atom):
+            return None
+        object = getattr(object, atom)
+    return object
 
+def wrap(object:object, wrapper:Type, *args, **kwargs):
+   
+    if isinstance(object, wrapper):
+        return object
+
+    object.__class__ = type(
+        object.__class__.__name__, (wrapper, object.__class__), {}
+    )
+
+    wrapper.__init__(object, *args, **kwargs)
+
+    return object
 
 def timed(func, lggr):
     """This decorator prints the execution time for the decorated function."""
