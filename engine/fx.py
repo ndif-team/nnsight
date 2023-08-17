@@ -65,6 +65,19 @@ class Proxy(torch.futures.Future, torch.fx.Proxy):
             torch.Size: _description_
         """
         return self.tracer.node_name_to_shape[self.node.name]
+    
+
+    def token(self, idx:int) -> Proxy:
+
+        if idx >= 0:
+            n_tokens = self.shape[1]
+            idx = -(n_tokens - idx)
+
+        return self[:,idx]
+    
+    def t(self, idx:int) -> Proxy:
+
+        return self.token(idx)
 
 
 class Tracer(torch.fx.proxy.GraphAppendingTracer):

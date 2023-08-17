@@ -36,10 +36,8 @@ class Model:
 
     def __init__(self, model_name_or_path: str) -> None:
         self.model_name_or_path = model_name_or_path
-
         self.output = None
         self.local_model: GenerationMixin = None
-
         self.invoker_state = InvokerState(self)
 
         # Use init_empty_weights to create graph i.e the specified model with no loaded parameters,
@@ -56,6 +54,7 @@ class Model:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name_or_path,
                 config=self.config,
+                padding_side='left',
                 cache_dir=CONFIG.APP.MODEL_CACHE_PATH,
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -97,9 +96,15 @@ class Model:
         Returns:
             BatchEncoding: _description_
         """
+        if isinstance(inputs, list) and isinstance(inputs[0], int):
+            inputs = torch.IntTensor([inputs])
+        if isinstance(inputs, torch.Tensor):
+            if inputs.ndim == 1:
+                inputs = inputs.unsqueeze(0)
+            inputs = {"input_ids": inputs.type(torch.IntTensor)}
         if not isinstance(inputs, dict):
             return self.tokenizer(
-                inputs, *args, return_tensors="pt", padding=True, **kwargs
+                inputs, *args, return_tensors="pt", padding=True,**kwargs
             )
 
         return BatchEncoding(inputs)
@@ -144,7 +149,9 @@ class Model:
             output = self.run_model(tree, *args, **kwargs)
 
             for name in self.invoker_state.tracer.save_proxies:
-                self.invoker_state.tracer.save_proxies[name].set_result(tree.interventions[name].value())
+                self.invoker_state.tracer.save_proxies[name].set_result(
+                    tree.interventions[name].value()
+                )
 
             self.invoker_state.reset()
 
