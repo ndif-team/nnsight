@@ -6,8 +6,8 @@ print(model)
 
 with model.invoke('Hello world') as invoker:
     
-    zzz = model.model.layers[0].output.copy()
+    hiddenstates = model.model.layers[0].output.save()
 
 output = model(device_map='server', max_new_tokens=1, return_dict_in_generate=True, output_scores=True)
 
-breakpoint()
+print(hiddenstates.value())

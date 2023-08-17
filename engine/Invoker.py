@@ -79,4 +79,5 @@ class Invoker:
         self.state.generation_idx += 1
 
         # Run graph with
-        self.state.model.run_graph("_", *self.args, **self.kwargs)
+        inputs = self.state.model.prepare_inputs("_")
+        self.state.model.run_graph(inputs, *self.args, **self.kwargs)
