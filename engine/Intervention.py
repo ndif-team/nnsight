@@ -10,6 +10,7 @@ from torch.utils.hooks import RemovableHandle
 
 from . import logger, util
 from .fx import Proxy
+from .modeling import InterventionModel
 
 
 class InterventionTree:
@@ -22,9 +23,74 @@ class InterventionTree:
         generation_idx (int): _description_
     """
 
+    @staticmethod
+    def from_pydantic(interventions: Dict[str, InterventionModel]) -> InterventionTree:
+        """_summary_
+
+        Args:
+            graph (torch.fx.graph.Graph): _description_
+        """
+
+        tree = InterventionTree()
+
+        for node in interventions.values():
+            tree._from_pydantic(node, interventions)
+
+        return tree
+
+    def _from_pydantic(
+        self,
+        pintervention: InterventionModel,
+        interventions: Dict[str, InterventionModel],
+    ) -> Intervention:
+        """Creates an Intervention from a Node.
+
+        Args:
+            node (torch.fx.node.Node): _description_
+
+        Returns:
+            Intervention: _description_
+        """
+
+        def _dereference(reference: InterventionModel.Reference):
+            return self._from_pydantic(interventions[reference.name], interventions)
+
+        # Arguments might be nodes themselves so recurse.
+        args = util.apply(pintervention.args, _dereference, InterventionModel.Reference)
+        kwargs = util.apply(
+            pintervention.kwargs, _dereference, InterventionModel.Reference
+        )
+
+        # Processing of args may have already created an Intervention for this node so just return it.
+        if pintervention.name in self.interventions:
+            return self.interventions[pintervention.name]
+
+        intervention = self.create(
+            pintervention.operation,
+            pintervention.name,
+            pintervention.target,
+            *args,
+            **kwargs,
+        )
+
+        # Dependencies and listeners might be nodes themselves so recurse.
+        dependencies = util.apply(
+            pintervention.dependencies, _dereference, InterventionModel.Reference
+        )
+        listeners = util.apply(
+            pintervention.listeners, _dereference, InterventionModel.Reference
+        )
+
+        # Set the callbacks for dependencies and listeners.
+        intervention.set_listeners(listeners)
+        intervention.set_dependencies(dependencies)
+
+        return intervention
+
     def __init__(self) -> None:
         self.interventions: Dict[str, Intervention] = dict()
-        self.activations: Dict[str, ActivationIntervention] = dict()
+        self.activation_interventions: Dict[str, ActivationIntervention] = dict()
+        self.save_interventions: Dict[str, ActivationIntervention] = dict()
         self.modules: Set[str] = set()
         self.generation_idx: int = 0
         self.model: torch.nn.Module = None
@@ -50,49 +116,6 @@ class InterventionTree:
     def increment(self) -> None:
         """Increments generation_idx by one."""
         self.generation_idx += 1
-
-    def from_graph(self, graph: torch.fx.graph.Graph) -> InterventionTree:
-        """_summary_
-
-        Args:
-            graph (torch.fx.graph.Graph): _description_
-        """
-        for node in graph.nodes:
-            self.from_node(node)
-
-        return self
-
-    def from_node(self, node: torch.fx.Node) -> Intervention:
-        """Creates an Intervention from a Node.
-
-        Args:
-            node (torch.fx.node.Node): _description_
-
-        Returns:
-            Intervention: _description_
-        """
-
-        # Arguments might be nodes themselves so recurse.
-        args = util.apply(node.args, self.from_node, torch.fx.Node)
-        kwargs = util.apply(node.kwargs, self.from_node, torch.fx.Node)
-
-        # Processing of args may have already created an Intervention for this node so just return it.
-        if node.name in self.interventions:
-            return self.interventions[node.name]
-
-        intervention = self.create(node.op, node.name, node.target, *args, **kwargs)
-
-        # Dependencies and listeners might be nodes themselves so recurse.
-        dependencies = util.apply(
-            list(node._input_nodes.keys()), self.from_node, torch.fx.Node
-        )
-        listeners = util.apply(list(node.users.keys()), self.from_node, torch.fx.Node)
-
-        # Set the callbacks for dependencies and listeners.
-        intervention.set_listeners(listeners)
-        intervention.set_dependencies(dependencies)
-
-        return intervention
 
     def create(
         self,
@@ -241,7 +264,7 @@ class ActivationIntervention(Intervention):
         super().__init__(*args, **kwargs)
 
         self.tree.modules.add(".".join(self.target.split(".")[:-3]))
-        self.tree.activations[self.target] = self
+        self.tree.activation_interventions[self.target] = self
 
     def set_dependencies(self, dependencies: List[Intervention]):
         return super().set_dependencies([self])
@@ -266,7 +289,7 @@ class ActivationIntervention(Intervention):
 class SetIntervention(Intervention):
     def intervene(self):
         module_name, activation_intervention, value_intervention = self.args
-        self.tree.activations[module_name] = value_intervention
+        self.tree.activation_interventions[module_name] = value_intervention
 
         self.set_result(value_intervention.value())
 
@@ -274,6 +297,9 @@ class SetIntervention(Intervention):
 class SaveIntervention(Intervention):
     def intervene(self):
         intervention = self.args[0]
+
+        self.tree.save_interventions[self.name] = self
+
         self.set_result(copy.deepcopy(intervention.value()))
 
     def destroy(self):
@@ -298,12 +324,12 @@ def intervene(activations, module_path: str, tree: InterventionTree, key: str):
 
     batch_module_path = f"{module_path}.{batch_idx}"
 
-    while batch_module_path in tree.activations:
-        intervention = tree.activations[batch_module_path]
+    while batch_module_path in tree.activation_interventions:
+        intervention = tree.activation_interventions[batch_module_path]
 
         intervention.batch_index_set(batch_idx, activations)
 
-        intervention = tree.activations[batch_module_path]
+        intervention = tree.activation_interventions[batch_module_path]
 
         ActivationIntervention.batch_index_update(
             batch_idx, activations, intervention.value()

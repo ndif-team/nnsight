@@ -25,7 +25,7 @@ class ResponseModel(BaseModel):
 
     output: Any = None
     recieved: datetime = None
-    copies: Dict[str, Any] = None
+    saves: Dict[str, Any] = None
     blocking: bool = False
 
     def __str__(self) -> str:

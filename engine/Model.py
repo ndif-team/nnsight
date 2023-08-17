@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pickle
-from typing import Union
+from typing import Union, List, Dict
 
 import accelerate
 import baukit
@@ -16,7 +16,7 @@ from transformers.generation.utils import GenerateOutput
 from . import CONFIG, logger, modeling
 from .Intervention import InterventionTree, intervene
 from .Invoker import Invoker, InvokerState
-from .modeling.Request import RequestModel
+
 from .Module import Module
 
 
@@ -138,19 +138,21 @@ class Model:
             Union[GenerateOutput, torch.LongTensor]: _description_
         """
 
-        tree = InterventionTree().from_graph(self.invoker_state.tracer.graph)
+        interventions = modeling.InterventionModel.from_graph(self.invoker_state.tracer.graph)
 
         if device_map == "server":
-            return self.submit_to_server(tree, *args, **kwargs)
+            return self.submit_to_server(interventions, *args, **kwargs)
 
         else:
             self.dispatch(device_map=device_map)
 
-            output = self.run_model(tree, *args, **kwargs)
+            tree = InterventionTree.from_pydantic(interventions)
+
+            output = self.run_model(tree, self.invoker_state.prompts, *args, **kwargs)
 
             for name in self.invoker_state.tracer.save_proxies:
                 self.invoker_state.tracer.save_proxies[name].set_result(
-                    tree.interventions[name].value()
+                    tree.save_interventions[name].value()
                 )
 
             self.invoker_state.reset()
@@ -161,6 +163,7 @@ class Model:
     def run_model(
         self,
         tree: InterventionTree,
+        prompts: List[str],
         *args,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
@@ -171,7 +174,7 @@ class Model:
         """
 
         # Tokenize inputs
-        inputs = self.prepare_inputs(self.invoker_state.prompts).to(
+        inputs = self.prepare_inputs(prompts).to(
             self.local_model.device
         )
 
@@ -198,7 +201,7 @@ class Model:
         return output
 
     def submit_to_server(
-        self, tree: InterventionTree, *args, blocking: bool = True, **kwargs
+        self, interventions: Dict[str, modeling.InterventionModel], *args, blocking: bool = True, **kwargs
     ):
         """_summary_
 
@@ -213,7 +216,7 @@ class Model:
             kwargs=kwargs,
             model_name=self.model_name_or_path,
             prompts=self.invoker_state.prompts,
-            interventions_tree=tree,
+            interventions=interventions,
         )
 
         if blocking:
@@ -221,7 +224,7 @@ class Model:
 
         return self.non_blocking_request(request)
 
-    def blocking_request(self, request: RequestModel):
+    def blocking_request(self, request: modeling.RequestModel):
         sio = socketio.Client()
         sio.connect(f"ws://{CONFIG.API.HOST}")
 
@@ -231,15 +234,15 @@ class Model:
 
             print(str(data))
 
-            if data.status == modeling.Response.JobStatus.COMPLETED:
-                for id, value in data.copies.items():
-                    Promise.promises[id].value = value
+            if data.status == modeling.JobStatus.COMPLETED:
+                for name, value in data.saves.items():
+                    self.invoker_state.tracer.save_proxies[name].set_result(value)
 
                 self.output = data.output
 
                 sio.disconnect()
 
-            elif data.status == modeling.Response.JobStatus.ERROR:
+            elif data.status == modeling.JobStatus.ERROR:
                 sio.disconnect()
 
         sio.emit("blocking_request", pickle.dumps(request))
@@ -248,7 +251,7 @@ class Model:
 
         return self.output
 
-    def non_blocking_request(self, request: RequestModel):
+    def non_blocking_request(self, request: modeling.RequestModel):
         pass
 
     def dispatch(self, device_map="auto"):

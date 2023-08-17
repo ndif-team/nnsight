@@ -3,7 +3,7 @@ import os
 
 import yaml
 
-from .modeling.Config import ConfigModel
+from .modeling import ConfigModel
 from .monkey_patching import *
 
 PATH = os.path.dirname(os.path.abspath(__file__))
