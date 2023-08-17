@@ -1,637 +1,346 @@
 from __future__ import annotations
 
-import uuid
-from abc import abstractclassmethod, abstractmethod
-from collections import OrderedDict
-from typing import Any, Dict, List, Union
+import copy
+from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
 import torch
-from typing_extensions import override
+import torch.futures
+import torch.fx
+from torch.utils.hooks import RemovableHandle
 
-from .util import Value, apply
-from . import logger
-INTERVENTIONS_TYPES = {}
-
-
-class Intervention:
-    '''
-    An Intervention represents an action that needs to be carried out
-    during the execution of a Model, and a store of value for those actions.
-
-    Class Attributes
-    ----------
-        interventions : Dict[str, Intervention]
-            stores a mapping between an Intervention's unique id and the Intervention.
-        generation_idx : int
-            index of what generation were currently on for multi token generation
-
-    Attributes
-    ----------
-        value : str
-            value store of Intervention
-        id : str
-            unique id of Intervention
-        listeners : Set
-            ids of Interventions that wish to be notified of a value change
-        dependencies : Set
-            ids of Interventions that this Intervention depends on having a set value
-    '''
-
-    interventions: Dict[str, Intervention] = OrderedDict()
-    generation_idx: int = 0
-
-    @classmethod
-    def increment(cls) -> None:
-        '''Increments Intervention.generation_idx by one.'''
-        Intervention.generation_idx += 1
+from . import logger, util
+from .fx import Proxy
+from .modeling import InterventionModel
 
 
+class InterventionTree:
+    """
 
-    @classmethod
-    def parse(cls, arg: Value, promises: Dict[str, Dict]) -> Union[Intervention, Value]:
-        '''
-        Parses a promise and it's args into Interventions
+    Attributes:
+        interventions (Dict[str, Intervention]): _description_
+        activations (Dict[str, ActivationIntervention]): _description_
+        modules (Set[str]): _description_
+        generation_idx (int): _description_
+    """
 
-        Parameters
-        ----------
-            arg : Value
-                Value as argument of Intervention or id of arg Intervention to be converted into an Intervention
-            promises : Dict
-                Mapping of Promise id to Dict of attributes that make up a promise: 'args', 'command', and 'id'. Returned from Promise.compile()
-        Returns
-        ----------
-            Union[Intervention,Value]
-                arg Value or converted Intervention
+    @staticmethod
+    def from_pydantic(interventions: Dict[str, InterventionModel]) -> InterventionTree:
+        """_summary_
 
-        '''
-        if isinstance(arg, str) and arg in promises:
+        Args:
+            graph (torch.fx.graph.Graph): _description_
+        """
 
-            promise = promises[arg]
-            promise['args'] = [Intervention.parse(
-                arg, promises) for arg in promise['args']]
-            promise = Intervention.create(**promise)
+        tree = InterventionTree()
 
-            return promise
-        return arg
+        for node in interventions.values():
+            tree._from_pydantic(node, interventions)
 
-    @classmethod
-    def from_execution_graph(cls, execution_graph: List[str], promises: Dict[str, Dict]) -> None:
-        '''
-        Parses the information from Promises into Interventions.
-        Chains dependant Interventions.
+        return tree
 
-        Parameters
-        ----------
-            execution_graph : List[str]
-                List of ids of Promises to be executed in order of execution. Returned from Promise.compile()
-            promises : Dict
-                Mapping of Promise id to Dict of attributes that make up a promise: 'args', 'command', and 'id'. Returned from Promise.compile()
-        '''
+    def _from_pydantic(
+        self,
+        pintervention: InterventionModel,
+        interventions: Dict[str, InterventionModel],
+    ) -> Intervention:
+        """Creates an Intervention from a Node.
 
-        dependancy = None
+        Args:
+            node (torch.fx.node.Node): _description_
 
-        for id in execution_graph:
+        Returns:
+            Intervention: _description_
+        """
 
-            intervention = Intervention.parse(id, promises)
-            if dependancy is not None:
-                Chain(intervention, dependancy)
-            dependancy = intervention
+        def _dereference(reference: InterventionModel.Reference):
+            return self._from_pydantic(interventions[reference.name], interventions)
 
-    @classmethod
-    def create(cls, args: List[Union[Intervention, Value]], id: str, command: str) -> Intervention:
-        '''
-        If an Intervention with the given id already exists, return it.
-        Otherwise create a new Intervention with subtype depending on command.
+        # Arguments might be nodes themselves so recurse.
+        args = util.apply(pintervention.args, _dereference, InterventionModel.Reference)
+        kwargs = util.apply(
+            pintervention.kwargs, _dereference, InterventionModel.Reference
+        )
 
-        Parameters
-        ----------
-            args : List[Union[Intervention,Value]]
-                List of arguments for Intervention. Can be anything
-            id : str
-                id of Intervention
-            command : str
-                String denoting what kind of Intervention
-        '''
+        # Processing of args may have already created an Intervention for this node so just return it.
+        if pintervention.name in self.interventions:
+            return self.interventions[pintervention.name]
 
-        if id in Intervention.interventions:
+        intervention = self.create(
+            pintervention.operation,
+            pintervention.name,
+            pintervention.target,
+            *args,
+            **kwargs,
+        )
 
-            return Intervention.interventions[id]
+        # Dependencies and listeners might be nodes themselves so recurse.
+        dependencies = util.apply(
+            pintervention.dependencies, _dereference, InterventionModel.Reference
+        )
+        listeners = util.apply(
+            pintervention.listeners, _dereference, InterventionModel.Reference
+        )
 
-        return INTERVENTIONS_TYPES[command](*args, id)
-    
-    @classmethod
-    def clear(cls) -> None:
-        '''
-        Clears the Intervention class attributes and clears subtypes.
-        Sets Intervention.generation_idx to zero.
-        '''
-        Intervention.interventions.clear()
-        Intervention.generation_idx = 0
+        # Set the callbacks for dependencies and listeners.
+        intervention.set_listeners(listeners)
+        intervention.set_dependencies(dependencies)
 
-        for type in Intervention.__subclasses__():
+        return intervention
 
-            type._clear()
-    
-    @abstractclassmethod
-    def _clear(cls) -> None:
-        '''Abstract method for subtypes to set when clearing information'''
-        pass
+    def __init__(self) -> None:
+        self.interventions: Dict[str, Intervention] = dict()
+        self.activation_interventions: Dict[str, ActivationIntervention] = dict()
+        self.save_interventions: Dict[str, ActivationIntervention] = dict()
+        self.modules: Set[str] = set()
+        self.generation_idx: int = 0
+        self.model: torch.nn.Module = None
 
-    def __init__(self, id: str = None) -> None:
+    def set_model(self, model: torch.nn.Module) -> RemovableHandle:
+        """
+        Adds a reference to a model to the tree so ModuleInterventions can access
+        its modules and run them. Also hooks the model so after each time it is ran, we can keep track
+        of the generation_idx
 
-        self.value = None
-        self.id = id or str(uuid.uuid4())
-        self.listeners = set()
-        self.dependencies = set()
+        Args:
+            model (torch.nn.Module): _description_
 
-        Intervention.interventions[self.id] = self
+        Returns:
+            RemovableHandle: Returns the hook so it can be removed after completion.
+        """
+        self.model = model
 
-        self.listen(self)
+        return self.model.register_forward_hook(
+            lambda module, input, output: self.increment()
+        )
 
-    def cpu(self):
+    def increment(self) -> None:
+        """Increments generation_idx by one."""
+        self.generation_idx += 1
 
-        def to_cpu(tensor: torch.Tensor):
+    def create(
+        self,
+        operation: str,
+        name: str,
+        target: Union[Callable[..., Any], str],
+        *args,
+        **kwargs,
+    ) -> Intervention:
+        """_summary_
 
-            return tensor.cpu()
+        Args:
+            operation (str): _description_
+            name (str): _description_
+            target (Union[Callable[..., Any], str]): _description_
 
-        self.value = apply(self.value, to_cpu, torch.Tensor)
+        Returns:
+            Intervention: _description_
+        """
+        if name in self.interventions:
+            return self.interventions[name]
+        if operation == "placeholder":
+            return ActivationIntervention(
+                self, operation, name, target, *args, **kwargs
+            )
+        if operation == "call_module":
+            return ModuleIntervention(self, operation, name, target, *args, **kwargs)
+        if target is Proxy.proxy_save:
+            return SaveIntervention(self, operation, name, target, *args, **kwargs)
+        if target is Proxy.proxy_set:
+            return SetIntervention(self, operation, name, target, *args, **kwargs)
 
-        return self
+        return Intervention(self, operation, name, target, *args, **kwargs)
 
-    @abstractmethod
-    def __call__(self):
-        '''Abstract method for subtypes to set when performing their intervention'''
-        pass
 
-    def notify_listeners(self) -> None:
-        '''
-        Attempts to signal listener that it's value is changed.
-        If the dependencies of a listener are fufilled, call the Intervention.
-        Removes dependencies of listeners.
-        '''
+class Intervention(torch.futures.Future):
+    """
+    An Intervention represents some action that needs to be carried out during the inference of a model.
 
-        for listener_id in list(self.listeners):
+    Attributes:
+        operation (str): _description_
+        name (str): _description_
+        target(Union[Callable[..., Any], str]): _description_
+        args (List[Any]): _description_
+        kwargs (Dict[str,Any]): _description_
+    """
 
-            if listener_id != self.id and listener_id in self.listeners:
+    def __init__(
+        self,
+        tree: InterventionTree,
+        operation: str,
+        name: str,
+        target: Union[Callable[..., Any], str],
+        *args,
+        **kwargs,
+    ):
+        """
+        Args:
+            operation (str): _description_
+            name (str): _description_
+            target (Union[Callable[..., Any], str]): _description_
+        """
+        super().__init__()
 
-                intervention = Intervention.interventions[listener_id]
-                intervention.remove_dependency(self.id)
+        self.tree = tree
 
-                if intervention.fufilled():
-                    intervention()
+        self.operation = operation
+        self.name = name
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs
 
-    def fufilled(self) -> bool:
-        '''
-        Returns whether all dependencies have been fufilled, thefore if the 
-        Intervention is ready to be executed.
-        '''
+        # Add to class attribute Intervention.interventions
+        tree.interventions[name] = self
 
-        return len(self.dependencies) == 0
+        # Add done callback to self so we see in logs when this is set.
+        self.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
 
-    def remove_dependency(self, id: str) -> None:
-        '''
-        Removes a dependency if it exists
+    def set_listeners(self, listeners: List[Intervention]) -> None:
+        """
+        Collects all listeners as a single Future and adds a done call back to call destroy()
+        when completed.
 
-        Parameters
-        ----------
-            id : str
-                id of Intervention to remove from dependencies
-        '''
-        if id in self.dependencies:
+        Args:
+            listeners (List[Intervention]): _description_
+        """
 
-            self.dependencies.remove(id)
+        # Add self to listeners becuase we should only destory this Intervention after it's been set.
+        listeners.append(self)
+        torch.futures.collect_all(listeners).add_done_callback(lambda x: self.destroy())
 
-    def depend(self, dependency: Intervention) -> None:
-        '''
-        Adds Intervention to dependencies and adds this Intervention to
-        it's listeners.
+    def set_dependencies(self, dependencies: List[Intervention]) -> None:
+        """
+        Collects all dependencies (arguments that are also Interventions) as a single Future and adds a done call back to call intervene()
+        when completed.
 
-        Parameters
-        ----------
-            dependency : Intervention
-                dependency to add to dependencies
-        '''
+        Args:
+            dependencies (List[Intervention]): _description_
+        """
+        torch.futures.collect_all(dependencies).add_done_callback(
+            lambda x: self.intervene()
+        )
 
-        self.dependencies.add(dependency.id)
-        dependency.listen(self)
+    def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
+        """Preprocess this interventions input to be ran by its command
 
-    def listen(self, listener: Intervention) -> None:
-        '''
-        Adds listener to listeners
+        Returns:
+            Tuple[List[Any], Dict[str,Any]]: _description_
+        """
 
-        Parameters
-        ----------
-            listener : Intervention
-                listener to add to listeners
-        '''
+        def _intervene(value: torch.futures.Future):
+            return value.value()
 
-        self.listeners.add(listener.id)
+        # TODO make this dynamic
+        device = self.tree.model.device
+
+        def _to(value: torch.Tensor):
+            return value.to(device)
+
+        # Turn futures into their values
+        args = util.apply(self.args, _intervene, torch.futures.Future)
+        kwargs = util.apply(self.kwargs, _intervene, torch.futures.Future)
+        # Move tensors to meta device
+        args = util.apply(args, _to, torch.Tensor)
+        kwargs = util.apply(kwargs, _to, torch.Tensor)
+
+        return args, kwargs
+
+    def intervene(self) -> None:
+        """Carries out the Intervention and sets the result."""
+        args, kwargs = self.prepare_inputs()
+
+        output = self.target(*args, **kwargs)
+
+        self.set_result(output)
 
     def destroy(self) -> None:
-        '''
-        Removes reference to self from id to Intervention mapping and sets its self.value 
-        to None.
-        '''
+        """Destroys the Intervention"""
+        logger.debug(f"=> DEL({self.name})")
 
-        logger.debug(f"Destroying {str(self)}")
-
-        self.value = None
-
-    def stop_listening(self, id: str) -> None:
-        '''
-        Removes Intervention with id from listeners. If there exist no more listeners,
-        destory self.
-
-        Parameters
-        ----------
-            id : str
-                id of Intervention to remove from listeners
-        '''
-
-        self.listeners.remove(id)
-
-        if len(self.listeners) == 0:
-
-            self.destroy()
-
-    def get_value(self, listener_id: str) -> torch.Tensor:
-        '''
-        Gets the Intervention's value. Requires an Intervention id in listeners.
-        Removes the listener with id listener_id from listeners.
-        If listener_id is not in listeners, raise ValueError
-        If value is None, raise ValueError.
-
-        Parameters
-        ----------
-            listener_id : str
-                id of Intervention that requests value
-
-        Returns
-        ----------
-            torch.Tensor
-                value of Intervention
-        '''
-
-        if listener_id not in self.listeners:
-
-            raise ValueError(
-                f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
-
-        if self.value is None:
-
-            raise ValueError(
-                f"Listener '{str(Intervention.interventions[listener_id])}' referenced value '{str(self)}' before assignment")
-
-        value = self.value
-
-        self.stop_listening(listener_id)
-
-        return value
-
-    def set_value(self, value: torch.Tensor, listener_id: str) -> None:
-        '''
-        Sets the Intervention's value. Requires an Intervention id in listeners.
-        Removes the listener with id listener_id from listeners.
-        Notifies listeners.
-
-        Parameters
-        ----------
-            value : torch.Tensor
-                value to set
-            listener_id : str
-                id of Intervention that requests to set value
-        '''
-
-        if listener_id is not None and listener_id not in self.listeners:
-
-            raise ValueError(
-                f"Listener '{str(Intervention.interventions[listener_id])}' tried to reference value '{str(self)}' but not in listeners")
-        
-        logger.debug(f"Setting {self}")
-        
-        self.value = value
-
-        self.stop_listening(listener_id)
-
-        self.notify_listeners()
+        del self.tree.interventions[self.name]
 
 
-class Chain(Intervention):
-    '''
-    An Intervention to make one Intervention dependant on anothers fufillment.
-
-    Attributes
-    ----------
-        arg1 : Intervention
-            Intervention that is dependant on another Intervention
-        arg2 : Intervention
-            dependant Intervention
-
-    '''
-
-    def __init__(self, arg1: Intervention, arg2: Intervention, *args, **kwargs) -> None:
-
+class ActivationIntervention(Intervention):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.arg1 = arg1
-        self.arg2 = arg2
-        self.arg1.depend(self)
-        self.depend(self.arg2)
+        self.tree.modules.add(".".join(self.target.split(".")[:-3]))
+        self.tree.activation_interventions[self.target] = self
 
-    def __call__(self) -> None:
+    def set_dependencies(self, dependencies: List[Intervention]):
+        return super().set_dependencies([self])
 
-        self.arg2.stop_listening(self.id)
+    def intervene(self):
+        pass
 
-        self.notify_listeners()
-
-
-class Add(Intervention):
-    '''
-    An Intervention to add two Interventions.
-
-    Attributes
-    ----------
-        arg1 : Intervention
-            first Intervention to add
-        arg2 : Intervention
-            second Intervention to add
-
-    '''
-
-    def __init__(self, arg1: Intervention, arg2: Intervention, *args, **kwargs) -> None:
-
-        super().__init__(*args, **kwargs)
-
-        self.arg1 = arg1
-        self.arg2 = arg2
-        self.depend(self.arg1)
-        self.depend(self.arg2)
-
-    def __repr__(self) -> str:
-        return f"ADD({str(self.arg1)},{self.arg2})"
-
-    def __call__(self) -> None:
-
-        value = self.arg1.get_value(self.id) + self.arg2.get_value(self.id)
-
-        self.set_value(value, self.id)
-
-
-class Get(Intervention):
-    '''
-    An Intervention to get and store activations of a Module.
-
-    Class Attributes
-    ----------
-        modules : Dict[str,Dict[str,Get]]
-            mapping of module_name to: mapping of id to self. Used by intervention method to
-            retrieve the correct Get Interventions that use a module
-
-    Attributes
-    ----------
-        module_name : str
-            module path requested for input or output
-        batch_index : index
-            index of Intervention within current batch
-        generation_idx : index
-            generation index that this Intervention should be executed
-
-    '''
-    modules: Dict[str, Dict[str, Get]] = dict()
-
-    @classmethod
-    def _clear(cls) -> None:
-        Get.modules.clear()
-
-    @classmethod
-    def layers(cls) -> List[str]:
-
-        return [module_name.replace('.input', '').replace('.output', '') for module_name in list(Get.modules.keys())]
-
-    def __init__(self, module_name: str, batch_index: int, generation_idx: int, *args, **kwargs) -> None:
-
-        super().__init__(*args, **kwargs)
-
-        self.module_name = module_name
-        self.batch_index = batch_index
-        self.generation_idx = generation_idx
-
-        if module_name in Get.modules:
-
-            Get.modules[module_name][self.id] = self
-
-        else:
-
-            Get.modules[module_name] = {self.id: self}
-
-    def __repr__(self) -> str:
-        return f"GET({self.module_name}[{self.batch_index}])"
-
-    def __call__(self, value: Tensor) -> None:
-
-        logger.debug(f"Setting {str(self)}")
-
-        self.value = self.batch_index_get(value)
-
-        self.notify_listeners()
-
-        self.batch_index_set(value, self.get_value(self.id))
-
-        del Get.modules[self.module_name][self.id]
-
-    def batch_index_set(self, value1, value2) -> None:
+    @staticmethod
+    def batch_index_update(batch_index: int, value1, value2) -> None:
         if isinstance(value1, torch.Tensor):
-            value1[[self.batch_index]] = value2
+            value1[[batch_index]] = value2
         elif isinstance(value1, list) or isinstance(value1, tuple):
             for value_idx in range(len(value1)):
-                self.batch_index_set(value1[value_idx], value2[value_idx])
+                ActivationIntervention.batch_index_update(batch_index, value1[value_idx], value2[value_idx])
+        elif isinstance(value1, dict):
+            for key in value1:
+                ActivationIntervention.batch_index_update(batch_index, value1[key], value2[key])
 
-    def batch_index_get(self, value):
-        if isinstance(value, torch.Tensor):
-            return value[[self.batch_index]]
-        elif isinstance(value, list) or isinstance(value, tuple):
-            return [self.batch_index_get(_value) for _value in value]
+    def batch_index_set(self, batch_index: int, value) -> None:
+        def _batch_index_set(value):
+            return value[[batch_index]]
 
-
-class Set(Intervention):
-
-    def __init__(self, arg1: Intervention, arg2: Intervention, *args, **kwargs) -> None:
-
-        super().__init__(*args, **kwargs)
-
-        self.arg1 = arg1
-        self.arg2 = arg2
-        self.depend(self.arg1)
-        self.depend(self.arg2)
-
-    def __repr__(self) -> str:
-        return f"SET({str(self.arg1)},{self.arg2})"
-
-    def __call__(self) -> None:
-
-        self.arg1.set_value(self.arg2.get_value(self.id), self.id)
-
-        self.notify_listeners()
+        self.set_result(util.apply(value, _batch_index_set, torch.Tensor))
 
 
-class Copy(Intervention):
+class SetIntervention(Intervention):
+    def intervene(self):
+        module_name, activation_intervention, value_intervention = self.args
+        self.tree.activation_interventions[module_name] = value_intervention
 
-    copies: Dict[str, Copy] = dict()
+        self.set_result(value_intervention.value())
 
-    @classmethod
-    def _clear(cls) -> None:
-        for copy in Copy.copies.values():
-            copy.copies = None
-        Copy.copies.clear()
 
-    def __init__(self, arg1: Intervention, *args, **kwargs) -> None:
+class SaveIntervention(Intervention):
+    def intervene(self):
+        intervention = self.args[0]
 
-        super().__init__(*args, **kwargs)
+        self.tree.save_interventions[self.name] = self
 
-        self.arg1 = arg1
-        self.depend(self.arg1)
+        self.set_result(copy.deepcopy(intervention.value()))
 
-        Copy.copies[self.id] = self
-
-    def __repr__(self) -> str:
-        return f"COPY({str(self.arg1)})"
-
-    def __call__(self) -> None:
-
-        value = self.arg1.get_value(self.id)
-        self.set_value(value, self.id)
-
-    def destroy(self) -> None:
+    def destroy(self):
         pass
 
 
-class Slice(Intervention):
+class ModuleIntervention(Intervention):
+    def intervene(self):
+        args, kwargs = self.prepare_inputs()
 
-    def __init__(self, arg1: Intervention, slice, *args, **kwargs) -> None:
+        module = util.fetch_attr(self.tree.model, self.target)
 
-        super().__init__(*args, **kwargs)
+        output = module(*args, **kwargs)
 
-        self.arg1 = arg1
-        self.depend(self.arg1)
-
-        self.slice = slice
-
-    def __repr__(self) -> str:
-        return f"Slice({self.arg1},{self.slice})"
-
-    def __call__(self):
-
-        value = self.arg1.get_value(self.id)[self.slice]
-        self.set_value(value, self.id)
+        self.set_result(output)
 
 
-class Tensor(Intervention):
+def intervene(activations, module_path: str, tree: InterventionTree, key: str):
+    batch_idx = 0
 
-    tensors: Dict[str, Tensor] = dict()
+    module_path = f"{module_path}.{key}.{tree.generation_idx}"
 
-    @classmethod
-    def _clear(cls) -> None:
-        for tensor in Tensor.tensors.values():
-            tensor.value = None
-        Tensor.tensors.clear()
+    batch_module_path = f"{module_path}.{batch_idx}"
 
-    @classmethod
-    def to(cls, device) -> None:
-        for tensor in Tensor.tensors.values():
-            # need to actually move tensors to model dtype
-            tensor.value = tensor.value.to(device)
+    while batch_module_path in tree.activation_interventions:
+        intervention = tree.activation_interventions[batch_module_path]
 
-    def __init__(self, value: torch.Tensor, *args, **kwargs) -> None:
+        intervention.batch_index_set(batch_idx, activations)
 
-        super().__init__(*args, **kwargs)
+        intervention = tree.activation_interventions[batch_module_path]
 
-        self.value = value
+        ActivationIntervention.batch_index_update(
+            batch_idx, activations, intervention.value()
+        )
 
-        Tensor.tensors[self.id] = self
+        batch_idx += 1
 
-    def __repr__(self) -> str:
-        return f"TENSOR({self.id})"
-
-    def listen(self, listener: Intervention) -> None:
-        super().listen(listener)
-        if self is not listener:
-            listener.dependencies.remove(self.id)
-
-
-class Adhoc(Intervention):
-
-    model: torch.nn.Module = None
-    adhoc_mode: bool = False
-
-    @classmethod
-    def _clear(cls) -> None:
-        Adhoc.model = None
-
-    def __init__(self, module_path: str, arg1: Intervention, *args, **kwargs) -> None:
-
-        super().__init__(*args, **kwargs)
-
-        self.arg1 = arg1
-        self.depend(arg1)
-
-        self.module_keys = module_path.replace(
-            '[', '.').replace(']', '').split('.')
-
-    def __call__(self) -> None:
-
-        value = self.get_module()(self.arg1.get_value(self.id))
-
-        self.set_value(value, self.id)
-
-    @override
-    def __enter__(self) -> None:
-        Adhoc.adhoc_mode = True
-
-    @override
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        Adhoc.adhoc_mode = False
-
-    def get_module(self) -> torch.nn.Module:
-
-        module = Adhoc.model
-
-        for key in self.module_keys:
-
-            if isinstance(module, list):
-                module = module[int(key)]
-
-            else:
-                module = getattr(module, key)
-
-        return module
-
-
-INTERVENTIONS_TYPES.update(
-    {'GET': Get, 'SET': Set, 'CPY': Copy, 'ADD': Add, 'TNS': Tensor, 'SLC': Slice, 'ADH': Adhoc})
-
-
-def intervene(activations, module_name):
-
-    if not Adhoc.adhoc_mode and module_name in Get.modules:
-
-        for get in list(Get.modules[module_name].values()):
-
-            if get.generation_idx == Intervention.generation_idx:
-
-                get(activations)
+        batch_module_path = f"{module_path}.{batch_idx}"
 
     return activations
-
-
-def output_intervene(activations, module_name):
-
-    module_name = f"{module_name}.output"
-
-    return intervene(activations, module_name)
-
-
-def input_intervene(activations, module_name):
-
-    module_name = f"{module_name}.input"
-
-    return intervene(activations, module_name)

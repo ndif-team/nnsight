@@ -1,5 +1,6 @@
 # The library is called engine
-from engine import Model
+from .Model import Model
+from .Module import Module
 import torch
 # Get model wrapper for any model you can get with AutoConfig.from_pretrained(model_name)
 model = Model('gpt2')
@@ -11,8 +12,6 @@ print(model)
 with model.invoke('Hello world') as invoker:
 
     # See the input prompt seperated into token strings
-    tokenized = invoker.tokens
-    hello, _world = tokenized
 
     # Use normal module access and .output to get output activations.
     # Then save the activations at this point in the execution tree
@@ -21,17 +20,18 @@ with model.invoke('Hello world') as invoker:
     #
     # Does not work with .input (yet)
     mlp0  = model.transformer.h[0].mlp.output.save()
+    umm = model.lm_head(mlp0[0]).save()
 
     # Copy the activations, sliced by the first token
-    mlp0_t1 = model.transformer.h[0].mlp.output.t(0).save()
-    # Or, use .token(idx) or .t(idx) to index it for you!
-    mlp0_t1_t = model.transformer.h[0].mlp.output.t(0).save()
+    mlp0_t1 = model.transformer.h[0].mlp.output[:,0].save()
+    # Or, use .token[token] or .t[token] to index it for you!
+    mlp0_t1_t = model.transformer.h[0].mlp.output[:, 0].save()
 
     mmlp0 = model.transformer.h[0].mlp.output
-    mmlp1 = model.transformer.h[1].mlp.output 
+    mmlp1 = model.transformer.h[1].mlp.output   
     # Addition works like you normally would either with tensors or primatives ( will add other operations later)
-    noise = (0.001**0.5)*torch.randn(mmlp1.t(1).shape)
-    mmlp1 = mmlp1.t(1) + noise
+    noise = (0.001**0.5)*torch.randn(768)
+    mmlp1 = mmlp1[:, 1] + noise
 
     mmlp2_before = model.transformer.h[2].mlp.output.save()
 

@@ -6,8 +6,8 @@ print(model)
 
 with model.invoke('Hello world') as invoker:
     
-    zzz = model.transformer.h[2].output.copy()
+    hiddenstates = model.transformer.h[2].output.copy()
 
-output = model(device_map='auto')
+output = model(device_map='server')
 
-breakpoint()
+print(hiddenstates.value())

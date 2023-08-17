@@ -1,104 +1,130 @@
 from __future__ import annotations
 
-from typing import Any, Union
+from dataclasses import dataclass
+from typing import Any, Type, Union
 
-import torch
+import torch.fx
 
-from .Promise import Promise
-from .util import Value, apply
+from . import util
+from .fx import Proxy
+from.Invoker import InvokerState
 
+class Module:
+    """_summary_
 
-def get_shape(data: torch.Tensor):
+    Attributes:
+        invoker_state (InvokerState): _description_
+        module_path (str): _description_
+        output_shape (torch.Size): _description_
+        output_type (Type): _description_
+        _output (Proxy): _description_
+    """
 
-    return data.shape
+    def __init__(self, invoker_state: "InvokerState") -> None:
+        self.invoker_state = invoker_state
 
+        self.module_path: str = None
+        self.output_shape: torch.Size = None
+        self.output_type: Type = torch.Tensor
 
-def hook(module: Module, input, output):
-
-    if not Module.adhoc_mode:
-
-        module.input_shape = apply(input, get_shape, torch.Tensor)
-        module.output_shape = apply(output, get_shape, torch.Tensor)
-        module._output = None
-        module._input = None
-
-
-class Module(torch.nn.Module):
-    '''
-    A Module represents a replacement for torch.nn.Module that keeps track of input
-    and output operations as Promises. 
-
-    Attributes
-    ----------
-        _input : Promise
-            Promise encapsulating the value of the Module's input. None before referencing
-        _output : Promise
-            Promise encapsulating the value of the Module's output. None before referencing
-        output_shape : torch.Size
-            shape of Module output
-        input_shape : torch.Size
-            shape of Module input
-        module_path : str
-            path of Module in Model tree
-    '''
-
-    generation_idx: int = 0
-    batch_idx: int = 0
-    adhoc_mode: bool = False
+        self._output: Proxy = None
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
+        """We override the __call__ function of modules because we may want to do a ModuleIntervention
+        i.e call a submodule of the model at a certain point during inference. In the graph model, this function checks to see if any
+        of it's arguments are Proxies. If so it thinks were in an Invocation context and should then instead of call the module,
+        create a new proxy denoting we eant to call the model with the given input.
 
-        if Module.adhoc_mode:
+        Returns:
+            Any: _description_
+        """
+        adhoc = any(isinstance(x, Proxy) for x in list(args) + list(kwds.values()))
 
-            inp = Promise.wrap(args[0])
+        if adhoc:
+            _get_node = lambda x: x.node
 
-            output = super().__call__(inp.get_meta(), **kwds)
+            args = util.apply(args, _get_node, Proxy)
+            kwds = util.apply(kwds, _get_node, Proxy)
 
-            return Promise([self.module_path, inp], apply(output, get_shape, torch.Tensor), command='ADH')
+            return Proxy(
+                self.invoker_state.tracer.create_node(
+                    "call_module", self.module_path, args, kwds
+                ),
+                self.invoker_state.tracer
+            )
 
         return super().__call__(*args, **kwds)
 
     @property
-    def input(self) -> Promise:
+    def output(self) -> Proxy:
+        """
+        Calling denotes the user wishes to get the output of this module and therefore we create a Proxy of that request.
+        Only generates a proxy the first time it is references otherwise returnh the already set one.
 
-        if self._input is None:
-            self._input = Promise(
-                [f"{self.module_path}.input", Module.batch_idx, Module.generation_idx], self.input_shape)
-        return self._input
-
-    @property
-    def output(self) -> Promise:
-
+        Returns:
+            Proxy: _description_
+        """
         if self._output is None:
-            self._output = Promise(
-                [f"{self.module_path}.output", Module.batch_idx, Module.generation_idx], self.output_shape)
+            self._output = Proxy(
+                self.invoker_state.tracer.create_node(
+                    "placeholder",
+                    f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
+                    (util.apply(self.output_shape, lambda x : torch.empty(x, device="meta"), torch.Size),),
+                    {},
+                ),
+                self.invoker_state.tracer,
+            )
+
         return self._output
 
-    @input.setter
-    def input(self, value: Union[Promise, Value]):
-        value = Promise.wrap(value)
-        Promise([self.input, value], value._shape, command='SET').execute()
-
     @output.setter
-    def output(self, value: Union[Promise, Value]):
-        value = Promise.wrap(value)
-        Promise([self.output, value], value._shape, command='SET').execute()
+    def output(self, value: Union[Proxy, Any]) -> None:
+        """Calling denotes the user wishes to set the output of this module and therefore we create a Proxy of that request.
+        _output is then set to be the new Proxy.
+
+        Args:
+            value (Union[Proxy, Any]): _description_
+        """
+
+        self._output = Proxy(
+            self.invoker_state.tracer.create_node(
+                "call_function",
+                Proxy.proxy_set,
+                (
+                    f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
+                    self.output.node,
+                    value.node,
+                ),
+                {},
+            ),
+            self.invoker_state.tracer,
+        )
 
     @staticmethod
-    def wrap(module):
+    def wrap(module: torch.nn.Module, invoker_state: "InvokerState") -> Module:
+        """Wraps the torch Module with our Module
+
+        Args:
+            module (torch.nn.Module): _description_
+            hook (Callable): _description_
+            invoker_state (InvokerState): _description_
+
+        Returns:
+            Module: _description_
+        """
+
+        def hook(module: Module, input: Any, output: Any):
+            module._output = None
+            module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
 
         for name, _module in module.named_children():
-
-            setattr(module, name, Module.wrap(_module))
+            setattr(module, name, Module.wrap(_module, invoker_state))
 
         if isinstance(module, Module):
-
             return module
 
-        module.__class__ = type(module.__class__.__name__,
-                                 (Module, module.__class__),
-                                 {})
-        
+        util.wrap(module, Module, invoker_state)
+
         module.register_forward_hook(hook)
 
         return module

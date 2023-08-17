@@ -60,20 +60,12 @@ class ModelProcessor(Processor):
 
     def process(self, request: RequestModel) -> None:
         try:
-            # Parse out data needed for inference
-            execution_graphs, promises, prompts = (
-                request.execution_graphs,
-                request.promises,
-                request.prompts,
-            )
-            # Promises are expected to be dictionary objects
-            promises = {id: value.model_dump() for id, value in promises.items()}
             args, kwargs = request.args, request.kwargs
 
+            tree = Intervention.InterventionTree.from_pydantic(request.interventions)
+
             # Run model with paramters and interventions
-            output = self.model.run_model(
-                execution_graphs, promises, prompts, *args, **kwargs
-            )
+            output = self.model.run_model(tree, request.prompts, *args, **kwargs)
 
             # Create response
             self.response_dict[request.id] = ResponseModel(
@@ -84,14 +76,11 @@ class ModelProcessor(Processor):
                 description="Your job has been completed.",
                 output=output,
                 # Move all copied data to cpu
-                copies={
-                    id: Intervention.Intervention.interventions[id].cpu().value
-                    for id in Intervention.Copy.copies
+                saves={
+                    name: tree.save_interventions[name].value().cpu()
+                    for name in tree.save_interventions
                 },
             ).log(self.logger)
-
-            # Reset the model of all state data
-            Model.clear()
 
         except Exception as exception:
             self.response_dict[request.id] = ResponseModel(
