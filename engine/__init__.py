@@ -3,7 +3,7 @@ import os
 
 import yaml
 
-from .modeling import ConfigModel
+from .modeling.Config import ConfigModel
 from .monkey_patching import *
 
 PATH = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +22,5 @@ logging_handler.setLevel(logging.DEBUG)
 logger = logging.getLogger("engine")
 logger.addHandler(logging_handler)
 logger.setLevel(logging.DEBUG)
-
 
 from .Model import Model

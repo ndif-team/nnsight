@@ -1,41 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Type, Union
+from typing import Any, Type, Union
 
 import torch.fx
 
 from . import util
 from .fx import Proxy
-
-if TYPE_CHECKING:
-    from .Model import Model
-
-
-@dataclass
-class IdxTracker:
-    batch_idx: int = 0
-    generation_idx: int = 0
-
-    def reset(self):
-        self.batch_idx = 0
-        self.generation_idx = 0
-
+from.Invoker import InvokerState
 
 class Module:
     """_summary_
 
     Attributes:
-        graph (torch.fx.graph.Graph): _description_
-        idx_tracker (IdxTracker): _description_
+        invoker_state (InvokerState): _description_
         module_path (str): _description_
         output_shape (torch.Size): _description_
         output_type (Type): _description_
         _output (Proxy): _description_
     """
 
-    def __init__(self, model: "Model") -> None:
-        self.model = model
+    def __init__(self, invoker_state: "InvokerState") -> None:
+        self.invoker_state = invoker_state
 
         self.module_path: str = None
         self.output_shape: torch.Size = None
@@ -61,9 +47,10 @@ class Module:
             kwds = util.apply(kwds, _get_node, Proxy)
 
             return Proxy(
-                self.model.intervention_graph.call_module(
-                    self.module_path, args=args, kwargs=kwds
-                )
+                self.invoker_state.tracer.create_node(
+                    "call_module", self.module_path, args, kwds
+                ),
+                self.invoker_state.tracer
             )
 
         return super().__call__(*args, **kwds)
@@ -79,11 +66,15 @@ class Module:
         """
         if self._output is None:
             self._output = Proxy(
-                self.model.intervention_graph.placeholder(
-                    f"{self.module_path}.output.{self.model.idx_tracker.generation_idx}.{self.model.idx_tracker.batch_idx}",
-                    default_value=self.output_shape,
-                )
+                self.invoker_state.tracer.create_node(
+                    "placeholder",
+                    f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
+                    (self.output_shape,),
+                    {},
+                ),
+                self.invoker_state.tracer,
             )
+
         return self._output
 
     @output.setter
@@ -94,24 +85,29 @@ class Module:
         Args:
             value (Union[Proxy, Any]): _description_
         """
-        node = self.model.intervention_graph.call_function(
-            Proxy.proxy_set,
-            args=(
-                f"{self.module_path}.output.{self.model.idx_tracker.generation_idx}.{self.model.idx_tracker.batch_idx}",
-                self.output.node,
-                value.node,
+
+        self._output = Proxy(
+            self.invoker_state.tracer.create_node(
+                "call_function",
+                Proxy.proxy_set,
+                (
+                    f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
+                    self.output.node,
+                    value.node,
+                ),
+                {},
             ),
+            self.invoker_state.tracer,
         )
-        self._output = Proxy(node, self._output.tracer)
 
     @staticmethod
-    def wrap(module: torch.nn.Module, model: "Model") -> Module:
+    def wrap(module: torch.nn.Module, invoker_state: "InvokerState") -> Module:
         """Wraps the torch Module with our Module
 
         Args:
             module (torch.nn.Module): _description_
             hook (Callable): _description_
-            model (Model): _description_
+            invoker_state (InvokerState): _description_
 
         Returns:
             Module: _description_
@@ -122,12 +118,12 @@ class Module:
             module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
 
         for name, _module in module.named_children():
-            setattr(module, name, Module.wrap(_module, model))
+            setattr(module, name, Module.wrap(_module, invoker_state))
 
         if isinstance(module, Module):
             return module
 
-        util.wrap(module, Module, model)
+        util.wrap(module, Module, invoker_state)
 
         module.register_forward_hook(hook)
 

@@ -6,9 +6,10 @@ from typing import Any, Callable, Dict, List, Set, Tuple, Union
 import torch
 import torch.futures
 import torch.fx
+from torch.utils.hooks import RemovableHandle
 
-from . import util, logger
-from .fx import Proxy, Node
+from . import logger, util
+from .fx import Proxy
 
 
 class InterventionTree:
@@ -26,13 +27,25 @@ class InterventionTree:
         self.activations: Dict[str, ActivationIntervention] = dict()
         self.modules: Set[str] = set()
         self.generation_idx: int = 0
+        self.model: torch.nn.Module = None
 
-    def reset(self) -> None:
-        """Resets the state."""
-        self.interventions.clear()
-        self.activations.clear()
-        self.modules.clear()
-        self.generation_idx = 0
+    def set_model(self, model: torch.nn.Module) -> RemovableHandle:
+        """
+        Adds a reference to a model to the tree so ModuleInterventions can access
+        its modules and run them. Also hooks the model so after each time it is ran, we can keep track
+        of the generation_idx
+
+        Args:
+            model (torch.nn.Module): _description_
+
+        Returns:
+            RemovableHandle: Returns the hook so it can be removed after completion.
+        """
+        self.model = model
+
+        return self.model.register_forward_hook(
+            lambda module, input, output: self.increment()
+        )
 
     def increment(self) -> None:
         """Increments generation_idx by one."""
@@ -49,7 +62,7 @@ class InterventionTree:
 
         return self
 
-    def from_node(self, node: Node) -> Intervention:
+    def from_node(self, node: torch.fx.Node) -> Intervention:
         """Creates an Intervention from a Node.
 
         Args:
@@ -60,23 +73,20 @@ class InterventionTree:
         """
 
         # Arguments might be nodes themselves so recurse.
-        args = util.apply(node.args, self.from_node, Node)
-        kwargs = util.apply(node.kwargs, self.from_node, Node)
+        args = util.apply(node.args, self.from_node, torch.fx.Node)
+        kwargs = util.apply(node.kwargs, self.from_node, torch.fx.Node)
 
         # Processing of args may have already created an Intervention for this node so just return it.
         if node.name in self.interventions:
             return self.interventions[node.name]
 
-        intervention = self.create(node.op, node.name, node.target, *args, **kwargs
-        )
+        intervention = self.create(node.op, node.name, node.target, *args, **kwargs)
 
         # Dependencies and listeners might be nodes themselves so recurse.
         dependencies = util.apply(
-            list(node._input_nodes.keys()), self.from_node, Node
+            list(node._input_nodes.keys()), self.from_node, torch.fx.Node
         )
-        listeners = util.apply(
-            list(node.users.keys()), self.from_node, Node
-        )
+        listeners = util.apply(list(node.users.keys()), self.from_node, torch.fx.Node)
 
         # Set the callbacks for dependencies and listeners.
         intervention.set_listeners(listeners)
@@ -159,7 +169,7 @@ class Intervention(torch.futures.Future):
         tree.interventions[name] = self
 
         # Add done callback to self so we see in logs when this is set.
-        self.add_done_callback(lambda x: logger.debug(f"SET({self.name})"))
+        self.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
 
     def set_listeners(self, listeners: List[Intervention]) -> None:
         """
@@ -197,7 +207,7 @@ class Intervention(torch.futures.Future):
             return value.value()
 
         # TODO make this dynamic
-        device = "cuda:0"
+        device = self.tree.model.device
 
         def _to(value: torch.Tensor):
             return value.to(device)
@@ -221,7 +231,7 @@ class Intervention(torch.futures.Future):
 
     def destroy(self) -> None:
         """Destroys the Intervention"""
-        logger.debug(f"Destroying: {self.name}")
+        logger.debug(f"=> DEL({self.name})")
 
         del self.tree.interventions[self.name]
 
@@ -281,7 +291,7 @@ class ModuleIntervention(Intervention):
         self.set_result(output)
 
 
-def intervene(activations, module_path: str, tree: InterventionTree, key:str):
+def intervene(activations, module_path: str, tree: InterventionTree, key: str):
     batch_idx = 0
 
     module_path = f"{module_path}.{key}.{tree.generation_idx}"

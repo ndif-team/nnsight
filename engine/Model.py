@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pickle
-from typing import Dict, List, Tuple, Union
+from typing import Union
 
 import accelerate
 import baukit
@@ -9,15 +9,15 @@ import socketio
 import torch
 import torch.fx
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, PreTrainedModel, PreTrainedTokenizer)
+                          BatchEncoding, GenerationMixin, PreTrainedModel,
+                          PreTrainedTokenizer)
 from transformers.generation.utils import GenerateOutput
 
-from . import CONFIG
-from .fx import Proxy
+from . import CONFIG, logger, modeling
 from .Intervention import InterventionTree, intervene
-from .Invoker import Invoker
-from .modeling import JobStatus, RequestModel, ResponseModel
-from .Module import IdxTracker, Module
+from .Invoker import Invoker, InvokerState
+from .modeling.Request import RequestModel
+from .Module import Module
 
 
 class Model:
@@ -36,17 +36,17 @@ class Model:
 
     def __init__(self, model_name_or_path: str) -> None:
         self.model_name_or_path = model_name_or_path
+
         self.output = None
-        self.local_model = None
-        self.intervention_graph = None
-        self.idx_tracker = IdxTracker()
-        self.intervention_tree = InterventionTree()
-        self.prompts = []
-        self.invokers = []
+        self.local_model: GenerationMixin = None
+
+        self.invoker_state = InvokerState(self)
 
         # Use init_empty_weights to create graph i.e the specified model with no loaded parameters,
         # to use for finding shapes of Module inputs and outputs, as well as replacing torch.nn.Module
         # with our Module.
+
+        logger.debug(f"Initializing `{self.model_name_or_path}`...")
 
         with accelerate.init_empty_weights(include_buffers=True):
             self.config = AutoConfig.from_pretrained(
@@ -68,26 +68,16 @@ class Model:
         # can be accessed directly.
         for name, module in self.graph_model.named_children():
             # Wrap all modules in our Module class.
-            module = Module.wrap(module, self)
+            module = Module.wrap(module, self.invoker_state)
 
             setattr(self.graph_model, name, module)
             setattr(self, name, module)
 
         self.init_graph()
 
-        self.reset()
+        logger.debug(f"Initialized `{self.model_name_or_path}`")
 
-    def reset(self) -> None:
-        """Resets attributes after inference"""
-        self.intervention_graph = torch.fx.graph.Graph(owning_module=self.graph_model)
-
-        self.prompts = []
-        self.invokers = []
-
-        self.intervention_tree.reset()
-        self.idx_tracker.reset()
-
-        Proxy.reset()
+        self.invoker_state.reset()
 
     def init_graph(self) -> None:
         """
@@ -98,8 +88,24 @@ class Model:
         for name, module in self.graph_model.named_modules():
             module.module_path = name
 
+    def prepare_inputs(self, inputs, *args, **kwargs) -> BatchEncoding:
+        """_summary_
+
+        Args:
+            inputs (_type_): _description_
+
+        Returns:
+            BatchEncoding: _description_
+        """
+        if not isinstance(inputs, dict):
+            return self.tokenizer(
+                inputs, *args, return_tensors="pt", padding=True, **kwargs
+            )
+
+        return BatchEncoding(inputs)
+
     @torch.inference_mode()
-    def run_graph(self, prompt: str, *args, **kwargs) -> BatchEncoding:
+    def run_graph(self, inputs, *args, **kwargs):
         """Runs meta version of model given prompt and return the tokenized inputs.
 
         Args:
@@ -108,11 +114,7 @@ class Model:
         Returns:
             BatchEncoding: _description_
         """
-        inputs = self.tokenizer([prompt], return_tensors="pt").to("cpu")
-
-        self.graph_model(*args, **inputs.copy().to("meta"), **kwargs)
-
-        return inputs
+        self.graph_model(*args, **inputs.to("meta"), **kwargs)
 
     def __repr__(self) -> str:
         return repr(self.graph_model)
@@ -130,28 +132,28 @@ class Model:
         Returns:
             Union[GenerateOutput, torch.LongTensor]: _description_
         """
+
+        tree = InterventionTree().from_graph(self.invoker_state.tracer.graph)
+
         if device_map == "server":
-            return self.submit_to_server(
-                execution_graphs, promises, prompts, *args, **kwargs
-            )
+            return self.submit_to_server(tree, *args, **kwargs)
 
         else:
             self.dispatch(device_map=device_map)
 
-            output = self.run_model(*args, **kwargs)
+            output = self.run_model(tree, *args, **kwargs)
 
-            for name in Proxy.save_proxies:
-                Proxy.save_proxies[name].set_result(
-                    self.intervention_tree.interventions[name].value()
-                )
+            for name in self.invoker_state.tracer.save_proxies:
+                self.invoker_state.tracer.save_proxies[name].set_result(tree.interventions[name].value())
 
-            self.reset()
+            self.invoker_state.reset()
 
             return output
 
     @torch.inference_mode()
     def run_model(
         self,
+        tree: InterventionTree,
         *args,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
@@ -160,12 +162,15 @@ class Model:
         Returns:
             Union[GenerateOutput, torch.LongTensor]: _description_
         """
-        tree = self.intervention_tree.from_graph(self.intervention_graph)
 
         # Tokenize inputs
-        inputs = self.tokenizer(self.prompts, padding=True, return_tensors="pt").to(
+        inputs = self.prepare_inputs(self.invoker_state.prompts).to(
             self.local_model.device
         )
+
+        hook = tree.set_model(self.local_model)
+
+        logger.debug(f"Running `{self.model_name_or_path}`...")
 
         # Run the model generate method with a baukit.TraceDict. tree.modules has all of the module names involved in Interventions.
         # output_intervene is called when module from tree.modules is ran and is the entry point for the Intervention tree
@@ -179,18 +184,29 @@ class Model:
         ):
             output = self.local_model.generate(*args, **inputs, **kwargs)
 
+        hook.remove()
+
+        logger.debug(f"Completed `{self.model_name_or_path}`")
+
         return output
 
     def submit_to_server(
-        self, execution_graphs, promises, prompts, *args, blocking=True, **kwargs
+        self, tree: InterventionTree, *args, blocking: bool = True, **kwargs
     ):
-        request = RequestModel(
+        """_summary_
+
+        Args:
+            blocking (bool, optional): _description_. Defaults to True.
+
+        Returns:
+            _type_: _description_
+        """
+        request = modeling.RequestModel(
             args=args,
             kwargs=kwargs,
             model_name=self.model_name_or_path,
-            execution_graphs=execution_graphs,
-            promises=promises,
-            prompts=prompts,
+            prompts=self.invoker_state.prompts,
+            interventions_tree=tree,
         )
 
         if blocking:
@@ -204,11 +220,11 @@ class Model:
 
         @sio.on("blocking_response")
         def blocking_response(data):
-            data: ResponseModel = pickle.loads(data)
+            data: modeling.ResponseModel = pickle.loads(data)
 
             print(str(data))
 
-            if data.status == JobStatus.COMPLETED:
+            if data.status == modeling.Response.JobStatus.COMPLETED:
                 for id, value in data.copies.items():
                     Promise.promises[id].value = value
 
@@ -216,7 +232,7 @@ class Model:
 
                 sio.disconnect()
 
-            elif data.status == JobStatus.ERROR:
+            elif data.status == modeling.Response.JobStatus.ERROR:
                 sio.disconnect()
 
         sio.emit("blocking_request", pickle.dumps(request))
@@ -235,6 +251,8 @@ class Model:
             device_map (str, optional): _description_. Defaults to "auto".
         """
         if self.local_model is None:
+            logger.debug(f"Dispatching `{self.model_name_or_path}`...")
+
             self.local_model = AutoModelForCausalLM.from_pretrained(
                 self.model_name_or_path,
                 config=self.config,
@@ -242,12 +260,7 @@ class Model:
                 cache_dir=CONFIG.APP.MODEL_CACHE_PATH,
             )
 
-            # After the model is ran for one generation, denote to Intervention that were moving to the next token generation.
-            self.local_model.register_forward_hook(
-                lambda module, input, output: self.intervention_tree.increment()
-            )
-
-            self.intervention_tree.model = self.local_model
+            logger.debug(f"Dispatched `{self.model_name_or_path}`")
 
     def invoke(self, prompt: str, *args, **kwargs) -> Invoker:
         """Creates an Invoker context.
@@ -259,4 +272,4 @@ class Model:
             Invoker: _description_
         """
 
-        return Invoker(self, prompt, *args, **kwargs)
+        return Invoker(self.invoker_state, prompt, *args, **kwargs)

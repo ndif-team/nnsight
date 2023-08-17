@@ -1,11 +1,32 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
+import torch.fx
 from typing_extensions import override
+
+from .fx import Tracer
 
 if TYPE_CHECKING:
     from .Model import Model
+
+
+class InvokerState:
+    def __init__(self, model: "Model") -> None:
+        self.model = model
+
+        self.generation_idx: int = None
+        self.batch_idx: int = None
+        self.prompts: List = []
+        self.tracer: Tracer = None
+
+        self.reset()
+
+    def reset(self):
+        self.generation_idx = 0
+        self.batch_idx = 0
+        self.prompts.clear()
+        self.tracer = Tracer(torch.fx.graph.Graph(owning_module=self.model))
 
 
 class Invoker:
@@ -21,31 +42,33 @@ class Invoker:
         kwargs : Dict
     """
 
-    def __init__(self, model: "Model", prompt: str, *args, **kwargs) -> None:
-        self.model = model
-        self.prompt = prompt
+    def __init__(self, state: InvokerState, input, *args, **kwargs) -> None:
+        self.state = state
+        self.input = input
         self.args = args
         self.kwargs = kwargs
+        self.tokens = None
 
     @override
     def __enter__(self) -> Invoker:
-        self.model.idx_tracker.generation_idx = 0
+        self.state.generation_idx = 0
 
-        self.model.prompts.append(self.prompt)
-
-        inputs = self.model.run_graph(self.prompt, *self.args, **self.kwargs)
+        inputs = self.state.model.prepare_inputs(self.input)
+        self.state.model.run_graph(inputs.copy(), *self.args, **self.kwargs)
 
         self.tokens = [
-            self.model.tokenizer.decode(token) for token in inputs["input_ids"][0]
+            self.state.model.tokenizer.decode(token) for token in inputs["input_ids"][0]
         ]
+
+        self.state.prompts.append("".join(self.tokens))
 
         return self
 
     @override
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.model.idx_tracker.batch_idx += 1
+        self.state.batch_idx += 1
 
     def next(self) -> None:
-        self.model.idx_tracker.generation_idx += 1
+        self.state.generation_idx += 1
 
-        self.model.run_graph("_", *self.args, **self.kwargs)
+        self.state.model.run_graph("_", *self.args, **self.kwargs)
