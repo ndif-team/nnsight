@@ -69,7 +69,7 @@ class Module:
                 self.invoker_state.tracer.create_node(
                     "placeholder",
                     f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
-                    (self.output_shape,),
+                    (util.apply(self.output_shape, lambda x : torch.empty(x, device="meta"), torch.Size),),
                     {},
                 ),
                 self.invoker_state.tracer,

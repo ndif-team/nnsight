@@ -274,10 +274,14 @@ class ActivationIntervention(Intervention):
 
     @staticmethod
     def batch_index_update(batch_index: int, value1, value2) -> None:
-        def _batch_index_update(value):
-            value[[batch_index]] = value2
-
-        util.apply(value1, _batch_index_update, torch.Tensor)
+        if isinstance(value1, torch.Tensor):
+            value1[[batch_index]] = value2
+        elif isinstance(value1, list) or isinstance(value1, tuple):
+            for value_idx in range(len(value1)):
+                ActivationIntervention.batch_index_update(batch_index, value1[value_idx], value2[value_idx])
+        elif isinstance(value1, dict):
+            for key in value1:
+                ActivationIntervention.batch_index_update(batch_index, value1[key], value2[key])
 
     def batch_index_set(self, batch_index: int, value) -> None:
         def _batch_index_set(value):

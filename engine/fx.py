@@ -120,7 +120,8 @@ class Tracer(torch.fx.proxy.GraphAppendingTracer):
             torch.Tensor: _description_
         """
         shape = self.node_name_to_shape.get(node.name, None)
-        return torch.empty(shape, device="meta") if shape is not None else None
+
+        return util.apply(shape, lambda x: torch.empty(x, device="meta"), torch.Size)
 
     def prepare_inputs(
         self, node: torch.fx.node.Node
@@ -168,7 +169,7 @@ class Tracer(torch.fx.proxy.GraphAppendingTracer):
         # A placeholder in our context is the output from a module during inference.
         if node.op == "placeholder":
             # Just get the meta tensor of the module output shape. We use the default_value kwarg to store this shape.
-            result = torch.empty(args[0], device="meta")
+            result = args[0]
         elif node.op == "get_attr":
             # TODO ?
             result = None
