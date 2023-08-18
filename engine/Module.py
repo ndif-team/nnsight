@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Type, Union
 
-import torch.fx
+import torch
 
 from . import util
 from .fx import Proxy
+
 from.Invoker import InvokerState
 
 class Module:

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import pickle
-from typing import Union, List, Dict
+from typing import Dict, List, Union
 
 import accelerate
 import baukit
 import socketio
 import torch
-import torch.fx
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, GenerationMixin, PreTrainedModel,
                           PreTrainedTokenizer)
@@ -16,7 +15,6 @@ from transformers.generation.utils import GenerateOutput
 from . import CONFIG, logger, modeling
 from .Intervention import InterventionTree, intervene
 from .Invoker import Invoker, InvokerState
-
 from .Module import Module
 
 
@@ -137,6 +135,8 @@ class Model:
         Returns:
             Union[GenerateOutput, torch.LongTensor]: _description_
         """
+
+        self.invoker_state.tracer.graph.eliminate_dead_code()
 
         interventions = modeling.InterventionModel.from_graph(self.invoker_state.tracer.graph)
 

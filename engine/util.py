@@ -1,9 +1,9 @@
 import time
 from functools import wraps
-from typing import Any, Callable, Union
+from typing import Any, Callable, Type, Union
 
 import torch
-from typing import Type
+
 Primative = Union[str, int, float, bool]
 Value = Union[Primative, torch.Tensor]
 

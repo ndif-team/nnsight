@@ -333,11 +333,13 @@ def intervene(activations, module_path: str, tree: InterventionTree, key: str):
 
         intervention.batch_index_set(batch_idx, activations)
 
-        intervention = tree.activation_interventions[batch_module_path]
+        _intervention = tree.activation_interventions[batch_module_path]
 
-        ActivationIntervention.batch_index_update(
-            batch_idx, activations, intervention.value()
-        )
+        if intervention is not _intervention:
+
+            ActivationIntervention.batch_index_update(
+                batch_idx, activations, _intervention.value()
+            )
 
         batch_idx += 1
 
