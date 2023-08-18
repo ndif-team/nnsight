@@ -154,7 +154,7 @@ class Model:
 
             for name in self.invoker_state.tracer.save_proxies:
                 self.invoker_state.tracer.save_proxies[name].set_result(
-                    tree.save_interventions[name].value()
+                    tree.interventions[name].value()
                 )
 
             self.invoker_state.reset()

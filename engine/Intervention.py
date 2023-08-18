@@ -90,7 +90,6 @@ class InterventionTree:
     def __init__(self) -> None:
         self.interventions: Dict[str, Intervention] = dict()
         self.activation_interventions: Dict[str, ActivationIntervention] = dict()
-        self.save_interventions: Dict[str, ActivationIntervention] = dict()
         self.modules: Set[str] = set()
         self.generation_idx: int = 0
         self.model: torch.nn.Module = None
@@ -294,7 +293,7 @@ class ActivationIntervention(Intervention):
 class SetIntervention(Intervention):
     def intervene(self):
         module_name, activation_intervention, value = self.args
-        
+
         self.tree.activation_interventions[module_name] = self
 
         self.set_result(Intervention.prepare_args(value, self.tree.model.device))
@@ -303,8 +302,6 @@ class SetIntervention(Intervention):
 class SaveIntervention(Intervention):
     def intervene(self):
         intervention = self.args[0]
-
-        self.tree.save_interventions[self.name] = self
 
         self.set_result(copy.deepcopy(intervention.value()))
 

@@ -77,8 +77,8 @@ class ModelProcessor(Processor):
                 output=output,
                 # Move all copied data to cpu
                 saves={
-                    name: tree.save_interventions[name].value().cpu()
-                    for name in tree.save_interventions
+                    name: tree.interventions[name].value().cpu()
+                    for name in tree.interventions
                 },
             ).log(self.logger)
 
