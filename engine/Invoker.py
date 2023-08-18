@@ -26,7 +26,7 @@ class InvokerState:
         self.generation_idx = 0
         self.batch_idx = 0
         self.prompts.clear()
-        self.tracer = Tracer(torch.fx.graph.Graph(owning_module=self.model))
+        self.tracer = Tracer(torch.fx.graph.Graph(owning_module=self.model.meta_model))
 
 
 class Invoker:

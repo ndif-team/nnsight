@@ -34,9 +34,6 @@ class Model:
 
     def __init__(self, model_name_or_path: str) -> None:
         self.model_name_or_path = model_name_or_path
-        self.output = None
-        self.local_model: GenerationMixin = None
-        self.invoker_state = InvokerState(self)
 
         # Use init_empty_weights to create graph i.e the specified model with no loaded parameters,
         # to use for finding shapes of Module inputs and outputs, as well as replacing torch.nn.Module
@@ -57,17 +54,22 @@ class Model:
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.graph_model: PreTrainedModel = AutoModelForCausalLM.from_config(
+            self.meta_model: PreTrainedModel = AutoModelForCausalLM.from_config(
                 self.config
             )
 
+        self.output = None
+        self.local_model: GenerationMixin = None
+        self.invoker_state = InvokerState(self)
+
+
         # Set immediate graph childen modules as Models children so sub-modules
         # can be accessed directly.
-        for name, module in self.graph_model.named_children():
+        for name, module in self.meta_model.named_children():
             # Wrap all modules in our Module class.
             module = Module.wrap(module, self.invoker_state)
 
-            setattr(self.graph_model, name, module)
+            setattr(self.meta_model, name, module)
             setattr(self, name, module)
 
         self.init_graph()
@@ -82,7 +84,7 @@ class Model:
         """
 
         # Set module_path attribute so Modules know their path.
-        for name, module in self.graph_model.named_modules():
+        for name, module in self.meta_model.named_modules():
             module.module_path = name
 
     def prepare_inputs(self, inputs, *args, **kwargs) -> BatchEncoding:
@@ -117,10 +119,10 @@ class Model:
         Returns:
             BatchEncoding: _description_
         """
-        self.graph_model(*args, **inputs.to("meta"), **kwargs)
+        self.meta_model(*args, **inputs.to("meta"), **kwargs)
 
     def __repr__(self) -> str:
-        return repr(self.graph_model)
+        return repr(self.meta_model)
 
     def __call__(
         self, *args, device_map="server", **kwargs
