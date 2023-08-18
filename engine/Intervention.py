@@ -219,6 +219,20 @@ class Intervention(torch.futures.Future):
             lambda x: self.intervene()
         )
 
+    @staticmethod
+    def prepare_args(args, device):
+
+        def _value(value: torch.futures.Future):
+            return value.value()
+        
+        def _to(value: torch.Tensor):
+            return value.to(device)
+
+        args = util.apply(args, _value, torch.futures.Future)
+        args = util.apply(args, _to, torch.Tensor)
+
+        return args
+
     def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
         """Preprocess this interventions input to be ran by its command
 
@@ -226,21 +240,8 @@ class Intervention(torch.futures.Future):
             Tuple[List[Any], Dict[str,Any]]: _description_
         """
 
-        def _intervene(value: torch.futures.Future):
-            return value.value()
-
-        # TODO make this dynamic
-        device = self.tree.model.device
-
-        def _to(value: torch.Tensor):
-            return value.to(device)
-
-        # Turn futures into their values
-        args = util.apply(self.args, _intervene, torch.futures.Future)
-        kwargs = util.apply(self.kwargs, _intervene, torch.futures.Future)
-        # Move tensors to meta device
-        args = util.apply(args, _to, torch.Tensor)
-        kwargs = util.apply(kwargs, _to, torch.Tensor)
+        args = Intervention.prepare_args(self.args, self.tree.model.device)
+        kwargs = Intervention.prepare_args(self.kwargs, self.tree.model.device)
 
         return args, kwargs
 
@@ -292,10 +293,11 @@ class ActivationIntervention(Intervention):
 
 class SetIntervention(Intervention):
     def intervene(self):
-        module_name, activation_intervention, value_intervention = self.args
-        self.tree.activation_interventions[module_name] = value_intervention
+        module_name, activation_intervention, value = self.args
+        
+        self.tree.activation_interventions[module_name] = self
 
-        self.set_result(value_intervention.value())
+        self.set_result(Intervention.prepare_args(value, self.tree.model.device))
 
 
 class SaveIntervention(Intervention):
