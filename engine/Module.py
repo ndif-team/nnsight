@@ -94,7 +94,7 @@ class Module:
                 (
                     f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
                     self.output.node,
-                    value.node,
+                    value.node if isinstance(value, Proxy) else value,
                 ),
                 {},
             ),
