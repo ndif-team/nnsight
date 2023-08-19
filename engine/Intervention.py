@@ -313,7 +313,7 @@ class SaveIntervention(Intervention):
 
         args, kwargs = self.prepare_inputs()
 
-        self.set_result(copy.deepcopy(args[0]))
+        self.set_result(util.apply(args[0], lambda x : x.clone(), torch.Tensor))
 
     def destroy(self):
         pass
