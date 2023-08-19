@@ -80,26 +80,13 @@ class Module:
 
     @output.setter
     def output(self, value: Union[Proxy, Any]) -> None:
-        """Calling denotes the user wishes to set the output of this module and therefore we create a Proxy of that request.
-        _output is then set to be the new Proxy.
+        """
+        Calling denotes the user wishes to set the output of this module and therefore we create a Proxy of that request.
 
         Args:
             value (Union[Proxy, Any]): _description_
         """
-
-        self._output = Proxy(
-            self.invoker_state.tracer.create_node(
-                "call_function",
-                Proxy.proxy_set,
-                (
-                    f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
-                    self.output.node,
-                    value.node if isinstance(value, Proxy) else value,
-                ),
-                {},
-            ),
-            self.invoker_state.tracer,
-        )
+        self.output.set(value)
 
     @staticmethod
     def wrap(module: torch.nn.Module, invoker_state: "InvokerState") -> Module:

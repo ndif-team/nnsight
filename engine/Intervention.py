@@ -15,47 +15,53 @@ from .modeling import InterventionModel
 
 class InterventionTree:
     """
-
     Attributes:
         interventions (Dict[str, Intervention]): _description_
-        activations (Dict[str, ActivationIntervention]): _description_
+        module_path_to_intervention_name (Dict[str, str): _description_
         modules (Set[str]): _description_
         generation_idx (int): _description_
+        model: _description_
     """
 
     @staticmethod
-    def from_pydantic(interventions: Dict[str, InterventionModel]) -> InterventionTree:
-        """_summary_
+    def from_pydantic(pinterventions: Dict[str, InterventionModel]) -> InterventionTree:
+        """
+        Creates an InterventionTree and its associated Interventions from a dictionary of
+        InterventionModel pydantic models.
 
         Args:
-            graph (torch.fx.graph.Graph): _description_
+            pinterventions (Dict[str, InterventionModel]): _description_
+
+        Returns:
+            InterventionTree: _description_
         """
 
         tree = InterventionTree()
 
-        for node in interventions.values():
-            tree._from_pydantic(node, interventions)
-
+        for node in pinterventions.values():
+            tree._from_pydantic(node, pinterventions)
         return tree
 
     def _from_pydantic(
         self,
         pintervention: InterventionModel,
-        interventions: Dict[str, InterventionModel],
+        pinterventions: Dict[str, InterventionModel],
     ) -> Intervention:
-        """Creates an Intervention from a Node.
+        """Creates an Intervention from a pydantic model
 
         Args:
-            node (torch.fx.node.Node): _description_
+            pintervention (InterventionModel): _description_
+            pinterventions (Dict[str, InterventionModel]): _description_
 
         Returns:
             Intervention: _description_
         """
 
         def _dereference(reference: InterventionModel.Reference):
-            return self._from_pydantic(interventions[reference.name], interventions)
+            return self._from_pydantic(pinterventions[reference.name], pinterventions)
 
-        # Arguments might be nodes themselves so recurse.
+  
+        # Arguments might be interventions themselves so recurse.
         args = util.apply(pintervention.args, _dereference, InterventionModel.Reference)
         kwargs = util.apply(
             pintervention.kwargs, _dereference, InterventionModel.Reference
@@ -73,7 +79,9 @@ class InterventionTree:
             **kwargs,
         )
 
-        # Dependencies and listeners might be nodes themselves so recurse.
+        self.interventions[intervention.name] = intervention
+
+        # Dependencies and listeners might be interventions themselves so recurse.
         dependencies = util.apply(
             pintervention.dependencies, _dereference, InterventionModel.Reference
         )
@@ -89,7 +97,7 @@ class InterventionTree:
 
     def __init__(self) -> None:
         self.interventions: Dict[str, Intervention] = dict()
-        self.activation_interventions: Dict[str, ActivationIntervention] = dict()
+        self.module_path_to_intervention_name: Dict[str, str] = dict()
         self.modules: Set[str] = set()
         self.generation_idx: int = 0
         self.model: torch.nn.Module = None
@@ -124,7 +132,7 @@ class InterventionTree:
         *args,
         **kwargs,
     ) -> Intervention:
-        """_summary_
+        """Creates the appropratie type of intervention based on its attributes.
 
         Args:
             operation (str): _description_
@@ -137,9 +145,14 @@ class InterventionTree:
         if name in self.interventions:
             return self.interventions[name]
         if operation == "placeholder":
-            return ActivationIntervention(
+            intervention = ActivationIntervention(
                 self, operation, name, target, *args, **kwargs
             )
+            self.modules.add(".".join(intervention.target.split(".")[:-3]))
+            self.module_path_to_intervention_name[
+                intervention.target
+            ] = intervention.name
+            return intervention
         if operation == "call_module":
             return ModuleIntervention(self, operation, name, target, *args, **kwargs)
         if target is Proxy.proxy_save:
@@ -155,6 +168,7 @@ class Intervention(torch.futures.Future):
     An Intervention represents some action that needs to be carried out during the inference of a model.
 
     Attributes:
+        tree (InterventionTree): _description_
         operation (str): _description_
         name (str): _description_
         target(Union[Callable[..., Any], str]): _description_
@@ -171,12 +185,6 @@ class Intervention(torch.futures.Future):
         *args,
         **kwargs,
     ):
-        """
-        Args:
-            operation (str): _description_
-            name (str): _description_
-            target (Union[Callable[..., Any], str]): _description_
-        """
         super().__init__()
 
         self.tree = tree
@@ -187,14 +195,14 @@ class Intervention(torch.futures.Future):
         self.args = args
         self.kwargs = kwargs
 
-        # Add to class attribute Intervention.interventions
-        tree.interventions[name] = self
+        self.fufilled = None
 
         # Add done callback to self so we see in logs when this is set.
         self.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
 
     def set_listeners(self, listeners: List[Intervention]) -> None:
         """
+        Chains listeners to have their .chain() method called in order of listeners.
         Collects all listeners as a single Future and adds a done call back to call destroy()
         when completed.
 
@@ -202,35 +210,26 @@ class Intervention(torch.futures.Future):
             listeners (List[Intervention]): _description_
         """
 
+        future = self
+
+        for listener in listeners:
+            future = future.then(listener.chain)
+
         # Add self to listeners becuase we should only destory this Intervention after it's been set.
         listeners.append(self)
+
         torch.futures.collect_all(listeners).add_done_callback(lambda x: self.destroy())
 
     def set_dependencies(self, dependencies: List[Intervention]) -> None:
         """
-        Collects all dependencies (arguments that are also Interventions) as a single Future and adds a done call back to call intervene()
-        when completed.
+        Sets the .fufilled attribute to be a single future collected from all dependecies.
+        .fufilled.done() tells you whether the Intervention is ready to be ran.
 
         Args:
             dependencies (List[Intervention]): _description_
         """
-        torch.futures.collect_all(dependencies).add_done_callback(
-            lambda x: self.intervene()
-        )
 
-    @staticmethod
-    def prepare_args(args, device):
-
-        def _value(value: torch.futures.Future):
-            return value.value()
-        
-        def _to(value: torch.Tensor):
-            return value.to(device)
-
-        args = util.apply(args, _value, torch.futures.Future)
-        args = util.apply(args, _to, torch.Tensor)
-
-        return args
+        self.fufilled = torch.futures.collect_all(dependencies)
 
     def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
         """Preprocess this interventions input to be ran by its command
@@ -239,8 +238,19 @@ class Intervention(torch.futures.Future):
             Tuple[List[Any], Dict[str,Any]]: _description_
         """
 
-        args = Intervention.prepare_args(self.args, self.tree.model.device)
-        kwargs = Intervention.prepare_args(self.kwargs, self.tree.model.device)
+        # Turn futures into their value
+        def _value(value: torch.futures.Future):
+            return value.value()
+
+        # Move tensors to device
+        def _to(value: torch.Tensor):
+            return value.to(self.tree.model.device)
+
+        args = util.apply(self.args, _value, torch.futures.Future)
+        args = util.apply(args, _to, torch.Tensor)
+
+        kwargs = util.apply(self.kwargs, _value, torch.futures.Future)
+        kwargs = util.apply(kwargs, _to, torch.Tensor)
 
         return args, kwargs
 
@@ -252,36 +262,33 @@ class Intervention(torch.futures.Future):
 
         self.set_result(output)
 
+    def chain(self, future: Intervention):
+        if self.fufilled.done():
+            self.intervene()
+
+        future.set_result(None)
+
     def destroy(self) -> None:
         """Destroys the Intervention"""
         logger.debug(f"=> DEL({self.name})")
 
         del self.tree.interventions[self.name]
 
-
-class ActivationIntervention(Intervention):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.tree.modules.add(".".join(self.target.split(".")[:-3]))
-        self.tree.activation_interventions[self.target] = self
-
-    def set_dependencies(self, dependencies: List[Intervention]):
-        return super().set_dependencies([self])
-
-    def intervene(self):
-        pass
-
     @staticmethod
-    def batch_index_update(batch_index: int, value1, value2) -> None:
+    def update(value1, value2) -> None:
         if isinstance(value1, torch.Tensor):
-            value1[[batch_index]] = value2
+            value1[:] = value2
         elif isinstance(value1, list) or isinstance(value1, tuple):
             for value_idx in range(len(value1)):
-                ActivationIntervention.batch_index_update(batch_index, value1[value_idx], value2[value_idx])
+                Intervention.update(value1[value_idx], value2[value_idx])
         elif isinstance(value1, dict):
             for key in value1:
-                ActivationIntervention.batch_index_update(batch_index, value1[key], value2[key])
+                Intervention.update(value1[key], value2[key])
+
+
+class ActivationIntervention(Intervention):
+    def intervene(self):
+        pass
 
     def batch_index_set(self, batch_index: int, value) -> None:
         def _batch_index_set(value):
@@ -292,18 +299,21 @@ class ActivationIntervention(Intervention):
 
 class SetIntervention(Intervention):
     def intervene(self):
-        module_name, activation_intervention, value = self.args
+        args, kwargs = self.prepare_inputs()
 
-        self.tree.activation_interventions[module_name] = self
+        value1, value2 = args
 
-        self.set_result(Intervention.prepare_args(value, self.tree.model.device))
+        Intervention.update(value1, value2)
+
+        self.destroy()
 
 
 class SaveIntervention(Intervention):
     def intervene(self):
-        intervention = self.args[0]
 
-        self.set_result(copy.deepcopy(intervention.value()))
+        args, kwargs = self.prepare_inputs()
+
+        self.set_result(copy.deepcopy(args[0]))
 
     def destroy(self):
         pass
@@ -327,18 +337,12 @@ def intervene(activations, module_path: str, tree: InterventionTree, key: str):
 
     batch_module_path = f"{module_path}.{batch_idx}"
 
-    while batch_module_path in tree.activation_interventions:
-        intervention = tree.activation_interventions[batch_module_path]
+    while batch_module_path in tree.module_path_to_intervention_name:
+        intervention: ActivationIntervention = tree.interventions[
+            tree.module_path_to_intervention_name[batch_module_path]
+        ]
 
         intervention.batch_index_set(batch_idx, activations)
-
-        _intervention = tree.activation_interventions[batch_module_path]
-
-        if intervention is not _intervention:
-
-            ActivationIntervention.batch_index_update(
-                batch_idx, activations, _intervention.value()
-            )
 
         batch_idx += 1
 
