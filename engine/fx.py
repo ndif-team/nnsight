@@ -17,7 +17,6 @@ class Proxy(torch.futures.Future, torch.fx.Proxy):
 
     @staticmethod
     def proxy_set(
-        module_path: str,
         activation_node: torch.fx.node.Node,
         value: Union[torch.fx.node.Node, Any],
     ) -> None:
@@ -27,7 +26,6 @@ class Proxy(torch.futures.Future, torch.fx.Proxy):
         (dont want to set the module output until weve actually arrived at the module).
 
         Args:
-            module_path (str): _description_
             activation_node (torch.fx.node.Node): _description_
             value (Union[torch.fx.node.Node, Any]): _description_
         """
@@ -45,6 +43,20 @@ class Proxy(torch.futures.Future, torch.fx.Proxy):
     def __init__(self, *args, **kwargs):
         torch.fx.Proxy.__init__(self, *args, **kwargs)
         torch.futures.Future.__init__(self)
+
+    def set(self, value: Union[Proxy, Any]):
+        Proxy(
+            self.tracer.create_node(
+                "call_function",
+                Proxy.proxy_set,
+                (
+                    self.node,
+                    value.node if isinstance(value, Proxy) else value,
+                ),
+                {},
+            ),
+            self.tracer,
+        )
 
     def save(self) -> Proxy:
         """Creates a save proxy and adds it to Proxy.save_proxies."""
@@ -65,18 +77,15 @@ class Proxy(torch.futures.Future, torch.fx.Proxy):
             torch.Size: _description_
         """
         return self.tracer.node_name_to_shape[self.node.name]
-    
 
-    def token(self, idx:int) -> Proxy:
-
+    def token(self, idx: int) -> Proxy:
         if idx >= 0:
             n_tokens = self.shape[1]
             idx = -(n_tokens - idx)
 
-        return self[:,idx]
-    
-    def t(self, idx:int) -> Proxy:
+        return self[:, idx]
 
+    def t(self, idx: int) -> Proxy:
         return self.token(idx)
 
 
