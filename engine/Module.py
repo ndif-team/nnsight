@@ -8,7 +8,7 @@ import torch
 from . import util
 from .fx import Proxy
 
-from.Invoker import InvokerState
+from.contexts.Invoker import InvokerState
 
 class Module:
     """_summary_

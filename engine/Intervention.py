@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from typing import Any, Callable, Dict, List, Set, Tuple, Union
 
 import torch
@@ -60,7 +59,6 @@ class InterventionTree:
         def _dereference(reference: InterventionModel.Reference):
             return self._from_pydantic(pinterventions[reference.name], pinterventions)
 
-  
         # Arguments might be interventions themselves so recurse.
         args = util.apply(pintervention.args, _dereference, InterventionModel.Reference)
         kwargs = util.apply(
@@ -203,7 +201,7 @@ class Intervention(torch.futures.Future):
     def set_listeners(self, listeners: List[Intervention]) -> None:
         """
         Chains listeners to have their .chain() method called in order of listeners.
-        Collects all listeners as a single Future and adds a done call back to call destroy()
+        Collects all listeners as a single Future and adds a done callback to .destroy()
         when completed.
 
         Args:
@@ -299,9 +297,7 @@ class ActivationIntervention(Intervention):
 
 class SetIntervention(Intervention):
     def intervene(self):
-        args, kwargs = self.prepare_inputs()
-
-        value1, value2 = args
+        (value1, value2), _ = self.prepare_inputs()
 
         Intervention.update(value1, value2)
 
@@ -310,10 +306,9 @@ class SetIntervention(Intervention):
 
 class SaveIntervention(Intervention):
     def intervene(self):
+        (value, *_), _ = self.prepare_inputs()
 
-        args, kwargs = self.prepare_inputs()
-
-        self.set_result(util.apply(args[0], lambda x : x.clone(), torch.Tensor))
+        self.set_result(util.apply(value, lambda x: x.clone(), torch.Tensor))
 
     def destroy(self):
         pass
