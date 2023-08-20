@@ -46,9 +46,9 @@ class ModelProcessor(Processor):
 
         # If max_memory is set, use accelerate.infer_auto_device_map to get a device_map
         if self.max_memory is not None:
-            self.model.graph.tie_weights()
+            self.model.meta_model.tie_weights()
             self.device_map = accelerate.infer_auto_device_map(
-                self.model.graph, max_memory=self.max_memory
+                self.model.meta_model, max_memory=self.max_memory
             )
 
         # Actually load the parameters of the model according to device_map
@@ -65,7 +65,7 @@ class ModelProcessor(Processor):
             tree = Intervention.InterventionTree.from_pydantic(request.interventions)
 
             # Run model with paramters and interventions
-            output = self.model.run_model(tree, request.prompts, *args, **kwargs)
+            output = self.model(request.prompts, tree, *args, device_map=self.device_map, **kwargs)
 
             # Create response
             self.response_dict[request.id] = ResponseModel(
