@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from typing_extensions import override
-
 if TYPE_CHECKING:
     from .Generator import Generator
 
@@ -14,7 +12,6 @@ class Invoker:
         self.input = input
         self.tokens = None
 
-    @override
     def __enter__(self) -> Invoker:
         # Were in a new invocation so set generation_idx to 0
         self.generator.generation_idx = 0
@@ -36,7 +33,6 @@ class Invoker:
 
         return self
 
-    @override
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         # Exiting an invocation so if we enter a new one, it will be a new batch idx
         self.generator.batch_idx += 1

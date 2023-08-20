@@ -7,7 +7,7 @@ import socketio
 import torch.fx
 
 from .. import CONFIG, logger, modeling
-from ..fx import Tracer
+from ..fx.Tracer import Tracer
 from ..Intervention import InterventionTree
 from .Invoker import Invoker
 
@@ -47,7 +47,7 @@ class Generator:
         if self.device_map == "server":
             self.run_server(interventions)
         else:
-            self.output = self.run_local(interventions)
+            self.run_local(interventions)
 
     def run_local(self, interventions: Dict[str, modeling.InterventionModel]):
         tree = InterventionTree.from_pydantic(interventions)
@@ -68,8 +68,8 @@ class Generator:
 
         if self.blocking:
             self.blocking_request(request)
-
-        self.non_blocking_request(request)
+        else:
+            self.non_blocking_request(request)
 
     def blocking_request(self, request: modeling.RequestModel):
         sio = socketio.Client()
@@ -95,8 +95,6 @@ class Generator:
         sio.emit("blocking_request", pickle.dumps(request))
 
         sio.wait()
-
-        return self.output
 
     def non_blocking_request(self, request: modeling.RequestModel):
         pass

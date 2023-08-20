@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Union, Tuple
+from typing import List, Union, Tuple
 
 import accelerate
 import baukit
@@ -16,7 +16,7 @@ from transformers import (
 )
 from transformers.generation.utils import GenerateOutput
 
-from . import CONFIG, logger, modeling
+from . import CONFIG, logger
 from .Intervention import InterventionTree, intervene
 from .Module import Module
 from .contexts.Generator import Generator
@@ -157,7 +157,7 @@ class Model:
 
         logger.debug(f"Completed `{self.model_name_or_path}`")
 
-        return output, tree
+        return output
 
 
        

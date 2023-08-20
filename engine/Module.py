@@ -5,8 +5,9 @@ from typing import Any, Type, Union
 import torch
 
 from . import util
-from .fx import Proxy
 from .contexts.Generator import Generator
+from .fx.Proxy import Proxy
+
 
 class Module:
     """_summary_

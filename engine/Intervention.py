@@ -8,7 +8,7 @@ import torch.fx
 from torch.utils.hooks import RemovableHandle
 
 from . import logger, util
-from .fx import Proxy
+from .fx.Proxy import Proxy
 from .modeling import InterventionModel
 
 
