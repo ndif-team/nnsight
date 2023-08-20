@@ -1,34 +1,30 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Type, Union
 
 import torch
 
 from . import util
 from .fx import Proxy
-
-from.contexts.Invoker import InvokerState
+from .contexts.Generator import Generator
 
 class Module:
     """_summary_
 
     Attributes:
-        invoker_state (InvokerState): _description_
+        generator (Generator): _description_
         module_path (str): _description_
         output_shape (torch.Size): _description_
         output_type (Type): _description_
         _output (Proxy): _description_
     """
 
-    def __init__(self, invoker_state: "InvokerState") -> None:
-        self.invoker_state = invoker_state
-
+    def __init__(self) -> None:
         self.module_path: str = None
         self.output_shape: torch.Size = None
         self.output_type: Type = torch.Tensor
-
         self._output: Proxy = None
+        self.generator: Generator = None
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         """We override the __call__ function of modules because we may want to do a ModuleIntervention
@@ -48,10 +44,10 @@ class Module:
             kwds = util.apply(kwds, _get_node, Proxy)
 
             return Proxy(
-                self.invoker_state.tracer.create_node(
+                self.generator.tracer.create_node(
                     "call_module", self.module_path, args, kwds
                 ),
-                self.invoker_state.tracer
+                self.generator.tracer,
             )
 
         return super().__call__(*args, **kwds)
@@ -67,13 +63,19 @@ class Module:
         """
         if self._output is None:
             self._output = Proxy(
-                self.invoker_state.tracer.create_node(
+                self.generator.tracer.create_node(
                     "placeholder",
-                    f"{self.module_path}.output.{self.invoker_state.generation_idx}.{self.invoker_state.batch_idx}",
-                    (util.apply(self.output_shape, lambda x : torch.empty(x, device="meta"), torch.Size),),
+                    f"{self.module_path}.output.{self.generator.generation_idx}.{self.generator.batch_idx}",
+                    (
+                        util.apply(
+                            self.output_shape,
+                            lambda x: torch.empty(x, device="meta"),
+                            torch.Size,
+                        ),
+                    ),
                     {},
                 ),
-                self.invoker_state.tracer,
+                self.generator.tracer,
             )
 
         return self._output
@@ -89,7 +91,7 @@ class Module:
         self.output.set(value)
 
     @staticmethod
-    def wrap(module: torch.nn.Module, invoker_state: "InvokerState") -> Module:
+    def wrap(module: torch.nn.Module) -> Module:
         """Wraps the torch Module with our Module
 
         Args:
@@ -106,12 +108,12 @@ class Module:
             module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
 
         for name, _module in module.named_children():
-            setattr(module, name, Module.wrap(_module, invoker_state))
+            setattr(module, name, Module.wrap(_module))
 
         if isinstance(module, Module):
             return module
 
-        util.wrap(module, Module, invoker_state)
+        util.wrap(module, Module)
 
         module.register_forward_hook(hook)
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Dict, List
 import socketio
 import torch.fx
 
-from .. import CONFIG, modeling, logger
+from .. import CONFIG, logger, modeling
 from ..fx import Tracer
 from ..Intervention import InterventionTree
 from .Invoker import Invoker
@@ -33,8 +33,11 @@ class Generator:
         )
         self.output = None
 
+        for name, module in self.model.meta_model.named_modules():
+            module.generator = self
+
     def __enter__(self) -> Generator:
-        pass
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.tracer.graph.eliminate_dead_code()
@@ -98,5 +101,5 @@ class Generator:
     def non_blocking_request(self, request: modeling.RequestModel):
         pass
 
-    def invoke(self, input, *args, **kwargs) -> Invoker:
-        return Invoker(self, input, *args, **kwargs)
+    def invoke(self, input) -> Invoker:
+        return Invoker(self, input)

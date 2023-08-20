@@ -66,7 +66,7 @@ class Model:
         # can be accessed directly.
         for name, module in self.meta_model.named_children():
             # Wrap all modules in our Module class.
-            module = Module.wrap(module, self.invoker_state)
+            module = Module.wrap(module)
 
             setattr(self.meta_model, name, module)
             setattr(self, name, module)

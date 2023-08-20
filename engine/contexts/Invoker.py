@@ -9,11 +9,9 @@ if TYPE_CHECKING:
 
 
 class Invoker:
-    def __init__(self, generator: "Generator", input, *args, **kwargs) -> None:
+    def __init__(self, generator: "Generator", input) -> None:
         self.generator = generator
         self.input = input
-        self.args = args
-        self.kwargs = kwargs
         self.tokens = None
 
     @override
@@ -23,7 +21,8 @@ class Invoker:
 
         # Run graph_mode with meta tensors to collect shape information
         inputs = self.generator.model.prepare_inputs(self.input)
-        self.generator.model.run_graph(inputs.copy(), *self.args, **self.kwargs)
+
+        self.generator.model.run_graph(inputs.copy())
 
         # Decode tokenized inputs for use usage
         self.tokens = [
@@ -48,4 +47,4 @@ class Invoker:
 
         # Run graph with
         inputs = self.generator.model.prepare_inputs("_")
-        self.generator.model.run_graph(inputs, *self.args, **self.kwargs)
+        self.generator.model.run_graph(inputs)
