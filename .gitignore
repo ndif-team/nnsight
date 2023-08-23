@@ -9,3 +9,4 @@ engine/model_checkpoints/**/blobs
 engine/model_checkpoints/**/*.bin
 engine/model_checkpoints/**/*.model
 engine/model_checkpoints/**/*.safetensors
+engine.log
