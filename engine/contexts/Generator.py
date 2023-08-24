@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
 import socketio
 import torch.fx
 
 from .. import CONFIG, logger, modeling
-from ..fx.Tracer import Tracer
+from ..fx.Tracer import InterventionTracer
 from ..Intervention import InterventionTree
 from .Invoker import Invoker
 
@@ -28,9 +28,10 @@ class Generator:
         self.generation_idx: int = 0
         self.batch_idx: int = 0
         self.prompts: List = []
-        self.tracer: Tracer = Tracer(
+        self.tracer: InterventionTracer = InterventionTracer(
             torch.fx.graph.Graph(owning_module=self.model.meta_model)
         )
+        self.modulations: List[Tuple[str, str, str]] = []
         self.output = None
 
         for name, module in self.model.meta_model.named_modules():

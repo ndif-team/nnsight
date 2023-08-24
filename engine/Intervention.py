@@ -8,7 +8,7 @@ import torch.fx
 from torch.utils.hooks import RemovableHandle
 
 from . import logger, util
-from .fx.Proxy import Proxy
+from .fx.Proxy import InterventionProxy
 from .modeling import InterventionModel
 
 
@@ -153,9 +153,9 @@ class InterventionTree:
             return intervention
         if operation == "call_module":
             return ModuleIntervention(self, operation, name, target, *args, **kwargs)
-        if target is Proxy.proxy_save:
+        if target is InterventionProxy.proxy_save:
             return SaveIntervention(self, operation, name, target, *args, **kwargs)
-        if target is Proxy.proxy_set:
+        if target is InterventionProxy.proxy_set:
             return SetIntervention(self, operation, name, target, *args, **kwargs)
 
         return Intervention(self, operation, name, target, *args, **kwargs)
