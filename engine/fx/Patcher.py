@@ -20,7 +20,7 @@ class Patcher:
             if graph is not None:
                 value = fn(*Proxy.get_value(args), **Proxy.get_value(kwargs))
 
-                return graph.proxy(
+                return graph.add(
                     graph=graph, value=value, target=fn, args=args, kwargs=kwargs
                 )
 

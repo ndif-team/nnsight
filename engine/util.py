@@ -23,10 +23,10 @@ def apply(data: Any, fn: Callable, cls: type):
 
     return data
 
-def fetch_attr(object:object, target: str, getfn=getattr):
+def fetch_attr(object:object, target: str):
     target_atoms = target.split(".")
     for i, atom in enumerate(target_atoms):
-        object = getfn(object, atom)
+        object = getattr(object, atom)
     return object
 
 def wrap(object:object, wrapper:Type, *args, **kwargs):

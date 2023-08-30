@@ -94,3 +94,4 @@ class Processor(Process, ABC):
                 self.logger.exception(f"Exception encountered in processing.")
             finally:
                 self.maintenance()
+           

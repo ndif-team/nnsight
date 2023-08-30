@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+
+import torch.futures
+
+from .. import util
+from ..logger import logger
+
+from .Proxy import Proxy
+
+if TYPE_CHECKING:
+    from .Graph import Graph
+
+
+class Node:
+    @staticmethod
+    def update(value1, value2) -> None:
+        if isinstance(value1, torch.Tensor):
+            value1[:] = value2
+        elif isinstance(value1, list) or isinstance(value1, tuple):
+            for value_idx in range(len(value1)):
+                Node.update(value1[value_idx], value2[value_idx])
+        elif isinstance(value1, dict):
+            for key in value1:
+                Node.update(value1[key], value2[key])
+
+    @staticmethod
+    def target_name(target) -> str:
+        if isinstance(target, str):
+            name = target
+        elif callable(target):
+            name = target.__name__
+
+        return name
+
+    def __init__(
+        self,
+        name: str,
+        graph: "Graph",
+        value: Any,
+        target: Union[Callable, str],
+        args: List[Any] = None,
+        kwargs: Dict[str, Any] = None,
+        meta: Dict[str, Any] = None,
+    ) -> None:
+        super().__init__()
+
+        if args is None:
+            args = list()
+        if kwargs is None:
+            kwargs = dict()
+        if meta is None:
+            meta = dict()
+
+        self.name = name
+        self.graph = graph
+        self.proxy_value = value
+        self.target = target
+        self.args = util.apply(args, lambda x: x.node, Proxy)
+        self.kwargs = util.apply(kwargs, lambda x: x.node, Proxy)
+        self.meta = meta
+
+        self.listeners: List[Node] = list([self])
+        self.dependencies: List[Node] = list()
+
+        util.apply(self.args, lambda x: self.dependencies.append(x), Node)
+        util.apply(self.kwargs, lambda x: self.dependencies.append(x), Node)
+        util.apply(self.args, lambda x: x.listeners.append(self), Node)
+        util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
+
+        self._future: torch.futures.Future = None
+
+    @property
+    def future(self):
+        if self._future is None:
+            self._future = torch.futures.Future()
+
+        return self._future
+
+    def value(self) -> Any:
+        return self.future.value()
+
+    def done(self) -> bool:
+        return self.future.done()
+
+    def fufilled(self):
+        for dependency in self.dependencies:
+            if not dependency.done():
+                return False
+
+        return True
+
+    def compile(self):
+        self.future.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
+
+        future = self.listeners[0].future
+
+        for listener in self.listeners[1:]:
+            future = future.then(listener.chain)
+
+        torch.futures.collect_all(
+            util.apply(self.listeners, lambda x: x.future, Node)
+        ).add_done_callback(lambda x: self.destroy())
+
+    def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
+        # Turn futures into their value
+        def _value(value: Node):
+            return value.value()
+
+        device = None
+
+        def _device(value):
+            nonlocal device
+            device = value.device
+
+        all_args = list(self.args) + list(self.kwargs.values())
+
+        util.apply(list(reversed(all_args)), _device, torch.Tensor)
+        util.apply(list(reversed(all_args)), _device, torch.nn.Module)
+
+        # Move tensors to device
+        def _to(value: torch.Tensor):
+            return value.to(device)
+
+        args = util.apply(self.args, _value, Node)
+        args = util.apply(args, _to, torch.Tensor)
+
+        kwargs = util.apply(self.kwargs, _value, Node)
+        kwargs = util.apply(kwargs, _to, torch.Tensor)
+
+        return args, kwargs
+
+    def execute(self) -> None:
+        args, kwargs = self.prepare_inputs()
+
+        if isinstance(self.target, str):
+            obj, *args = args
+
+            target = getattr(obj, self.target)
+        else:
+            target = self.target
+
+        output = target(*args, **kwargs)
+
+        self.future.set_result(output)
+
+    def destroy(self) -> None:
+        logger.debug(f"=> DEL({self.name})")
+
+        self._future = None
+
+    def chain(self, future: torch.futures.Future):
+
+        if self.fufilled() and not self.done():
+            self.execute()
+
+        future.set_result(None)
+
+    def __str__(self):
+        args = util.apply(self.args, lambda x: x.name, Node)
+        args = [str(arg) for arg in args]
+        meta = f"{self.meta['file']}({self.meta['line']})" if self.meta else ""
+        return f"{self.name}:[ {meta} args:({','.join(args)}) l:{len(self.listeners)} d:{len(self.dependencies)}]"

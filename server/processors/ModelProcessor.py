@@ -1,9 +1,9 @@
 from typing import Dict
 
 import accelerate
-from engine import Intervention, Model
-from engine import logger as engine_logger
-from engine.modeling import JobStatus, RequestModel, ResponseModel
+from engine import Model
+from engine.logger import logger as engine_logger
+from engine.modeling import JobStatus, RequestModel, ResponseModel, fx
 
 from ..ResponseDict import ResponseDict
 from . import Processor
@@ -62,10 +62,10 @@ class ModelProcessor(Processor):
         try:
             args, kwargs = request.args, request.kwargs
 
-            tree = Intervention.InterventionTree.from_pydantic(request.interventions)
+            graph = fx.NodeModel.to_graph(request.intervention_graph)
 
-            # Run model with paramters and interventions
-            output = self.model(request.prompts, tree, *args, device_map=self.device_map, **kwargs)
+            # Run model with parameters and interventions
+            output = self.model(request.prompts, graph, *args, **kwargs)
 
             # Create response
             self.response_dict[request.id] = ResponseModel(
@@ -77,8 +77,8 @@ class ModelProcessor(Processor):
                 output=output,
                 # Move all copied data to cpu
                 saves={
-                    name: tree.interventions[name].value().cpu()
-                    for name in tree.interventions
+                    name: value.value()
+                    for name, value in graph.nodes.items() if value.done()
                 },
             ).log(self.logger)
 

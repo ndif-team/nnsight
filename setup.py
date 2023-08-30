@@ -22,4 +22,4 @@ setup(
         "accelerate"
     ],
     include_package_data=True,
-    package_data={'': ['config.yaml']})
+    package_data={'': ['config.yaml', 'model_checkpoints/**/*']})

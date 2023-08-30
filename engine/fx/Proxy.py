@@ -1,106 +1,166 @@
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
-import torch.futures
-import torch.fx
+import torch
 
+from .. import util
 
-class TensorProxy(torch.fx.Proxy):
-    @property
-    def shape(self) -> torch.Size:
-        """_summary_
-
-        Returns:
-            torch.Size: _description_
-        """
-        return self.tracer.node_name_to_value[self.node.name].shape
-
-    @property
-    def device(self):
-        return self.tracer.node_name_to_value[self.node.name].device
-
-    @property
-    def dtype(self):
-        return self.tracer.node_name_to_value[self.node.name].dtype
-
-    def size(self, dim: int=None):
-        if dim is None:
-            return self.tracer.node_name_to_value[self.node.name].size()
-        return self.tracer.node_name_to_value[self.node.name].size(dim)
+if TYPE_CHECKING:
+    from .Node import Node
 
 
-class InterventionProxy(torch.futures.Future, TensorProxy):
-    """
-    We extend the Proxy class here for a couple reasons.
-    We add the .save() method to denote were creating a save Node for a future Intervention and save a reference to it.
-    We add torch.future.Future as a super class so we can set the value after Inference.
-    """
+class Proxy:
+    @staticmethod
+    def get_node(args):
+        return util.apply(args, lambda x: x.node, Proxy)
 
     @staticmethod
-    def proxy_set(
-        activation_node: torch.fx.node.Node,
-        value: Union[torch.fx.node.Node, Any],
-    ) -> None:
-        """
-        Shell function to capture when were setting the value of a module output.
-        activation_node is not used but it is an argument here so it is added to its dependencies
-        (dont want to set the module output until weve actually arrived at the module).
-
-        Args:
-            activation_node (torch.fx.node.Node): _description_
-            value (Union[torch.fx.node.Node, Any]): _description_
-        """
-        pass
-
-    @staticmethod
-    def proxy_save(node: torch.fx.node.Node) -> None:
-        """Shell function to capture when were saving a value during Inference.
-
-        Args:
-            node (torch.fx.node.Node): _description_
-        """
-        pass
-
-    def __init__(self, *args, **kwargs):
-        torch.fx.Proxy.__init__(self, *args, **kwargs)
-        torch.futures.Future.__init__(self)
-
-    def set(self, value: Union[InterventionProxy, Any]):
-        self.tracer.proxy(
-            self.tracer.create_node(
-                "call_function",
-                InterventionProxy.proxy_set,
-                (
-                    self.node,
-                    value.node if isinstance(value, InterventionProxy) else value,
-                ),
-                {},
+    def get_value(args):
+        def slice_to_value(arg: slice):
+            return slice(
+                Proxy.get_value(arg.start),
+                Proxy.get_value(arg.stop),
+                Proxy.get_value(arg.step),
             )
+
+        args = util.apply(args, lambda x: x.node.proxy_value, Proxy)
+        args = util.apply(args, slice_to_value, slice)
+
+        return args
+
+    def __init__(self, node: "Node") -> None:
+        self.node = node
+
+    def __call__(self, *args, **kwargs):
+        if self.node.graph.is_module_node(self.node.args[0]) and not isinstance(
+            self.node.proxy_value, torch.nn.Module
+        ):
+            value = self.node.proxy_value.__func__(
+                Proxy(self.node.args[0]), *args, **kwargs
+            )
+
+            return value
+
+        else:
+            value = self.node.proxy_value(
+                *Proxy.get_value(args), **Proxy.get_value(kwargs)
+            )
+
+            return self.node.graph.add(
+                graph=self.node.graph,
+                value=value,
+                target="__call__",
+                args=[self.node] + list(args),
+                kwargs=kwargs,
+            )
+
+    def __getitem__(self, key):
+        key = Proxy.get_value(key)
+
+        value = self.node.proxy_value[key]
+
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target="__getitem__",
+            args=[self.node, key],
         )
 
-    def save(self) -> InterventionProxy:
-        """Creates a save proxy and adds it to Proxy.save_proxies."""
-        proxy = self.tracer.proxy(
-            self.tracer.create_node(
-                "call_function", InterventionProxy.proxy_save, (self.node,), {}
-            )
+    def __getattr__(self, key: str):
+        value = util.fetch_attr(self.node.proxy_value, key)
+
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target=util.fetch_attr,
+            args=[self.node, key],
         )
-        self.tracer.save_proxies[proxy.node.name] = proxy
-        return proxy
 
-    def token(self, idx: int) -> InterventionProxy:
-        if idx >= 0:
-            n_tokens = self.shape[1]
-            idx = -(n_tokens - idx)
+    def __len__(self):
+        value = len(self.node.proxy_value)
 
-        return self[:, idx]
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target=len,
+            args=[self.node],
+        )
 
-    def t(self, idx: int) -> InterventionProxy:
-        return self.token(idx)
+    def __add__(self, other):
+        value = self.node.proxy_value + Proxy.get_value(other)
 
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target="__add__",
+            args=[self.node, other],
+        )
 
-# When we use graph.eliminate_dead_code(), we want proxy_set and proxy_save and their dependencies to not be removed
-torch.fx.node._side_effectful_functions.update(
-    set([InterventionProxy.proxy_set, InterventionProxy.proxy_save])
-)
+    def __sub__(self, other):
+        value = self.node.proxy_value - Proxy.get_value(other)
+
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target="__sub__",
+            args=[self.node, other],
+        )
+
+    def __pow__(self, other):
+        value = self.node.proxy_value ** Proxy.get_value(other)
+
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target=pow,
+            args=[self.node, other],
+        )
+
+    def __mul__(self, other):
+        value = self.node.proxy_value * Proxy.get_value(other)
+
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target="__mul__",
+            args=[self.node, other],
+        )
+
+    def __truediv__(self, other):
+        value = self.node.proxy_value / Proxy.get_value(other)
+
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target="__truediv__",
+            args=[self.node, other],
+        )
+
+    def __bool__(self):
+        return self.node.proxy_value.__bool__()
+
+    def __index__(self):
+        return self.node.proxy_value.__index__()
+
+    def __instancecheck__(self, __instance: Any) -> bool:
+        return self.node.proxy_value.__instancecheck__(__instance)
+
+    @classmethod
+    def __torch_function__(cls, orig_method, types, args=None, kwargs=None):
+        if args is None:
+            args = list()
+        if kwargs is None:
+            kwargs = dict()
+
+        value = orig_method(*Proxy.get_value(args), **Proxy.get_value(kwargs))
+
+        self: Proxy = args[0]
+
+        return self.node.graph.add(
+            graph=self.node.graph,
+            value=value,
+            target=orig_method,
+            args=args,
+            kwargs=kwargs,
+        )
