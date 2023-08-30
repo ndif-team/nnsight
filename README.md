@@ -21,12 +21,12 @@ from engine import Model
 
 model = Model('gpt2')
 
-with model.invoke('The Eiffel Tower is in the city of') as invoker:
+with model.generate(device_map='cuda', max_new_tokens=1) as generator:
+    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
-    hidden_states = model.transformer.h[-1].output[0].copy()
+        hidden_states = model.transformer.h[-1].output[0].copy()
 
-output = model(device_map='cuda', max_new_tokens=1)
-
+output = generator.output
 ```
 
 Running the engine API remotely on LLaMA 65b and saving the hidden states of the last layer:
@@ -35,12 +35,12 @@ Running the engine API remotely on LLaMA 65b and saving the hidden states of the
 from engine import Model
 
 model = Model('decapoda-research/llama-65b-hf')
+with model.generate(device_map='server', max_new_tokens=1) as generator:
+    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
-with model.invoke('The Eiffel Tower is in the city of') as invoker:
+        hidden_states = model.model.layers[-1].output[0].save()
 
-    hidden_states = model.model.layers[-1].output[0].copy()
-
-output = model(device_map='server', max_new_tokens=1)
+output = generator.output
 ```
 
 More examples can be found in `engine/examples/`
