@@ -6,7 +6,8 @@ import torch
 
 from . import util
 from .contexts.Generator import Generator
-from .fx.Proxy import Proxy
+from .intervention import InterventionProxy
+from .fx.Graph import Graph
 
 
 class Module:
@@ -22,9 +23,14 @@ class Module:
 
     def __init__(self) -> None:
         self.module_path: str = None
+        self.input_shape: torch.Size = None
+        self.input_type: Type = None
         self.output_shape: torch.Size = None
-        self.output_type: Type = torch.Tensor
-        self._output: Proxy = None
+        self.output_type: Type = None
+
+        self._output: InterventionProxy = None
+        self._graph: Graph = None
+
         self.generator: Generator = None
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
@@ -36,25 +42,19 @@ class Module:
         Returns:
             Any: _description_
         """
-        adhoc = any(isinstance(x, Proxy) for x in list(args) + list(kwds.values()))
+        proxy = any(
+            isinstance(x, InterventionProxy) for x in list(args) + list(kwds.values())
+        )
 
-        if adhoc:
-            _get_node = lambda x: x.node
+        if proxy:
+            module_proxy = getattr(self.generator.graph.module_proxy, self.module_path)
 
-            args = util.apply(args, _get_node, Proxy)
-            kwds = util.apply(kwds, _get_node, Proxy)
-
-            return Proxy(
-                self.generator.tracer.create_node(
-                    "call_module", self.module_path, args, kwds
-                ),
-                self.generator.tracer,
-            )
+            return module_proxy(*args, **kwds)
 
         return super().__call__(*args, **kwds)
 
     @property
-    def output(self) -> Proxy:
+    def output(self) -> InterventionProxy:
         """
         Calling denotes the user wishes to get the output of this module and therefore we create a Proxy of that request.
         Only generates a proxy the first time it is references otherwise returnh the already set one.
@@ -63,26 +63,23 @@ class Module:
             Proxy: _description_
         """
         if self._output is None:
-            self._output = Proxy(
-                self.generator.tracer.create_node(
-                    "placeholder",
-                    f"{self.module_path}.output.{self.generator.generation_idx}.{self.generator.batch_idx}",
-                    (
-                        util.apply(
-                            self.output_shape,
-                            lambda x: torch.empty(x, device="meta"),
-                            torch.Size,
-                        ),
-                    ),
-                    {},
+            self._output = self.generator.graph.add(
+                graph=self.generator.graph,
+                value=util.apply(
+                    self.output_shape,
+                    lambda x: torch.empty(x, device="meta"),
+                    torch.Size,
                 ),
-                self.generator.tracer,
+                target="argument",
+                args=[
+                    f"{self.module_path}.output.{self.generator.generation_idx}.{self.generator.batch_idx}"
+                ],
             )
 
         return self._output
 
     @output.setter
-    def output(self, value: Union[Proxy, Any]) -> None:
+    def output(self, value: Union[InterventionProxy, Any]) -> None:
         """
         Calling denotes the user wishes to set the output of this module and therefore we create a Proxy of that request.
 
@@ -90,6 +87,20 @@ class Module:
             value (Union[Proxy, Any]): _description_
         """
         self.output.set(value)
+
+    @property
+    def graph(self) -> Graph:
+        if self._graph is None:
+            self._graph = Graph.trace(
+                self,
+                *util.apply(
+                    self.input_shape,
+                    lambda x: torch.empty(x, device="meta"),
+                    torch.Size,
+                ),
+            )
+
+        return self._graph
 
     @staticmethod
     def wrap(module: torch.nn.Module) -> Module:
@@ -107,6 +118,9 @@ class Module:
         def hook(module: Module, input: Any, output: Any):
             module._output = None
             module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
+            module.input_shape = util.apply(input, lambda x: x.shape, torch.Tensor)
+            module.output_type = util.apply(output, lambda x: x.dtype, torch.Tensor)
+            module.input_type = util.apply(input, lambda x: x.dtype, torch.Tensor)
 
         for name, _module in module.named_children():
             setattr(module, name, Module.wrap(_module))
@@ -119,3 +133,4 @@ class Module:
         module.register_forward_hook(hook)
 
         return module
+    

@@ -26,8 +26,6 @@ def apply(data: Any, fn: Callable, cls: type):
 def fetch_attr(object:object, target: str):
     target_atoms = target.split(".")
     for i, atom in enumerate(target_atoms):
-        if not hasattr(object, atom):
-            return None
         object = getattr(object, atom)
     return object
 
