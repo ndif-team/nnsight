@@ -72,7 +72,7 @@ class Node:
         self._future: torch.futures.Future = None
 
     @property
-    def future(self):
+    def future(self) -> torch.futures.Future:
         if self._future is None:
             self._future = torch.futures.Future()
 
@@ -84,14 +84,14 @@ class Node:
     def done(self) -> bool:
         return self.future.done()
 
-    def fufilled(self):
+    def fufilled(self) -> bool:
         for dependency in self.dependencies:
             if not dependency.done():
                 return False
 
         return True
 
-    def compile(self):
+    def compile(self) -> None:
         self.future.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
 
         future = self.listeners[0].future
@@ -157,7 +157,7 @@ class Node:
 
         future.set_result(None)
 
-    def __str__(self):
+    def __str__(self) -> str:
         args = util.apply(self.args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]
         meta = f"{self.meta['file']}({self.meta['line']})" if self.meta else ""

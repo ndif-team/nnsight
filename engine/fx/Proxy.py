@@ -32,7 +32,7 @@ class Proxy:
     def __init__(self, node: "Node") -> None:
         self.node = node
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args, **kwargs) -> Proxy:
         if self.node.graph.is_module_node(self.node.args[0]) and not isinstance(
             self.node.proxy_value, torch.nn.Module
         ):
@@ -55,7 +55,7 @@ class Proxy:
                 kwargs=kwargs,
             )
 
-    def __getitem__(self, key):
+    def __getitem__(self, key) -> Proxy:
         key = Proxy.get_value(key)
 
         value = self.node.proxy_value[key]
@@ -67,7 +67,7 @@ class Proxy:
             args=[self.node, key],
         )
 
-    def __getattr__(self, key: str):
+    def __getattr__(self, key: str) -> Proxy:
         value = util.fetch_attr(self.node.proxy_value, key)
 
         return self.node.graph.add(
@@ -77,7 +77,7 @@ class Proxy:
             args=[self.node, key],
         )
 
-    def __len__(self):
+    def __len__(self) -> Proxy:
         value = len(self.node.proxy_value)
 
         return self.node.graph.add(
@@ -87,7 +87,7 @@ class Proxy:
             args=[self.node],
         )
 
-    def __add__(self, other):
+    def __add__(self, other) -> Proxy:
         value = self.node.proxy_value + Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -97,7 +97,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __sub__(self, other):
+    def __sub__(self, other) -> Proxy:
         value = self.node.proxy_value - Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -107,7 +107,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __pow__(self, other):
+    def __pow__(self, other) -> Proxy:
         value = self.node.proxy_value ** Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -117,7 +117,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __mul__(self, other):
+    def __mul__(self, other) -> Proxy:
         value = self.node.proxy_value * Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -127,7 +127,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __truediv__(self, other):
+    def __truediv__(self, other) -> Proxy:
         value = self.node.proxy_value / Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -137,10 +137,10 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return self.node.proxy_value.__bool__()
 
-    def __index__(self):
+    def __index__(self) -> int:
         return self.node.proxy_value.__index__()
 
     def __instancecheck__(self, __instance: Any) -> bool:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .Proxy import Proxy
 
 
@@ -5,7 +7,7 @@ class Patcher:
     def __init__(self) -> None:
         self.patches = list()
 
-    def patch(self, fn):
+    def patch(self, fn) -> None:
         def patched(*args, **kwargs):
             arguments = list(args) + list(kwargs.values())
 
@@ -33,9 +35,9 @@ class Patcher:
 
         self.patches.append((module, fn))
 
-    def __enter__(self):
+    def __enter__(self) -> Patcher:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         for module, fn in self.patches:
             setattr(module, fn.__name__, fn)

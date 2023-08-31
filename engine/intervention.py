@@ -6,14 +6,13 @@ import torch.futures
 
 from . import util
 from .fx.Graph import Graph
-from .fx.Proxy import Proxy
 from .fx.Node import Node
+from .fx.Proxy import Proxy
+
 
 class InterventionProxy(torch.futures.Future, Proxy):
-
     @staticmethod
     def proxy_save(value: Any) -> None:
-
         return util.apply(value, lambda x: x.clone(), torch.Tensor)
 
     def __init__(self, *args, **kwargs):
@@ -39,7 +38,7 @@ class InterventionProxy(torch.futures.Future, Proxy):
         self.node.graph.add(
             graph=self.node.graph,
             value=None,
-            target='null',
+            target="null",
             args=[proxy.node],
         )
 
@@ -58,7 +57,7 @@ class InterventionProxy(torch.futures.Future, Proxy):
     @property
     def shape(self):
         return self.node.proxy_value.shape
-    
+
     @property
     def value(self):
         return self.node.future.value()
@@ -72,12 +71,12 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
     batch_module_path = f"{module_path}.{batch_idx}"
 
     while batch_module_path in graph.argument_node_names:
-        node: Node = graph.nodes[
-            graph.argument_node_names[batch_module_path]
-        ]
+        node: Node = graph.nodes[graph.argument_node_names[batch_module_path]]
 
-        node.future.set_result(util.apply(activations, lambda x : x[[batch_idx]], torch.Tensor))
-        
+        node.future.set_result(
+            util.apply(activations, lambda x: x[[batch_idx]], torch.Tensor)
+        )
+
         batch_idx += 1
 
         batch_module_path = f"{module_path}.{batch_idx}"

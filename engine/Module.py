@@ -6,8 +6,8 @@ import torch
 
 from . import util
 from .contexts.Generator import Generator
-from .intervention import InterventionProxy
 from .fx.Graph import Graph
+from .intervention import InterventionProxy
 
 
 class Module:
@@ -108,8 +108,6 @@ class Module:
 
         Args:
             module (torch.nn.Module): _description_
-            hook (Callable): _description_
-            invoker_state (InvokerState): _description_
 
         Returns:
             Module: _description_
@@ -133,4 +131,3 @@ class Module:
         module.register_forward_hook(hook)
 
         return module
-    

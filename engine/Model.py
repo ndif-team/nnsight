@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from typing import List, Tuple, Union
+from typing import List, Any, Union
 
 import accelerate
 import baukit
 import torch
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, GenerationMixin, PreTrainedModel,
-                          PreTrainedTokenizer)
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    GenerationMixin,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.generation.utils import GenerateOutput
 
 from . import CONFIG
@@ -29,7 +35,7 @@ class Model:
     ----------
         model_name_or_path : str
             name of registered model or path to checkpoint
-        graph : PreTrainedModel
+        meta_model : PreTrainedModel
             model with weights not initialized
         tokenizer : PreTrainedTokenizer
         local_model : PreTrainedModel
@@ -62,21 +68,27 @@ class Model:
                 self.config
             )
 
-        # Set immediate graph childen modules as Models children so sub-modules
-        # can be accessed directly.
         for name, module in self.meta_model.named_children():
             # Wrap all modules in our Module class.
             module = Module.wrap(module)
 
             setattr(self.meta_model, name, module)
+
         self.init_meta_model()
 
         self.local_model: GenerationMixin = None
 
         logger.debug(f"Initialized `{self.model_name_or_path}`")
 
-    def __getattr__(self, key):
+    def __getattr__(self, key:Any) -> Any:
+        """Allows user to access meta_model attributes directly
 
+        Args:
+            key (_type_): _description_
+
+        Returns:
+            Any: _description_
+        """
         return getattr(self.meta_model, key)
 
     def init_meta_model(self) -> None:
@@ -88,6 +100,8 @@ class Model:
         for name, module in self.meta_model.named_modules():
             module.module_path = name
 
+        # Run some prompt though the network to setup up module output shapes
+        # Needed if user is editing a module graph before a call to invoke
         self.run_meta(self.prepare_inputs("_"))
 
     def prepare_inputs(self, inputs, *args, **kwargs) -> BatchEncoding:
@@ -113,14 +127,12 @@ class Model:
         return BatchEncoding(inputs)
 
     @torch.inference_mode()
-    def run_meta(self, inputs, *args, **kwargs):
-        """Runs meta version of model given prompt and return the tokenized inputs.
+    def run_meta(self, inputs:BatchEncoding, *args, **kwargs) -> None:
+        """Runs meta version of model given prompt.
 
         Args:
-            prompt (str): _description_
+            inputs (BatchEncoding): _description_
 
-        Returns:
-            BatchEncoding: _description_
         """
         self.meta_model(*args, **inputs.to("meta"), **kwargs)
 
@@ -175,8 +187,9 @@ class Model:
 
         return output
 
-    def dispatch(self, device_map="auto"):
-        """Actually loades the model paramaters to devices specified by device_map
+    def dispatch(self, device_map="auto") -> None:
+        """Actually loades the model paramaters to devices specified by device_map or moves existing
+        model to device_map.
 
         Args:
             device_map (str, optional): _description_. Defaults to "auto".
@@ -200,7 +213,8 @@ class Model:
             else:
                 self.local_model.to(device_map)
 
-    def modulize(self, module: Module, node_name: str, module_name: str):
+    def modulize(self, module: Module, node_name: str, module_name: str) -> None:
+        
         wme = WrapperModuleEdit(module.module_path, module_name)
         wme.wrapper: Module = Module.wrap(wme.wrapper)
         wme.wrapper.module_path = f"{module.module_path}.{module_name}"
