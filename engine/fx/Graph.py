@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, List, Union, Type
+from typing import Any, Callable, Dict, List, Type, Union
 
 import torch
 
@@ -24,6 +24,7 @@ class Graph:
         generation_idx (int): desc
 
     """
+
     @staticmethod
     def trace(
         module: torch.nn.Module, *args: List[Any], **kwargs: Dict[str, Any]
@@ -71,26 +72,42 @@ class Graph:
             patcher.patch(torch.finfo)
             patcher.patch(torch.arange)
 
-            output = forward(graph.nodes["module_0"], *arguments)
+            output = forward(graph.module_proxy, *arguments)
 
             value = Proxy.get_value(output)
 
             return_proxy = graph.add(
-                graph=graph, value=value, target=Graph.ret, args=output
+                graph=graph, value=value, target=Graph.rtn, args=output
+            )
+
+            graph.add(
+                graph=graph,
+                value=None,
+                target="null",
+                args=[return_proxy.node],
             )
 
         return graph
 
     @staticmethod
-    def ret(*args, **kwargs):
+    def rtn(*args, **kwargs):
+        """
+        Function to just pass through data for returning data in a graph forward method.
+
+        Returns:
+            _type_: _description_
+        """
+
         return args
 
-    def __init__(self, module: torch.nn.Module, proxy_class:Type[Proxy]=Proxy) -> None:
+    def __init__(
+        self, module: torch.nn.Module, proxy_class: Type[Proxy] = Proxy
+    ) -> None:
         """_summary_
 
         Args:
             module (torch.nn.Module): _description_
-            proxy_class (Type[Proxy], optional): _description_. 
+            proxy_class (Type[Proxy], optional): _description_.
         """
         self.proxy_class = proxy_class
 
@@ -180,19 +197,6 @@ class Graph:
         """
         return self.proxy_class(node)
 
-    def is_module_node(self, value) -> bool:
-        """_summary_
-
-        Args:
-            value (_type_): _description_
-
-        Returns:
-            bool: _description_
-        """
-        return isinstance(value, Node) and isinstance(
-            value.proxy_value, torch.nn.Module
-        )
-
     def eliminate_dead_code(self):
         pass
 
@@ -205,6 +209,7 @@ class Graph:
         Returns:
             torch.nn.Module: _description_
         """
+
         def forward(*args, **kwargs):
             self.compile(module)
 
@@ -217,7 +222,7 @@ class Graph:
                 if key in self.argument_node_names:
                     self.nodes[self.argument_node_names[key]].future.set_result(arg)
 
-            return self.nodes["ret_0"].value()
+            return self.nodes["rtn_0"].value()
 
         module.forward = forward
 

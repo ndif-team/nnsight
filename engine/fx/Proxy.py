@@ -33,11 +33,11 @@ class Proxy:
         self.node = node
 
     def __call__(self, *args, **kwargs) -> Proxy:
-        if self.node.graph.is_module_node(self.node.args[0]) and not isinstance(
+        if self.node.args[0] is self.node.graph.module_proxy.node and not isinstance(
             self.node.proxy_value, torch.nn.Module
         ):
             value = self.node.proxy_value.__func__(
-                Proxy(self.node.args[0]), *args, **kwargs
+                self.node.graph.module_proxy, *args, **kwargs
             )
 
             return value
