@@ -7,6 +7,9 @@ class WrapperModule(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
 
+        if len(args) == 1:
+            args = args[0]
+
         return args
 
 

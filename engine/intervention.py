@@ -56,7 +56,7 @@ class InterventionProxy(torch.futures.Future, Proxy):
 
     @property
     def shape(self):
-        return self.node.proxy_value.shape
+        return util.apply(self.node.proxy_value, lambda x : x.shape, torch.Tensor)
 
     @property
     def value(self):
