@@ -59,7 +59,7 @@ class NodeModel(BaseModel):
         # Processing of args may have already created an Intervention for this node so just return it.
         if node_model.name in graph.nodes:
             return graph.nodes[node_model.name]
-        
+
         graph.add(
             graph=graph,
             value=None,

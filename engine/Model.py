@@ -31,14 +31,14 @@ class Model:
     """
     A Model represents a wrapper for an LLM
 
-    Attributes
-    ----------
-        model_name_or_path : str
-            name of registered model or path to checkpoint
-        meta_model : PreTrainedModel
-            model with weights not initialized
-        tokenizer : PreTrainedTokenizer
-        local_model : PreTrainedModel
+    Attributes:
+
+        model_name_or_path (str): Name of registered model or path to checkpoint.
+        config (Any): desc
+        meta_model (PreTrainedModel): Model with weights not initialized.
+        tokenizer (PreTrainedTokenizer): desc
+        local_model (PreTrainedModel): desc
+        edits (List[Edit]): desc
     """
 
     def __init__(self, model_name_or_path: str) -> None:
@@ -76,7 +76,7 @@ class Model:
 
         self.init_meta_model()
 
-        self.local_model: GenerationMixin = None
+        self.local_model: PreTrainedModel = None
 
         logger.debug(f"Initialized `{self.model_name_or_path}`")
 
@@ -84,7 +84,7 @@ class Model:
         """Allows user to access meta_model attributes directly
 
         Args:
-            key (_type_): _description_
+            key (Any): _description_
 
         Returns:
             Any: _description_
@@ -100,8 +100,8 @@ class Model:
         for name, module in self.meta_model.named_modules():
             module.module_path = name
 
-        # Run some prompt though the network to setup up module output shapes
-        # Needed if user is editing a module graph before a call to invoke
+        # Run some prompt though the network to setup up module output shapes.
+        # Needed if user is editing a module graph before a call to invoke.
         self.run_meta(self.prepare_inputs("_"))
 
     def prepare_inputs(self, inputs, *args, **kwargs) -> BatchEncoding:
@@ -169,8 +169,8 @@ class Model:
 
             logger.debug(f"Running `{self.model_name_or_path}`...")
 
-            # Run the model generate method with a baukit.TraceDict. tree.modules has all of the module names involved in Interventions.
-            # output_intervene is called when module from tree.modules is ran and is the entry point for the Intervention tree
+            # Run the model generate method with a baukit.TraceDict.
+            # intervene is hooked to all modules and is the entry point into the intervention graph.
             with baukit.TraceDict(
                 self.local_model,
                 list(modules),

@@ -10,7 +10,6 @@ from engine.modeling import ResponseModel
 
 
 def aquire(function):
-
     @wraps(function)
     def wrapper(self, *args, **kwargs):
         self.lock.acquire()
@@ -42,7 +41,6 @@ class ResponseDict(MutableMapping):
         return (self.results_path, self.lock, self.signal_queue)
 
     def __setstate__(self, state):
-
         self.results_path = state[0]
         self.lock = state[1]
         self.signal_queue = state[2]

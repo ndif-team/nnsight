@@ -34,10 +34,8 @@ class Module:
         self.generator: Generator = None
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
-        """We override the __call__ function of modules because we may want to do a ModuleIntervention
-        i.e call a submodule of the model at a certain point during inference. In the graph model, this function checks to see if any
-        of it's arguments are Proxies. If so it thinks were in an Invocation context and should then instead of call the module,
-        create a new proxy denoting we eant to call the model with the given input.
+        """Override __call__ to check for InterventionProxy arguments. If there are any, we should return an
+        InterventionProxy denoting we want to call the given module with arguments.
 
         Returns:
             Any: _description_
@@ -57,7 +55,7 @@ class Module:
     def output(self) -> InterventionProxy:
         """
         Calling denotes the user wishes to get the output of this module and therefore we create a Proxy of that request.
-        Only generates a proxy the first time it is references otherwise returnh the already set one.
+        Only generates a proxy the first time it is references otherwise return the already set one.
 
         Returns:
             Proxy: _description_

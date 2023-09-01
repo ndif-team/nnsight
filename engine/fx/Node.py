@@ -6,7 +6,6 @@ import torch.futures
 
 from .. import util
 from ..logger import logger
-
 from .Proxy import Proxy
 
 if TYPE_CHECKING:
@@ -14,8 +13,29 @@ if TYPE_CHECKING:
 
 
 class Node:
+    """_summary_
+
+    Attributes:
+        name (str): _description_
+        graph (Graph): _description_
+        proxy_value (Any): _description_
+        target (Union[Callable, str]): _description_
+        args (List[Any], optional): _description_. Defaults to None.
+        kwargs (Dict[str, Any], optional): _description_. Defaults to None.
+        meta (Dict[str, Any], optional): _description_. Defaults to None.
+        listeners (List[Node]): desc
+        dependencies (List[Node]): desc
+        _future (torch.futures.Future): desc
+    """
+
     @staticmethod
     def update(value1, value2) -> None:
+        """Updates Tensor values with other Tensor values.
+
+        Args:
+            value1 (_type_): _description_
+            value2 (_type_): _description_
+        """
         if isinstance(value1, torch.Tensor):
             value1[:] = value2
         elif isinstance(value1, list) or isinstance(value1, tuple):
@@ -64,8 +84,10 @@ class Node:
         self.listeners: List[Node] = list([self])
         self.dependencies: List[Node] = list()
 
+        # Add all arguments that are nodes to nodes dependencies
         util.apply(self.args, lambda x: self.dependencies.append(x), Node)
         util.apply(self.kwargs, lambda x: self.dependencies.append(x), Node)
+        # Add node to all arguments that are nodes' listeners
         util.apply(self.args, lambda x: x.listeners.append(self), Node)
         util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
 
@@ -73,18 +95,38 @@ class Node:
 
     @property
     def future(self) -> torch.futures.Future:
+        """Lazy creation of _future attribute.
+
+        Returns:
+            torch.futures.Future: _description_
+        """
         if self._future is None:
             self._future = torch.futures.Future()
 
         return self._future
 
     def value(self) -> Any:
+        """Wrapper for this node's future .value()
+
+        Returns:
+            Any: _description_
+        """
         return self.future.value()
 
     def done(self) -> bool:
+        """Wrapper for this node's future .done()
+
+        Returns:
+            bool: _description_
+        """
         return self.future.done()
 
     def fufilled(self) -> bool:
+        """Returns True if all of this node's dependencies are done.
+
+        Returns:
+            bool: _description_
+        """
         for dependency in self.dependencies:
             if not dependency.done():
                 return False
@@ -92,13 +134,19 @@ class Node:
         return True
 
     def compile(self) -> None:
+        # When this future is done, log that event.
         self.future.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
 
+        # Nodes tell listeners when to try and be executed.
+        # This chains futures so after this node's future is done, it goes through
+        # it's listeners in orde and calls their .chain() method.
         future = self.listeners[0].future
 
         for listener in self.listeners[1:]:
             future = future.then(listener.chain)
 
+        # Collect all listeners futures into a single future that when done, call this
+        # nodes .destroy() method.
         torch.futures.collect_all(
             util.apply(self.listeners, lambda x: x.future, Node)
         ).add_done_callback(lambda x: self.destroy())
@@ -132,17 +180,24 @@ class Node:
         return args, kwargs
 
     def execute(self) -> None:
+        """Actually executes this node."""
+
+        # Prepare arguments.
         args, kwargs = self.prepare_inputs()
 
+        # If target is a string, it must be a method attribute on the first argument object.
         if isinstance(self.target, str):
             obj, *args = args
 
             target = getattr(obj, self.target)
+        # Otherwise it must be the function itself.
         else:
             target = self.target
 
+        # Call the target to get value.
         output = target(*args, **kwargs)
 
+        # Set this nodes future value to result.
         self.future.set_result(output)
 
     def destroy(self) -> None:
@@ -151,7 +206,6 @@ class Node:
         self._future = None
 
     def chain(self, future: torch.futures.Future):
-
         if self.fufilled() and not self.done():
             self.execute()
 

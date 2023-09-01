@@ -18,7 +18,7 @@ class Graph:
         nodes (Dict[str, Node]): Mapping of node name to node.
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
             Used so names are unique.
-        module_proxy (Proxy): _description_
+        module_proxy (Proxy): Proxy for given root module
         argument_node_names (Dict[str, str]): _description_
         return_node_name (str): desc
         generation_idx (int): desc
@@ -40,19 +40,37 @@ class Graph:
         Returns:
             Graph: _description_
         """
+
+        # Create a graph with the module as the root module
         graph = Graph(module)
 
+        # Get 'unbound' version of forward method so we can pass in proxy of module insead of self
         forward = module.__class__.forward
 
+        # Want list not tuple
         args = list(args)
 
+        # Inspect forward signature to collect all parameters
         signature = inspect.signature(forward)
 
-        def get_argument_value(param, idx):
+        def get_argument_value(param: inspect.Parameter, idx: int):
+            """Gets the correct argument to pass to forward method.
+
+
+            Args:
+                param (_type_): _description_
+                idx (_type_): _description_
+
+            Returns:
+                _type_: _description_
+            """
+
+            # If idx in range of provided args, create a proxy for that arg instead of default.
             if idx < len(args):
                 return graph.add(
                     graph=graph, value=args[idx], target="argument", args=[param.name]
                 )
+            # If param name in provided kwargs, create a proxy for that arg instead of default.
             if param.name in kwargs:
                 return graph.add(
                     graph=graph,
@@ -60,26 +78,35 @@ class Graph:
                     target="argument",
                     args=[param.name],
                 )
+            # Otherwise just return default
             return param.default
 
+        # Create the appropriate proxies/values for the forward method in order to trace.
         arguments = [
             get_argument_value(param, i)
             for i, param in enumerate(list(signature.parameters.values())[1:])
         ]
 
+        # Some methods cannot be caught because they arent torch functions or dont play nice with __torch_function__.
+        # So the patcher repalces the methods with something to catch proxies and return proxies.
         with Patcher() as patcher:
             patcher.patch(torch.full)
             patcher.patch(torch.finfo)
             patcher.patch(torch.arange)
 
+            # Run forward with root module proxy and arguments
             output = forward(graph.module_proxy, *arguments)
 
+            # Get proxy_value for return
             value = Proxy.get_value(output)
 
+            # Create the 'rtn_0' return proxy
             return_proxy = graph.add(
                 graph=graph, value=value, target=Graph.rtn, args=output
             )
 
+            # This is how we tell the graph not to destroy a proxy after it's listeners are completed.
+            # Create a 'null' proxy. The return proxy listens to the 'null' proxy with args=[return_proxy.node] but 'null' will never be completed.
             graph.add(
                 graph=graph,
                 value=None,
@@ -121,17 +148,29 @@ class Graph:
         self.generation_idx = 0
 
     def increment(self) -> None:
+        """Increments the generation_idx by one. Should be called by a forward hook on the model being used for generation."""
         self.generation_idx += 1
 
     def compile(self, module: torch.nn.Module) -> None:
+        """Re-compile graph to prepare for a new execution of the graph.
+
+        Args:
+            module (torch.nn.Module): Module to be considered the root module of the graph.
+        """
+
+        # Remove nodes that have no effect.
         self.eliminate_dead_code()
+
+        # Reset all node futures.
         for node in self.nodes.values():
             node._future = None
+        # Compile nodes individually.
         for node in self.nodes.values():
             node.compile()
 
         self.generation_idx = 0
 
+        # Setting the root module future kicks off the graph execution.
         self.nodes["module_0"].future.set_result(module)
 
     def add(
@@ -143,12 +182,12 @@ class Graph:
         kwargs: Dict[str, Any] = None,
         name: str = None,
     ) -> Proxy:
-        """_summary_
+        """Adds a node to the graph and returns it's proxy.
 
         Args:
             graph (Graph): _description_
-            value (Any): _description_
-            target (Union[Callable, str]): _description_
+            value (Any): 'meta' proxy value used for tracing the shapes and values.
+            target (Union[Callable, str]): Either the function to call for this node, or a string that's the name of a method attribute on the first arg.
             args (List[Any], optional): _description_. Defaults to None.
             kwargs (Dict[str, Any], optional): _description_. Defaults to None.
             name (str, optional): _description_. Defaults to None.
@@ -160,6 +199,11 @@ class Graph:
 
         if target_name not in self.name_idx:
             self.name_idx[target_name] = 0
+        else:
+            if target_name == "rtn":
+                raise ValueError("Can only have one return ('rtn') node.")
+            if target_name == "module":
+                raise ValueError("Can only have one module node.")
 
         if name is None:
             name = f"{target_name}_{self.name_idx[target_name]}"
@@ -187,7 +231,7 @@ class Graph:
         return self.proxy(node)
 
     def proxy(self, node: Node) -> Proxy:
-        """_summary_
+        """Returns proxy of node with specified proxy_class.
 
         Args:
             node (Node): _description_
@@ -201,7 +245,8 @@ class Graph:
         pass
 
     def wrap(self, module: torch.nn.Module) -> torch.nn.Module:
-        """_summary_
+        """Replaces the forward method of the given module with an execution of the module's graph.
+        Traces and creates the graph if it does not exist.
 
         Args:
             module (torch.nn.Module): _description_
@@ -211,19 +256,27 @@ class Graph:
         """
 
         def forward(*args, **kwargs):
+            # Compile the graph with the given module as the root module.
             self.compile(module)
 
+            # Gets list of all argument nodes for this graph.
             argument_nodes_list = list(self.argument_node_names.values())
 
+            # Sets the result of the argument nodes future for args.
             for i, arg in enumerate(args):
                 self.nodes[argument_nodes_list[i]].future.set_result(arg)
 
+            # And then for kwargs.
             for key in kwargs:
                 if key in self.argument_node_names:
                     self.nodes[self.argument_node_names[key]].future.set_result(arg)
 
-            return self.nodes["rtn_0"].value()
+            # 'rtn_0' should have the value we need to return.
+            return_value = self.nodes["rtn_0"].value()
+            self.nodes["rtn_0"]._future = None
+            return return_value
 
+        # Repalce forward method with custom graph execution method.
         module.forward = forward
 
         return module

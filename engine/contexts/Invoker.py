@@ -13,34 +13,33 @@ class Invoker:
         self.tokens = None
 
     def __enter__(self) -> Invoker:
-        # Were in a new invocation so set generation_idx to 0
+        # Were in a new invocation so set generation_idx to 0,
         self.generator.generation_idx = 0
 
-        # Run graph_mode with meta tensors to collect shape information
+        # Run graph_mode with meta tensors to collect shape information,
         inputs = self.generator.model.prepare_inputs(self.input)
-
         self.generator.model.run_meta(inputs.copy())
 
-        # Decode tokenized inputs for use usage
+        # Decode tokenized inputs for user usage.
         self.tokens = [
             self.generator.model.tokenizer.decode(token)
             for token in inputs["input_ids"][0]
         ]
 
         # Rebuild prompt from tokens (do this becuase if they input ids directly, we still need to pass
-        # all input data at once to a tokenizer to correctly batch the attention)
+        # all input data at once to a tokenizer to correctly batch the attention).
         self.generator.prompts.append("".join(self.tokens))
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        # Exiting an invocation so if we enter a new one, it will be a new batch idx
+        # Exiting an invocation so if we enter a new one, it will be a new batch idx.
         self.generator.batch_idx += 1
 
     def next(self) -> None:
-        # .next() increases which generation idx the interventions happen
+        # .next() increases which generation idx the interventions happen.
         self.generator.generation_idx += 1
 
-        # Run graph with
+        # Run graph with singe token input.
         inputs = self.generator.model.prepare_inputs("_")
         self.generator.model.run_meta(inputs)

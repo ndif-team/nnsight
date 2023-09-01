@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 
@@ -11,6 +11,12 @@ if TYPE_CHECKING:
 
 
 class Proxy:
+    """_summary_
+
+    Attributes:
+        node (Node): desc
+    """
+
     @staticmethod
     def get_node(args):
         return util.apply(args, lambda x: x.node, Proxy)
@@ -55,7 +61,7 @@ class Proxy:
                 kwargs=kwargs,
             )
 
-    def __getitem__(self, key) -> Proxy:
+    def __getitem__(self, key: Union[Proxy, Any]) -> Proxy:
         key = Proxy.get_value(key)
 
         value = self.node.proxy_value[key]
@@ -67,7 +73,9 @@ class Proxy:
             args=[self.node, key],
         )
 
-    def __getattr__(self, key: str) -> Proxy:
+    def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
+        key = Proxy.get_value(key)
+
         value = util.fetch_attr(self.node.proxy_value, key)
 
         return self.node.graph.add(
@@ -87,7 +95,7 @@ class Proxy:
             args=[self.node],
         )
 
-    def __add__(self, other) -> Proxy:
+    def __add__(self, other: Union[Proxy, Any]) -> Proxy:
         value = self.node.proxy_value + Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -97,7 +105,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __sub__(self, other) -> Proxy:
+    def __sub__(self, other: Union[Proxy, Any]) -> Proxy:
         value = self.node.proxy_value - Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -107,7 +115,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __pow__(self, other) -> Proxy:
+    def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
         value = self.node.proxy_value ** Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -117,7 +125,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __mul__(self, other) -> Proxy:
+    def __mul__(self, other: Union[Proxy, Any]) -> Proxy:
         value = self.node.proxy_value * Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -127,7 +135,7 @@ class Proxy:
             args=[self.node, other],
         )
 
-    def __truediv__(self, other) -> Proxy:
+    def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
         value = self.node.proxy_value / Proxy.get_value(other)
 
         return self.node.graph.add(
@@ -147,7 +155,7 @@ class Proxy:
         return self.node.proxy_value.__instancecheck__(__instance)
 
     @classmethod
-    def __torch_function__(cls, orig_method, types, args=None, kwargs=None):
+    def __torch_function__(cls, orig_method, types, args=None, kwargs=None) -> Proxy:
         if args is None:
             args = list()
         if kwargs is None:

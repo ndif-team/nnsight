@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, List
 
 from pydantic import BaseModel, ConfigDict
+
 from .fx import NodeModel
 
 
@@ -14,8 +15,8 @@ class RequestModel(BaseModel):
     kwargs: Dict
     model_name: str
     prompts: List[str]
-    intervention_graph: Dict[str,NodeModel]
-    #Edits
+    intervention_graph: Dict[str, NodeModel]
+    # Edits
 
     id: str = None
     recieved: datetime = None

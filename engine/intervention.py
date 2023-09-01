@@ -56,7 +56,7 @@ class InterventionProxy(torch.futures.Future, Proxy):
 
     @property
     def shape(self):
-        return util.apply(self.node.proxy_value, lambda x : x.shape, torch.Tensor)
+        return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
     @property
     def value(self):
@@ -64,19 +64,35 @@ class InterventionProxy(torch.futures.Future, Proxy):
 
 
 def intervene(activations, module_path: str, graph: Graph, key: str):
+    """Entry to intervention graph. This should be hooked to all modules involved in intervention graph.
+
+    Args:
+        activations (_type_): _description_
+        module_path (str): _description_
+        graph (Graph): _description_
+        key (str): _description_
+
+    Returns:
+        _type_: _description_
+    """
     batch_idx = 0
 
+    # Key to module activation argument nodes has format: <module path>.<output/input>.<generation index>.<batch index>
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
     batch_module_path = f"{module_path}.{batch_idx}"
 
+    # We create a new key as we increment batch_idx and check if that key is in the graph's argument_node_names dict.
     while batch_module_path in graph.argument_node_names:
+        # If it exists, we grab it.
         node: Node = graph.nodes[graph.argument_node_names[batch_module_path]]
 
+        # We set its result to the activatins, indexed by only the relevant batch index.
         node.future.set_result(
             util.apply(activations, lambda x: x[[batch_idx]], torch.Tensor)
         )
 
+        # Increment batch_idx and go again.
         batch_idx += 1
 
         batch_module_path = f"{module_path}.{batch_idx}"

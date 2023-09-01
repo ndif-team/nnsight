@@ -23,27 +23,28 @@ def apply(data: Any, fn: Callable, cls: type):
 
     return data
 
-def fetch_attr(object:object, target: str):
+
+def fetch_attr(object: object, target: str):
     target_atoms = target.split(".")
     for i, atom in enumerate(target_atoms):
         object = getattr(object, atom)
     return object
 
-def wrap(object:object, wrapper:Type, *args, **kwargs):
-   
+
+def wrap(object: object, wrapper: Type, *args, **kwargs):
     if isinstance(object, wrapper):
         return object
 
-    object.__class__ = type(
-        object.__class__.__name__, (wrapper, object.__class__), {}
-    )
+    object.__class__ = type(object.__class__.__name__, (wrapper, object.__class__), {})
 
     wrapper.__init__(object, *args, **kwargs)
 
     return object
 
+
 def timed(func, lggr):
     """This decorator prints the execution time for the decorated function."""
+
     @wraps(func)
     def wrapper(*args, **kwargs):
         start = time.time()
