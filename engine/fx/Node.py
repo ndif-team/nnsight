@@ -217,31 +217,23 @@ class Node:
         if self.target == "null":
             return
 
-        try:
-            # Prepare arguments.
-            args, kwargs = self.prepare_inputs()
+        # Prepare arguments.
+        args, kwargs = self.prepare_inputs()
 
-            # If target is a string, it must be a method attribute on the first argument object.
-            if isinstance(self.target, str):
-                obj, *args = args
+        # If target is a string, it must be a method attribute on the first argument object.
+        if isinstance(self.target, str):
+            obj, *args = args
 
-                target = getattr(obj, self.target)
-            # Otherwise it must be the function itself.
-            else:
-                target = self.target
+            target = getattr(obj, self.target)
+        # Otherwise it must be the function itself.
+        else:
+            target = self.target
 
-            # Call the target to get value.
-            output = target(*args, **kwargs)
+        # Call the target to get value.
+        output = target(*args, **kwargs)
 
-            # Set this nodes future value to result.
-            self.future.set_result(output)
-
-        except Exception as e:
-            logger.exception(f"Exception in execution of node '{self.name}'.")
-
-            self.future.set_exception(e)
-
-            raise e
+        # Set this nodes future value to result.
+        self.future.set_result(output)
 
     def destroy(self) -> None:
         logger.debug(f"=> DEL({self.name})")
@@ -250,8 +242,18 @@ class Node:
 
     def chain(self, future: torch.futures.Future):
         if self.fufilled() and not self.done():
-            self.execute()
+            try:
+                self.execute()
+            except Exception as e:
+                #TODO
+                # An exectption is actually never thrown upward to the point it stops the program. Need to find a way.
+                logger.exception(f"Exception in execution of node '{self.name}'.")
 
+                self.future.set_exception(e)
+                future.set_exception(e)
+
+                raise e
+            
         future.set_result(None)
 
     def __str__(self) -> str:
