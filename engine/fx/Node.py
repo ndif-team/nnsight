@@ -118,7 +118,8 @@ class Node:
                 device = value.device
 
             util.apply(self.proxy_value, _device, torch.Tensor)
-            util.apply(self.proxy_value, _device, torch.nn.Module)
+            # TODO
+            #util.apply(self.proxy_value, _device, torch.nn.Module)
 
             self._device = device
 
