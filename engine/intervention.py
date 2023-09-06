@@ -15,17 +15,6 @@ class InterventionProxy(Proxy):
     def proxy_save(value: Any) -> None:
         return util.apply(value, lambda x: x.clone(), torch.Tensor)
 
-    def set(self, value: Union[InterventionProxy, Any]):
-
-        Node.update(self.node.proxy_value, Proxy.prepare_values(value, self.node.device))
-
-        self.node.graph.add(
-            graph=self.node.graph,
-            value=self.node.proxy_value,
-            target=Node.update,
-            args=[self.node, value],
-        )
-
     def save(self) -> InterventionProxy:
         
         proxy = self.node.graph.add(

@@ -7,6 +7,9 @@ import torch
 from . import util
 from .contexts.Generator import Generator
 from .fx.Graph import Graph
+from .fx.Node import Node
+from .fx.Proxy import Proxy
+
 from .intervention import InterventionProxy
 
 
@@ -84,7 +87,15 @@ class Module:
         Args:
             value (Union[Proxy, Any]): _description_
         """
-        self.output.set(value)
+
+        Node.update(self.output.node.proxy_value, self.output.node.prepare_proxy_values(value))
+
+        self.output.node.graph.add(
+            graph=self.output.node.graph,
+            value=self.output.node.proxy_value,
+            target=Node.update,
+            args=[self.output.node, value],
+        )
 
     @property
     def graph(self) -> Graph:

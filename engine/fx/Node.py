@@ -123,6 +123,20 @@ class Node:
             self._device = device
 
         return self._device
+    
+    def prepare_proxy_values(self, values):
+        def slice_to_value(arg: slice):
+            return slice(
+                self.prepare_proxy_values(arg.start),
+                self.prepare_proxy_values(arg.stop),
+                self.prepare_proxy_values(arg.step),
+            )
+
+        values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
+        values = util.apply(values, slice_to_value, slice)
+        values = util.apply(values, lambda x: x.to(self.device), torch.Tensor)
+
+        return values
 
     def value(self) -> Any:
         """Wrapper for this node's future .value()
