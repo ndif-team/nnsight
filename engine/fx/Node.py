@@ -139,7 +139,7 @@ class Node:
 
         # Nodes tell listeners when to try and be executed.
         # This chains futures so after this node's future is done, it goes through
-        # it's listeners in orde and calls their .chain() method.
+        # it's listeners in order and calls their .chain() method.
         future = self.listeners[0].future
 
         for listener in self.listeners[1:]:
@@ -182,23 +182,36 @@ class Node:
     def execute(self) -> None:
         """Actually executes this node."""
 
-        # Prepare arguments.
-        args, kwargs = self.prepare_inputs()
+        if self.target == 'null':
+            return
 
-        # If target is a string, it must be a method attribute on the first argument object.
-        if isinstance(self.target, str):
-            obj, *args = args
+        try:
 
-            target = getattr(obj, self.target)
-        # Otherwise it must be the function itself.
-        else:
-            target = self.target
+            # Prepare arguments.
+            args, kwargs = self.prepare_inputs()
 
-        # Call the target to get value.
-        output = target(*args, **kwargs)
+            # If target is a string, it must be a method attribute on the first argument object.
+            if isinstance(self.target, str):
+                obj, *args = args
 
-        # Set this nodes future value to result.
-        self.future.set_result(output)
+                target = getattr(obj, self.target)
+            # Otherwise it must be the function itself.
+            else:
+                target = self.target
+
+            # Call the target to get value.
+            output = target(*args, **kwargs)
+
+            # Set this nodes future value to result.
+            self.future.set_result(output)
+
+        except Exception as e:
+
+            logger.error(f"Exception in execution of node '{self.name}'. {str(e)}")
+
+            self.future.set_exception(e)
+
+            raise e
 
     def destroy(self) -> None:
         logger.debug(f"=> DEL({self.name})")
