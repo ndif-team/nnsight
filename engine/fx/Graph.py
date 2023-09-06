@@ -242,11 +242,11 @@ class Graph:
         return self.proxy_class(node)
 
     def eliminate_dead_code(self):
+        #TODO
         pass
 
     def wrap(self, module: torch.nn.Module) -> torch.nn.Module:
         """Replaces the forward method of the given module with an execution of the module's graph.
-        Traces and creates the graph if it does not exist.
 
         Args:
             module (torch.nn.Module): _description_

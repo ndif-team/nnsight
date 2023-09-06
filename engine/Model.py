@@ -207,9 +207,11 @@ class Model:
             logger.debug(f"Dispatched `{self.model_name_or_path}`")
         else:
             if isinstance(device_map, str) and device_map != "auto":
-                self.local_model = accelerate.dispatch_model(
-                    self.local_model, device_map
-                )
+                # self.local_model = accelerate.dispatch_model(
+                #     self.local_model, device_map
+                # )
+
+                pass
             else:
                 self.local_model.to(device_map)
 

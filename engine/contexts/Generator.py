@@ -56,7 +56,7 @@ class Generator:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """On exit, run and generate using the model writher locally or on the server.  
+        """On exit, run and generate using the model whether locally or on the server.  
         """
         if self.device_map == "server":
             self.run_server()
