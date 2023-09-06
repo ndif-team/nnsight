@@ -21,7 +21,6 @@ class Graph:
             Used so names are unique.
         module_proxy (Proxy): Proxy for given root module
         argument_node_names (Dict[str, str]): _description_
-        return_node_name (str): desc
         generation_idx (int): desc
 
     """
@@ -144,7 +143,6 @@ class Graph:
 
         self.module_proxy = self.add(graph=self, value=module, target="module")
         self.argument_node_names: Dict[str, str] = dict()
-        self.return_node_name: str = None
 
         self.generation_idx = 0
 
