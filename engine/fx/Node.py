@@ -92,6 +92,7 @@ class Node:
         util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
 
         self._future: torch.futures.Future = None
+        self._device:torch.device = None
 
     @property
     def future(self) -> torch.futures.Future:
@@ -104,6 +105,24 @@ class Node:
             self._future = torch.futures.Future()
 
         return self._future
+    
+    @property
+    def device(self):
+
+        if self._device is None:
+
+            device = None
+
+            def _device(value):
+                nonlocal device
+                device = value.device
+
+            util.apply(self.proxy_value, _device, torch.Tensor)
+            util.apply(self.proxy_value, _device, torch.nn.Module)
+
+            self._device = device
+
+        return self._device
 
     def value(self) -> Any:
         """Wrapper for this node's future .value()

@@ -22,18 +22,19 @@ class Proxy:
         return util.apply(args, lambda x: x.node, Proxy)
 
     @staticmethod
-    def get_value(args):
+    def prepare_values(values, device):
         def slice_to_value(arg: slice):
             return slice(
-                Proxy.get_value(arg.start),
-                Proxy.get_value(arg.stop),
-                Proxy.get_value(arg.step),
+                Proxy.prepare_values(arg.start, device),
+                Proxy.prepare_values(arg.stop, device),
+                Proxy.prepare_values(arg.step, device),
             )
 
-        args = util.apply(args, lambda x: x.node.proxy_value, Proxy)
-        args = util.apply(args, slice_to_value, slice)
+        values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
+        values = util.apply(values, slice_to_value, slice)
+        values = util.apply(values, lambda x: x.to(device), torch.Tensor)
 
-        return args
+        return values
 
     def __init__(self, node: "Node") -> None:
         self.node = node
@@ -50,7 +51,8 @@ class Proxy:
 
         else:
             value = self.node.proxy_value(
-                *Proxy.get_value(args), **Proxy.get_value(kwargs)
+                *Proxy.prepare_values(args, self.node.device),
+                **Proxy.prepare_values(kwargs, self.node.device),
             )
 
             return self.node.graph.add(
@@ -62,7 +64,7 @@ class Proxy:
             )
 
     def __getitem__(self, key: Union[Proxy, Any]) -> Proxy:
-        key = Proxy.get_value(key)
+        key = Proxy.prepare_values(key, self.node.device)
 
         value = self.node.proxy_value[key]
 
@@ -74,7 +76,7 @@ class Proxy:
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
-        key = Proxy.get_value(key)
+        key = Proxy.prepare_values(key, self.node.device)
 
         value = util.fetch_attr(self.node.proxy_value, key)
 
@@ -96,7 +98,7 @@ class Proxy:
         )
 
     def __add__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value + Proxy.get_value(other)
+        value = self.node.proxy_value + Proxy.prepare_values(other, self.node.device)
 
         return self.node.graph.add(
             graph=self.node.graph,
@@ -106,7 +108,7 @@ class Proxy:
         )
 
     def __sub__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value - Proxy.get_value(other)
+        value = self.node.proxy_value - Proxy.prepare_values(other, self.node.device)
 
         return self.node.graph.add(
             graph=self.node.graph,
@@ -116,7 +118,7 @@ class Proxy:
         )
 
     def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value ** Proxy.get_value(other)
+        value = self.node.proxy_value ** Proxy.prepare_values(other, self.node.device)
 
         return self.node.graph.add(
             graph=self.node.graph,
@@ -126,7 +128,7 @@ class Proxy:
         )
 
     def __mul__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value * Proxy.get_value(other)
+        value = self.node.proxy_value * Proxy.prepare_values(other, self.node.device)
 
         return self.node.graph.add(
             graph=self.node.graph,
@@ -136,7 +138,7 @@ class Proxy:
         )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value / Proxy.get_value(other)
+        value = self.node.proxy_value / Proxy.prepare_values(other, self.node.device)
 
         return self.node.graph.add(
             graph=self.node.graph,
@@ -161,9 +163,12 @@ class Proxy:
         if kwargs is None:
             kwargs = dict()
 
-        value = orig_method(*Proxy.get_value(args), **Proxy.get_value(kwargs))
-
         self: Proxy = args[0]
+
+        value = orig_method(
+            *Proxy.prepare_values(args, self.node.device),
+            **Proxy.prepare_values(kwargs, self.node.device),
+        )
 
         return self.node.graph.add(
             graph=self.node.graph,

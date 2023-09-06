@@ -17,7 +17,7 @@ class InterventionProxy(Proxy):
 
     def set(self, value: Union[InterventionProxy, Any]):
 
-        Node.update(self.node.proxy_value, Proxy.get_value(value))
+        Node.update(self.node.proxy_value, Proxy.prepare_values(value, self.node.device))
 
         self.node.graph.add(
             graph=self.node.graph,
