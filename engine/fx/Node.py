@@ -137,6 +137,24 @@ class Node:
 
         return values
 
+    def compile(self) -> None:
+        # When this future is done, log that event.
+        self.future.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
+
+        # Nodes tell listeners when to try and be executed.
+        # This chains futures so after this node's future is done, it goes through
+        # it's listeners in order and calls their .chain() method.
+        future = self.listeners[0].future
+
+        for listener in self.listeners[1:]:
+            future = future.then(listener.chain)
+
+        # Collect all listeners futures into a single future that when done, call this
+        # nodes .destroy() method.
+        torch.futures.collect_all(
+            util.apply(self.listeners, lambda x: x.future, Node)
+        ).add_done_callback(lambda x: self.destroy())
+
     def value(self) -> Any:
         """Wrapper for this node's future .value()
 
@@ -164,24 +182,6 @@ class Node:
                 return False
 
         return True
-
-    def compile(self) -> None:
-        # When this future is done, log that event.
-        self.future.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
-
-        # Nodes tell listeners when to try and be executed.
-        # This chains futures so after this node's future is done, it goes through
-        # it's listeners in order and calls their .chain() method.
-        future = self.listeners[0].future
-
-        for listener in self.listeners[1:]:
-            future = future.then(listener.chain)
-
-        # Collect all listeners futures into a single future that when done, call this
-        # nodes .destroy() method.
-        torch.futures.collect_all(
-            util.apply(self.listeners, lambda x: x.future, Node)
-        ).add_done_callback(lambda x: self.destroy())
 
     def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
         # Turn futures into their value
@@ -237,7 +237,7 @@ class Node:
             self.future.set_result(output)
 
         except Exception as e:
-            logger.error(f"Exception in execution of node '{self.name}'. {str(e)}")
+            logger.exception(f"Exception in execution of node '{self.name}'.")
 
             self.future.set_exception(e)
 
