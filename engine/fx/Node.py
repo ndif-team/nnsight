@@ -92,7 +92,7 @@ class Node:
         util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
 
         self._future: torch.futures.Future = None
-        self._proxy_device:torch.device = None
+        self._proxy_device: torch.device = None
 
     @property
     def future(self) -> torch.futures.Future:
@@ -105,12 +105,10 @@ class Node:
             self._future = torch.futures.Future()
 
         return self._future
-    
+
     @property
     def proxy_device(self):
-
         if self._proxy_device is None:
-
             device = None
 
             def _device(value):
@@ -119,12 +117,12 @@ class Node:
 
             util.apply(self.proxy_value, _device, torch.Tensor)
             # TODO
-            #util.apply(self.proxy_value, _device, torch.nn.Module)
+            # util.apply(self.proxy_value, _device, torch.nn.Module)
 
             self._proxy_device = device
 
         return self._proxy_device
-    
+
     def prepare_proxy_values(self, values):
         def slice_to_value(arg: slice):
             return slice(
@@ -216,11 +214,10 @@ class Node:
     def execute(self) -> None:
         """Actually executes this node."""
 
-        if self.target == 'null':
+        if self.target == "null":
             return
 
         try:
-
             # Prepare arguments.
             args, kwargs = self.prepare_inputs()
 
@@ -240,7 +237,6 @@ class Node:
             self.future.set_result(output)
 
         except Exception as e:
-
             logger.error(f"Exception in execution of node '{self.name}'. {str(e)}")
 
             self.future.set_exception(e)

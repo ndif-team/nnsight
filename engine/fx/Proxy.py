@@ -21,8 +21,6 @@ class Proxy:
     def get_node(args):
         return util.apply(args, lambda x: x.node, Proxy)
 
-
-
     def __init__(self, node: "Node") -> None:
         self.node = node
 
@@ -61,9 +59,8 @@ class Proxy:
             target="__getitem__",
             args=[self.node, key],
         )
-    
-    def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
 
+    def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
         item_proxy = self[key]
 
         update = item_proxy.node.__class__.update
@@ -88,11 +85,9 @@ class Proxy:
             target=util.fetch_attr,
             args=[self.node, key],
         )
-    
+
     def __setattr__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
-
-        if key == 'node':
-
+        if key == "node":
             return super(Proxy, self).__setattr__(key, value)
 
         attr_proxy: Proxy = getattr(self, key)

@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Type, Union
 
 import torch
 
+from .. import util
 from .Node import Node
 from .Patcher import Patcher
 from .Proxy import Proxy
@@ -95,10 +96,10 @@ class Graph:
             patcher.patch(torch.arange)
 
             # Run forward with root module proxy and arguments
-            output = forward(graph.module_proxy, *arguments)
+            output: Proxy = forward(graph.module_proxy, *arguments)
 
             # Get proxy_value for return
-            value = Proxy.get_value(output)
+            value = util.apply(output, lambda x: x.node.proxy_value, Proxy)
 
             # Create the 'rtn_0' return proxy
             return_proxy = graph.add(
@@ -242,7 +243,7 @@ class Graph:
         return self.proxy_class(node)
 
     def eliminate_dead_code(self):
-        #TODO
+        # TODO
         pass
 
     def wrap(self, module: torch.nn.Module) -> torch.nn.Module:

@@ -11,19 +11,19 @@ class Patcher:
         def patched(*args, **kwargs):
             arguments = list(args) + list(kwargs.values())
 
-            graph = None
+            node = None
 
             for arg in arguments:
                 if isinstance(arg, Proxy):
-                    graph = arg.node.graph
+                    node = arg.node
 
                     break
 
-            if graph is not None:
-                value = fn(*Proxy.get_value(args), **Proxy.get_value(kwargs))
+            if node is not None:
+                value = fn(*node.prepare_proxy_values(args), **node.prepare_proxy_values(kwargs))
 
-                return graph.add(
-                    graph=graph, value=value, target=fn, args=args, kwargs=kwargs
+                return node.graph.add(
+                    graph=node.graph, value=value, target=fn, args=args, kwargs=kwargs
                 )
 
             else:
