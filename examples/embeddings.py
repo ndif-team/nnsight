@@ -10,13 +10,9 @@ with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
 
         embeddings = model.transformer.wte.output.save()
 
-print(model.tokenizer.decode(generator.output[0]))
-print(embeddings.value)
+    with generator.invoke("_ _ _ _ _ _ _ _ _ _") as invoker:
 
-with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
-    
-    with generator.invoke("doo doo doo doo dosdfgsdo") as invoker:
-
-        model.transformer.wte.output = embeddings.value
+        model.transformer.wte.output = embeddings
 
 print(model.tokenizer.decode(generator.output[0]))
+print(model.tokenizer.decode(generator.output[1]))
