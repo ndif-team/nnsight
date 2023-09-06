@@ -10,24 +10,24 @@ from .fx.Node import Node
 from .fx.Proxy import Proxy
 
 
-class InterventionProxy(torch.futures.Future, Proxy):
+class InterventionProxy(Proxy):
     @staticmethod
     def proxy_save(value: Any) -> None:
         return util.apply(value, lambda x: x.clone(), torch.Tensor)
 
-    def __init__(self, *args, **kwargs):
-        Proxy.__init__(self, *args, **kwargs)
-        torch.futures.Future.__init__(self)
-
     def set(self, value: Union[InterventionProxy, Any]):
+
+        Node.update(self.node.proxy_value, Proxy.get_value(value))
+
         self.node.graph.add(
             graph=self.node.graph,
-            value=Proxy.get_value(value),
+            value=self.node.proxy_value,
             target=Node.update,
             args=[self.node, value],
         )
 
     def save(self) -> InterventionProxy:
+        
         proxy = self.node.graph.add(
             graph=self.node.graph,
             value=self.node.proxy_value,
@@ -85,11 +85,11 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
     # We create a new key as we increment batch_idx and check if that key is in the graph's argument_node_names dict.
     while batch_module_path in graph.argument_node_names:
         # If it exists, we grab it.
-        node: Node = graph.nodes[graph.argument_node_names[batch_module_path]]
+        node = graph.nodes[graph.argument_node_names[batch_module_path]]
 
         # We set its result to the activatins, indexed by only the relevant batch index.
         node.future.set_result(
-            util.apply(activations, lambda x: x[[batch_idx]], torch.Tensor)
+            util.apply(activations, lambda x: x.select(0, batch_idx).unsqueeze(0), torch.Tensor)
         )
 
         # Increment batch_idx and go again.
