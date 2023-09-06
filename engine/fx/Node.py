@@ -92,7 +92,7 @@ class Node:
         util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
 
         self._future: torch.futures.Future = None
-        self._device:torch.device = None
+        self._proxy_device:torch.device = None
 
     @property
     def future(self) -> torch.futures.Future:
@@ -107,9 +107,9 @@ class Node:
         return self._future
     
     @property
-    def device(self):
+    def proxy_device(self):
 
-        if self._device is None:
+        if self._proxy_device is None:
 
             device = None
 
@@ -121,9 +121,9 @@ class Node:
             # TODO
             #util.apply(self.proxy_value, _device, torch.nn.Module)
 
-            self._device = device
+            self._proxy_device = device
 
-        return self._device
+        return self._proxy_device
     
     def prepare_proxy_values(self, values):
         def slice_to_value(arg: slice):
@@ -135,7 +135,7 @@ class Node:
 
         values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
         values = util.apply(values, slice_to_value, slice)
-        values = util.apply(values, lambda x: x.to(self.device), torch.Tensor)
+        values = util.apply(values, lambda x: x.to(self.proxy_device), torch.Tensor)
 
         return values
 

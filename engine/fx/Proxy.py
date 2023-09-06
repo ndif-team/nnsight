@@ -99,7 +99,7 @@ class Proxy:
 
         update = attr_proxy.node.__class__.update
 
-        update(attr_proxy.node.proxy_value, attr_proxy.node.prepare_proxy_values(value, attr_proxy.node.device))
+        update(attr_proxy.node.proxy_value, attr_proxy.node.prepare_proxy_values(value))
 
         attr_proxy.node.graph.add(
             graph=attr_proxy.node.graph,
