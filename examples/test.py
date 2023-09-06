@@ -9,11 +9,10 @@ print(model)
 
 # Invoke using a prompt
 with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
-    with generator.invoke('Hello world') as invoker:
+    with generator.invoke('Hello world ') as invoker:
 
         # See the input prompt seperated into token strings
         tokenized = invoker.tokens
-        hello, _world = tokenized
 
         # Use normal module access and .output to get output activations.
         # Then save the activations at this point in the execution tree

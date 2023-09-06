@@ -1,19 +1,13 @@
 from __future__ import annotations
 
-from typing import List, Any, Union
+from typing import Any, List, Union
 
 import accelerate
 import baukit
 import torch
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    GenerationMixin,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          BatchEncoding, GenerationMixin, PreTrainedModel,
+                          PreTrainedTokenizer)
 from transformers.generation.utils import GenerateOutput
 
 from . import CONFIG
@@ -80,7 +74,7 @@ class Model:
 
         logger.debug(f"Initialized `{self.model_name_or_path}`")
 
-    def __getattr__(self, key:Any) -> Any:
+    def __getattr__(self, key: Any) -> Any:
         """Allows user to access meta_model attributes directly
 
         Args:
@@ -127,7 +121,7 @@ class Model:
         return BatchEncoding(inputs)
 
     @torch.inference_mode()
-    def run_meta(self, inputs:BatchEncoding, *args, **kwargs) -> None:
+    def run_meta(self, inputs: BatchEncoding, *args, **kwargs) -> None:
         """Runs meta version of model given prompt.
 
         Args:
@@ -139,6 +133,7 @@ class Model:
     def __repr__(self) -> str:
         return repr(self.meta_model)
 
+    @torch.inference_mode()
     def __call__(
         self,
         prompts: List[str],
@@ -207,6 +202,7 @@ class Model:
             logger.debug(f"Dispatched `{self.model_name_or_path}`")
         else:
             if isinstance(device_map, str) and device_map != "auto":
+                # TODO
                 # self.local_model = accelerate.dispatch_model(
                 #     self.local_model, device_map
                 # )
@@ -216,22 +212,37 @@ class Model:
                 self.local_model.to(device_map)
 
     def modulize(self, module: Module, node_name: str, module_name: str) -> None:
-        
+        """_summary_
+
+        Args:
+            module (Module): _description_
+            node_name (str): _description_
+            module_name (str): _description_
+        """
+
+        # Create a WrapperModuleEdit which just adds a WrapperModule to an existing module at the given moduel_name.
         wme = WrapperModuleEdit(module.module_path, module_name)
+        # Wrap with our Module and update new attributes.
         wme.wrapper: Module = Module.wrap(wme.wrapper)
         wme.wrapper.module_path = f"{module.module_path}.{module_name}"
         wme.wrapper.generator = module.generator
         wme.wrapper.output_shape = module.output_shape
+        # Carry out the edit on the meta_model.
         wme.edit(self.meta_model)
 
+        # Get/create the execution graph for the module's forward method.
         graph = module.graph
 
+        # Add two proxies/nodes, one to get the new WrapperModule we added and another to call it with the data from the original module.
+        # Passing the data through the wrapper module allows hooking of the module's output like usual.
         module_proxy = getattr(graph.module_proxy, module_name)
         module_proxy(graph.nodes[node_name])
 
+        # Create and carry out the edit on the meta_model.
         ge = GraphEdit(module.module_path, module.graph)
         ge.edit(self.meta_model)
 
+        # Append to self.edits so when we call the local model, we temporarily edit the module in the same way as the meta model.
         self.edits.append(wme)
         self.edits.append(ge)
 
