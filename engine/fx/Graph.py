@@ -274,7 +274,7 @@ class Graph:
 
             # 'rtn_0' should have the value we need to return.
             return_value = self.nodes["rtn_0"].value()
-            self.nodes["rtn_0"]._future = None
+            self.nodes["rtn_0"].destroy()
             return return_value
 
         # Repalce forward method with custom graph execution method.
