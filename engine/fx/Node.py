@@ -257,7 +257,9 @@ class Node:
         future.set_result(None)
 
     def __str__(self) -> str:
-        args = util.apply(self.args, lambda x: x.name, Node)
+
+        args = util.apply(self.args, lambda x: f"'{x}'", str)
+        args = util.apply(args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]
         meta = f"{self.meta['file']}({self.meta['line']})" if self.meta else ""
         return f"{self.name}:[ {meta} args:({','.join(args)}) l:{len(self.listeners)} d:{len(self.dependencies)}]"

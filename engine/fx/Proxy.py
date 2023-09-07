@@ -61,6 +61,7 @@ class Proxy:
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
+        
         item_proxy = self[key]
 
         update = item_proxy.node.__class__.update
