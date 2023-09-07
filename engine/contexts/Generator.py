@@ -124,5 +124,5 @@ class Generator:
     def non_blocking_request(self, request: modeling.RequestModel):
         pass
 
-    def invoke(self, input) -> Invoker:
-        return Invoker(self, input)
+    def invoke(self, input, *args, **kwargs) -> Invoker:
+        return Invoker(self, input,  *args, **kwargs)
