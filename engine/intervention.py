@@ -10,13 +10,35 @@ from .fx.Node import Node
 from .fx.Proxy import Proxy
 
 
+class TokenIndexer:
+    def __init__(self, proxy: InterventionProxy) -> None:
+        self.proxy = proxy
+
+    def convert_idx(self, idx: int):
+        if idx >= 0:
+            n_tokens = self.proxy.node.proxy_value.shape[1]
+            idx = -(n_tokens - idx)
+
+        return idx
+
+    def __getitem__(self, key: int) -> Proxy:
+
+        key = self.convert_idx(key)
+
+        return self.proxy[:, key]
+
+    def __setitem__(self, key: int, value: Union[Proxy, Any]) -> None:
+        key = self.convert_idx(key)
+
+        self.proxy[:, key] = value
+
+
 class InterventionProxy(Proxy):
     @staticmethod
     def proxy_save(value: Any) -> None:
         return util.apply(value, lambda x: x.clone(), torch.Tensor)
 
     def save(self) -> InterventionProxy:
-        
         proxy = self.node.graph.add(
             graph=self.node.graph,
             value=self.node.proxy_value,
@@ -33,15 +55,13 @@ class InterventionProxy(Proxy):
 
         return proxy
 
-    def token(self, idx: int) -> InterventionProxy:
-        if idx >= 0:
-            n_tokens = self.node.proxy_value.shape[1]
-            idx = -(n_tokens - idx)
+    @property
+    def token(self) -> TokenIndexer:
+        return TokenIndexer(self)
 
-        return self[:, idx]
-
-    def t(self, idx: int) -> InterventionProxy:
-        return self.token(idx)
+    @property
+    def t(self) -> TokenIndexer:
+        return self.token
 
     @property
     def shape(self):
@@ -64,26 +84,26 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
     Returns:
         _type_: _description_
     """
-    batch_idx = 0
 
     # Key to module activation argument nodes has format: <module path>.<output/input>.<generation index>.<batch index>
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
-    batch_module_path = f"{module_path}.{batch_idx}"
+    # TODO
+    # Probably need a better way to do this. Should be a dict of argument name to list of nodes and their batch_idx?
+    argument_node_names = [
+        name for name in graph.argument_node_names if name.startswith(module_path)
+    ]
 
-    # We create a new key as we increment batch_idx and check if that key is in the graph's argument_node_names dict.
-    while batch_module_path in graph.argument_node_names:
-        # If it exists, we grab it.
-        node = graph.nodes[graph.argument_node_names[batch_module_path]]
+    for argument_node_name in argument_node_names:
+        node = graph.nodes[graph.argument_node_names[argument_node_name]]
 
-        # We set its result to the activatins, indexed by only the relevant batch index.
+        batch_idx = int(argument_node_name.split(".")[-1])
+
+        # We set its result to the activations, indexed by only the relevant batch index.
         node.future.set_result(
-            util.apply(activations, lambda x: x.select(0, batch_idx).unsqueeze(0), torch.Tensor)
+            util.apply(
+                activations, lambda x: x.select(0, batch_idx).unsqueeze(0), torch.Tensor
+            )
         )
-
-        # Increment batch_idx and go again.
-        batch_idx += 1
-
-        batch_module_path = f"{module_path}.{batch_idx}"
 
     return activations
