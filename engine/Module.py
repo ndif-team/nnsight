@@ -50,7 +50,7 @@ class Module:
         if proxy:
             module_proxy = getattr(self.generator.graph.module_proxy, self.module_path)
 
-            return module_proxy(*args, **kwds)
+            return module_proxy.forward(*args, **kwds)
 
         return super().__call__(*args, **kwds)
 
