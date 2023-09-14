@@ -78,8 +78,8 @@ def blocking_request(data: str) -> None:
             byte string expected to be a RequestModel
     """
 
-    # Load byte string into RequestModel
-    rquest: RequestModel = pickle.loads(data)
+    # Load RequestModel
+    rquest = RequestModel(**data)
     # Denote this request is a blocking request. This notifies the response dict downstream
     # we want to respond immediately to the user when some update to their request handing is made.
     rquest.blocking = True

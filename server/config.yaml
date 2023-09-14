@@ -1,6 +1,11 @@
 RESPONSE_PATH: ./responses
 PORT: 5000
 LOG_PATH: ./logs
+ALLOWED_MODULES: 
+  - torch
+  - builtins
+  - engine
+DISALLOWED_FUNCTIONS: []
 MODEL_CONFIGURATIONS:
   - repo_id: gpt2
   # - repo_id: decapoda-research/llama-65b-hf

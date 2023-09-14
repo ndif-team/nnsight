@@ -87,23 +87,6 @@ class Proxy:
             args=[self.node, key],
         )
 
-    def __setattr__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
-        if key == "node":
-            return super(Proxy, self).__setattr__(key, value)
-
-        attr_proxy: Proxy = getattr(self, key)
-
-        update = attr_proxy.node.__class__.update
-
-        update(attr_proxy.node.proxy_value, attr_proxy.node.prepare_proxy_values(value))
-
-        attr_proxy.node.graph.add(
-            graph=attr_proxy.node.graph,
-            value=attr_proxy.node.proxy_value,
-            target=update,
-            args=[attr_proxy.node, value],
-        )
-
     def __len__(self) -> Proxy:
         value = len(self.node.proxy_value)
 

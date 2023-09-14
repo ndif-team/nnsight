@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING, List, Dict, Union
+from typing import TYPE_CHECKING, Dict, List, Union
 
 import socketio
 
@@ -32,10 +32,15 @@ class Generator:
         graph (Graph): Graph of all user intervention operations.
         output (??): desc
     """
+
     def __init__(
-        self, model: "Model", *args, device_map:Union[str,Dict]="server", blocking:bool=True, **kwargs
+        self,
+        model: "Model",
+        *args,
+        device_map: Union[str, Dict] = "server",
+        blocking: bool = True,
+        **kwargs,
     ) -> None:
-        
         self.model = model
         self.device_map = device_map
         self.blocking = blocking
@@ -56,15 +61,13 @@ class Generator:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """On exit, run and generate using the model whether locally or on the server.  
-        """
+        """On exit, run and generate using the model whether locally or on the server."""
         if self.device_map == "server":
             self.run_server()
         else:
             self.run_local()
 
     def run_local(self):
-
         # Dispatch the model to the correct device.
         self.model.dispatch(device_map=self.device_map)
 
@@ -72,15 +75,13 @@ class Generator:
         self.output = self.model(self.prompts, self.graph, *self.args, **self.kwargs)
 
     def run_server(self):
-
         # Create the pydantic class for the request.
         request = modeling.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
             model_name=self.model.model_name_or_path,
             prompts=self.prompts,
-            # Convert Graph class into transferable json format
-            intervention_graph=modeling.fx.NodeModel.from_graph(self.graph),
+            intervention_graph=self.graph,
         )
 
         if self.blocking:
@@ -89,7 +90,6 @@ class Generator:
             self.non_blocking_request(request)
 
     def blocking_request(self, request: modeling.RequestModel):
-
         # Create a socketio connection to the server.
         sio = socketio.Client()
         sio.connect(f"ws://{CONFIG.API.HOST}")
@@ -97,14 +97,13 @@ class Generator:
         # Called when recieving a response from the server.
         @sio.on("blocking_response")
         def blocking_response(data):
-
             # Load the data into the ResponseModel pydantic class.
             data: modeling.ResponseModel = pickle.loads(data)
 
             # Print response for user ( should be logger.info and have an infor handler print to stdout)
             print(str(data))
 
-            # If the status of the response is completed, update the local futures that the user specified to save. 
+            # If the status of the response is completed, update the local futures that the user specified to save.
             # Then disconnect and continue.
             if data.status == modeling.JobStatus.COMPLETED:
                 for name, value in data.saves.items():
@@ -117,7 +116,10 @@ class Generator:
             elif data.status == modeling.JobStatus.ERROR:
                 sio.disconnect()
 
-        sio.emit("blocking_request", pickle.dumps(request))
+        sio.emit(
+            "blocking_request",
+            request.model_dump(exclude_defaults=True, exclude_none=True),
+        )
 
         sio.wait()
 
@@ -125,4 +127,4 @@ class Generator:
         pass
 
     def invoke(self, input, *args, **kwargs) -> Invoker:
-        return Invoker(self, input,  *args, **kwargs)
+        return Invoker(self, input, *args, **kwargs)

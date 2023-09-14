@@ -15,4 +15,6 @@ class ConfigModel(BaseModel):
     RESPONSE_PATH: str
     PORT: int
     LOG_PATH: str
+    ALLOWED_MODULES: List[str]
+    DISALLOWED_FUNCTIONS: List[str]
     MODEL_CONFIGURATIONS: List[ModelConfigModel]

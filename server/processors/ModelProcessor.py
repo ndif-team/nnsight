@@ -1,7 +1,8 @@
 from typing import Dict
 
 import accelerate
-from engine import Model
+import torch
+from engine import Model, util
 from engine.logger import logger as engine_logger
 from engine.modeling import JobStatus, RequestModel, ResponseModel, fx
 
@@ -62,7 +63,7 @@ class ModelProcessor(Processor):
         try:
             args, kwargs = request.args, request.kwargs
 
-            graph = fx.NodeModel.to_graph(request.intervention_graph)
+            graph = request.graph()
 
             # Run model with parameters and interventions
             output = self.model(request.prompts, graph, *args, **kwargs)
@@ -77,8 +78,9 @@ class ModelProcessor(Processor):
                 output=output,
                 # Move all copied data to cpu
                 saves={
-                    name: value.value()
-                    for name, value in graph.nodes.items() if value.done()
+                    name: util.apply(value.value(), lambda x: x.cpu(), torch.Tensor)
+                    for name, value in graph.nodes.items()
+                    if value.done()
                 },
             ).log(self.logger)
 

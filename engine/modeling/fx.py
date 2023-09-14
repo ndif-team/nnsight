@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Union
+from typing import Any, Callable, Dict, List, Union
 
 from pydantic import BaseModel
 
@@ -19,16 +19,6 @@ class NodeModel(BaseModel):
     kwargs: Dict[str, Any]
 
     @staticmethod
-    def from_graph(graph: Graph):
-        nodes = dict()
-
-        for node in graph.nodes.values():
-            node = NodeModel.from_node(node)
-            nodes[node.name] = node
-
-        return nodes
-
-    @staticmethod
     def from_node(node: Node):
         def _reference(node: Node):
             return NodeModel.Reference(name=node.name)
@@ -37,15 +27,6 @@ class NodeModel(BaseModel):
         kwargs = util.apply(node.kwargs, _reference, Node)
 
         return NodeModel(name=node.name, target=node.target, args=args, kwargs=kwargs)
-
-    @staticmethod
-    def to_graph(nodes: Dict[str, NodeModel]):
-        graph = Graph(None)
-
-        for node in nodes.values():
-            NodeModel.to_node(graph, nodes, node)
-
-        return graph
 
     @staticmethod
     def to_node(graph: Graph, nodes: Dict[str, NodeModel], node_model: NodeModel):
