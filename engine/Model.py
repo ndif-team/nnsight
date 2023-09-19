@@ -121,23 +121,20 @@ class Model:
             BatchEncoding: _description_
         """
 
-        if isinstance(inputs, str):
+        if isinstance(inputs, str) or (
+            isinstance(inputs, list) and isinstance(inputs[0], int)
+        ):
             inputs = [inputs]
 
-        if isinstance(inputs, list):
-            if isinstance(inputs[0], str):
-                return self.tokenizer(
-                    inputs, *args, return_tensors="pt", padding=True, **kwargs
-                )
-            if isinstance(inputs[0], int):
-                inputs = [inputs]
-            inputs = torch.IntTensor(inputs)
-        if isinstance(inputs, torch.Tensor):
-            if inputs.ndim == 1:
-                inputs = inputs.unsqueeze(0)
-            return BatchEncoding({"input_ids": inputs.type(torch.IntTensor)})
+        if isinstance(inputs, torch.Tensor) and inputs.ndim == 1:
+            inputs = inputs.unsqueeze(0)
 
-        raise ValueError("Invalid input")
+        if not isinstance(inputs[0], str):
+            inputs = [self.tokenizer.decode(ids) for ids in inputs]
+
+        return self.tokenizer(
+            inputs, *args, return_tensors="pt", padding=True, **kwargs
+        )
 
     @torch.inference_mode()
     def run_meta(self, inputs: BatchEncoding, *args, **kwargs) -> None:
