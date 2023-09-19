@@ -88,22 +88,23 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
     # Key to module activation argument nodes has format: <module path>.<output/input>.<generation index>.<batch index>
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
-    # TODO
-    # Probably need a better way to do this. Should be a dict of argument name to list of nodes and their batch_idx?
-    argument_node_names = [
-        name for name in graph.argument_node_names if name.startswith(module_path)
-    ]
+    if module_path in graph.argument_node_names:
 
-    for argument_node_name in argument_node_names:
-        node = graph.nodes[graph.argument_node_names[argument_node_name]]
+        argument_node_names = graph.argument_node_names[module_path]
 
-        batch_idx = int(argument_node_name.split(".")[-1])
+        # multiple argument nodes can have same module_path if there are multiple invocations.
+        for argument_node_name in argument_node_names:
 
-        # We set its result to the activations, indexed by only the relevant batch index.
-        node.future.set_result(
-            util.apply(
-                activations, lambda x: x.select(0, batch_idx).unsqueeze(0), torch.Tensor
+            node = graph.nodes[argument_node_name]
+
+            # args for argument nodes are (module_path, batch_size, batch_start)
+            _, batch_size, batch_start = node.args
+
+            # We set its result to the activations, indexed by only the relevant batch idxs.
+            node.future.set_result(
+                util.apply(
+                    activations, lambda x: x.narrow(0, batch_start, batch_size), torch.Tensor
+                )
             )
-        )
 
     return activations

@@ -73,7 +73,9 @@ class Module:
                 ),
                 target="argument",
                 args=[
-                    f"{self.module_path}.output.{self.generator.generation_idx}.{self.generator.batch_idx}"
+                    f"{self.module_path}.output.{self.generator.generation_idx}",
+                    self.generator.batch_size,
+                    len(self.generator.prompts) - self.generator.batch_size
                 ],
             )
 

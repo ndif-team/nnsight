@@ -26,8 +26,7 @@ class Generator:
         kwargs (Dict[str,Any]): Keyword arguments for calling the model.
         generation_idx (int): Keeps track of what iteration of generation to do interventions at. Used by the Module class
             to specify generation_idx for interventions and changed by the Invoker class using invoker.next().
-        batch_idx (int): Keeps track of which batch in generation to do interventions at. Used by the Module class
-            to specify batch_idx for interventions and changed by the Invoker class using invoker.__exit__().
+        batch_size (int): Current size of invocation batch. To be used by Module node creation
         prompts (List[str]): Keeps track of prompts used by invokers.
         graph (Graph): Graph of all user intervention operations.
         output (??): desc
@@ -47,10 +46,11 @@ class Generator:
         self.args = args
         self.kwargs = kwargs
 
-        self.generation_idx: int = 0
-        self.batch_idx: int = 0
-        self.prompts: List[str] = []
         self.graph = Graph(self.model.meta_model, proxy_class=InterventionProxy)
+
+        self.generation_idx: int = 0
+        self.batch_size: int = 0
+        self.prompts: List[str] = []
         self.output = None
 
         # Modules need to know about the current generator to create the correct proxies.

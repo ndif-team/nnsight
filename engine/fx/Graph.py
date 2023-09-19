@@ -20,7 +20,7 @@ class Graph:
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
             Used so names are unique.
         module_proxy (Proxy): Proxy for given root module
-        argument_node_names (Dict[str, str]): _description_
+        argument_node_names (Dict[str, List[str]]): _description_
         generation_idx (int): desc
 
     """
@@ -142,7 +142,7 @@ class Graph:
         self.name_idx: Dict[str, int] = dict()
 
         self.module_proxy = self.add(graph=self, value=module, target="module")
-        self.argument_node_names: Dict[str, str] = dict()
+        self.argument_node_names: Dict[str, List[str]] = dict()
 
         self.generation_idx = 0
 
@@ -225,7 +225,12 @@ class Graph:
         self.nodes[name] = node
 
         if target_name == "argument":
-            self.argument_node_names[args[0]] = name
+            module_path, _, _ = args
+
+            if module_path not in self.argument_node_names:
+                self.argument_node_names[module_path] = []
+
+            self.argument_node_names[module_path].append(name)
 
         return self.proxy(node)
 

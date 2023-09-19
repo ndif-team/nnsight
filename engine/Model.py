@@ -5,9 +5,15 @@ from typing import Any, List, Union
 import accelerate
 import baukit
 import torch
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, GenerationMixin, PreTrainedModel,
-                          PreTrainedTokenizer)
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    GenerationMixin,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.generation.utils import GenerateOutput
 
 from . import CONFIG
@@ -58,8 +64,8 @@ class Model:
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.meta_model: PreTrainedModel = AutoModelForCausalLM.from_config(
-                self.config
+            self.meta_model: PreTrainedModel = Module.wrap(
+                AutoModelForCausalLM.from_config(self.config)
             )
 
         for name, module in self.meta_model.named_children():
@@ -98,7 +104,14 @@ class Model:
         # Needed if user is editing a module graph before a call to invoke.
         self.run_meta(self.prepare_inputs("_"))
 
-    def prepare_inputs(self, inputs, *args, **kwargs) -> BatchEncoding:
+    def prepare_inputs(
+        self,
+        inputs: Union[
+            str, List[str], List[List[str]], List[int], List[List[int]], torch.Tensor
+        ],
+        *args,
+        **kwargs,
+    ) -> BatchEncoding:
         """_summary_
 
         Args:
@@ -107,18 +120,24 @@ class Model:
         Returns:
             BatchEncoding: _description_
         """
-        if isinstance(inputs, list) and isinstance(inputs[0], int):
-            inputs = torch.IntTensor([inputs])
+
+        if isinstance(inputs, str):
+            inputs = [inputs]
+
+        if isinstance(inputs, list):
+            if isinstance(inputs[0], str):
+                return self.tokenizer(
+                    inputs, *args, return_tensors="pt", padding=True, **kwargs
+                )
+            if isinstance(inputs[0], int):
+                inputs = [inputs]
+            inputs = torch.IntTensor(inputs)
         if isinstance(inputs, torch.Tensor):
             if inputs.ndim == 1:
                 inputs = inputs.unsqueeze(0)
-            inputs = {"input_ids": inputs.type(torch.IntTensor)}
-        if not isinstance(inputs, dict):
-            return self.tokenizer(
-                inputs, *args, return_tensors="pt", padding=True, **kwargs
-            )
+            return BatchEncoding({"input_ids": inputs.type(torch.IntTensor)})
 
-        return BatchEncoding(inputs)
+        raise ValueError("Invalid input")
 
     @torch.inference_mode()
     def run_meta(self, inputs: BatchEncoding, *args, **kwargs) -> None:
@@ -157,8 +176,8 @@ class Model:
 
             modules = set(
                 [
-                    ".".join(graph.nodes[name].args[0].split(".")[:-3])
-                    for name in graph.argument_node_names.values()
+                    ".".join(name.split(".")[:-2])
+                    for name in graph.argument_node_names.keys()
                 ]
             )
 
