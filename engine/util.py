@@ -54,3 +54,48 @@ def timed(func, lggr):
         return result
 
     return wrapper
+
+
+def cross_entropy_loss(
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    shift:bool = False,
+    avg_batch: bool = True,
+    avg_token: bool = True,
+):
+    
+    logits = logits.cpu()
+    target_ids = target_ids.cpu()
+    
+    if logits.ndim == 2:
+        logits = logits.unsqueeze(0)
+
+    if target_ids.ndim == 1:
+        target_ids = target_ids.unsqueeze(0)
+
+    assert logits.ndim == 3
+    assert target_ids.ndim == 2
+    assert logits.size(0) == target_ids.size(0)
+    assert logits.size(1) == target_ids.size(1)
+
+
+    if shift:
+        logits = logits[:, :-1]
+        target_ids = target_ids[:, 1:]
+
+    batch_losses = []
+
+    for batch_idx in range(len(logits)):
+        batch_loss = torch.nn.functional.cross_entropy(
+            logits[batch_idx],
+            target_ids[batch_idx],
+            reduction="mean" if avg_token else "none",
+        )
+        batch_losses.append(batch_loss)
+
+    batch_losses = torch.stack(batch_losses)
+
+    if avg_batch:
+        batch_losses = batch_losses.mean(dim=0)
+
+    return batch_losses
