@@ -187,14 +187,17 @@ class Node:
         # Turn futures into their value
         def _value(value: Node):
             return value.value()
+        
+        args = util.apply(self.args, _value, Node)
+        kwargs = util.apply(self.kwargs, _value, Node)
 
         device = None
 
         def _device(value):
             nonlocal device
             device = value.device
-
-        all_args = list(self.args) + list(self.kwargs.values())
+            
+        all_args = list(args) + list(kwargs.values())
 
         util.apply(list(reversed(all_args)), _device, torch.Tensor)
         util.apply(list(reversed(all_args)), _device, torch.nn.Module)
@@ -203,10 +206,7 @@ class Node:
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        args = util.apply(self.args, _value, Node)
         args = util.apply(args, _to, torch.Tensor)
-
-        kwargs = util.apply(self.kwargs, _value, Node)
         kwargs = util.apply(kwargs, _to, torch.Tensor)
 
         return args, kwargs
