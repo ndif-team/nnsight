@@ -14,7 +14,7 @@ setup(
         "transformers @ git+https://github.com/huggingface/transformers.git",
         "protobuf",
         "python-socketio[client]",
-        "tokenizers==0.13.0",
+        "tokenizers",
         "pydantic",
         "torch",
         "sentencepiece",
