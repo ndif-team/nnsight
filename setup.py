@@ -12,9 +12,9 @@ setup(
     install_requires=[
         "baukit @ git+https://github.com/davidbau/baukit.git@e14a18a6ad6cf9e0d6a5dc7a97e671e393c01682",
         "transformers @ git+https://github.com/huggingface/transformers.git",
-        "protobuf==3.13.0",
+        "protobuf",
         "python-socketio[client]",
-        "tokenizers",
+        "tokenizers==0.13.0",
         "pydantic",
         "torch",
         "sentencepiece",

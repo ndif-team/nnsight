@@ -200,7 +200,7 @@ class Node:
         all_args = list(args) + list(kwargs.values())
 
         util.apply(list(reversed(all_args)), _device, torch.Tensor)
-        util.apply(list(reversed(all_args)), _device, torch.nn.Module)
+        #util.apply(list(reversed(all_args)), _device, torch.nn.Module)
 
         # Move tensors to device
         def _to(value: torch.Tensor):
