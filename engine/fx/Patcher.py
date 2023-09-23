@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import wraps
+
 from .Proxy import Proxy
 
 
@@ -8,6 +10,7 @@ class Patcher:
         self.patches = list()
 
     def patch(self, fn) -> None:
+        @wraps(fn)
         def patched(*args, **kwargs):
             arguments = list(args) + list(kwargs.values())
 
@@ -20,7 +23,10 @@ class Patcher:
                     break
 
             if node is not None:
-                value = fn(*node.prepare_proxy_values(args), **node.prepare_proxy_values(kwargs))
+                value = fn(
+                    *node.prepare_proxy_values(args),
+                    **node.prepare_proxy_values(kwargs),
+                )
 
                 return node.graph.add(
                     graph=node.graph, value=value, target=fn, args=args, kwargs=kwargs

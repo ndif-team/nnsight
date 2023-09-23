@@ -1,7 +1,10 @@
+from functools import wraps
+
 import torch
 
 
 def repeat_interleave_wrapper(fn):
+    @wraps(fn)
     def repeat_interleave(
         input: torch.Tensor, repeats: torch.LongTensor, dim=None, output_size=None
     ):

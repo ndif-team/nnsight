@@ -268,12 +268,12 @@ class Graph:
 
             # Sets the result of the argument nodes future for args.
             for i, arg in enumerate(args):
-                self.nodes[argument_nodes_list[i]].future.set_result(arg)
+                self.nodes[argument_nodes_list[i][0]].future.set_result(arg)
 
             # And then for kwargs.
             for key in kwargs:
                 if key in self.argument_node_names:
-                    self.nodes[self.argument_node_names[key]].future.set_result(arg)
+                    self.nodes[self.argument_node_names[key][0]].future.set_result(arg)
 
             # 'rtn_0' should have the value we need to return.
             return_value = self.nodes["rtn_0"].value()
