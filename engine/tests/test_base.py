@@ -12,7 +12,7 @@ def MSG_prompt():
 
 def test_generation(gpt2:engine.Model, device:str, MSG_prompt:str):
 
-    with gpt2.generate(device_map='device', max_new_tokens=3) as generator:
+    with gpt2.generate(device_map=device, max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
             pass
 
@@ -22,7 +22,7 @@ def test_generation(gpt2:engine.Model, device:str, MSG_prompt:str):
 
 def test_save(gpt2:engine.Model, device:str):
 
-    with gpt2.generate(device_map='device', max_new_tokens=1) as generator:
+    with gpt2.generate(device_map=device, max_new_tokens=1) as generator:
         with generator.invoke('Hello world') as invoker:
 
             hs = gpt2.transformer.h[-1].output[0].save()
@@ -34,7 +34,7 @@ def test_save(gpt2:engine.Model, device:str):
 
 def test_set(gpt2:engine.Model, device:str):
 
-    with gpt2.generate(device_map='device', max_new_tokens=1) as generator:
+    with gpt2.generate(device_map=device, max_new_tokens=1) as generator:
         with generator.invoke('Hello world') as invoker:
             
             pre = gpt2.transformer.h[-1].output[0].save()
@@ -51,7 +51,7 @@ def test_set(gpt2:engine.Model, device:str):
 
 def test_adhoc_module(gpt2:engine.Model, device:str):
 
-    with gpt2.generate(device_map='device') as generator:
+    with gpt2.generate(device_map=device) as generator:
         with generator.invoke('The Eiffel Tower is in the city of') as invoker:
             
             hidden_states = gpt2.transformer.h[-1].output[0]
@@ -65,7 +65,7 @@ def test_adhoc_module(gpt2:engine.Model, device:str):
 
 def test_embeddings_set1(gpt2:engine.Model, device:str, MSG_prompt:str):
 
-    with gpt2.generate(device_map='device', max_new_tokens=3) as generator:
+    with gpt2.generate(device_map=device, max_new_tokens=3) as generator:
     
         with generator.invoke(MSG_prompt) as invoker:
 
@@ -83,7 +83,7 @@ def test_embeddings_set1(gpt2:engine.Model, device:str, MSG_prompt:str):
 
 def test_embeddings_set2(gpt2:engine.Model, device:str, MSG_prompt:str):
 
-    with gpt2.generate(device_map='device', max_new_tokens=3) as generator:
+    with gpt2.generate(device_map=device, max_new_tokens=3) as generator:
     
         with generator.invoke(MSG_prompt) as invoker:
 
@@ -91,7 +91,7 @@ def test_embeddings_set2(gpt2:engine.Model, device:str, MSG_prompt:str):
 
     output1 = gpt2.tokenizer.decode(generator.output[0])
 
-    with gpt2.generate(device_map='device', max_new_tokens=3) as generator:
+    with gpt2.generate(device_map=device, max_new_tokens=3) as generator:
 
         with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
 
