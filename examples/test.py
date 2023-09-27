@@ -2,13 +2,13 @@
 from engine import Model
 import torch
 # Get model wrapper for any model you can get with AutoConfig.from_pretrained(model_name)
-model = Model('gpt2')
+model = Model('gpt2',device_map='cuda:0')
 
 # Prints normal module tree to show access tree for modules
 print(model)
 
 # Invoke using a prompt
-with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as generator:
     with generator.invoke('Hello world ') as invoker:
 
         # See the input prompt seperated into token strings

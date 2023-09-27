@@ -1,9 +1,9 @@
 from engine import Model
 import torch
 
-model = Model("gpt2")
+model = Model("gpt2", device_map='cuda:0')
 
-with model.generate(device_map='cuda:0') as generator:
+with model.generate() as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
         
         hidden_states = model.transformer.h[-1].output[0]

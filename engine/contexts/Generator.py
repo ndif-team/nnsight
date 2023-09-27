@@ -19,7 +19,6 @@ class Generator:
 
     Attributes:
         model (Model): Model object this is a generator for.
-        device_map (Union[str,Dict]): What device/device map to run the model on. Defaults to 'server'
         blocking (bool): If when using device_map='server', block and wait form responses. Otherwise have to manually
             request a response.
         args (List[Any]): Arguments for calling the model.
@@ -36,12 +35,12 @@ class Generator:
         self,
         model: "Model",
         *args,
-        device_map: Union[str, Dict] = "server",
         blocking: bool = True,
+        server: bool = False,
         **kwargs,
     ) -> None:
         self.model = model
-        self.device_map = device_map
+        self.server = server
         self.blocking = blocking
         self.args = args
         self.kwargs = kwargs
@@ -62,14 +61,14 @@ class Generator:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """On exit, run and generate using the model whether locally or on the server."""
-        if self.device_map == "server":
+        if self.server:
             self.run_server()
         else:
             self.run_local()
 
     def run_local(self):
         # Dispatch the model to the correct device.
-        self.model.dispatch(device_map=self.device_map)
+        self.model.dispatch()
 
         # Run the model and store the output.
         self.output = self.model(self.prompts, self.graph, *self.args, **self.kwargs)

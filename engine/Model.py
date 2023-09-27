@@ -43,10 +43,14 @@ class Model:
         edits (List[Edit]): desc
     """
 
-    def __init__(self, model_name_or_path: str, alter=True) -> None:
+    def __init__(self, model_name_or_path: str, *args, alter=True, **kwargs) -> None:
         self.model_name_or_path = model_name_or_path
         self.edits: List[Edit] = list()
         self.alter = alter
+        self.args = args
+        self.kwargs = kwargs
+
+        self.kwargs['trust_remote_code'] = True
 
         # Use init_empty_weights to create graph i.e the specified model with no loaded parameters,
         # to use for finding shapes of Module inputs and outputs, as well as replacing torch.nn.Module
@@ -222,22 +226,11 @@ class Model:
             ] if self.alter and self.config.model_type in MODEL_TYPE_TO_ALTERATION else Patcher():
                 self.local_model = AutoModelForCausalLM.from_pretrained(
                     self.model_name_or_path,
+                    *self.args,
                     config=self.config,
-                    device_map=device_map,
-                    trust_remote_code=True,
+                    **self.kwargs
                 )
-
             logger.debug(f"Dispatched `{self.model_name_or_path}`")
-        else:
-            if isinstance(device_map, str) and device_map != "auto":
-                # TODO
-                # self.local_model = accelerate.dispatch_model(
-                #     self.local_model, device_map
-                # )
-
-                pass
-            else:
-                self.local_model.to(device_map)
 
     def modulize(self, module: Module, node_name: str, module_name: str) -> None:
         """_summary_
