@@ -225,7 +225,7 @@ class Graph:
         self.nodes[name] = node
 
         if target_name == "argument":
-            module_path, _, _ = args
+            module_path = args[0]
 
             if module_path not in self.argument_node_names:
                 self.argument_node_names[module_path] = []

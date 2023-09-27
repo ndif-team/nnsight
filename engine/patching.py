@@ -33,6 +33,8 @@ class Patcher:
         for patch in self.patches:
             patch.patch()
 
+        return self
+
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         for patch in self.patches:
             patch.restore()
