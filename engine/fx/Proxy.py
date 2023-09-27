@@ -61,7 +61,6 @@ class Proxy:
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
-        
         item_proxy = self[key]
 
         update = item_proxy.node.__class__.update
@@ -177,3 +176,35 @@ class Proxy:
             args=args,
             kwargs=kwargs,
         )
+
+
+from functools import wraps
+
+
+def proxy_wrapper(fn) -> None:
+    @wraps(fn)
+    def patched(*args, **kwargs):
+        arguments = list(args) + list(kwargs.values())
+
+        node = None
+
+        for arg in arguments:
+            if isinstance(arg, Proxy):
+                node = arg.node
+
+                break
+
+        if node is not None:
+            value = fn(
+                *node.prepare_proxy_values(args),
+                **node.prepare_proxy_values(kwargs),
+            )
+
+            return node.graph.add(
+                graph=node.graph, value=value, target=fn, args=args, kwargs=kwargs
+            )
+
+        else:
+            return fn(*args, **kwargs)
+
+    return patched

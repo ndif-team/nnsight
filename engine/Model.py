@@ -17,6 +17,7 @@ from transformers import (
 from transformers.generation.utils import GenerateOutput
 
 from . import CONFIG
+from .alteration import MODEL_TYPE_TO_ALTERATION
 from .contexts.Generator import Generator
 from .editing.Editor import Edit, Editor
 from .editing.GraphEdit import GraphEdit
@@ -25,6 +26,7 @@ from .fx.Graph import Graph
 from .intervention import intervene
 from .logger import logger
 from .Module import Module
+from .patching import Patcher
 
 
 class Model:
@@ -41,9 +43,10 @@ class Model:
         edits (List[Edit]): desc
     """
 
-    def __init__(self, model_name_or_path: str) -> None:
+    def __init__(self, model_name_or_path: str, alter=True) -> None:
         self.model_name_or_path = model_name_or_path
         self.edits: List[Edit] = list()
+        self.alter = alter
 
         # Use init_empty_weights to create graph i.e the specified model with no loaded parameters,
         # to use for finding shapes of Module inputs and outputs, as well as replacing torch.nn.Module
@@ -53,20 +56,26 @@ class Model:
 
         with accelerate.init_empty_weights(include_buffers=True):
             self.config = AutoConfig.from_pretrained(
-                self.model_name_or_path, cache_dir=CONFIG.APP.MODEL_CACHE_PATH
+                self.model_name_or_path
             )
 
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name_or_path,
                 config=self.config,
                 padding_side="left",
-                cache_dir=CONFIG.APP.MODEL_CACHE_PATH,
+                trust_remote_code=True,
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.meta_model: PreTrainedModel = Module.wrap(
-                AutoModelForCausalLM.from_config(self.config)
-            )
+            # Check for alterations for the model type and if so perform the patch
+            with MODEL_TYPE_TO_ALTERATION[
+                self.config.model_type
+            ] if self.alter and self.config.model_type in MODEL_TYPE_TO_ALTERATION else Patcher():
+                self.meta_model: PreTrainedModel = Module.wrap(
+                    AutoModelForCausalLM.from_config(
+                        self.config, trust_remote_code=True
+                    )
+                )
 
         for name, module in self.meta_model.named_children():
             # Wrap all modules in our Module class.
@@ -208,12 +217,15 @@ class Model:
         if self.local_model is None:
             logger.debug(f"Dispatching `{self.model_name_or_path}`...")
 
-            self.local_model = AutoModelForCausalLM.from_pretrained(
-                self.model_name_or_path,
-                config=self.config,
-                device_map=device_map,
-                cache_dir=CONFIG.APP.MODEL_CACHE_PATH,
-            )
+            with MODEL_TYPE_TO_ALTERATION[
+                self.config.model_type
+            ] if self.alter and self.config.model_type in MODEL_TYPE_TO_ALTERATION else Patcher():
+                self.local_model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name_or_path,
+                    config=self.config,
+                    device_map=device_map,
+                    trust_remote_code=True,
+                )
 
             logger.debug(f"Dispatched `{self.model_name_or_path}`")
         else:

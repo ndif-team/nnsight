@@ -1,4 +1,2 @@
 API:
-  HOST: nagoya.research.khoury.northeastern.edu:5000
-APP:
-  MODEL_CACHE_PATH: ./model_checkpoints 
+  HOST: localhost:5000
