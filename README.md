@@ -18,9 +18,9 @@ Here is a simple example where we run the engine API locally on gpt2 and save th
 ```python
 from engine import Model
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda')
 
-with model.generate(device_map='cuda', max_new_tokens=1) as generator:
+with model.generate(max_new_tokens=1) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
         hidden_states = model.transformer.h[-1].output[0].save()
@@ -31,21 +31,21 @@ hidden_states = hidden_states.value
 
 Lets go over this piece by piece.
 
-We import the `Model` object from the `engine` module and create a gpt2 model using the huggingface repo ID for gpt2, `'gpt2'`
+We import the `Model` object from the `engine` module and create a gpt2 model using the huggingface repo ID for gpt2, `'gpt2'`. This accepts arguments to create the model including `device_map` to specify which device to run on.
 
 ```python
 from engine import Model
 
-model = Model('gpt2')
+model = Model('gpt2',device_map='cuda')
 ```
 
-Then, we create a generation context block by calling `.generate(...)` on the model object. This denotes we wish to actually generate tokens given some prompts. `device_map='cuda'` specifies running the model on the `cuda` device. 
+Then, we create a generation context block by calling `.generate(...)` on the model object. This denotes we wish to actually generate tokens given some prompts.
 
-Other keyword arguments are passed downstream to [AutoModelForCausalLM.generate(...)](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationMixin.generate). Refer to the linked docs for reference.
+Keyword arguments are passed downstream to [AutoModelForCausalLM.generate(...)](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationMixin.generate). Refer to the linked docs for reference.
 
 
 ```python
-with model.generate(device_map='cuda', max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as generator:
 ```
 
 Now calling `.generate(...)` does not actually initialize or run the model. Only after the `with generator` block is exited, is the acually model loaded and ran. All operations in the block are "proxies" which essentially creates a graph of operations we wish to carry out later.
@@ -141,9 +141,9 @@ Most* basic operations and torch operations work on proxies and are added to the
 from engine import Model
 import torch 
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda')
 
-with model.generate(device_map='cuda', max_new_tokens=1) as generator:
+with model.generate(max_new_tokens=1) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
         hidden_states_pre = model.transformer.h[-1].output[0].save()
@@ -191,9 +191,9 @@ We often not only want to see whats happening during computation, but intervene 
 from engine import Model
 import torch 
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda')
 
-with model.generate(device_map='cuda', max_new_tokens=1) as generator:
+with model.generate(max_new_tokens=1) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
         hidden_states_pre = model.transformer.h[-1].output[0].save()
@@ -242,9 +242,9 @@ Here we again generate using gpt2, but generate three tokens and save the hidden
 ```python
 from engine import Model
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda')
 
-with model.generate(device_map='cuda', max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
         hidden_states1 = model.transformer.h[-1].output[0].save()
@@ -276,9 +276,9 @@ Here we just get the hidden states of the first token:
 ```python
 from engine import Model
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda')
 
-with model.generate(device_map='cuda', max_new_tokens=1) as generator:
+with model.generate(max_new_tokens=1) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
         hidden_states = model.transformer.h[-1].output[0].t[0].save()
@@ -299,9 +299,9 @@ In this case, we grab the token embeddings coming from the first prompt, `"Madis
 ```python
 from engine import Model
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda')
 
-with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as generator:
     
     with generator.invoke("Madison square garden is located in the city of New") as invoker:
 
@@ -327,9 +327,9 @@ We also could have entered a pre-saved embedding tensor as shown here:
 ```python
 from engine import Model
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda')
 
-with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as generator:
     
     with generator.invoke("Madison square garden is located in the city of New") as invoker:
 
@@ -338,7 +338,7 @@ with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
 print(model.tokenizer.decode(generator.output[0]))
 print(embeddings.value)
 
-with model.generate(device_map='cuda:0', max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as generator:
 
     with generator.invoke("_ _ _ _ _ _ _ _ _ _") as invoker:
 
@@ -357,9 +357,9 @@ Another thing we can do is apply modules in the model's module tree at any point
 from engine import Model
 import torch
 
-model = Model("gpt2")
+model = Model("gpt2", device_map='cuda')
 
-with model.generate(device_map='cuda:0') as generator:
+with model.generate() as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
         
         hidden_states = model.transformer.h[-1].output[0]
@@ -408,7 +408,7 @@ Running the engine API remotely on LLaMA 65b and saving the hidden states of the
 from engine import Model
 
 model = Model('decapoda-research/llama-65b-hf')
-with model.generate(device_map='server', max_new_tokens=1) as generator:
+with model.generate(server=True, max_new_tokens=1) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
         hidden_states = model.model.layers[-1].output[0].save()
