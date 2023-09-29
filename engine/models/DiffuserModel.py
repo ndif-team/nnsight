@@ -213,6 +213,8 @@ class DiffuserModel(AbstractModel):
             scheduler,
             latents.to(self.local_model.unet.device),
             text_embeddings.to(self.local_model.unet.device),
+            *args,
+            **kwargs,
             end_iteration=n_steps,
         )
 
