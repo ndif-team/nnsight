@@ -164,14 +164,14 @@ class DiffuserModel(AbstractModel):
         
         text_tokens = self.meta_model.text_tokenize(inputs)
 
-        return text_tokens, latents
+        return text_tokens, latents, n_imgs
     
     def run_meta(self, inputs, *args, **kwargs) -> None:
 
-        text_tokens, latents = inputs
+        text_tokens, latents, n_imgs = inputs
 
         text_embeddings = self.meta_model.get_text_embeddings(
-            text_tokens, latents.size(0)
+            text_tokens, n_imgs
         )
 
         latents = torch.cat([latents] * 2).to("meta")
@@ -196,10 +196,10 @@ class DiffuserModel(AbstractModel):
 
         """
 
-        text_tokens, latents = inputs
+        text_tokens, latents, n_imgs = inputs
 
         text_embeddings = self.local_model.get_text_embeddings(
-            text_tokens, latents.size(0)
+            text_tokens, n_imgs
         )
 
         scheduler: SchedulerMixin = getattr(diffusers, scheduler).from_pretrained(
@@ -221,7 +221,7 @@ class DiffuserModel(AbstractModel):
         return self.local_model.vae.decode(latents).sample
 
 
-    def to_image(self, latents):
+    def to_image(self, latents) -> List[Image.Image]:
         """
         Function to convert latents to images
         """

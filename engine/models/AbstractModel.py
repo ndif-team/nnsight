@@ -163,11 +163,11 @@ class AbstractModel:
         pass
 
     @abstractmethod
-    def load_meta(self, repoid_or_path, *args, **kwargs) -> None:
+    def load_meta(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
         pass
 
     @abstractmethod
-    def load_local(self, repoid_or_path, *args, **kwargs) -> None:
+    def load_local(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
         pass
 
     @abstractmethod
