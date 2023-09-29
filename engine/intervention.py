@@ -22,7 +22,6 @@ class TokenIndexer:
         return idx
 
     def __getitem__(self, key: int) -> Proxy:
-
         key = self.convert_idx(key)
 
         return self.proxy[:, key]
@@ -89,12 +88,10 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
     if module_path in graph.argument_node_names:
-
         argument_node_names = graph.argument_node_names[module_path]
 
         # multiple argument nodes can have same module_path if there are multiple invocations.
         for argument_node_name in argument_node_names:
-
             node = graph.nodes[argument_node_name]
 
             # args for argument nodes are (module_path, batch_size, batch_start)
@@ -103,7 +100,9 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
             # We set its result to the activations, indexed by only the relevant batch idxs.
             node.future.set_result(
                 util.apply(
-                    activations, lambda x: x.narrow(0, batch_start, batch_size), torch.Tensor
+                    activations,
+                    lambda x: x.narrow(0, batch_start, batch_size),
+                    torch.Tensor,
                 )
             )
 

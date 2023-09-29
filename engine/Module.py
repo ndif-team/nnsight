@@ -8,12 +8,10 @@ from . import util
 from .contexts.Generator import Generator
 from .fx.Graph import Graph
 from .fx.Node import Node
-from .fx.Proxy import Proxy
-
 from .intervention import InterventionProxy
 
 
-class Module:
+class Module(torch.nn.Module):
     """_summary_
 
     Attributes:
@@ -75,7 +73,7 @@ class Module:
                 args=[
                     f"{self.module_path}.output.{self.generator.generation_idx}",
                     self.generator.batch_size,
-                    len(self.generator.prompts) - self.generator.batch_size
+                    len(self.generator.prompts) - self.generator.batch_size,
                 ],
             )
 
@@ -90,7 +88,9 @@ class Module:
             value (Union[Proxy, Any]): _description_
         """
 
-        Node.update(self.output.node.proxy_value, self.output.node.prepare_proxy_values(value))
+        Node.update(
+            self.output.node.proxy_value, self.output.node.prepare_proxy_values(value)
+        )
 
         self.output.node.graph.add(
             graph=self.output.node.graph,
@@ -134,7 +134,7 @@ class Module:
         for name, _module in module.named_children():
             setattr(module, name, Module.wrap(_module))
 
-        if isinstance(module, Module):
+        if isinstance(module, (Module, torch.nn.ModuleList)):
             return module
 
         util.wrap(module, Module)

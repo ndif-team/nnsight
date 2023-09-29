@@ -23,14 +23,14 @@ class Invoker:
 
         # Run graph_mode with meta tensors to collect shape information,
         inputs = self.generator.model.prepare_inputs(self.input)
-        self.generator.model.run_meta(inputs.copy(), *self.args, **self.kwargs)
+        token_ids = self.generator.model.run_meta(inputs, *self.args, **self.kwargs)
 
         # Decode tokenized inputs for user usage.
         self.tokens = [
             [self.generator.model.tokenizer.decode(token) for token in ids]
-            for ids in inputs["input_ids"]
+            for ids in token_ids
         ]
-        self.ids = inputs["input_ids"]
+        self.ids = token_ids
 
         self.generator.batch_size = len(self.ids)
 

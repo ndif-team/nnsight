@@ -11,7 +11,7 @@ from ..intervention import InterventionProxy
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
-    from ..Model import Model
+    from ..models.AbstractModel import AbstractModel
 
 
 class Generator:
@@ -33,7 +33,7 @@ class Generator:
 
     def __init__(
         self,
-        model: "Model",
+        model: "AbstractModel",
         *args,
         blocking: bool = True,
         server: bool = False,
@@ -53,7 +53,7 @@ class Generator:
         self.output = None
 
         # Modules need to know about the current generator to create the correct proxies.
-        for name, module in self.model.meta_model.named_modules():
+        for name, module in self.model.named_modules():
             module.generator = self
 
     def __enter__(self) -> Generator:
@@ -67,9 +67,6 @@ class Generator:
             self.run_local()
 
     def run_local(self):
-        # Dispatch the model to the correct device.
-        self.model.dispatch()
-
         # Run the model and store the output.
         self.output = self.model(self.prompts, self.graph, *self.args, **self.kwargs)
 
