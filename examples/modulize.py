@@ -1,6 +1,6 @@
-from engine import Model
+from engine import LanguageModel
 
-model = Model('gpt2', device_map='cuda:0')
+model = LanguageModel('gpt2', device_map='cuda:0')
 
 print(model.transformer.h[1].attn.graph)
 
