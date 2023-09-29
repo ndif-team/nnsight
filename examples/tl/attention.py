@@ -1,8 +1,8 @@
-from engine import Model
+from engine import LanguageModel
 from engine.fx.Proxy import Proxy
 from engine import util
 
-model = Model('gpt2', device_map='cuda:0')
+model = LanguageModel('gpt2', device_map='cuda:0')
 
 gpt2_text = "Natural language processing tasks, such as question answering, machine translation, reading comprehension, and summarization, are typically approached with supervised learning on taskspecific datasets."
 

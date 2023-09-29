@@ -1,6 +1,6 @@
-from engine import Model
+from engine import LanguageModel
 
-model = Model("gpt2")
+model = LanguageModel("gpt2")
 
 print(model)
 

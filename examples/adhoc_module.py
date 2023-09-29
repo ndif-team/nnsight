@@ -1,7 +1,7 @@
-from engine import Model
+from engine import LanguageModel
 import torch
 
-model = Model("gpt2", device_map='cuda:0')
+model = LanguageModel("gpt2", device_map='cuda:0')
 
 with model.generate() as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:

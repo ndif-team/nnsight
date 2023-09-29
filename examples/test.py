@@ -1,8 +1,8 @@
 # The library is called engine
-from engine import Model
+from engine import LanguageModel
 import torch
 # Get model wrapper for any model you can get with AutoConfig.from_pretrained(model_name)
-model = Model('gpt2',device_map='cuda:0')
+model = LanguageModel('gpt2',device_map='cuda:0')
 
 # Prints normal module tree to show access tree for modules
 print(model)

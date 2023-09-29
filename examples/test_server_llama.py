@@ -1,6 +1,6 @@
-from engine import Model
+from engine import LanguageModel
 
-model = Model('decapoda-research/llama-65b-hf')
+model = LanguageModel('decapoda-research/llama-65b-hf')
 
 print(model)
 
