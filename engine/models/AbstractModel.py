@@ -76,8 +76,6 @@ class AbstractModel:
                     self.repoid_or_path, *self.args, **self.kwargs
                 )
 
-        inputs = self.prepare_inputs(prompts)
-
         with Editor(self, edits):
             graph.compile(self.local_model)
 
@@ -104,7 +102,7 @@ class AbstractModel:
                     activation, module_path, graph, "output"
                 ),
             ):
-                output = self.run_local(inputs, *args, **kwargs)
+                output = self.run_local(prompts, *args, **kwargs)
 
             increment_hook.remove()
 
@@ -157,8 +155,7 @@ class AbstractModel:
     def prepare_inputs(
         self,
         inputs: Any,
-        *args,
-        **kwargs,
+        **kwargs
     ) -> Any:
         pass
 

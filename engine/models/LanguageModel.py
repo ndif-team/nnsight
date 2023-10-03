@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Union
+from typing import List, Union, Callable
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -27,7 +27,7 @@ class LanguageModel(AbstractModel):
 
         super().__init__(*args, **kwargs)
 
-    def register_increment_hook(self, hook) -> RemovableHandle:
+    def register_increment_hook(self, hook: Callable) -> RemovableHandle:
         return self.local_model.register_forward_hook(hook)
 
     def load_meta(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
@@ -49,18 +49,8 @@ class LanguageModel(AbstractModel):
         self,
         inputs: Union[
             str, List[str], List[List[str]], List[int], List[List[int]], torch.Tensor
-        ],
-        *args,
-        **kwargs,
+        ]
     ) -> BatchEncoding:
-        """_summary_
-
-        Args:
-            inputs (_type_): _description_
-
-        Returns:
-            BatchEncoding: _description_
-        """
 
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
@@ -74,15 +64,21 @@ class LanguageModel(AbstractModel):
             inputs = [self.tokenizer.decode(ids) for ids in inputs]
 
         return self.tokenizer(
-            inputs, *args, return_tensors="pt", padding=True, **kwargs
+            inputs, return_tensors="pt", padding=True
         )
 
     def run_meta(self, inputs, *args, **kwargs) -> None:
+
+        inputs = self.prepare_inputs(inputs)
+
         self.meta_model(*args, **inputs.copy().to("meta"), **kwargs)
 
         return inputs["input_ids"]
 
     def run_local(self, inputs, *args, **kwargs) -> None:
+
+        inputs = self.prepare_inputs(inputs)
+
         return self.local_model.generate(
             *args, **inputs.to(self.local_model.device), **kwargs
         )

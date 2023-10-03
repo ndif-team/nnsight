@@ -152,10 +152,8 @@ class DiffuserModel(AbstractModel):
     def prepare_inputs(
         self,
         inputs,
-        *args,
         n_imgs=1,
         img_size=512,
-        **kwargs,
     ) -> Any:
         if not isinstance(inputs, list):
             inputs = [inputs]
@@ -164,11 +162,11 @@ class DiffuserModel(AbstractModel):
         
         text_tokens = self.meta_model.text_tokenize(inputs)
 
-        return text_tokens, latents, n_imgs
+        return text_tokens, latents
     
-    def run_meta(self, inputs, *args, **kwargs) -> None:
+    def run_meta(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
 
-        text_tokens, latents, n_imgs = inputs
+        text_tokens, latents = self.prepare_inputs(inputs, n_imgs=n_imgs, img_size=img_size)
 
         text_embeddings = self.meta_model.get_text_embeddings(
             text_tokens, n_imgs
@@ -187,7 +185,7 @@ class DiffuserModel(AbstractModel):
         return text_tokens.input_ids
 
     def run_local(
-        self, inputs, *args, n_steps=20, scheduler="LMSDiscreteScheduler", **kwargs
+        self, inputs, *args, n_steps=20, scheduler="LMSDiscreteScheduler", n_imgs=1, img_size=512, **kwargs
     ) -> None:
         """Runs meta version of model given prompt.
 
@@ -196,15 +194,16 @@ class DiffuserModel(AbstractModel):
 
         """
 
-        text_tokens, latents, n_imgs = inputs
+        text_tokens, latents = self.prepare_inputs(inputs, n_imgs=n_imgs, img_size=img_size)
 
         text_embeddings = self.local_model.get_text_embeddings(
             text_tokens, n_imgs
         )
 
-        scheduler: SchedulerMixin = getattr(diffusers, scheduler).from_pretrained(
-            self.repoid_or_path, subfolder="scheduler"
-        )
+        if isinstance(scheduler, str):
+            scheduler: SchedulerMixin = getattr(diffusers, scheduler).from_pretrained(
+                self.repoid_or_path, subfolder="scheduler"
+            )
         scheduler.set_timesteps(n_steps)
 
         latents = latents * scheduler.init_noise_sigma

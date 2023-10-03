@@ -22,8 +22,7 @@ class Invoker:
         self.generator.generation_idx = 0
 
         # Run graph_mode with meta tensors to collect shape information,
-        inputs = self.generator.model.prepare_inputs(self.input)
-        token_ids = self.generator.model.run_meta(inputs, *self.args, **self.kwargs)
+        token_ids = self.generator.model.run_meta(self.input, *self.args, **self.kwargs)
 
         # Decode tokenized inputs for user usage.
         self.tokens = [
@@ -52,10 +51,9 @@ class Invoker:
         self.generator.generation_idx += 1
 
         # Run graph with singe token input.
-        inputs = self.generator.model.prepare_inputs(["_"] * self.generator.batch_size)
-        self.generator.model.run_meta(inputs, *self.args, **self.kwargs)
+        self.generator.model.run_meta("_", *self.args, **self.kwargs)
 
-    def save(self) -> Dict[str, Proxy]:
+    def save_all(self) -> Dict[str, Proxy]:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]
 
         Returns:
