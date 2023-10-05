@@ -13,19 +13,20 @@ from .AbstractModel import AbstractModel
 
 
 class Diffuser(torch.nn.Module):
-
-    def __init__(self, repoid_or_path, tokenizer: CLIPTokenizer, *args, **kwargs) -> None:
+    def __init__(
+        self, repoid_or_path, tokenizer: CLIPTokenizer, *args, **kwargs
+    ) -> None:
         super().__init__()
 
         self.tokenizer = tokenizer
 
-        self.vae:AutoencoderKL = AutoencoderKL.from_pretrained(
+        self.vae: AutoencoderKL = AutoencoderKL.from_pretrained(
             repoid_or_path, *args, **kwargs, subfolder="vae"
         )
         self.unet: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(
             repoid_or_path, *args, **kwargs, subfolder="unet"
         )
-        self.text_encoder:CLIPTextModel = CLIPTextModel.from_pretrained(
+        self.text_encoder: CLIPTextModel = CLIPTextModel.from_pretrained(
             repoid_or_path, *args, **kwargs, subfolder="text_encoder"
         )
 
@@ -46,7 +47,6 @@ class Diffuser(torch.nn.Module):
 
         return text_embeddings
 
-   
     def text_tokenize(self, prompts):
         return self.tokenizer(
             prompts,
@@ -63,7 +63,6 @@ class Diffuser(torch.nn.Module):
             if token != self.tokenizer.vocab_size - 1
         ]
 
-
     def get_noise(self, batch_size, img_size) -> torch.Tensor:
         return torch.randn(
             (batch_size, self.unet.config.in_channels, img_size // 8, img_size // 8)
@@ -73,13 +72,13 @@ class Diffuser(torch.nn.Module):
         latents = self.get_noise(n_imgs, img_size).repeat(n_prompts, 1, 1, 1)
 
         return latents
-    
+
     def decode(self, latents):
         return self.vae.decode(1 / 0.18215 * latents).sample
 
     def encode(self, tensors):
         return self.vae.encode(tensors).latent_dist.mode() * 0.18215
-    
+
     def predict_noise(
         self, scheduler, iteration, latents, text_embeddings, guidance_scale=7.5
     ):
@@ -124,32 +123,32 @@ class Diffuser(torch.nn.Module):
         return latents
 
 
-
 class DiffuserModel(AbstractModel):
-
     def __init__(self, *args, **kwargs) -> None:
-        
         self.local_model: Diffuser = None
         self.meta_model: Diffuser = None
-        self.tokenizer:CLIPTokenizer = None
+        self.tokenizer: CLIPTokenizer = None
 
         super().__init__(*args, **kwargs)
 
-    def register_increment_hook(self, hook) -> RemovableHandle:
+    def _register_increment_hook(self, hook) -> RemovableHandle:
         return self.local_model.unet.register_forward_hook(hook)
 
-    def load_meta(self, repoid_or_path, *args, device="cpu", **kwargs) -> torch.nn.Module:
+    def _load_meta(
+        self, repoid_or_path, *args, device="cpu", **kwargs
+    ) -> torch.nn.Module:
         self.tokenizer = CLIPTokenizer.from_pretrained(
             repoid_or_path, *args, **kwargs, subfolder="tokenizer"
         )
 
         return Diffuser(repoid_or_path, self.tokenizer, *args, **kwargs)
 
-    def load_local(self, repoid_or_path, *args, device="cpu", **kwargs) -> torch.nn.Module:
+    def _load_local(
+        self, repoid_or_path, *args, device="cpu", **kwargs
+    ) -> torch.nn.Module:
         return Diffuser(repoid_or_path, self.tokenizer, *args, **kwargs).to(device)
-    
 
-    def prepare_inputs(
+    def _prepare_inputs(
         self,
         inputs,
         n_imgs=1,
@@ -159,18 +158,17 @@ class DiffuserModel(AbstractModel):
             inputs = [inputs]
 
         latents = self.meta_model.get_initial_latents(n_imgs, img_size, len(inputs))
-        
+
         text_tokens = self.meta_model.text_tokenize(inputs)
 
         return text_tokens, latents
-    
-    def run_meta(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
 
-        text_tokens, latents = self.prepare_inputs(inputs, n_imgs=n_imgs, img_size=img_size)
-
-        text_embeddings = self.meta_model.get_text_embeddings(
-            text_tokens, n_imgs
+    def _run_meta(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
+        text_tokens, latents = self._prepare_inputs(
+            inputs, n_imgs=n_imgs, img_size=img_size
         )
+
+        text_embeddings = self.meta_model.get_text_embeddings(text_tokens, n_imgs)
 
         latents = torch.cat([latents] * 2).to("meta")
 
@@ -184,21 +182,36 @@ class DiffuserModel(AbstractModel):
 
         return text_tokens.input_ids
 
-    def run_local(
-        self, inputs, *args, n_steps=20, scheduler="LMSDiscreteScheduler", n_imgs=1, img_size=512, **kwargs
-    ) -> None:
-        """Runs meta version of model given prompt.
-
-        Args:
-            inputs (BatchEncoding): _description_
-
-        """
-
-        text_tokens, latents = self.prepare_inputs(inputs, n_imgs=n_imgs, img_size=img_size)
-
-        text_embeddings = self.local_model.get_text_embeddings(
-            text_tokens, n_imgs
+    def _run_local(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
+        text_tokens, latents = self._prepare_inputs(
+            inputs, n_imgs=n_imgs, img_size=img_size
         )
+
+        text_embeddings = self.meta_model.get_text_embeddings(text_tokens, n_imgs)
+
+        latents = torch.cat([latents] * 2).to("meta")
+
+        return self.meta_model.unet(
+            latents,
+            torch.zeros((1,), device="meta"),
+            encoder_hidden_states=text_embeddings,
+        ).sample
+
+    def _generation(
+        self,
+        inputs,
+        *args,
+        n_steps=20,
+        scheduler="LMSDiscreteScheduler",
+        n_imgs=1,
+        img_size=512,
+        **kwargs,
+    ) -> None:
+        text_tokens, latents = self._prepare_inputs(
+            inputs, n_imgs=n_imgs, img_size=img_size
+        )
+
+        text_embeddings = self.local_model.get_text_embeddings(text_tokens, n_imgs)
 
         if isinstance(scheduler, str):
             scheduler: SchedulerMixin = getattr(diffusers, scheduler).from_pretrained(
@@ -220,7 +233,6 @@ class DiffuserModel(AbstractModel):
         latents = (1 / 0.18215) * latents
 
         return self.local_model.vae.decode(latents).sample
-
 
     def to_image(self, latents) -> List[Image.Image]:
         """

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any, List, Union
+from typing import Any, Callable, List, Union
 
 import accelerate
 import baukit
@@ -10,6 +10,7 @@ from torch.utils.hooks import RemovableHandle
 
 from ..alteration import REPOID_TO_ALTERATION
 from ..contexts.Generator import Generator
+from ..contexts.Runner import Runner
 from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
@@ -29,13 +30,14 @@ class AbstractModel:
         self.args = args
         self.kwargs = kwargs
         self.dispatched = False
+        self.local_model: torch.nn.Module = None
 
         logger.debug(f"Initializing `{self.repoid_or_path}`...")
 
         with self.alteration() if self.alter else Patcher():
             with accelerate.init_empty_weights(include_buffers=True):
                 self.meta_model: torch.nn.Module = Module.wrap(
-                    self.load_meta(self.repoid_or_path, *args, **kwargs).to("meta")
+                    self._load_meta(self.repoid_or_path, *args, **kwargs).to("meta")
                 )
 
         # Wrap all modules in our Module class.
@@ -50,21 +52,20 @@ class AbstractModel:
 
         logger.debug(f"Initialized `{self.repoid_or_path}`")
 
-        self.local_model: torch.nn.Module = None
-
     def __repr__(self):
         return repr(self.meta_model)
 
     def __getattr__(self, key):
         return getattr(self.meta_model, key)
 
-    @torch.inference_mode()
     def __call__(
         self,
-        prompts: List[str],
+        fn: Callable,
+        inputs: Any,
         graph: Graph,
         *args,
         edits: List[Edit] = None,
+        inference: bool = True,
         **kwargs,
     ) -> Any:
         if edits is None:
@@ -72,14 +73,19 @@ class AbstractModel:
 
         if not self.dispatched:
             with self.alteration() if self.alter else Patcher():
-                self.local_model = self.load_local(
+                self.local_model = self._load_local(
                     self.repoid_or_path, *self.args, **self.kwargs
                 )
+
+                for param in self.local_model.parameters():
+                    param.requires_grad = False
+
+        self.local_model.eval() if inference else self.local_model.train()
 
         with Editor(self, edits):
             graph.compile(self.local_model)
 
-            increment_hook = self.register_increment_hook(
+            increment_hook = self._register_increment_hook(
                 lambda module, input, output: graph.increment()
             )
 
@@ -94,15 +100,16 @@ class AbstractModel:
 
             # Run the model generate method with a baukit.TraceDict.
             # intervene is hooked to all modules and is the entry point into the intervention graph.
-            with baukit.TraceDict(
-                self.local_model,
-                list(modules),
-                retain_output=False,
-                edit_output=lambda activation, module_path: intervene(
-                    activation, module_path, graph, "output"
-                ),
-            ):
-                output = self.run_local(prompts, *args, **kwargs)
+            with torch.inference_mode(mode=inference):
+                with baukit.TraceDict(
+                    self.local_model,
+                    list(modules),
+                    retain_output=False,
+                    edit_output=lambda activation, module_path: intervene(
+                        activation, module_path, graph, "output"
+                    ),
+                ):
+                    output = fn(inputs, *args, **kwargs)
 
             increment_hook.remove()
 
@@ -115,6 +122,9 @@ class AbstractModel:
 
     def generate(self, *args, **kwargs) -> Generator:
         return Generator(self, *args, **kwargs)
+
+    def forward(self, inputs, *args, **kwargs) -> Runner:
+        return Runner(self, inputs, *args, **kwargs)
 
     def modulize(self, module: Module, node_name: str, module_name: str) -> None:
         """_summary_
@@ -152,29 +162,29 @@ class AbstractModel:
         self.edits.append(ge)
 
     @abstractmethod
-    def prepare_inputs(
-        self,
-        inputs: Any,
-        **kwargs
-    ) -> Any:
+    def _prepare_inputs(self, inputs: Any, **kwargs) -> Any:
         pass
 
     @abstractmethod
-    def load_meta(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
+    def _load_meta(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
         pass
 
     @abstractmethod
-    def load_local(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
+    def _load_local(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
         pass
 
     @abstractmethod
-    def run_meta(self, inputs, *args, **kwargs) -> Any:
+    def _run_meta(self, inputs, *args, **kwargs) -> Any:
         pass
 
     @abstractmethod
-    def run_local(self, inputs, *args, **kwargs) -> Any:
+    def _run_local(self, inputs, *args, **kwargs) -> Any:
         pass
 
     @abstractmethod
-    def register_increment_hook(self, hook) -> RemovableHandle:
+    def _generation(self, inputs, *args, **kwargs) -> Any:
+        pass
+
+    @abstractmethod
+    def _register_increment_hook(self, hook) -> RemovableHandle:
         pass

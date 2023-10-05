@@ -68,7 +68,7 @@ class Generator:
 
     def run_local(self):
         # Run the model and store the output.
-        self.output = self.model(self.prompts, self.graph, *self.args, **self.kwargs)
+        self.output = self.model(self.model._generation, self.prompts, self.graph, *self.args, **self.kwargs)
 
     def run_server(self):
         # Create the pydantic class for the request.

@@ -81,6 +81,8 @@ def cross_entropy_loss(
         logits = logits[:, :-1]
         target_ids = target_ids[:, 1:]
 
+    target_ids = target_ids.long()
+
     batch_losses = []
 
     for batch_idx in range(len(logits)):
