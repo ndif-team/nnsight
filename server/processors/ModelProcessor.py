@@ -4,7 +4,7 @@ import accelerate
 import torch
 from engine import Model, util
 from engine.logger import logger as engine_logger
-from engine.modeling import JobStatus, RequestModel, ResponseModel, fx
+from engine.pydantics import JobStatus, RequestModel, ResponseModel, fx
 
 from ..ResponseDict import ResponseDict
 from . import Processor

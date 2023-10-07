@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from ..models.AbstractModel import AbstractModel
 
 
+# TODO make parent class for Runner and Generator as Module depends on attributes
 class Runner:
     def __init__(
         self,

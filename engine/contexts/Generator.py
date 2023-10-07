@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Dict, List, Union
 
 import socketio
 
-from .. import CONFIG, modeling
+from .. import CONFIG, pydantics
 from ..fx.Graph import Graph
 from ..intervention import InterventionProxy
 from .Invoker import Invoker
@@ -72,7 +72,7 @@ class Generator:
 
     def run_server(self):
         # Create the pydantic class for the request.
-        request = modeling.RequestModel(
+        request = pydantics.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
             model_name=self.model.model_name_or_path,
@@ -85,7 +85,7 @@ class Generator:
         else:
             self.non_blocking_request(request)
 
-    def blocking_request(self, request: modeling.RequestModel):
+    def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
         sio = socketio.Client()
         sio.connect(f"ws://{CONFIG.API.HOST}")
@@ -94,14 +94,14 @@ class Generator:
         @sio.on("blocking_response")
         def blocking_response(data):
             # Load the data into the ResponseModel pydantic class.
-            data: modeling.ResponseModel = pickle.loads(data)
+            data: pydantics.ResponseModel = pickle.loads(data)
 
             # Print response for user ( should be logger.info and have an infor handler print to stdout)
             print(str(data))
 
             # If the status of the response is completed, update the local futures that the user specified to save.
             # Then disconnect and continue.
-            if data.status == modeling.JobStatus.COMPLETED:
+            if data.status == pydantics.JobStatus.COMPLETED:
                 for name, value in data.saves.items():
                     self.graph.nodes[name].future.set_result(value)
 
@@ -109,7 +109,7 @@ class Generator:
 
                 sio.disconnect()
             # Or if there was some error.
-            elif data.status == modeling.JobStatus.ERROR:
+            elif data.status == pydantics.JobStatus.ERROR:
                 sio.disconnect()
 
         sio.emit(
@@ -119,7 +119,7 @@ class Generator:
 
         sio.wait()
 
-    def non_blocking_request(self, request: modeling.RequestModel):
+    def non_blocking_request(self, request: pydantics.RequestModel):
         pass
 
     def invoke(self, input, *args, **kwargs) -> Invoker:

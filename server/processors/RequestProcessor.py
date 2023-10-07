@@ -3,7 +3,7 @@ import pickle
 from multiprocessing import Queue
 from typing import Any, Dict
 
-from engine.modeling import JobStatus, RequestModel, ResponseModel
+from engine.pydantics import JobStatus, RequestModel, ResponseModel
 
 from .. import CONFIG
 from ..ResponseDict import ResponseDict

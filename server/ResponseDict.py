@@ -6,7 +6,7 @@ from multiprocessing import Queue
 from threading import Lock
 from typing import List
 
-from engine.modeling import ResponseModel
+from engine.pydantics import ResponseModel
 
 
 def aquire(function):

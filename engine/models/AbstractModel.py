@@ -21,19 +21,27 @@ from ..patching import Patcher
 
 
 class AbstractModel:
-    def __init__(self, repoid_or_path, *args, alter=True, **kwargs) -> None:
+    """_summary_
+    """
+    def __init__(self, repoid_or_path:str, *args, alter:bool=True, **kwargs) -> None:
         super().__init__()
+
+        # TODO handle passing in a torch module
         self.repoid_or_path = repoid_or_path
-        self.edits: List[Edit] = list()
-        self.alter = alter
         self.args = args
         self.kwargs = kwargs
+        # Boolean on whether to check if alterations exist for this module and apply them.
+        self.alter = alter
+        # Boolean on whether this model has been dispatched (locally loaded) yet
         self.dispatched = False
         self.local_model: torch.nn.Module = None
+        self.edits: List[Edit] = list()
 
         logger.debug(f"Initializing `{self.repoid_or_path}`...")
 
+        # If alter and alteration exist, use alteration patcher context while loading module.
         with self.alteration() if self.alter else Patcher():
+            # Use accelerate and .to('meta') to assure tensors are loaded to 'meta' device
             with accelerate.init_empty_weights(include_buffers=True):
                 self.meta_model: torch.nn.Module = Module.wrap(
                     self._load_meta(self.repoid_or_path, *args, **kwargs).to("meta")
@@ -49,14 +57,23 @@ class AbstractModel:
         for name, module in self.meta_model.named_modules():
             module.module_path = name
 
+        # Run inital dummy string to populate Module shapes, dtypes etc
         self._run_meta("_")
 
         logger.debug(f"Initialized `{self.repoid_or_path}`")
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return repr(self.meta_model)
 
-    def __getattr__(self, key):
+    def __getattr__(self, key) -> Any:
+        """Allows access of sub-modules on meta_model directly from AbstractModel object
+
+        Args:
+            key (_type_): _description_
+
+        Returns:
+            Any: _description_
+        """
         return getattr(self.meta_model, key)
 
     def __call__(
@@ -69,27 +86,45 @@ class AbstractModel:
         inference: bool = True,
         **kwargs,
     ) -> Any:
+        """Runs some function with some inputs and some graph with the approriate context for this model.
+
+        Args:
+            fn (Callable): _description_
+            inputs (Any): _description_
+            graph (Graph): _description_
+            edits (List[Edit], optional): _description_. Defaults to None.
+            inference (bool, optional): _description_. Defaults to True.
+
+        Returns:
+            Any: _description_
+        """
         if edits is None:
             edits = self.edits
 
+
+        # If local_model not yet loaded, do so.
         if not self.dispatched:
             with self.alteration() if self.alter else Patcher():
                 self.local_model = self._load_local(
                     self.repoid_or_path, *self.args, **self.kwargs
                 )
 
+                # By default, all params should be frozen.
                 for param in self.local_model.parameters():
                     param.requires_grad = False
 
-        self.local_model.eval() if inference else self.local_model.train()
 
         with Editor(self, edits):
+
+            # Send local_model to graph to re-compile
             graph.compile(self.local_model)
 
             increment_hook = self._register_increment_hook(
                 lambda module, input, output: graph.increment()
             )
 
+            # The intervention graph for running a Model will have the modules that are involved
+            # in the graph's argument_node_names.
             modules = set(
                 [
                     ".".join(name.split(".")[:-2])
@@ -99,8 +134,8 @@ class AbstractModel:
 
             logger.debug(f"Running `{self.repoid_or_path}`...")
 
-            # Run the model generate method with a baukit.TraceDict.
-            # intervene is hooked to all modules and is the entry point into the intervention graph.
+            self.local_model.eval() if inference else self.local_model.train()
+
             with torch.inference_mode(mode=inference):
                 with HookModel(
                     self.local_model,
@@ -166,28 +201,44 @@ class AbstractModel:
 
     @abstractmethod
     def _prepare_inputs(self, inputs: Any, **kwargs) -> Any:
-        pass
+        """Abstract method for Model type to process inputs.
+
+        Args:
+            inputs (Any): _description_
+
+        Returns:
+            Any: _description_
+        """
+        raise NotImplementedError()
 
     @abstractmethod
     def _load_meta(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
-        pass
+        """Abstract method for Model type to initialize what it needs for it's meta model.
+
+        Args:
+            repoid_or_path (_type_): _description_
+
+        Returns:
+            torch.nn.Module: _description_
+        """
+        raise NotImplementedError()
 
     @abstractmethod
     def _load_local(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
-        pass
+        raise NotImplementedError()
 
     @abstractmethod
     def _run_meta(self, inputs, *args, **kwargs) -> Any:
-        pass
+        raise NotImplementedError()
 
     @abstractmethod
     def _run_local(self, inputs, *args, **kwargs) -> Any:
-        pass
+        raise NotImplementedError()
 
     @abstractmethod
     def _generation(self, inputs, *args, **kwargs) -> Any:
-        pass
+        raise NotImplementedError()
 
     @abstractmethod
     def _register_increment_hook(self, hook) -> RemovableHandle:
-        pass
+        raise NotImplementedError()

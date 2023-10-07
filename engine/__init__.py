@@ -2,7 +2,7 @@ import os
 
 import yaml
 
-from .modeling.Config import ConfigModel
+from .pydantics.Config import ConfigModel
 from .patching import *
 
 PATH = os.path.dirname(os.path.abspath(__file__))

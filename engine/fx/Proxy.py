@@ -17,14 +17,12 @@ class Proxy:
         node (Node): desc
     """
 
-    @staticmethod
-    def get_node(args):
-        return util.apply(args, lambda x: x.node, Proxy)
-
     def __init__(self, node: "Node") -> None:
         self.node = node
 
     def __call__(self, *args, **kwargs) -> Proxy:
+        # If calling a method (not a sub-module) on the main module of this graph,
+        # we want to trace into that method.
         if self.node.args[0] is self.node.graph.module_proxy.node and not isinstance(
             self.node.proxy_value, torch.nn.Module
         ):
@@ -33,7 +31,7 @@ class Proxy:
             )
 
             return value
-
+        # Otherwise we just want to add a node saying we wish to call this module.
         else:
             value = self.node.proxy_value(
                 *self.node.prepare_proxy_values(args),
@@ -182,6 +180,17 @@ from functools import wraps
 
 
 def proxy_wrapper(fn) -> None:
+    """Wraps problematic functions (torch functions sometimes).
+    Checks if anty of its args are proxies. If so we return a proxy of the function.
+    Otherwise just run the function.
+
+    Args:
+        fn (function): _description_
+
+    Returns:
+        _type_: _description_
+    """
+
     @wraps(fn)
     def patched(*args, **kwargs):
         arguments = list(args) + list(kwargs.values())

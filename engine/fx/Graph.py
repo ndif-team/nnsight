@@ -12,7 +12,7 @@ from .Proxy import Proxy, proxy_wrapper
 
 
 class Graph:
-    """_summary_
+    """Represents a computation graph involving a Module
 
     Attributes:
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
@@ -21,7 +21,7 @@ class Graph:
             Used so names are unique.
         module_proxy (Proxy): Proxy for given root module
         argument_node_names (Dict[str, List[str]]): _description_
-        generation_idx (int): desc
+        generation_idx (int): _description_
 
     """
 
