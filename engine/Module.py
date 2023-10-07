@@ -30,6 +30,7 @@ class Module(torch.nn.Module):
         self.output_type: Type = None
 
         self._output: InterventionProxy = None
+        self._input: InterventionProxy = None
         self._graph: Graph = None
 
         self.generator: Generator = None
@@ -98,6 +99,53 @@ class Module(torch.nn.Module):
             target=Node.update,
             args=[self.output.node, value],
         )
+    
+    @property
+    def input(self) -> InterventionProxy:
+        """
+        Calling denotes the user wishes to get the input of this module and therefore we create a Proxy of that request.
+        Only generates a proxy the first time it is references otherwise return the already set one.
+
+        Returns:
+            Proxy: _description_
+        """
+        if self._input is None:
+            self._input = self.generator.graph.add(
+                graph=self.generator.graph,
+                value=util.apply(
+                    self.input_shape,
+                    lambda x: torch.empty(x, device="meta"),
+                    torch.Size,
+                ),
+                target="argument",
+                args=[
+                    f"{self.module_path}.input.{self.generator.generation_idx}",
+                    self.generator.batch_size,
+                    len(self.generator.prompts) - self.generator.batch_size,
+                ],
+            )
+
+        return self._input
+
+    @input.setter
+    def input(self, value: Union[InterventionProxy, Any]) -> None:
+        """
+        Calling denotes the user wishes to set the input of this module and therefore we create a Proxy of that request.
+
+        Args:
+            value (Union[Proxy, Any]): _description_
+        """
+
+        Node.update(
+            self.input.node.proxy_value, self.input.node.prepare_proxy_values(value)
+        )
+
+        self.input.node.graph.add(
+            graph=self.input.node.graph,
+            value=self.input.node.proxy_value,
+            target=Node.update,
+            args=[self.input.node, value],
+        )
 
     @property
     def graph(self) -> Graph:
@@ -126,6 +174,7 @@ class Module(torch.nn.Module):
 
         def hook(module: Module, input: Any, output: Any):
             module._output = None
+            module._input = None
             module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
             module.input_shape = util.apply(input, lambda x: x.shape, torch.Tensor)
             module.output_type = util.apply(output, lambda x: x.dtype, torch.Tensor)

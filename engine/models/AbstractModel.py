@@ -15,7 +15,7 @@ from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
 from ..fx.Graph import Graph
-from ..intervention import intervene
+from ..intervention import intervene, HookModel
 from ..logger import logger
 from ..Module import Module
 from ..patching import Patcher
@@ -50,7 +50,11 @@ class AbstractModel:
         for name, module in self.meta_model.named_modules():
             module.module_path = name
 
+        self._run_meta('_')
+
         logger.debug(f"Initialized `{self.repoid_or_path}`")
+
+
 
     def __repr__(self):
         return repr(self.meta_model)
@@ -101,12 +105,14 @@ class AbstractModel:
             # Run the model generate method with a baukit.TraceDict.
             # intervene is hooked to all modules and is the entry point into the intervention graph.
             with torch.inference_mode(mode=inference):
-                with baukit.TraceDict(
+                with HookModel(
                     self.local_model,
                     list(modules),
-                    retain_output=False,
-                    edit_output=lambda activation, module_path: intervene(
-                        activation, module_path, graph, "output"
+                    input_hook=lambda activations, module_path: intervene(
+                        activations, module_path, graph, "input"
+                    ),
+                    output_hook=lambda activations, module_path: intervene(
+                        activations, module_path, graph, "output"
                     ),
                 ):
                     output = fn(inputs, *args, **kwargs)

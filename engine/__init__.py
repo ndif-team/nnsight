@@ -12,3 +12,4 @@ with open(os.path.join(PATH, "config.yaml"), "r") as file:
 from .models.DiffuserModel import DiffuserModel
 from .models.LanguageModel import LanguageModel
 from .models.AbstractModel import AbstractModel
+from .Module import Module

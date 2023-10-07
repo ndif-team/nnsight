@@ -56,4 +56,11 @@ class Runner:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.output = self.model(self.model._run_local, self.input, self.graph, *self.args, inference=self.inference, **self.kwargs)
+        self.output = self.model(
+            self.model._run_local,
+            self.input,
+            self.graph,
+            *self.args,
+            inference=self.inference,
+            **self.kwargs,
+        )
