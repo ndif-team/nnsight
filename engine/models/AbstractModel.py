@@ -4,7 +4,6 @@ from abc import abstractmethod
 from typing import Any, Callable, List, Union
 
 import accelerate
-import baukit
 import torch
 from torch.utils.hooks import RemovableHandle
 
@@ -50,11 +49,9 @@ class AbstractModel:
         for name, module in self.meta_model.named_modules():
             module.module_path = name
 
-        self._run_meta('_')
+        self._run_meta("_")
 
         logger.debug(f"Initialized `{self.repoid_or_path}`")
-
-
 
     def __repr__(self):
         return repr(self.meta_model)
