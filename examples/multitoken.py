@@ -1,6 +1,6 @@
-from engine import Model
+from engine import LanguageModel
 
-model = Model("gpt2")
+model = LanguageModel("gpt2", device_map='cuda:0')
 
 
 def get_scores():
@@ -15,7 +15,6 @@ def decode(scores):
 
 
 with model.generate(
-    device_map="cuda:0",
     max_new_tokens=3,
     return_dict_in_generate=True,
     output_scores=True,

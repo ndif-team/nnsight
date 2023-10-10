@@ -5,13 +5,13 @@ from typing import TYPE_CHECKING, Dict, List, Union
 
 import socketio
 
-from .. import CONFIG, modeling
+from .. import CONFIG, pydantics
 from ..fx.Graph import Graph
 from ..intervention import InterventionProxy
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
-    from ..Model import Model
+    from ..models.AbstractModel import AbstractModel
 
 
 class Generator:
@@ -19,7 +19,6 @@ class Generator:
 
     Attributes:
         model (Model): Model object this is a generator for.
-        device_map (Union[str,Dict]): What device/device map to run the model on. Defaults to 'server'
         blocking (bool): If when using device_map='server', block and wait form responses. Otherwise have to manually
             request a response.
         args (List[Any]): Arguments for calling the model.
@@ -34,14 +33,14 @@ class Generator:
 
     def __init__(
         self,
-        model: "Model",
+        model: "AbstractModel",
         *args,
-        device_map: Union[str, Dict] = "server",
         blocking: bool = True,
+        server: bool = False,
         **kwargs,
     ) -> None:
         self.model = model
-        self.device_map = device_map
+        self.server = server
         self.blocking = blocking
         self.args = args
         self.kwargs = kwargs
@@ -54,7 +53,7 @@ class Generator:
         self.output = None
 
         # Modules need to know about the current generator to create the correct proxies.
-        for name, module in self.model.meta_model.named_modules():
+        for name, module in self.model.named_modules():
             module.generator = self
 
     def __enter__(self) -> Generator:
@@ -62,21 +61,18 @@ class Generator:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """On exit, run and generate using the model whether locally or on the server."""
-        if self.device_map == "server":
+        if self.server:
             self.run_server()
         else:
             self.run_local()
 
     def run_local(self):
-        # Dispatch the model to the correct device.
-        self.model.dispatch(device_map=self.device_map)
-
         # Run the model and store the output.
-        self.output = self.model(self.prompts, self.graph, *self.args, **self.kwargs)
+        self.output = self.model(self.model._generation, self.prompts, self.graph, *self.args, **self.kwargs)
 
     def run_server(self):
         # Create the pydantic class for the request.
-        request = modeling.RequestModel(
+        request = pydantics.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
             model_name=self.model.model_name_or_path,
@@ -89,7 +85,7 @@ class Generator:
         else:
             self.non_blocking_request(request)
 
-    def blocking_request(self, request: modeling.RequestModel):
+    def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
         sio = socketio.Client()
         sio.connect(f"ws://{CONFIG.API.HOST}")
@@ -98,14 +94,14 @@ class Generator:
         @sio.on("blocking_response")
         def blocking_response(data):
             # Load the data into the ResponseModel pydantic class.
-            data: modeling.ResponseModel = pickle.loads(data)
+            data: pydantics.ResponseModel = pickle.loads(data)
 
             # Print response for user ( should be logger.info and have an infor handler print to stdout)
             print(str(data))
 
             # If the status of the response is completed, update the local futures that the user specified to save.
             # Then disconnect and continue.
-            if data.status == modeling.JobStatus.COMPLETED:
+            if data.status == pydantics.JobStatus.COMPLETED:
                 for name, value in data.saves.items():
                     self.graph.nodes[name].future.set_result(value)
 
@@ -113,7 +109,7 @@ class Generator:
 
                 sio.disconnect()
             # Or if there was some error.
-            elif data.status == modeling.JobStatus.ERROR:
+            elif data.status == pydantics.JobStatus.ERROR:
                 sio.disconnect()
 
         sio.emit(
@@ -123,7 +119,7 @@ class Generator:
 
         sio.wait()
 
-    def non_blocking_request(self, request: modeling.RequestModel):
+    def non_blocking_request(self, request: pydantics.RequestModel):
         pass
 
     def invoke(self, input, *args, **kwargs) -> Invoker:

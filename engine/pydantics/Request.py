@@ -23,6 +23,7 @@ class RequestModel(BaseModel):
     prompts: List[str]
     intervention_graph: Union[Graph, bytes, Dict[str, NodeModel]]
     # Edits
+    # altered
 
     id: str = None
     recieved: datetime = None

@@ -1,12 +1,12 @@
-from engine import Model
+from engine import LanguageModel
 from engine.fx.Proxy import Proxy
 from engine import util
 
-model = Model('gpt2')
+model = LanguageModel('gpt2', device_map='cuda:0')
 
 gpt2_text = "Natural language processing tasks, such as question answering, machine translation, reading comprehension, and summarization, are typically approached with supervised learning on taskspecific datasets."
 
-with model.generate(device_map='cuda:0', max_new_tokens=1, output_attentions=True) as generator:
+with model.generate(max_new_tokens=1, output_attentions=True) as generator:
 
     with generator.invoke(gpt2_text, output_attentions=True) as invoker:
 

@@ -7,12 +7,12 @@ import torch
 
 from .. import util
 from .Node import Node
-from .Patcher import Patcher
-from .Proxy import Proxy
+from ..patching import Patcher, Patch
+from .Proxy import Proxy, proxy_wrapper
 
 
 class Graph:
-    """_summary_
+    """Represents a computation graph involving a Module
 
     Attributes:
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
@@ -21,7 +21,7 @@ class Graph:
             Used so names are unique.
         module_proxy (Proxy): Proxy for given root module
         argument_node_names (Dict[str, List[str]]): _description_
-        generation_idx (int): desc
+        generation_idx (int): _description_
 
     """
 
@@ -90,9 +90,9 @@ class Graph:
         # Some methods cannot be caught because they arent torch functions or dont play nice with __torch_function__.
         # So the patcher repalces the methods with something to catch proxies and return proxies.
         with Patcher() as patcher:
-            patcher.patch(torch.full)
-            patcher.patch(torch.finfo)
-            patcher.patch(torch.arange)
+            patcher.add(Patch(torch.full, proxy_wrapper(torch.full)))
+            patcher.add(Patch(torch.finfo, proxy_wrapper(torch.finfo)))
+            patcher.add(Patch(torch.arange, proxy_wrapper(torch.arange)))
 
             # Run forward with root module proxy and arguments
             output: Proxy = forward(graph.module_proxy, *arguments)
@@ -225,7 +225,7 @@ class Graph:
         self.nodes[name] = node
 
         if target_name == "argument":
-            module_path, _, _ = args
+            module_path = args[0]
 
             if module_path not in self.argument_node_names:
                 self.argument_node_names[module_path] = []

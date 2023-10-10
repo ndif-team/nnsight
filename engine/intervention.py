@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Union
+from typing import Any, Callable, List, Tuple, Union
 
 import torch.futures
 
 from . import util
 from .fx.Graph import Graph
-from .fx.Node import Node
 from .fx.Proxy import Proxy
 
 
@@ -22,7 +21,6 @@ class TokenIndexer:
         return idx
 
     def __getitem__(self, key: int) -> Proxy:
-
         key = self.convert_idx(key)
 
         return self.proxy[:, key]
@@ -89,12 +87,10 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
     if module_path in graph.argument_node_names:
-
         argument_node_names = graph.argument_node_names[module_path]
 
         # multiple argument nodes can have same module_path if there are multiple invocations.
         for argument_node_name in argument_node_names:
-
             node = graph.nodes[argument_node_name]
 
             # args for argument nodes are (module_path, batch_size, batch_start)
@@ -103,8 +99,51 @@ def intervene(activations, module_path: str, graph: Graph, key: str):
             # We set its result to the activations, indexed by only the relevant batch idxs.
             node.future.set_result(
                 util.apply(
-                    activations, lambda x: x.narrow(0, batch_start, batch_size), torch.Tensor
+                    activations,
+                    lambda x: x.narrow(0, batch_start, batch_size),
+                    torch.Tensor,
                 )
             )
 
     return activations
+
+
+class HookModel:
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        modules: List[str],
+        input_hook: Callable = None,
+        output_hook: Callable = None,
+    ) -> None:
+        self.model = model
+        self.modules: List[Tuple[torch.nn.Module, str]] = [
+            (util.fetch_attr(self.model, module_path), module_path)
+            for module_path in modules
+        ]
+        self.input_hook = input_hook
+        self.output_hook = output_hook
+
+        self.handles = []
+
+    def __enter__(self) -> HookModel:
+        for module, module_path in self.modules:
+            if self.input_hook is not None:
+
+                def input_hook(module, input, module_path=module_path):
+                    return self.input_hook(input, module_path)
+
+                self.handles.append(module.register_forward_pre_hook(input_hook))
+
+            if self.output_hook is not None:
+
+                def output_hook(module, input, output, module_path=module_path):
+                    return self.output_hook(output, module_path)
+
+                self.handles.append(module.register_forward_hook(output_hook))
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        for handle in self.handles:
+            handle.remove()

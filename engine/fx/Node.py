@@ -26,6 +26,7 @@ class Node:
         listeners (List[Node]): desc
         dependencies (List[Node]): desc
         _future (torch.futures.Future): desc
+        _proxy_device (torch.device): desc
     """
 
     @staticmethod
@@ -107,7 +108,12 @@ class Node:
         return self._future
 
     @property
-    def proxy_device(self):
+    def proxy_device(self) -> torch.device:
+        """Lazy creation of _proxy_device attribute.
+
+        Returns:
+            torch.Device: _description_
+        """
         if self._proxy_device is None:
             device = None
 
@@ -131,8 +137,11 @@ class Node:
                 self.prepare_proxy_values(arg.step),
             )
 
+        # Convert procies to their proxy_value
         values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
+        # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
+        # Move tensors to that of the proxy_device (probably 'meta')
         values = util.apply(values, lambda x: x.to(self.proxy_device), torch.Tensor)
 
         return values
@@ -187,7 +196,7 @@ class Node:
         # Turn futures into their value
         def _value(value: Node):
             return value.value()
-        
+
         args = util.apply(self.args, _value, Node)
         kwargs = util.apply(self.kwargs, _value, Node)
 
@@ -196,11 +205,11 @@ class Node:
         def _device(value):
             nonlocal device
             device = value.device
-            
+
         all_args = list(args) + list(kwargs.values())
 
         util.apply(list(reversed(all_args)), _device, torch.Tensor)
-        #util.apply(list(reversed(all_args)), _device, torch.nn.Module)
+        # util.apply(list(reversed(all_args)), _device, torch.nn.Module)
 
         # Move tensors to device
         def _to(value: torch.Tensor):
@@ -214,6 +223,7 @@ class Node:
     def execute(self) -> None:
         """Actually executes this node."""
 
+        # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
 
@@ -236,16 +246,19 @@ class Node:
         self.future.set_result(output)
 
     def destroy(self) -> None:
+        """Removes the reference to the node's _future and logs it's destruction."""
         logger.debug(f"=> DEL({self.name})")
 
         self._future = None
 
     def chain(self, future: torch.futures.Future):
+        # If all of a nodes dependencies are done, execute it.
+        # Dont execute if already done.
         if self.fufilled() and not self.done():
             try:
                 self.execute()
             except Exception as e:
-                #TODO
+                # TODO
                 # An exectption is actually never thrown upward to the point it stops the program. Need to find a way.
                 logger.exception(f"Exception in execution of node '{self.name}'.")
 
@@ -253,11 +266,10 @@ class Node:
                 future.set_exception(e)
 
                 raise e
-            
+
         future.set_result(None)
 
     def __str__(self) -> str:
-
         args = util.apply(self.args, lambda x: f"'{x}'", str)
         args = util.apply(args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]

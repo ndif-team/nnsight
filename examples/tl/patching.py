@@ -3,7 +3,7 @@ from engine.fx.Proxy import Proxy
 from engine import util
 import torch
 
-model = Model('gpt2')
+model = Model('gpt2', device_map='cuda:0')
 
 clean_prompt = "After John and Mary went to the store, Mary gave a bottle of milk to"
 corrupted_prompt = "After John and Mary went to the store, John gave a bottle of milk to"
@@ -12,7 +12,7 @@ correct_index = model.tokenizer(" John")['input_ids'][0]
 incorrect_index = model.tokenizer(" Mary")['input_ids'][0]
 
 
-with model.generate(device_map='cuda:0', max_new_tokens=1) as generator:
+with model.generate(max_new_tokens=1) as generator:
 
     with generator.invoke(clean_prompt) as invoker:
 

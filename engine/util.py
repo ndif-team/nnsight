@@ -59,14 +59,13 @@ def timed(func, lggr):
 def cross_entropy_loss(
     logits: torch.Tensor,
     target_ids: torch.Tensor,
-    shift:bool = False,
+    shift: bool = False,
     avg_batch: bool = True,
     avg_token: bool = True,
 ):
-    
     logits = logits.cpu()
     target_ids = target_ids.cpu()
-    
+
     if logits.ndim == 2:
         logits = logits.unsqueeze(0)
 
@@ -78,10 +77,11 @@ def cross_entropy_loss(
     assert logits.size(0) == target_ids.size(0)
     assert logits.size(1) == target_ids.size(1)
 
-
     if shift:
         logits = logits[:, :-1]
         target_ids = target_ids[:, 1:]
+
+    target_ids = target_ids.long()
 
     batch_losses = []
 
@@ -99,3 +99,11 @@ def cross_entropy_loss(
         batch_losses = batch_losses.mean(dim=0)
 
     return batch_losses
+
+
+class WrapperModule(torch.nn.Module):
+    def forward(self, *args, **kwargs):
+        if len(args) == 1:
+            args = args[0]
+
+        return args
