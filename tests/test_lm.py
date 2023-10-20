@@ -1,11 +1,11 @@
-import engine
+import nnsight
 import pytest
 import torch
 
 
 @pytest.fixture(scope="module")
 def gpt2(device: str):
-    return engine.LanguageModel("gpt2", device_map=device)
+    return nnsight.LanguageModel("gpt2", device_map=device)
 
 
 @pytest.fixture
@@ -13,7 +13,7 @@ def MSG_prompt():
     return "Madison Square Garden is located in the city of"
 
 
-def test_generation(gpt2: engine.LanguageModel, MSG_prompt: str):
+def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
             pass
@@ -23,7 +23,7 @@ def test_generation(gpt2: engine.LanguageModel, MSG_prompt: str):
     assert output == "Madison Square Garden is located in the city of New York City"
 
 
-def test_save(gpt2: engine.LanguageModel):
+def test_save(gpt2: nnsight.LanguageModel):
     with gpt2.generate(max_new_tokens=1) as generator:
         with generator.invoke("Hello world") as invoker:
             hs = gpt2.transformer.h[-1].output[0].save()
@@ -33,7 +33,7 @@ def test_save(gpt2: engine.LanguageModel):
     assert hs.value.ndim == 3
 
 
-def test_set(gpt2: engine.LanguageModel):
+def test_set(gpt2: nnsight.LanguageModel):
     with gpt2.generate(max_new_tokens=1) as generator:
         with generator.invoke("Hello world") as invoker:
             pre = gpt2.transformer.h[-1].output[0].save()
@@ -49,7 +49,7 @@ def test_set(gpt2: engine.LanguageModel):
     assert output != "Madison Square Garden is located in the city of New"
 
 
-def test_adhoc_module(gpt2: engine.LanguageModel):
+def test_adhoc_module(gpt2: nnsight.LanguageModel):
     with gpt2.generate() as generator:
         with generator.invoke("The Eiffel Tower is in the city of") as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0]
@@ -61,7 +61,7 @@ def test_adhoc_module(gpt2: engine.LanguageModel):
     assert output == "\n-el Tower is a the middle centre Paris"
 
 
-def test_embeddings_set1(gpt2: engine.LanguageModel, MSG_prompt: str):
+def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
             embeddings = gpt2.transformer.wte.output
@@ -76,7 +76,7 @@ def test_embeddings_set1(gpt2: engine.LanguageModel, MSG_prompt: str):
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
 
-def test_embeddings_set2(gpt2: engine.LanguageModel, MSG_prompt: str):
+def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
             embeddings = gpt2.transformer.wte.output.save()

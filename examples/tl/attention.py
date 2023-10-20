@@ -1,6 +1,6 @@
-from engine import LanguageModel
-from engine.fx.Proxy import Proxy
-from engine import util
+from nnsight import LanguageModel
+from nnsight.fx.Proxy import Proxy
+from nnsight import util
 
 model = LanguageModel('gpt2', device_map='cuda:0')
 

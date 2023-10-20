@@ -1,9 +1,9 @@
 from typing import Any
 
 import torch
-from engine import AbstractModel, LanguageModel, util
-from engine.Module import Module
-from engine.toolbox.optim.lora import LORA
+from nnsight import AbstractModel, LanguageModel, util
+from nnsight.Module import Module
+from nnsight.toolbox.optim.lora import LORA
 from torch.utils.data import DataLoader, Dataset
 
 model = LanguageModel("gpt2", device_map="cuda:0")

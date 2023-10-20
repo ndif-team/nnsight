@@ -5,9 +5,9 @@ name: Python application
 
 on:
   push:
-    branches: [ "master", "dev" ]
+    branches: [ "main", "dev" ]
   pull_request:
-    branches: [ "master", "dev" ]
+    branches: [ "main", "dev" ]
 
 permissions:
   contents: read
@@ -36,5 +36,4 @@ jobs:
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
     - name: Test with pytest
       run: |
-        cd engine
-        pytest --device cpu
+        pytest tests/ --device cpu

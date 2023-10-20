@@ -1,4 +1,4 @@
-from engine import DiffuserModel
+from nnsight import DiffuserModel
 
 
 diffuser = DiffuserModel("CompVis/stable-diffusion-v1-4", device='cuda:0')

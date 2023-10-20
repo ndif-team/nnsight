@@ -1,4 +1,4 @@
-from engine import LanguageModel
+from nnsight import LanguageModel
 
 model = LanguageModel('decapoda-research/llama-65b-hf')
 

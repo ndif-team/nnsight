@@ -1,5 +1,5 @@
-# The library is called engine
-from engine import LanguageModel
+# The library is called nnsight
+from nnsight import LanguageModel
 import torch
 # Get model wrapper for any model you can get with AutoConfig.from_pretrained(model_name)
 model = LanguageModel('gpt2',device_map='cuda:0')
