@@ -1,12 +1,4 @@
 build/
-logs/
-responses/
-engine/model_checkpoints/**/.no_exist/
 *.egg-info/
 .installed.cfg
 __pycache__/
-engine/model_checkpoints/**/blobs
-engine/model_checkpoints/**/*.bin
-engine/model_checkpoints/**/*.model
-engine/model_checkpoints/**/*.safetensors
-engine.log

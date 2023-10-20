@@ -1,4 +1,4 @@
-from engine import LanguageModel
+from nnsight import LanguageModel
 import torch
 
 model = LanguageModel("gpt2", device_map='cuda:0')

@@ -1,6 +1,6 @@
-from engine import Model
-from engine.fx.Proxy import Proxy
-from engine import util
+from nnsight import Model
+from nnsight.fx.Proxy import Proxy
+from nnsight import util
 import torch
 
 model = Model('gpt2', device_map='cuda:0')
