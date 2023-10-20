@@ -6,7 +6,7 @@ The `nnsight/` directory contains the nnsight package for interpreting and manip
 
 Install this package through pip by running:
 
-`pip install git+https://github.com/JadenFiotto-Kaufman/ndif`
+`pip install nnsight`
 
 #### Examples
 
