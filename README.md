@@ -1,9 +1,6 @@
-# NDIF Repository
-## nnsight API
+# nnsight API
 
-The `nnsight/` directory contains the nnsight package for interpreting and manipulating the internals of large language models.
-
-- `nnsight/model_checkpoints` is set to be the default huggingface hub cache directory. Contains by default models found on the NDIF server with their respective configurations.
+The `nnsight/` directory contains the nnsight package for interpreting and manipulating the internals of deep learning models.
 
 #### Installation
 
