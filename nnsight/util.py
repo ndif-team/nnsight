@@ -1,14 +1,23 @@
 import time
 from functools import wraps
-from typing import Any, Callable, Type, Union
+from typing import Any, Callable, Collection, Type
 
 import torch
 
-Primative = Union[str, int, float, bool]
-Value = Union[Primative, torch.Tensor]
+"""Module for utility functions and classes used throughout the package."""
 
 
-def apply(data: Any, fn: Callable, cls: type):
+def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
+    """Applies some function to all members of a collection of a give type (or types)
+
+    Args:
+        data (Collection): Collection to apply function to.
+        fn (Callable): Function to apply.
+        cls (type): Type or Types to apply function to.
+
+    Returns:
+        Collection: Same kind of collection as data, after then fn has been applied to memebers of given type.
+    """
     if isinstance(data, cls):
         return fn(data)
 
@@ -24,14 +33,33 @@ def apply(data: Any, fn: Callable, cls: type):
     return data
 
 
-def fetch_attr(object: object, target: str):
+def fetch_attr(object: object, target: str) -> Any:
+    """Retrieves an attribute from an object hierarchy given an attribute path. Levels are seperated by '.' e.x (transformer.h.1)
+
+    Args:
+        object (object): Root object to get attribute from.
+        target (str): Attribute path as '.' seperated string.
+
+    Returns:
+        Any: Fetched attribute.
+    """
     target_atoms = target.split(".")
     for i, atom in enumerate(target_atoms):
         object = getattr(object, atom)
     return object
 
 
-def wrap(object: object, wrapper: Type, *args, **kwargs):
+def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
+    """Wraps some object given some wrapper type.
+    Updates the __class__ attribute of the object and calls the wrapper type's __init__ method.
+
+    Args:
+        object (object): Object to wrap.
+        wrapper (Type): Type to wrap the object in.
+
+    Returns:
+        object: Wrapped object.
+    """
     if isinstance(object, wrapper):
         return object
 
@@ -42,27 +70,25 @@ def wrap(object: object, wrapper: Type, *args, **kwargs):
     return object
 
 
-def timed(func, lggr):
-    """This decorator prints the execution time for the decorated function."""
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start = time.time()
-        result = func(*args, **kwargs)
-        end = time.time()
-        lggr.debug(f"Method `{func.__qualname__}` ran in {round(end - start, 6)}s")
-        return result
-
-    return wrapper
-
-
 def cross_entropy_loss(
     logits: torch.Tensor,
     target_ids: torch.Tensor,
     shift: bool = False,
     avg_batch: bool = True,
     avg_token: bool = True,
-):
+) -> torch.Tensor:
+    """Helper function for cross entropy loss.
+
+    Args:
+        logits (torch.Tensor): Logits tensor of shape (batch size, n tokens, n features) or (n tokens, n features).
+        target_ids (torch.Tensor): Target ids tensor of shape (batch size, n tokens) or (n tokens).
+        shift (bool, optional): If to ignore the last token of logits and first token of target ids. Defaults to False.
+        avg_batch (bool, optional): If to average the loss across batch. Defaults to True.
+        avg_token (bool, optional): If to average the loss across tokens. Defaults to True.
+
+    Returns:
+        torch.Tensor: Loss.
+    """
     logits = logits.cpu()
     target_ids = target_ids.cpu()
 
@@ -102,8 +128,26 @@ def cross_entropy_loss(
 
 
 class WrapperModule(torch.nn.Module):
+    """Simple torch module which passes it's input through. Useful for hooking.
+    If there is only one argument, returns the first element.
+    """
+
     def forward(self, *args, **kwargs):
         if len(args) == 1:
             args = args[0]
 
         return args
+
+
+def timed(func, lggr):
+    """This decorator prints the execution time for the decorated function."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        result = func(*args, **kwargs)
+        end = time.time()
+        lggr.debug(f"Method `{func.__qualname__}` ran in {round(end - start, 6)}s")
+        return result
+
+    return wrapper

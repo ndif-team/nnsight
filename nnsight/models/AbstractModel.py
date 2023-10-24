@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from abc import abstractmethod
-from typing import Any, Callable, List, Union
+from abc import abstractmethod, ABC
+from typing import Any, Callable, Dict, List, Union
 
 import accelerate
 import torch
@@ -20,10 +20,15 @@ from ..Module import Module
 from ..patching import Patcher
 
 
-class AbstractModel:
-    """_summary_
+class AbstractModel(ABC):
+    """Abstract class to be implmented for pytorch models wishing to gain this package's functionality.
+
+    Attributes:
+        repoid_or_path (str): Hugging face repo id of model to load or path to checkpoint.
+        args (List[Any]): __desc__
+        kwargs (Dict[str,Any]): __desc__
     """
-    def __init__(self, repoid_or_path:str, *args, alter:bool=True, **kwargs) -> None:
+    def __init__(self, repoid_or_path:str, *args:List[Any], alter:bool=True, **kwargs:Dict[str,Any]) -> None:
         super().__init__()
 
         # TODO handle passing in a torch module
