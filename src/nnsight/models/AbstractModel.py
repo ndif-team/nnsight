@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from abc import abstractmethod, ABC
+import copy
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Union
 
 import accelerate
@@ -14,7 +15,7 @@ from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
 from ..fx.Graph import Graph
-from ..intervention import intervene, HookModel
+from ..intervention import HookModel, intervene
 from ..logger import logger
 from ..Module import Module
 from ..patching import Patcher
@@ -28,29 +29,51 @@ class AbstractModel(ABC):
         args (List[Any]): __desc__
         kwargs (Dict[str,Any]): __desc__
     """
-    def __init__(self, repoid_or_path:str, *args:List[Any], alter:bool=True, **kwargs:Dict[str,Any]) -> None:
+
+    def __init__(
+        self,
+        repoid_path_model: Union[str, torch.nn.Module],
+        *args: List[Any],
+        alter: bool = True,
+        tokenizer=None,
+        **kwargs: Dict[str, Any],
+    ) -> None:
         super().__init__()
 
-        # TODO handle passing in a torch module
-        self.repoid_or_path = repoid_or_path
+        self.repoid_path_clsname = repoid_path_model
         self.args = args
         self.kwargs = kwargs
         # Boolean on whether to check if alterations exist for this module and apply them.
         self.alter = alter
         # Boolean on whether this model has been dispatched (locally loaded) yet
         self.dispatched = False
+        self.custom_model = False
         self.local_model: torch.nn.Module = None
+        self.tokenizer = tokenizer
         self.edits: List[Edit] = list()
 
-        logger.debug(f"Initializing `{self.repoid_or_path}`...")
+        if isinstance(repoid_path_model, torch.nn.Module):
+            self.repoid_path_clsname = repoid_path_model.__class__.__name__
+            self.custom_model = True
+            self.dispatched = True
+            self.local_model = repoid_path_model
+
+        logger.debug(f"Initializing `{self.repoid_path_clsname}`...")
 
         # If alter and alteration exist, use alteration patcher context while loading module.
         with self.alteration() if self.alter else Patcher():
             # Use accelerate and .to('meta') to assure tensors are loaded to 'meta' device
             with accelerate.init_empty_weights(include_buffers=True):
-                self.meta_model: torch.nn.Module = Module.wrap(
-                    self._load_meta(self.repoid_or_path, *args, **kwargs).to("meta")
-                )
+                if self.custom_model:
+                    self.meta_model: Module = Module.wrap(
+                        copy.deepcopy(self.local_model).to("meta")
+                    )
+                else:
+                    self.meta_model: Module = Module.wrap(
+                        self._load_meta(self.repoid_path_clsname, *args, **kwargs).to(
+                            "meta"
+                        )
+                    )
 
         # Wrap all modules in our Module class.
         for name, module in self.meta_model.named_children():
@@ -65,7 +88,7 @@ class AbstractModel(ABC):
         # Run inital dummy string to populate Module shapes, dtypes etc
         self._run_meta("_")
 
-        logger.debug(f"Initialized `{self.repoid_or_path}`")
+        logger.debug(f"Initialized `{self.repoid_path_clsname}`")
 
     def __repr__(self) -> str:
         return repr(self.meta_model)
@@ -106,21 +129,18 @@ class AbstractModel(ABC):
         if edits is None:
             edits = self.edits
 
-
         # If local_model not yet loaded, do so.
         if not self.dispatched:
             with self.alteration() if self.alter else Patcher():
                 self.local_model = self._load_local(
-                    self.repoid_or_path, *self.args, **self.kwargs
+                    self.repoid_path_clsname, *self.args, **self.kwargs
                 )
 
                 # By default, all params should be frozen.
                 for param in self.local_model.parameters():
                     param.requires_grad = False
 
-
         with Editor(self, edits):
-
             # Send local_model to graph to re-compile
             graph.compile(self.local_model)
 
@@ -137,7 +157,7 @@ class AbstractModel(ABC):
                 ]
             )
 
-            logger.debug(f"Running `{self.repoid_or_path}`...")
+            logger.debug(f"Running `{self.repoid_path_clsname}`...")
 
             self.local_model.eval() if inference else self.local_model.train()
 
@@ -156,12 +176,12 @@ class AbstractModel(ABC):
 
             increment_hook.remove()
 
-            logger.debug(f"Completed `{self.repoid_or_path}`")
+            logger.debug(f"Completed `{self.repoid_path_clsname}`")
 
         return output
 
     def alteration(self) -> Patcher:
-        return REPOID_TO_ALTERATION.get(self.repoid_or_path, Patcher())
+        return REPOID_TO_ALTERATION.get(self.repoid_path_clsname, Patcher())
 
     def generate(self, *args, **kwargs) -> Generator:
         return Generator(self, *args, **kwargs)
