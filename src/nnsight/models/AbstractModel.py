@@ -183,7 +183,7 @@ class AbstractModel(ABC):
         # Wrap with our Module and update new attributes.
         wme.wrapper: Module = Module.wrap(wme.wrapper)
         wme.wrapper.module_path = f"{module.module_path}.{module_name}"
-        wme.wrapper.generator = module.generator
+        wme.wrapper.tracer = module.tracer
         wme.wrapper.output_shape = module.output_shape
         # Carry out the edit on the meta_model.
         wme.edit(self.meta_model)

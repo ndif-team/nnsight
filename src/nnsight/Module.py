@@ -5,14 +5,14 @@ from typing import Any, Dict, List, Union
 import torch
 
 from . import util
-from .contexts.Generator import Generator
+from .contexts.Tracer import Tracer
 from .fx.Graph import Graph
 from .fx.Node import Node
 from .intervention import InterventionProxy
 
 """The Module object acts as the entrypoint into the interwoven intervention graph for manipulating the inputs and outputs of Modules as a model is running.
 Specifically, the `.output` and `.input` attributes are the root nodes of the intervention graph, and all operation performed on these Proxy objects are the downstream nodes that populate the graph.
-Requires a Generator object to add the correct proxies to the intervention graph. 
+Requires a Tracewr object to add the correct proxies to the intervention graph. 
 
 Examples:
 
@@ -46,7 +46,7 @@ class Module(torch.nn.Module):
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
         input_shape (torch.Size): Shape of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
         input_type (torch.dtype): Dtype of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
-        generator (nnsight.context.Generator.Generator): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.
+        tracer (nnsight.context.Tracer.Tracer): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.
     """
 
     def __init__(self) -> None:
@@ -60,7 +60,7 @@ class Module(torch.nn.Module):
         self._input: InterventionProxy = None
         self._graph: Graph = None
 
-        self.generator: Generator = None
+        self.tracer: Tracer = None
 
     def __call__(
         self, *args: List[Any], **kwds: Dict[str, Any]
@@ -80,7 +80,7 @@ class Module(torch.nn.Module):
         )
 
         if proxy:
-            module_proxy = getattr(self.generator.graph.module_proxy, self.module_path)
+            module_proxy = getattr(self.tracer.graph.module_proxy, self.module_path)
 
             return module_proxy.forward(*args, **kwds)
 
@@ -96,8 +96,8 @@ class Module(torch.nn.Module):
             Proxy: Output proxy.
         """
         if self._output is None:
-            self._output = self.generator.graph.add(
-                graph=self.generator.graph,
+            self._output = self.tracer.graph.add(
+                graph=self.tracer.graph,
                 value=util.apply(
                     self.output_shape,
                     lambda x: torch.empty(x, device="meta"),
@@ -105,9 +105,9 @@ class Module(torch.nn.Module):
                 ),
                 target="argument",
                 args=[
-                    f"{self.module_path}.output.{self.generator.generation_idx}",
-                    self.generator.batch_size,
-                    len(self.generator.prompts) - self.generator.batch_size,
+                    f"{self.module_path}.output.{self.tracer.generation_idx}",
+                    self.tracer.batch_size,
+                    len(self.tracer.prompts) - self.tracer.batch_size,
                 ],
             )
 
@@ -143,8 +143,8 @@ class Module(torch.nn.Module):
             Proxy: Input proxy.
         """
         if self._input is None:
-            self._input = self.generator.graph.add(
-                graph=self.generator.graph,
+            self._input = self.tracer.graph.add(
+                graph=self.tracer.graph,
                 value=util.apply(
                     self.input_shape,
                     lambda x: torch.empty(x, device="meta"),
@@ -152,9 +152,9 @@ class Module(torch.nn.Module):
                 ),
                 target="argument",
                 args=[
-                    f"{self.module_path}.input.{self.generator.generation_idx}",
-                    self.generator.batch_size,
-                    len(self.generator.prompts) - self.generator.batch_size,
+                    f"{self.module_path}.input.{self.tracer.generation_idx}",
+                    self.tracer.batch_size,
+                    len(self.tracer.prompts) - self.tracer.batch_size,
                 ],
             )
 

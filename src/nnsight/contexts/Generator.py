@@ -1,20 +1,15 @@
 from __future__ import annotations
 
 import pickle
-from typing import TYPE_CHECKING, Dict, List, Union
 
 import socketio
 
 from .. import CONFIG, pydantics
-from ..fx.Graph import Graph
-from ..intervention import InterventionProxy
 from .Invoker import Invoker
-
-if TYPE_CHECKING:
-    from ..models.AbstractModel import AbstractModel
+from .Tracer import Tracer
 
 
-class Generator:
+class Generator(Tracer):
     """_summary_
 
     Attributes:
@@ -33,28 +28,15 @@ class Generator:
 
     def __init__(
         self,
-        model: "AbstractModel",
         *args,
         blocking: bool = True,
         server: bool = False,
         **kwargs,
     ) -> None:
-        self.model = model
+        super().__init__(*args, **kwargs)
+
         self.server = server
         self.blocking = blocking
-        self.args = args
-        self.kwargs = kwargs
-
-        self.graph = Graph(self.model.meta_model, proxy_class=InterventionProxy)
-
-        self.generation_idx: int = 0
-        self.batch_size: int = 0
-        self.prompts: List[str] = []
-        self.output = None
-
-        # Modules need to know about the current generator to create the correct proxies.
-        for name, module in self.model.named_modules():
-            module.generator = self
 
     def __enter__(self) -> Generator:
         return self
@@ -68,7 +50,9 @@ class Generator:
 
     def run_local(self):
         # Run the model and store the output.
-        self.output = self.model(self.model._generation, self.prompts, self.graph, *self.args, **self.kwargs)
+        self.output = self.model(
+            self.model._generation, self.prompts, self.graph, *self.args, **self.kwargs
+        )
 
     def run_server(self):
         # Create the pydantic class for the request.
