@@ -167,7 +167,7 @@ class AbstractModel(ABC):
         return Generator(self, *args, **kwargs)
 
     def forward(self, inputs, *args, **kwargs) -> Runner:
-        return Runner(self, inputs, *args, **kwargs)
+        return Runner(inputs, self, *args, **kwargs)
 
     def modulize(self, module: Module, node_name: str, module_name: str) -> None:
         """_summary_
