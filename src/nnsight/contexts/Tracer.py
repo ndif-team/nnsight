@@ -26,7 +26,7 @@ class Tracer(AbstractContextManager):
         self.graph = Graph(self.model.meta_model, proxy_class=InterventionProxy)
 
         self.batch_size: int = 0
-        self.prompts: List[str] = []
+        self.input_ids: List[List[int]] = []
         self.output = None
 
         self.generation_idx:int = 0

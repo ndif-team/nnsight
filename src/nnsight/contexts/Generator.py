@@ -51,7 +51,7 @@ class Generator(Tracer):
     def run_local(self):
         # Run the model and store the output.
         self.output = self.model(
-            self.model._generation, self.prompts, self.graph, *self.args, **self.kwargs
+            self.model._generation, self.input_ids, self.graph, *self.args, **self.kwargs
         )
 
     def run_server(self):
@@ -60,7 +60,7 @@ class Generator(Tracer):
             args=self.args,
             kwargs=self.kwargs,
             model_name=self.model.model_name_or_path,
-            prompts=self.prompts,
+            prompts=self.input_ids,
             intervention_graph=self.graph,
         )
 

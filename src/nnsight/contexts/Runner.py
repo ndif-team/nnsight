@@ -27,7 +27,7 @@ class Runner(Tracer):
 
         self.batch_size = len(self.ids)
 
-        self.prompts.extend(["".join(tokens) for tokens in self.tokens])
+        self.input_ids.extend(token_ids)
 
         if len(self.tokens) == 1:
             self.tokens = self.tokens[0]
