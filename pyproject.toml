@@ -15,6 +15,23 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-
+dependencies = [
+    "transformers",
+    "protobuf",
+    "python-socketio[client]",
+    "tokenizers",
+    "pydantic",
+    "torch",
+    "sentencepiece",
+    "torchvision",
+    "accelerate",
+    "diffusers"
+    ]
 [project.urls]
 "Homepage" = "https://github.com/JadenFiotto-Kaufman/nnsight"
+
+[tool.setuptools]
+include-package-data = true
+[tool.setuptools.package-data]
+nnsight = ["config.yaml", "nnsight.log"]
+
