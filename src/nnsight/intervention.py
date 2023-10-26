@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from typing import Any, Callable, Collection, List, Tuple, Union
 
-import torch.futures
+import torch
 from torch.utils.hooks import RemovableHandle
 
 from . import util
@@ -120,19 +120,13 @@ class InterventionProxy(Proxy):
 
     @property
     def value(self) -> Any:
-        """Property to return the potentially populated value of this proxy's future.
+        """Property to return the value of this proxy's node.
 
         Returns:
             Any: The stored value of the proxy, populated during execution of the model.
-
-        Raises:
-
-            Exception: Raised if the proxy's value is not done and populated.
         """
 
-        # TODO Catch exception thrown when future is not done and replace with a better one.
-
-        return self.node.future.value()
+        return self.node.value
 
 
 def intervene(activations: Any, module_path: str, graph: Graph, key: str):
@@ -143,9 +137,9 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     If exists, value is a list of node names to iterate through.
     Node args for argument type nodes should be [module_path, batch_size, batch_start]
     Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
-        only batch indexed tensors relevant to this intervention node. Sets the value of the nodes future
-        usung the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
-        subsequent futures to make edits to the values only in the relevant tensors, and have it update the original
+        only batch indexed tensors relevant to this intervention node. Sets the value of a node
+        using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
+        subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
         tensors. This both prevents interventions from effecting bathes outside their perview and allows edits
         to the output from downstream intervention nodes in the graph.
 
@@ -173,7 +167,7 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
             _, batch_size, batch_start = node.args
 
             # We set its result to the activations, indexed by only the relevant batch idxs.
-            node.future.set_result(
+            node.set_value(
                 util.apply(
                     activations,
                     lambda x: x.narrow(0, batch_start, batch_size),

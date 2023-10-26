@@ -150,7 +150,6 @@ class AbstractModel(ABC):
 
         with Editor(self, edits):
             # Send local_model to graph to re-compile
-            graph.compile(self.local_model)
 
             increment_hook = self._register_increment_hook(
                 lambda module, input, output: graph.increment()
@@ -166,6 +165,8 @@ class AbstractModel(ABC):
             )
 
             logger.debug(f"Running `{self.repoid_path_clsname}`...")
+
+            graph.compile(self.local_model)
 
             self.local_model.eval() if inference else self.local_model.train()
 
