@@ -50,6 +50,7 @@ class LanguageModel(AbstractModel):
             str, List[str], List[List[str]], List[int], List[List[int]], torch.Tensor
         ],
     ) -> BatchEncoding:
+        
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
         ):
@@ -59,7 +60,10 @@ class LanguageModel(AbstractModel):
             inputs = inputs.unsqueeze(0)
 
         if not isinstance(inputs[0], str):
-            inputs = [self.tokenizer.decode(ids) for ids in inputs]
+
+            inputs = [{'input_ids' : ids} for ids in inputs]
+
+            return self.tokenizer.pad(inputs, return_tensors="pt")
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True)
 

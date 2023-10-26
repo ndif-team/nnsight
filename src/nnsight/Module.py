@@ -1,53 +1,86 @@
 from __future__ import annotations
 
-from typing import Any, Type, Union
+from typing import Any, Dict, List, Union
 
 import torch
 
 from . import util
-from .contexts.Generator import Generator
+from .contexts.Tracer import Tracer
 from .fx.Graph import Graph
 from .fx.Node import Node
 from .intervention import InterventionProxy
 
+"""The Module object acts as the entrypoint into the interwoven intervention graph for manipulating the inputs and outputs of Modules as a model is running.
+Specifically, the `.output` and `.input` attributes are the root nodes of the intervention graph, and all operation performed on these Proxy objects are the downstream nodes that populate the graph.
+Requires a Tracewr object to add the correct proxies to the intervention graph. 
+
+Examples:
+
+    Below example shows accessing the input and output of a gpt2 module, saving them during execution, and printing the resulting values after execution:
+
+    >>> with model.generate() as generator:
+    >>>    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+    >>>        hidden_states = model.lm_head.input.save()
+    >>>        logits = model.lm_head.output.save()
+    >>> print(hidden_states.value)
+    >>> print(logits.value)
+
+    Below example shows accessing the output of a gpt2 module and setting the values to zero:
+
+    >>> with model.generate() as generator:
+    >>>    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+    >>>        model.transformer.h[0].output[0] = 0
+
+"""
+
 
 class Module(torch.nn.Module):
-    """_summary_
+    """Class meant to wrap existing torch modules within a model's module tree in order to add nnsight functionality.
+    Proxies of it's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:
-        generator (Generator): _description_
-        module_path (str): _description_
-        output_shape (torch.Size): _description_
-        output_type (Type): _description_
-        _output (Proxy): _description_
+        module_path (str): String representing the attribute path of this module relative the the root model. Seperarated by '.' e.x ('transformer.h.0.mlp'). Set by AbstractModel on intialization of meta model.
+        output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
+        output_shape (torch.Size): Shape of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
+        output_type (torch.dtype): Dtype of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
+        output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
+        input_shape (torch.Size): Shape of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
+        input_type (torch.dtype): Dtype of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
+        tracer (nnsight.context.Tracer.Tracer): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.
     """
 
     def __init__(self) -> None:
         self.module_path: str = None
         self.input_shape: torch.Size = None
-        self.input_type: Type = None
+        self.input_type: torch.dtype = None
         self.output_shape: torch.Size = None
-        self.output_type: Type = None
+        self.output_type: torch.dtype = None
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
         self._graph: Graph = None
 
-        self.generator: Generator = None
+        self.tracer: Tracer = None
 
-    def __call__(self, *args: Any, **kwds: Any) -> Any:
-        """Override __call__ to check for InterventionProxy arguments. If there are any, we should return an
-        InterventionProxy denoting we want to call the given module with arguments.
+    def __call__(
+        self, *args: List[Any], **kwds: Dict[str, Any]
+    ) -> Union[Any, InterventionProxy]:
+        """Override __call__ to check for InterventionProxy arguments.
+        If there are any, we should return an InterventionProxy denoting we want to call the given module with arguments.
+
+        Args:
+            args (List[Any]): Positional arguments.
+            kwargs (Dict[str,Any]): Keyword arguments
 
         Returns:
-            Any: _description_
+            Union[Any,InterventionProxy]: Either the output of the module if not tracing or a Proxy if tracing.
         """
         proxy = any(
             isinstance(x, InterventionProxy) for x in list(args) + list(kwds.values())
         )
 
         if proxy:
-            module_proxy = getattr(self.generator.graph.module_proxy, self.module_path)
+            module_proxy = getattr(self.tracer.graph.module_proxy, self.module_path)
 
             return module_proxy.forward(*args, **kwds)
 
@@ -60,11 +93,11 @@ class Module(torch.nn.Module):
         Only generates a proxy the first time it is references otherwise return the already set one.
 
         Returns:
-            Proxy: _description_
+            Proxy: Output proxy.
         """
         if self._output is None:
-            self._output = self.generator.graph.add(
-                graph=self.generator.graph,
+            self._output = self.tracer.graph.add(
+                graph=self.tracer.graph,
                 value=util.apply(
                     self.output_shape,
                     lambda x: torch.empty(x, device="meta"),
@@ -72,9 +105,9 @@ class Module(torch.nn.Module):
                 ),
                 target="argument",
                 args=[
-                    f"{self.module_path}.output.{self.generator.generation_idx}",
-                    self.generator.batch_size,
-                    len(self.generator.prompts) - self.generator.batch_size,
+                    f"{self.module_path}.output.{self.tracer.generation_idx}",
+                    self.tracer.batch_size,
+                    len(self.tracer.input_ids) - self.tracer.batch_size,
                 ],
             )
 
@@ -99,7 +132,7 @@ class Module(torch.nn.Module):
             target=Node.update,
             args=[self.output.node, value],
         )
-    
+
     @property
     def input(self) -> InterventionProxy:
         """
@@ -107,11 +140,11 @@ class Module(torch.nn.Module):
         Only generates a proxy the first time it is references otherwise return the already set one.
 
         Returns:
-            Proxy: _description_
+            Proxy: Input proxy.
         """
         if self._input is None:
-            self._input = self.generator.graph.add(
-                graph=self.generator.graph,
+            self._input = self.tracer.graph.add(
+                graph=self.tracer.graph,
                 value=util.apply(
                     self.input_shape,
                     lambda x: torch.empty(x, device="meta"),
@@ -119,9 +152,9 @@ class Module(torch.nn.Module):
                 ),
                 target="argument",
                 args=[
-                    f"{self.module_path}.input.{self.generator.generation_idx}",
-                    self.generator.batch_size,
-                    len(self.generator.prompts) - self.generator.batch_size,
+                    f"{self.module_path}.input.{self.tracer.generation_idx}",
+                    self.tracer.batch_size,
+                    len(self.tracer.input_ids) - self.tracer.batch_size,
                 ],
             )
 
@@ -163,13 +196,13 @@ class Module(torch.nn.Module):
 
     @staticmethod
     def wrap(module: torch.nn.Module) -> Module:
-        """Wraps the torch Module with our Module
+        """Wraps the torch Module with our Module class. Adds a forward hook to the module to populate output and input data. Does not wrap torch.nn.ModuleList.
 
         Args:
-            module (torch.nn.Module): _description_
+            module (torch.nn.Module): The torch Module to wrap.
 
         Returns:
-            Module: _description_
+            Module: The wrapped Module.
         """
 
         def hook(module: Module, input: Any, output: Any):

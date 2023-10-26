@@ -6,8 +6,8 @@ from typing import Any, Callable, Dict, List, Type, Union
 import torch
 
 from .. import util
+from ..patching import Patch, Patcher
 from .Node import Node
-from ..patching import Patcher, Patch
 from .Proxy import Proxy, proxy_wrapper
 
 
@@ -160,17 +160,14 @@ class Graph:
         # Remove nodes that have no effect.
         self.eliminate_dead_code()
 
-        # Reset all node futures.
-        for node in self.nodes.values():
-            node._future = None
         # Compile nodes individually.
         for node in self.nodes.values():
             node.compile()
 
         self.generation_idx = 0
 
-        # Setting the root module future kicks off the graph execution.
-        self.nodes["module_0"].future.set_result(module)
+        # Setting the root module kicks off the graph execution.
+        self.nodes["module_0"].set_value(module)
 
     def add(
         self,
@@ -266,17 +263,17 @@ class Graph:
             # Gets list of all argument nodes for this graph.
             argument_nodes_list = list(self.argument_node_names.values())
 
-            # Sets the result of the argument nodes future for args.
+            # Sets the result of the argument nodes for args.
             for i, arg in enumerate(args):
-                self.nodes[argument_nodes_list[i][0]].future.set_result(arg)
+                self.nodes[argument_nodes_list[i][0]].set_value(arg)
 
             # And then for kwargs.
             for key in kwargs:
                 if key in self.argument_node_names:
-                    self.nodes[self.argument_node_names[key][0]].future.set_result(arg)
+                    self.nodes[self.argument_node_names[key][0]].set_value(arg)
 
             # 'rtn_0' should have the value we need to return.
-            return_value = self.nodes["rtn_0"].value()
+            return_value = self.nodes["rtn_0"].value
             self.nodes["rtn_0"].destroy()
             return return_value
 

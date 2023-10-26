@@ -215,7 +215,7 @@ class DiffuserModel(AbstractModel):
 
         if isinstance(scheduler, str):
             scheduler: SchedulerMixin = getattr(diffusers, scheduler).from_pretrained(
-                self.repoid_or_path, subfolder="scheduler"
+                self.repoid_path_clsname, subfolder="scheduler"
             )
         scheduler.set_timesteps(n_steps)
 

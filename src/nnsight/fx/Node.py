@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
-import torch.futures
+import torch
 
 from .. import util
 from ..logger import logger
@@ -25,7 +25,7 @@ class Node:
         meta (Dict[str, Any], optional): _description_. Defaults to None.
         listeners (List[Node]): desc
         dependencies (List[Node]): desc
-        _future (torch.futures.Future): desc
+        value (Any): desc
         _proxy_device (torch.device): desc
     """
 
@@ -82,7 +82,9 @@ class Node:
         self.kwargs = util.apply(kwargs, lambda x: x.node, Proxy)
         self.meta = meta
 
-        self.listeners: List[Node] = list([self])
+        self.value: Any = None
+
+        self.listeners: List[Node] = list()
         self.dependencies: List[Node] = list()
 
         # Add all arguments that are nodes to nodes dependencies
@@ -92,20 +94,10 @@ class Node:
         util.apply(self.args, lambda x: x.listeners.append(self), Node)
         util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
 
-        self._future: torch.futures.Future = None
+        self.remaining_listeners = 0
+        self.remaining_dependencies = 0
+
         self._proxy_device: torch.device = None
-
-    @property
-    def future(self) -> torch.futures.Future:
-        """Lazy creation of _future attribute.
-
-        Returns:
-            torch.futures.Future: _description_
-        """
-        if self._future is None:
-            self._future = torch.futures.Future()
-
-        return self._future
 
     @property
     def proxy_device(self) -> torch.device:
@@ -147,55 +139,19 @@ class Node:
         return values
 
     def compile(self) -> None:
-        # When this future is done, log that event.
-        self.future.add_done_callback(lambda x: logger.debug(f"=> SET({self.name})"))
-
-        # Nodes tell listeners when to try and be executed.
-        # This chains futures so after this node's future is done, it goes through
-        # it's listeners in order and calls their .chain() method.
-        future = self.listeners[0].future
-
-        for listener in self.listeners[1:]:
-            future = future.then(listener.chain)
-
-        # Collect all listeners futures into a single future that when done, call this
-        # nodes .destroy() method.
-        torch.futures.collect_all(
-            util.apply(self.listeners, lambda x: x.future, Node)
-        ).add_done_callback(lambda x: self.destroy())
-
-    def value(self) -> Any:
-        """Wrapper for this node's future .value()
-
-        Returns:
-            Any: _description_
-        """
-        return self.future.value()
-
-    def done(self) -> bool:
-        """Wrapper for this node's future .done()
-
-        Returns:
-            bool: _description_
-        """
-        return self.future.done()
+        self.remaining_listeners = len(self.listeners)
+        self.remaining_dependencies = len(self.dependencies)
 
     def fufilled(self) -> bool:
-        """Returns True if all of this node's dependencies are done.
+        return self.remaining_dependencies == 0
 
-        Returns:
-            bool: _description_
-        """
-        for dependency in self.dependencies:
-            if not dependency.done():
-                return False
-
-        return True
+    def redundant(self) -> bool:
+        return self.remaining_listeners == 0
 
     def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
-        # Turn futures into their value
-        def _value(value: Node):
-            return value.value()
+        # Turn nodes into their value
+        def _value(node: Node):
+            return node.value
 
         args = util.apply(self.args, _value, Node)
         kwargs = util.apply(self.kwargs, _value, Node)
@@ -209,6 +165,7 @@ class Node:
         all_args = list(args) + list(kwargs.values())
 
         util.apply(list(reversed(all_args)), _device, torch.Tensor)
+        # TODO
         # util.apply(list(reversed(all_args)), _device, torch.nn.Module)
 
         # Move tensors to device
@@ -242,32 +199,30 @@ class Node:
         # Call the target to get value.
         output = target(*args, **kwargs)
 
-        # Set this nodes future value to result.
-        self.future.set_result(output)
+        self.set_value(output)
+
+    def set_value(self, value: Any):
+        self.value = value
+
+        logger.debug(f"=> SET({self.name})")
+
+        for listener in self.listeners:
+            listener.remaining_dependencies -= 1
+
+            if listener.fufilled():
+                listener.execute()
+
+        for dependency in self.dependencies:
+            dependency.remaining_listeners -= 1
+
+            if dependency.redundant():
+                dependency.destroy()
 
     def destroy(self) -> None:
-        """Removes the reference to the node's _future and logs it's destruction."""
+        """Removes the reference to the node's value and logs it's destruction."""
         logger.debug(f"=> DEL({self.name})")
 
-        self._future = None
-
-    def chain(self, future: torch.futures.Future):
-        # If all of a nodes dependencies are done, execute it.
-        # Dont execute if already done.
-        if self.fufilled() and not self.done():
-            try:
-                self.execute()
-            except Exception as e:
-                # TODO
-                # An exectption is actually never thrown upward to the point it stops the program. Need to find a way.
-                logger.exception(f"Exception in execution of node '{self.name}'.")
-
-                self.future.set_exception(e)
-                future.set_exception(e)
-
-                raise e
-
-        future.set_result(None)
+        self.value = None
 
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)

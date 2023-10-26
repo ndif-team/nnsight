@@ -1,41 +1,89 @@
 from __future__ import annotations
 
 import importlib
-from typing import List
+from contextlib import AbstractContextManager
+from typing import Any, List
+
+"""Patching module handles patching of classes and functions in modules.
+
+Attributes:
+    DEFAULT_PATCHER (Patcher): The default patcher that patches some torch functions on initialization. 
+
+"""
 
 
 class Patch:
-    def __init__(self, obj, replacement) -> None:
+    """Class representing a replacement of an attribute on a module.
+
+    Attributes:
+        obj (Any): Object to replace.
+        replacement (Any): Object that replaces.
+    """
+
+    def __init__(self, obj: Any, replacement: Any) -> None:
         self.obj = obj
         self.replacement = replacement
 
-    def patch(self):
+    def patch(self) -> None:
+        """Carries out the replacment of an object in a module.
+
+        Imports the objects module with:
+            >>> importlib.import_module(self.obj.__module__)
+        And replaces it with:
+            >>> setattr(module, self.obj.__name__, self.replacement)
+
+        """
         module = importlib.import_module(self.obj.__module__)
 
         setattr(module, self.obj.__name__, self.replacement)
 
-    def restore(self):
+    def restore(self) -> None:
+        """Carries out the restoration of nthe original object on the objects module.
+
+        Imports the objects module with:
+            >>> importlib.import_module(self.obj.__module__)
+        And replaces it with:
+            >>> setattr(module, self.obj.__name__, self.obj)
+
+        """
         module = importlib.import_module(self.obj.__module__)
 
         setattr(module, self.obj.__name__, self.obj)
 
 
-class Patcher:
+class Patcher(AbstractContextManager):
+    """Context manager that patches from a list of Patches on __enter__ and restores the patch on __exit__.
+
+    Attributes:
+        patches (List[Patch]):
+    """
+
     def __init__(self, patches: List[Patch] = None) -> None:
         self.patches = patches or []
 
-    def add(self, patch: Patch):
+    def add(self, patch: Patch) -> None:
+        """Adds a Patch to the patches. Also calls `.patch()` on the Patch.
+
+        Args:
+            patch (Patch): Patch to add.
+        """
         self.patches.append(patch)
 
         patch.patch()
 
     def __enter__(self) -> Patcher:
+        """Enters the patching context. Calls `.patch()` on all patches.
+
+        Returns:
+            Patcher: Patcher
+        """
         for patch in self.patches:
             patch.patch()
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Calls `.restore()` on all patches."""
         for patch in self.patches:
             patch.restore()
 

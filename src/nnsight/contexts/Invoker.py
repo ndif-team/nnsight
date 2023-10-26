@@ -33,9 +33,7 @@ class Invoker:
 
         self.generator.batch_size = len(self.ids)
 
-        # Rebuild prompt from tokens (do this becuase if they input ids directly, we still need to pass
-        # all input data at once to a tokenizer to correctly batch the attention).
-        self.generator.prompts.extend(["".join(tokens) for tokens in self.tokens])
+        self.generator.input_ids.extend(token_ids)
 
         if len(self.tokens) == 1:
             self.tokens = self.tokens[0]
@@ -46,9 +44,9 @@ class Invoker:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         pass
 
-    def next(self) -> None:
+    def next(self, increment:int=1) -> None:
         # .next() increases which generation idx the interventions happen.
-        self.generator.generation_idx += 1
+        self.generator.generation_idx += increment
 
         # Run graph with singe token input.
         self.generator.model._run_meta("_", *self.args, **self.kwargs)

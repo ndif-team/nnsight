@@ -1,4 +1,5 @@
 build/
+dist/
 *.egg-info/
 .installed.cfg
 __pycache__/
