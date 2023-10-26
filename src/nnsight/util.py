@@ -1,10 +1,10 @@
+"""Module for utility functions and classes used throughout the package."""
+
 import time
 from functools import wraps
 from typing import Any, Callable, Collection, Type
 
 import torch
-
-"""Module for utility functions and classes used throughout the package."""
 
 
 def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
@@ -133,6 +133,7 @@ class WrapperModule(torch.nn.Module):
     """
 
     def forward(self, *args, **kwargs):
+        # TODO document
         if len(args) == 1:
             args = args[0]
 

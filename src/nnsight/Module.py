@@ -1,18 +1,6 @@
-from __future__ import annotations
-
-from typing import Any, Dict, List, Union
-
-import torch
-
-from . import util
-from .contexts.Tracer import Tracer
-from .fx.Graph import Graph
-from .fx.Node import Node
-from .intervention import InterventionProxy
-
 """The Module object acts as the entrypoint into the interwoven intervention graph for manipulating the inputs and outputs of Modules as a model is running.
 Specifically, the `.output` and `.input` attributes are the root nodes of the intervention graph, and all operation performed on these Proxy objects are the downstream nodes that populate the graph.
-Requires a Tracewr object to add the correct proxies to the intervention graph. 
+Requires a ``Tracer`` object to add the correct proxies to the intervention graph. 
 
 Examples:
 
@@ -32,6 +20,18 @@ Examples:
     >>>        model.transformer.h[0].output[0] = 0
 
 """
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Union
+
+import torch
+
+from . import util
+from .contexts.Tracer import Tracer
+from .fx.Graph import Graph
+from .fx.Node import Node
+from .intervention import InterventionProxy
 
 
 class Module(torch.nn.Module):

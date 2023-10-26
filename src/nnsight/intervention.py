@@ -1,3 +1,12 @@
+"""This module contains logic to interleave a computation graph (an intervention graph) with the computation graph of a model.
+
+The class InterventionProxy extends the functionaly of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
+
+The intervene function is the entry hook into the models computation graph in order to interleave an intervention graph.
+
+The class HookModel provides a context manager for adding input and output hooks to modules and removing them upon context exit.
+
+"""
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
@@ -9,16 +18,6 @@ from torch.utils.hooks import RemovableHandle
 from . import util
 from .fx.Graph import Graph
 from .fx.Proxy import Proxy
-
-"""This module contains logic to interleave a computation graph (an intervention graph) with the computation graph of a model.
-
-The class InterventionProxy extends the functionaly of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
-
-The intervene function is the entry hook into the models computation graph in order to interleave an intervention graph.
-
-The class HookModel provides a context manager for adding input and output hooks to modules and removing them upon context exit.
-
-"""
 
 
 class InterventionProxy(Proxy):

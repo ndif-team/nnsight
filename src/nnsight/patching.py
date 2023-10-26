@@ -1,15 +1,14 @@
-from __future__ import annotations
-
-import importlib
-from contextlib import AbstractContextManager
-from typing import Any, List
-
 """Patching module handles patching of classes and functions in modules.
 
 Attributes:
     DEFAULT_PATCHER (Patcher): The default patcher that patches some torch functions on initialization. 
 
 """
+from __future__ import annotations
+
+import importlib
+from contextlib import AbstractContextManager
+from typing import Any, List
 
 
 class Patch:
