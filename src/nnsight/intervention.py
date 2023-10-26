@@ -1,6 +1,6 @@
 """This module contains logic to interleave a computation graph (an intervention graph) with the computation graph of a model.
 
-The class InterventionProxy extends the functionaly of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
+The class InterventionProxy extends the functionality of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
 
 The intervene function is the entry hook into the models computation graph in order to interleave an intervention graph.
 
@@ -86,7 +86,7 @@ class InterventionProxy(Proxy):
     def token(self) -> TokenIndexer:
         """Property used to do token based indexing on a proxy.
         Directly indexes the second dimension of tensors.
-        Makes positive indicies negative as tokens are padded on the left.
+        Makes positive indices negative as tokens are padded on the left.
 
         Example:
 
@@ -139,7 +139,7 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
         only batch indexed tensors relevant to this intervention node. Sets the value of a node
         using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
         subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
-        tensors. This both prevents interventions from effecting bathes outside their perview and allows edits
+        tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
         to the output from downstream intervention nodes in the graph.
 
     Args:
@@ -240,9 +240,9 @@ class HookModel(AbstractContextManager):
 
 
 class TokenIndexer:
-    """Helper class to directly access token indicies of hidden states.
+    """Helper class to directly access token indices of hidden states.
     Directly indexes the second dimension of tensors.
-    Makes positive indicies negative as tokens are padded on the left.
+    Makes positive indices negative as tokens are padded on the left.
 
     Args:
         proxy (InterventionProxy): Proxy to aid in token indexing.

@@ -24,7 +24,7 @@ class Patch:
         self.replacement = replacement
 
     def patch(self) -> None:
-        """Carries out the replacment of an object in a module.
+        """Carries out the replacement of an object in a module.
 
         Imports the objects module with:
             >>> importlib.import_module(self.obj.__module__)
@@ -37,7 +37,7 @@ class Patch:
         setattr(module, self.obj.__name__, self.replacement)
 
     def restore(self) -> None:
-        """Carries out the restoration of nthe original object on the objects module.
+        """Carries out the restoration of the original object on the objects module.
 
         Imports the objects module with:
             >>> importlib.import_module(self.obj.__module__)

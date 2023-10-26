@@ -129,7 +129,7 @@ class Node:
                 self.prepare_proxy_values(arg.step),
             )
 
-        # Convert procies to their proxy_value
+        # Convert proxies to their proxy_value
         values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
         # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
@@ -142,7 +142,7 @@ class Node:
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
 
-    def fufilled(self) -> bool:
+    def fulfilled(self) -> bool:
         return self.remaining_dependencies == 0
 
     def redundant(self) -> bool:
@@ -209,7 +209,7 @@ class Node:
         for listener in self.listeners:
             listener.remaining_dependencies -= 1
 
-            if listener.fufilled():
+            if listener.fulfilled():
                 listener.execute()
 
         for dependency in self.dependencies:

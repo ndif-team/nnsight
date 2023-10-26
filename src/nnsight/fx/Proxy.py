@@ -181,7 +181,7 @@ from functools import wraps
 
 def proxy_wrapper(fn) -> None:
     """Wraps problematic functions (torch functions sometimes).
-    Checks if anty of its args are proxies. If so we return a proxy of the function.
+    Checks if any of its args are proxies. If so we return a proxy of the function.
     Otherwise just run the function.
 
     Args:

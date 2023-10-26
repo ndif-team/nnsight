@@ -16,7 +16,7 @@ def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
         cls (type): Type or Types to apply function to.
 
     Returns:
-        Collection: Same kind of collection as data, after then fn has been applied to memebers of given type.
+        Collection: Same kind of collection as data, after then fn has been applied to members of given type.
     """
     if isinstance(data, cls):
         return fn(data)
@@ -34,11 +34,11 @@ def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
 
 
 def fetch_attr(object: object, target: str) -> Any:
-    """Retrieves an attribute from an object hierarchy given an attribute path. Levels are seperated by '.' e.x (transformer.h.1)
+    """Retrieves an attribute from an object hierarchy given an attribute path. Levels are separated by '.' e.x (transformer.h.1)
 
     Args:
         object (object): Root object to get attribute from.
-        target (str): Attribute path as '.' seperated string.
+        target (str): Attribute path as '.' separated string.
 
     Returns:
         Any: Fetched attribute.

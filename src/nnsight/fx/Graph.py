@@ -44,7 +44,7 @@ class Graph:
         # Create a graph with the module as the root module
         graph = Graph(module)
 
-        # Get 'unbound' version of forward method so we can pass in proxy of module insead of self
+        # Get 'unbound' version of forward method so we can pass in proxy of module instead of self
         forward = module.__class__.forward
 
         # Want list not tuple
@@ -87,8 +87,8 @@ class Graph:
             for i, param in enumerate(list(signature.parameters.values())[1:])
         ]
 
-        # Some methods cannot be caught because they arent torch functions or dont play nice with __torch_function__.
-        # So the patcher repalces the methods with something to catch proxies and return proxies.
+        # Some methods cannot be caught because they aren't torch functions or dont play nice with __torch_function__.
+        # So the patcher replaces the methods with something to catch proxies and return proxies.
         with Patcher() as patcher:
             patcher.add(Patch(torch.full, proxy_wrapper(torch.full)))
             patcher.add(Patch(torch.finfo, proxy_wrapper(torch.finfo)))
@@ -277,7 +277,7 @@ class Graph:
             self.nodes["rtn_0"].destroy()
             return return_value
 
-        # Repalce forward method with custom graph execution method.
+        # Replace forward method with custom graph execution method.
         module.forward = forward
 
         return module

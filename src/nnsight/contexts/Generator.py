@@ -74,16 +74,16 @@ class Generator(Tracer):
         sio = socketio.Client()
         sio.connect(f"ws://{CONFIG.API.HOST}")
 
-        # Called when recieving a response from the server.
+        # Called when receiving a response from the server.
         @sio.on("blocking_response")
         def blocking_response(data):
             # Load the data into the ResponseModel pydantic class.
             data: pydantics.ResponseModel = pickle.loads(data)
 
-            # Print response for user ( should be logger.info and have an infor handler print to stdout)
+            # Print response for user ( should be logger.info and have an info handler print to stdout)
             print(str(data))
 
-            # If the status of the response is completed, update the local futures that the user specified to save.
+            # If the status of the response is completed, update the local nodes that the user specified to save.
             # Then disconnect and continue.
             if data.status == pydantics.JobStatus.COMPLETED:
                 for name, value in data.saves.items():

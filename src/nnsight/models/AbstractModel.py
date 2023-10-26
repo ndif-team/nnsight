@@ -22,7 +22,7 @@ from ..patching import Patcher
 
 
 class AbstractModel(ABC):
-    """Abstract class to be implmented for pytorch models wishing to gain this package's functionality.
+    """Abstract class to be implemented for pytorch models wishing to gain this package's functionality.
 
     Attributes:
         repoid_path_clsname (str): Hugging face repo id of model to load, path to checkpoint, or class name of custom model.
@@ -35,7 +35,7 @@ class AbstractModel(ABC):
             device. All modules are wrapped in nnsight.Module adding interleaving operation functionality.
         tokenizer (_typ_): Tokenizer.
         local_model (torch.nn.Module): Locally loaded and dispatched model. Only loaded and dispatched on first use.
-            This is the actual model that is ran with hooks added to it to enter the intervetnion graph.
+            This is the actual model that is ran with hooks added to it to enter the intervention graph.
     """
 
     def __init__(
@@ -92,7 +92,7 @@ class AbstractModel(ABC):
         for name, module in self.meta_model.named_modules():
             module.module_path = name
 
-        # Run inital dummy string to populate Module shapes, dtypes etc
+        # Run initial dummy string to populate Module shapes, dtypes etc
         self._run_meta("_")
 
         logger.debug(f"Initialized `{self.repoid_path_clsname}`")
@@ -121,7 +121,7 @@ class AbstractModel(ABC):
         inference: bool = True,
         **kwargs,
     ) -> Any:
-        """Runs some function with some inputs and some graph with the approriate contexts for this model.
+        """Runs some function with some inputs and some graph with the appropriate contexts for this model.
 
         Loads and dispatched local_model if not already done so.
 
@@ -253,7 +253,7 @@ class AbstractModel(ABC):
             module_name (str): _description_
         """
 
-        # Create a WrapperModuleEdit which just adds a WrapperModule to an existing module at the given moduel_name.
+        # Create a WrapperModuleEdit which just adds a WrapperModule to an existing module at the given module_name.
         wme = WrapperModuleEdit(module.module_path, module_name)
         # Wrap with our Module and update new attributes.
         wme.wrapper: Module = Module.wrap(wme.wrapper)
@@ -297,7 +297,7 @@ class AbstractModel(ABC):
         Abstract method to initialize meta_model and tokenizer. To be implemented by inheritors.
 
         Args:
-            repoid_or_path (str): Huggigface repo id or path to checkpoint.
+            repoid_or_path (str): Huggingface repo id or path to checkpoint.
 
         Returns:
             torch.nn.Module: Meta version of model
@@ -348,7 +348,7 @@ class AbstractModel(ABC):
     @abstractmethod
     def _generation(self, inputs, *args, **kwargs) -> Any:
         """
-        Abstract method to do interative generation on the local_model. To be implemented by inheritors.
+        Abstract method to do iterative generation on the local_model. To be implemented by inheritors.
 
         Args:
             inputs (Any): Inputs.
