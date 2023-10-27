@@ -93,7 +93,7 @@ class AbstractModel(ABC):
             module.module_path = name
 
         # Run initial dummy string to populate Module shapes, dtypes etc
-        self._run_meta(self._example_input())
+        self._scan(self._prepare_inputs(self._example_input()))
 
         logger.debug(f"Initialized `{self.repoid_path_clsname}`")
 
@@ -172,6 +172,8 @@ class AbstractModel(ABC):
 
             self.local_model.eval() if inference else self.local_model.train()
 
+            inputs = self._prepare_inputs(inputs)
+
             with torch.inference_mode(mode=inference):
                 with HookModel(
                     self.local_model,
@@ -186,6 +188,8 @@ class AbstractModel(ABC):
                     output = fn(inputs, *args, **kwargs)
 
             increment_hook.remove()
+
+            self.local_model.eval() 
 
             logger.debug(f"Completed `{self.repoid_path_clsname}`")
 
@@ -241,7 +245,7 @@ class AbstractModel(ABC):
             >>>         pass
             >>> print(invoker.output)
         """
-        return Runner(inputs, self, *args, **kwargs)
+        return Runner(self, inputs, *args, **kwargs)
 
     def alteration(self) -> Patcher:
         return REPOID_TO_ALTERATION.get(self.repoid_path_clsname, Patcher())
@@ -320,17 +324,14 @@ class AbstractModel(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def _run_meta(self, inputs, *args, **kwargs) -> Any:
+    def _scan(self, inputs, *args, **kwargs) -> None:
         """
-        Abstract method to directly call the meta_model. To be implemented by inheritors.
+        Abstract method to directly call the meta_model and therefore populate the input/output shapes etc. To be implemented by inheritors.
 
         Used for tracing operations and their input/output shapes/dtypes.
 
         Args:
             inputs (Any): Inputs.
-
-        Returns:
-            Any: Output.
         """
         raise NotImplementedError()
 
@@ -373,5 +374,9 @@ class AbstractModel(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def _example_input(self) -> None:
+    def _example_input(self) -> Any:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def _batched_inputs(self) -> List[Any]:
         raise NotImplementedError()

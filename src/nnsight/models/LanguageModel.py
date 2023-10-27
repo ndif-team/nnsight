@@ -1,18 +1,13 @@
 from __future__ import annotations
+import collections
 
-from typing import Any, Callable, Dict, List, Union
+from typing import Any, Callable, Dict, List, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
-from transformers import (
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    PretrainedConfig,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          BatchEncoding, PretrainedConfig, PreTrainedModel,
+                          PreTrainedTokenizer)
 
 from .AbstractModel import AbstractModel
 
@@ -76,7 +71,7 @@ class LanguageModel(AbstractModel):
             Dict[str, Any],
         ],
     ) -> BatchEncoding:
-        if isinstance(inputs, dict):
+        if isinstance(inputs, collections.abc.Mapping):
             return BatchEncoding(inputs)
 
         if isinstance(inputs, str) or (
@@ -94,26 +89,21 @@ class LanguageModel(AbstractModel):
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True)
 
-    def _run_meta(self, inputs, *args, scan=True, **kwargs) -> None:
-        inputs = self._prepare_inputs(inputs)
+    def _batched_inputs(self, prepared_inputs: BatchEncoding) -> torch.Tensor:
+        return prepared_inputs["input_ids"]
 
-        if scan:
+    def _example_input(self) -> Dict[str, torch.Tensor]:
+        return {"input_ids": torch.tensor([[0]])}
 
-            self.meta_model(*args, **inputs.copy().to("meta"), **kwargs)
+    def _scan(self, prepared_inputs, *args, **kwargs) -> None:
+        self.meta_model(*args, **prepared_inputs.copy().to("meta"), **kwargs)
 
-        return inputs["input_ids"]
-
-    def _run_local(self, inputs, *args, scan=False, **kwargs):
-        inputs = self._prepare_inputs(inputs)
-
-        return self.local_model(*args, **inputs.to(self.local_model.device), **kwargs)
-
-    def _generation(self, inputs, *args, **kwargs) -> None:
-        inputs = self._prepare_inputs(inputs)
-
-        return self.local_model.generate(
-            *args, **inputs.to(self.local_model.device), **kwargs
+    def _run_local(self, prepared_inputs, *args, **kwargs) -> Any:
+        return self.local_model(
+            *args, **prepared_inputs.to(self.local_model.device), **kwargs
         )
 
-    def _example_input(self) -> None:
-        return {"input_ids": torch.tensor([[0]])}
+    def _generation(self, prepared_inputs, *args, **kwargs) -> Any:
+        return self.local_model.generate(
+            *args, **prepared_inputs.to(self.local_model.device), **kwargs
+        )

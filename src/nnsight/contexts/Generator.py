@@ -51,7 +51,7 @@ class Generator(Tracer):
     def run_local(self):
         # Run the model and store the output.
         self.output = self.model(
-            self.model._generation, self.input_ids, self.graph, *self.args, **self.kwargs
+            self.model._generation, self.batched_input, self.graph, *self.args, **self.kwargs
         )
 
     def run_server(self):
@@ -108,3 +108,4 @@ class Generator(Tracer):
 
     def invoke(self, input, *args, **kwargs) -> Invoker:
         return Invoker(self, input, *args, **kwargs)
+    

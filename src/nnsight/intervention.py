@@ -51,23 +51,12 @@ class InterventionProxy(Proxy):
             Throws an error if this value is not populated.
     """
 
-    @staticmethod
-    def proxy_save(value: Any) -> None:
-        return util.apply(value, lambda x: x.clone(), torch.Tensor)
-
     def save(self) -> InterventionProxy:
-        """Method when called, indicates to the intervention graph to clone and not delete the tensor values of the result.
+        """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
 
         Returns:
             InterventionProxy: Save proxy.
         """
-
-        # Create node indicating we wish to clone the values of the current proxy in the intervention graph.
-        proxy = self.node.graph.add(
-            value=self.node.proxy_value,
-            target=InterventionProxy.proxy_save,
-            args=[self.node],
-        )
 
         # Add a 'null' node with the save proxy as an argument to ensure the values are never deleted.
         # This is because 'null' nodes never actually get set and therefore there will always be a
@@ -75,10 +64,10 @@ class InterventionProxy(Proxy):
         self.node.graph.add(
             value=None,
             target="null",
-            args=[proxy.node],
+            args=[self.node],
         )
 
-        return proxy
+        return self
 
     @property
     def token(self) -> TokenIndexer:

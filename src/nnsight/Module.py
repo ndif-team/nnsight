@@ -106,7 +106,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.output.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.input_ids) - self.tracer.batch_size,
+                    len(self.tracer.batched_input) - self.tracer.batch_size,
                 ],
             )
 
@@ -151,7 +151,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.input.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.input_ids) - self.tracer.batch_size,
+                    len(self.tracer.batched_input) - self.tracer.batch_size,
                 ],
             )
 

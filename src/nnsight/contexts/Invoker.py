@@ -3,56 +3,63 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict
 
 from ..tracing.Proxy import Proxy
-
-if TYPE_CHECKING:
-    from .Generator import Generator
+from .Tracer import Tracer
 
 
 class Invoker:
-    def __init__(self, generator: "Generator", input, *args, **kwargs) -> None:
-        self.generator = generator
+    def __init__(
+        self,
+        tracer: Tracer,
+        input,
+        *args,
+        scan: bool = True,
+        **kwargs,
+    ) -> None:
+        self.tracer = tracer
         self.input = input
+        self.scan = scan
         self.args = args
         self.kwargs = kwargs
-        self.tokens = None
-        self.ids = None
 
     def __enter__(self) -> Invoker:
         # Were in a new invocation so set generation_idx to 0,
-        self.generator.generation_idx = 0
+        self.tracer.generation_idx = 0
 
-        # Run graph_mode with meta tensors to collect shape information,
+        self.input = self.tracer.model._prepare_inputs(
+            self.input, *self.args, **self.kwargs
+        )
 
-        #TODO
-        # Have run_meta return tuple of (batched_inputs, meta_data to put on invoker.) Same with runner
-        token_ids = self.generator.model._run_meta(self.input, *self.args, **self.kwargs)
+        if self.scan:
+            self.tracer.model._scan(self.input, *self.args, **self.kwargs)
+        else:
+            for name, module in self.tracer.model.meta_model.named_modules():
+                module._output = None
+                module._input = None
 
-        # Decode tokenized inputs for user usage.
-        self.tokens = [
-            [self.generator.model.tokenizer.decode(token) for token in ids]
-            for ids in token_ids
-        ]
-        self.ids = token_ids
+        batched_inputs = self.tracer.model._batched_inputs(self.input)
 
-        self.generator.batch_size = len(self.ids)
-
-        self.generator.input_ids.extend(token_ids)
-
-        if len(self.tokens) == 1:
-            self.tokens = self.tokens[0]
-            self.ids = self.ids[0]
+        self.tracer.batch_size = len(batched_inputs)
+        self.tracer.batched_input.extend(batched_inputs)
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         pass
 
-    def next(self, increment:int=1) -> None:
+    def next(self, increment: int = 1) -> None:
         # .next() increases which generation idx the interventions happen.
-        self.generator.generation_idx += increment
+        self.tracer.generation_idx += increment
 
-        # Run graph with singe token input.
-        self.generator.model._run_meta(self.generator.model._example_input(), *self.args, **self.kwargs)
+        if self.scan:
+            # Run graph with singe token input.
+            self.inputs = self.tracer.model._prepare_inputs(
+                self.tracer.model._example_input(), *self.args, **self.kwargs
+            )
+            self.tracer.model._scan(self.inputs, *self.args, **self.kwargs)
+        else:
+            for name, module in self.tracer.model.meta_model.named_modules():
+                module._output = None
+                module._input = None
 
     def save_all(self) -> Dict[str, Proxy]:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]
@@ -62,7 +69,7 @@ class Invoker:
         """
         result = {}
 
-        for name, module in self.generator.model.meta_model.named_modules():
+        for name, module in self.tracer.model.meta_model.named_modules():
             result[module.module_path] = module.output.save()
 
         return result

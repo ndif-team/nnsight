@@ -163,7 +163,7 @@ class DiffuserModel(AbstractModel):
 
         return text_tokens, latents
 
-    def _run_meta(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
+    def _scan(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
         text_tokens, latents = self._prepare_inputs(
             inputs, n_imgs=n_imgs, img_size=img_size
         )
@@ -179,8 +179,6 @@ class DiffuserModel(AbstractModel):
         ).sample
 
         self.meta_model.vae.decode(latents)
-
-        return text_tokens.input_ids
 
     def _run_local(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
         text_tokens, latents = self._prepare_inputs(

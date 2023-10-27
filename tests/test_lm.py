@@ -36,7 +36,7 @@ def test_save(gpt2: nnsight.LanguageModel):
 def test_set(gpt2: nnsight.LanguageModel):
     with gpt2.generate(max_new_tokens=1) as generator:
         with generator.invoke("Hello world") as invoker:
-            pre = gpt2.transformer.h[-1].output[0].save()
+            pre = gpt2.transformer.h[-1].output[0].clone().save()
 
             gpt2.transformer.h[-1].output[0] = 0
 
