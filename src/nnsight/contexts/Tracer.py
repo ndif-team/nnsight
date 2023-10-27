@@ -34,6 +34,8 @@ class Tracer(AbstractContextManager):
         # Modules need to know about the current Tracer to create the correct proxies.
         for name, module in self.model.named_modules():
             module.tracer = self
+            module._output = None
+            module._input = None
 
     @abstractmethod
     def __enter__(self) -> Tracer:

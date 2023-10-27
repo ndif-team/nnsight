@@ -5,8 +5,8 @@ from typing import Any, Callable, Dict, List, Union
 from pydantic import BaseModel
 
 from .. import util
-from ..fx.Graph import Graph
-from ..fx.Node import Node
+from ..tracing.Graph import Graph
+from ..tracing.Node import Node
 
 
 class NodeModel(BaseModel):
@@ -42,7 +42,6 @@ class NodeModel(BaseModel):
             return graph.nodes[node_model.name]
 
         graph.add(
-            graph=graph,
             value=None,
             target=node_model.target,
             args=args,

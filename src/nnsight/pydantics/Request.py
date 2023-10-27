@@ -10,8 +10,8 @@ from pydantic import (
     field_serializer
 )
 
-from ..fx.Graph import Graph
-from .fx import NodeModel
+from ..tracing.Graph import Graph
+from .tracing import NodeModel
 
 
 class RequestModel(BaseModel):

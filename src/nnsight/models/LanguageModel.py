@@ -103,7 +103,7 @@ class LanguageModel(AbstractModel):
 
         return inputs["input_ids"]
 
-    def _run_local(self, inputs, *args, **kwargs):
+    def _run_local(self, inputs, *args, scan=False, **kwargs):
         inputs = self._prepare_inputs(inputs)
 
         return self.local_model(*args, **inputs.to(self.local_model.device), **kwargs)
