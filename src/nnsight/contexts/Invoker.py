@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict
 
-from ..fx.Proxy import Proxy
+from ..tracing.Proxy import Proxy
 
 if TYPE_CHECKING:
     from .Generator import Generator
@@ -22,6 +22,9 @@ class Invoker:
         self.generator.generation_idx = 0
 
         # Run graph_mode with meta tensors to collect shape information,
+
+        #TODO
+        # Have run_meta return tuple of (batched_inputs, meta_data to put on invoker.) Same with runner
         token_ids = self.generator.model._run_meta(self.input, *self.args, **self.kwargs)
 
         # Decode tokenized inputs for user usage.
@@ -49,7 +52,7 @@ class Invoker:
         self.generator.generation_idx += increment
 
         # Run graph with singe token input.
-        self.generator.model._run_meta("_", *self.args, **self.kwargs)
+        self.generator.model._run_meta(self.generator.model._example_input(), *self.args, **self.kwargs)
 
     def save_all(self) -> Dict[str, Proxy]:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]

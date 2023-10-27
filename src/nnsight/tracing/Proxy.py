@@ -11,16 +11,25 @@ if TYPE_CHECKING:
 
 
 class Proxy:
-    """_summary_
+    """Proxy objects are the actual objects that interact with operations in order to update the graph to create new nodes.
+
+    The operations that are traceable on base Proxy objects are many python built-in and magic methods, as well as implementing __torch_function__ to trace torch operations.
+    When an operation is traced, arguments are converted into their 'meta' tensor values and ran through the operation in order to find out the shames and data types of the result.
 
     Attributes:
-        node (Node): desc
+        node (Node): This proxy's node.
     """
 
     def __init__(self, node: "Node") -> None:
         self.node = node
 
     def __call__(self, *args, **kwargs) -> Proxy:
+        """
+        Calling a Proxy object normally just creates a '__call__' operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
+
+        Returns:
+            Proxy: New '__call__' proxy.
+        """
         # If calling a method (not a sub-module) on the main module of this graph,
         # we want to trace into that method.
         if self.node.args[0] is self.node.graph.module_proxy.node and not isinstance(
@@ -39,7 +48,6 @@ class Proxy:
             )
 
             return self.node.graph.add(
-                graph=self.node.graph,
                 value=value,
                 target="__call__",
                 args=[self.node] + list(args),
@@ -52,7 +60,6 @@ class Proxy:
         value = self.node.proxy_value[key]
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target="__getitem__",
             args=[self.node, key],
@@ -66,7 +73,6 @@ class Proxy:
         update(item_proxy.node.proxy_value, item_proxy.node.prepare_proxy_values(value))
 
         item_proxy.node.graph.add(
-            graph=item_proxy.node.graph,
             value=item_proxy.node.proxy_value,
             target=update,
             args=[item_proxy.node, value],
@@ -78,7 +84,6 @@ class Proxy:
         value = util.fetch_attr(self.node.proxy_value, key)
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target=util.fetch_attr,
             args=[self.node, key],
@@ -88,7 +93,6 @@ class Proxy:
         value = len(self.node.proxy_value)
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target=len,
             args=[self.node],
@@ -98,7 +102,6 @@ class Proxy:
         value = self.node.proxy_value + self.node.prepare_proxy_values(other)
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target="__add__",
             args=[self.node, other],
@@ -108,7 +111,6 @@ class Proxy:
         value = self.node.proxy_value - self.node.prepare_proxy_values(other)
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target="__sub__",
             args=[self.node, other],
@@ -118,7 +120,6 @@ class Proxy:
         value = self.node.proxy_value ** self.node.prepare_proxy_values(other)
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target=pow,
             args=[self.node, other],
@@ -128,7 +129,6 @@ class Proxy:
         value = self.node.proxy_value * self.node.prepare_proxy_values(other)
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target="__mul__",
             args=[self.node, other],
@@ -138,7 +138,6 @@ class Proxy:
         value = self.node.proxy_value / self.node.prepare_proxy_values(other)
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target="__truediv__",
             args=[self.node, other],
@@ -168,7 +167,6 @@ class Proxy:
         )
 
         return self.node.graph.add(
-            graph=self.node.graph,
             value=value,
             target=orig_method,
             args=args,
@@ -210,7 +208,7 @@ def proxy_wrapper(fn) -> None:
             )
 
             return node.graph.add(
-                graph=node.graph, value=value, target=fn, args=args, kwargs=kwargs
+                value=value, target=fn, args=args, kwargs=kwargs
             )
 
         else:

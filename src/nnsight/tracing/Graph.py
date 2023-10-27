@@ -12,16 +12,25 @@ from .Proxy import Proxy, proxy_wrapper
 
 
 class Graph:
-    """Represents a computation graph involving a Module
+    """Represents a computation graph involving a torch.nn.module.
+
+    Reserve target names:
+        'module' : There should only be the single root module as a node in the graph for tracing . Added on __init__ and when compiling,
+            the node's value is set to to be whatever module that is being interleaved with this computation graph.
+        'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names.
+            which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph
+            as entry points to kick of the execution of the graph.
+        'rtn' : Should only be one 'rtn' target named node as this is what is used.
+        'null' : Null nodes never get executed and therefore their listeners never get destroyed.
 
     Attributes:
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
         nodes (Dict[str, Node]): Mapping of node name to node.
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
             Used so names are unique.
-        module_proxy (Proxy): Proxy for given root module
-        argument_node_names (Dict[str, List[str]]): _description_
-        generation_idx (int): _description_
+        module_proxy (Proxy): Proxy for given root meta module.
+        argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
+        generation_idx (int): Current generation index.
 
     """
 
@@ -130,18 +139,12 @@ class Graph:
     def __init__(
         self, module: torch.nn.Module, proxy_class: Type[Proxy] = Proxy
     ) -> None:
-        """_summary_
-
-        Args:
-            module (torch.nn.Module): _description_
-            proxy_class (Type[Proxy], optional): _description_.
-        """
         self.proxy_class = proxy_class
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
 
-        self.module_proxy = self.add(graph=self, value=module, target="module")
+        self.module_proxy = self.add(value=module, target="module")
         self.argument_node_names: Dict[str, List[str]] = dict()
 
         self.generation_idx = 0
@@ -152,6 +155,10 @@ class Graph:
 
     def compile(self, module: torch.nn.Module) -> None:
         """Re-compile graph to prepare for a new execution of the graph.
+
+        Compiles all nodes and sets generation_idx to 0.
+
+        Finally, sets the "module_0" node's value to the module that is being interleaved.
 
         Args:
             module (torch.nn.Module): Module to be considered the root module of the graph.
@@ -171,7 +178,6 @@ class Graph:
 
     def add(
         self,
-        graph: Graph,
         value: Any,
         target: Union[Callable, str],
         args: List[Any] = None,
@@ -181,15 +187,17 @@ class Graph:
         """Adds a node to the graph and returns it's proxy.
 
         Args:
-            graph (Graph): _description_
             value (Any): 'meta' proxy value used for tracing the shapes and values.
             target (Union[Callable, str]): Either the function to call for this node, or a string that's the name of a method attribute on the first arg.
-            args (List[Any], optional): _description_. Defaults to None.
-            kwargs (Dict[str, Any], optional): _description_. Defaults to None.
-            name (str, optional): _description_. Defaults to None.
+            args (List[Any], optional): Positional arguments of node. Defaults to None.
+            kwargs (Dict[str, Any], optional): Keyword arguments of node. Defaults to None.
+            name (str, optional): Unique name of node. Otherwise pull name from target Defaults to None.
 
         Returns:
-            Proxy: _description_
+            Proxy: Proxy for the added node.
+
+        Raises:
+            ValueError: If more than one "rtn" or "module" nodes are added to the graph.
         """
         target_name = Node.target_name(target)
 
@@ -211,7 +219,7 @@ class Graph:
 
         node = Node(
             name=name,
-            graph=graph,
+            graph=self,
             value=value,
             target=target,
             args=args,
@@ -235,10 +243,10 @@ class Graph:
         """Returns proxy of node with specified proxy_class.
 
         Args:
-            node (Node): _description_
+            node (Node): Node.
 
         Returns:
-            Proxy: _description_
+            Proxy: Proxy.
         """
         return self.proxy_class(node)
 
@@ -250,10 +258,10 @@ class Graph:
         """Replaces the forward method of the given module with an execution of the module's graph.
 
         Args:
-            module (torch.nn.Module): _description_
+            module (torch.nn.Module): Module to replace the forward method of.
 
         Returns:
-            torch.nn.Module: _description_
+            torch.nn.Module: The module, post-replacement.
         """
 
         def forward(*args, **kwargs):

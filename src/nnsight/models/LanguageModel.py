@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, List, Union
+from typing import Any, Callable, Dict, List, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -18,6 +18,26 @@ from .AbstractModel import AbstractModel
 
 
 class LanguageModel(AbstractModel):
+    """LanguageModels are nnsight wrappers around AutoModelForCausalLM models.
+
+    Inputs can be in the form of:
+        Prompt: (str)
+        Prompts: (List[str])
+        Batched prompts: (List[List[str]])
+        Tokenized prompt: (Union[List[int], torch.Tensor])
+        Tokenized prompts: (Union[List[List[int]], torch.Tensor])
+        Direct input: (Dict[str,Any])
+
+    Calls to generate pass arguments downstream to :func:`AutoModelForCausalLM.generate`
+
+    Attributes:
+        config (PretrainedConfig): Huggingface config file loaded from repository or checkpoint.
+        tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
+        meta_model (PreTrainedModel): Meta version of underlying AutoModelForCausalLM model.
+        local_model (PreTrainedModel): Local version of underlying AutoModelForCausalLM model.
+
+    """
+
     def __init__(self, *args, **kwargs) -> None:
         self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = None
@@ -47,10 +67,18 @@ class LanguageModel(AbstractModel):
     def _prepare_inputs(
         self,
         inputs: Union[
-            str, List[str], List[List[str]], List[int], List[List[int]], torch.Tensor
+            str,
+            List[str],
+            List[List[str]],
+            List[int],
+            List[List[int]],
+            torch.Tensor,
+            Dict[str, Any],
         ],
     ) -> BatchEncoding:
-        
+        if isinstance(inputs, dict):
+            return BatchEncoding(inputs)
+
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
         ):
@@ -60,17 +88,18 @@ class LanguageModel(AbstractModel):
             inputs = inputs.unsqueeze(0)
 
         if not isinstance(inputs[0], str):
-
-            inputs = [{'input_ids' : ids} for ids in inputs]
+            inputs = [{"input_ids": ids} for ids in inputs]
 
             return self.tokenizer.pad(inputs, return_tensors="pt")
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True)
 
-    def _run_meta(self, inputs, *args, **kwargs) -> None:
+    def _run_meta(self, inputs, *args, scan=True, **kwargs) -> None:
         inputs = self._prepare_inputs(inputs)
 
-        self.meta_model(*args, **inputs.copy().to("meta"), **kwargs)
+        if scan:
+
+            self.meta_model(*args, **inputs.copy().to("meta"), **kwargs)
 
         return inputs["input_ids"]
 
@@ -85,3 +114,6 @@ class LanguageModel(AbstractModel):
         return self.local_model.generate(
             *args, **inputs.to(self.local_model.device), **kwargs
         )
+
+    def _example_input(self) -> None:
+        return {"input_ids": torch.tensor([[0]])}

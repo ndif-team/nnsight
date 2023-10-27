@@ -1,5 +1,5 @@
 from nnsight import LanguageModel
-from nnsight.fx.Proxy import Proxy
+from nnsight.tracing.Proxy import Proxy
 from nnsight import util
 
 model = LanguageModel('gpt2', device_map='cuda:0')

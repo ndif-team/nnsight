@@ -245,3 +245,6 @@ class DiffuserModel(AbstractModel):
         pil_images = [Image.fromarray(image) for image in images]
 
         return pil_images
+
+    def _example_input(self) -> None:
+        return "_"

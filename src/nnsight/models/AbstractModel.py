@@ -14,11 +14,11 @@ from ..contexts.Runner import Runner
 from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
-from ..fx.Graph import Graph
 from ..intervention import HookModel, intervene
 from ..logger import logger
 from ..Module import Module
 from ..patching import Patcher
+from ..tracing.Graph import Graph
 
 
 class AbstractModel(ABC):
@@ -93,7 +93,7 @@ class AbstractModel(ABC):
             module.module_path = name
 
         # Run initial dummy string to populate Module shapes, dtypes etc
-        self._run_meta("_")
+        self._run_meta(self._example_input())
 
         logger.debug(f"Initialized `{self.repoid_path_clsname}`")
 
@@ -147,6 +147,8 @@ class AbstractModel(ABC):
                 # By default, all params should be frozen.
                 for param in self.local_model.parameters():
                     param.requires_grad = False
+
+            self.dispatched = True
 
         with Editor(self, edits):
             # Send local_model to graph to re-compile
@@ -368,4 +370,8 @@ class AbstractModel(ABC):
         Returns:
             RemovableHandle: Handle to remove the applied hook after generation is done.
         """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def _example_input(self) -> None:
         raise NotImplementedError()

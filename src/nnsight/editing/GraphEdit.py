@@ -1,7 +1,7 @@
 from .Editor import Edit
 import torch
 from .. import util
-from ..fx.Graph import Graph
+from ..tracing.Graph import Graph
 class GraphEdit(Edit):
 
     def __init__(self, module_path:str, graph:Graph) -> None:

@@ -71,5 +71,6 @@ The forward, runner context is meant for direct input to the underlying model (o
 >>> model.forward("The Eiffel Tower is in the city of", inference=True) as runner:
 >>>     logits = model.lm_head.output.save()
 >>> print(logits.value)
->>> print(runner.output)
+
+See :mod:`nnsight.contexts`
 """

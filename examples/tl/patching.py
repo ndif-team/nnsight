@@ -1,5 +1,5 @@
 from nnsight import Model
-from nnsight.fx.Proxy import Proxy
+from nnsight.tracing.Proxy import Proxy
 from nnsight import util
 import torch
 

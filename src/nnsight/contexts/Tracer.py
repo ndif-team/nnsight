@@ -5,7 +5,7 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, List
 from ..intervention import InterventionProxy
 
-from ..fx.Graph import Graph
+from ..tracing.Graph import Graph
 
 if TYPE_CHECKING:
     from ..models.AbstractModel import AbstractModel

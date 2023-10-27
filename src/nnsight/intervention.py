@@ -16,8 +16,8 @@ import torch
 from torch.utils.hooks import RemovableHandle
 
 from . import util
-from .fx.Graph import Graph
-from .fx.Proxy import Proxy
+from .tracing.Graph import Graph
+from .tracing.Proxy import Proxy
 
 
 class InterventionProxy(Proxy):
@@ -64,7 +64,6 @@ class InterventionProxy(Proxy):
 
         # Create node indicating we wish to clone the values of the current proxy in the intervention graph.
         proxy = self.node.graph.add(
-            graph=self.node.graph,
             value=self.node.proxy_value,
             target=InterventionProxy.proxy_save,
             args=[self.node],
@@ -74,7 +73,6 @@ class InterventionProxy(Proxy):
         # This is because 'null' nodes never actually get set and therefore there will always be a
         # dependency for the save proxy.
         self.node.graph.add(
-            graph=self.node.graph,
             value=None,
             target="null",
             args=[proxy.node],

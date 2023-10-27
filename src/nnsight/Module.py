@@ -29,8 +29,8 @@ import torch
 
 from . import util
 from .contexts.Tracer import Tracer
-from .fx.Graph import Graph
-from .fx.Node import Node
+from .tracing.Graph import Graph
+from .tracing.Node import Node
 from .intervention import InterventionProxy
 
 
@@ -97,7 +97,6 @@ class Module(torch.nn.Module):
         """
         if self._output is None:
             self._output = self.tracer.graph.add(
-                graph=self.tracer.graph,
                 value=util.apply(
                     self.output_shape,
                     lambda x: torch.empty(x, device="meta"),
@@ -127,7 +126,6 @@ class Module(torch.nn.Module):
         )
 
         self.output.node.graph.add(
-            graph=self.output.node.graph,
             value=self.output.node.proxy_value,
             target=Node.update,
             args=[self.output.node, value],
@@ -144,7 +142,6 @@ class Module(torch.nn.Module):
         """
         if self._input is None:
             self._input = self.tracer.graph.add(
-                graph=self.tracer.graph,
                 value=util.apply(
                     self.input_shape,
                     lambda x: torch.empty(x, device="meta"),
@@ -174,7 +171,6 @@ class Module(torch.nn.Module):
         )
 
         self.input.node.graph.add(
-            graph=self.input.node.graph,
             value=self.input.node.proxy_value,
             target=Node.update,
             args=[self.input.node, value],
