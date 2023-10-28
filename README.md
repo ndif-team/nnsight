@@ -99,7 +99,7 @@ GPT2LMHeadModel(
 `.output` returns a proxy for the output of this module. This essentially means were saying, when we get to the output of this module during inference, grab it and perform any operations we define on it (which also become proxies). There are two operational proxies here, one for getting the 0th index of the output, and one for saving the output. We take the 0th index because the output of gpt2 transformer layers are a tuple where the first index are the actual hidden states (last two indicies are from attention). We can call `.shape` on any proxies to get what shape the value will eventually be. 
 Running `print(model.transformer.h[-1].output.shape)` returns `(torch.Size([1, 10, 768]), (torch.Size([1, 12, 10, 64]), torch.Size([1, 12, 10, 64])))`
 
-During processing of the intervention computational graph we are building, when the value of a proxy is no longer ever needed, its value is dereferenced and destroyed. However calling `.save()` on the proxy informs the computation graph to clone the value of this proxy and never destroy it, allowing us to access to value after generation.
+During processing of the intervention computational graph we are building, when the value of a proxy is no longer ever needed, its value is dereferenced and destroyed. However calling `.save()` on the proxy informs the computation graph to save the value of this proxy and never destroy it, allowing us to access to value after generation.
 
 After exiting the generator context, the model is ran with the specified arguments and intervention graph. `generator.output` is populated with the actual output and `hidden_states.value` will contain the value.
 
