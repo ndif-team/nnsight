@@ -29,9 +29,9 @@ import torch
 
 from . import util
 from .contexts.Tracer import Tracer
-from .tracing.Graph import Graph
-from .tracing.Node import Node
 from .intervention import InterventionProxy
+from .tracing.Graph import Graph
+from .tracing.Proxy import Proxy
 
 
 class Module(torch.nn.Module):
@@ -121,13 +121,13 @@ class Module(torch.nn.Module):
             value (Union[Proxy, Any]): _description_
         """
 
-        Node.update(
+        Proxy.proxy_update(
             self.output.node.proxy_value, self.output.node.prepare_proxy_values(value)
         )
 
         self.output.node.graph.add(
             value=self.output.node.proxy_value,
-            target=Node.update,
+            target=Proxy.proxy_update,
             args=[self.output.node, value],
         )
 
@@ -166,13 +166,13 @@ class Module(torch.nn.Module):
             value (Union[Proxy, Any]): _description_
         """
 
-        Node.update(
+        Proxy.proxy_update(
             self.input.node.proxy_value, self.input.node.prepare_proxy_values(value)
         )
 
         self.input.node.graph.add(
             value=self.input.node.proxy_value,
-            target=Node.update,
+            target=Proxy.proxy_update,
             args=[self.input.node, value],
         )
 

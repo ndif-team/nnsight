@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union
+import operator
+from typing import TYPE_CHECKING, Any, Callable, Union
 
 import torch
 
@@ -19,6 +20,27 @@ class Proxy:
     Attributes:
         node (Node): This proxy's node.
     """
+
+    @staticmethod
+    def proxy_update(value1, value2) -> None:
+        """Updates Tensor values with other Tensor values.
+
+        Args:
+            value1 (_type_): _description_
+            value2 (_type_): _description_
+        """
+        if isinstance(value1, torch.Tensor):
+            value1[:] = value2
+        elif isinstance(value1, list) or isinstance(value1, tuple):
+            for value_idx in range(len(value1)):
+                Proxy.proxy_update(value1[value_idx], value2[value_idx])
+        elif isinstance(value1, dict):
+            for key in value1:
+                Proxy.proxy_update(value1[key], value2[key])
+
+    @staticmethod
+    def proxy_call(callable: Callable, *args, **kwargs) -> None:
+        return callable(*args, **kwargs)
 
     def __init__(self, node: "Node") -> None:
         self.node = node
@@ -49,7 +71,7 @@ class Proxy:
 
             return self.node.graph.add(
                 value=value,
-                target="__call__",
+                target=Proxy.proxy_call,
                 args=[self.node] + list(args),
                 kwargs=kwargs,
             )
@@ -61,20 +83,20 @@ class Proxy:
 
         return self.node.graph.add(
             value=value,
-            target="__getitem__",
+            target=operator.getitem,
             args=[self.node, key],
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
         item_proxy = self[key]
 
-        update = item_proxy.node.__class__.update
-
-        update(item_proxy.node.proxy_value, item_proxy.node.prepare_proxy_values(value))
+        Proxy.proxy_update(
+            item_proxy.node.proxy_value, item_proxy.node.prepare_proxy_values(value)
+        )
 
         item_proxy.node.graph.add(
             value=item_proxy.node.proxy_value,
-            target=update,
+            target=Proxy.proxy_update,
             args=[item_proxy.node, value],
         )
 
@@ -103,7 +125,7 @@ class Proxy:
 
         return self.node.graph.add(
             value=value,
-            target="__add__",
+            target=operator.add,
             args=[self.node, other],
         )
 
@@ -112,7 +134,7 @@ class Proxy:
 
         return self.node.graph.add(
             value=value,
-            target="__sub__",
+            target=operator.sub,
             args=[self.node, other],
         )
 
@@ -130,7 +152,16 @@ class Proxy:
 
         return self.node.graph.add(
             value=value,
-            target="__mul__",
+            target=operator.mul,
+            args=[self.node, other],
+        )
+
+    def __matmul__(self, other: Union[Proxy, Any]) -> Proxy:
+        value = self.node.proxy_value @ self.node.prepare_proxy_values(other)
+
+        return self.node.graph.add(
+            value=value,
+            target=operator.matmul,
             args=[self.node, other],
         )
 
@@ -139,7 +170,7 @@ class Proxy:
 
         return self.node.graph.add(
             value=value,
-            target="__truediv__",
+            target=operator.truediv,
             args=[self.node, other],
         )
 
@@ -207,9 +238,7 @@ def proxy_wrapper(fn) -> None:
                 **node.prepare_proxy_values(kwargs),
             )
 
-            return node.graph.add(
-                value=value, target=fn, args=args, kwargs=kwargs
-            )
+            return node.graph.add(value=value, target=fn, args=args, kwargs=kwargs)
 
         else:
             return fn(*args, **kwargs)

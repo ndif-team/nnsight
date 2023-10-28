@@ -199,7 +199,7 @@ class Graph:
         Raises:
             ValueError: If more than one "rtn" or "module" nodes are added to the graph.
         """
-        target_name = Node.target_name(target)
+        target_name = target if isinstance(target, str) else target.__name__
 
         if target_name not in self.name_idx:
             self.name_idx[target_name] = 0

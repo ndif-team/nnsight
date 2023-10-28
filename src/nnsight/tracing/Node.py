@@ -29,32 +29,6 @@ class Node:
         _proxy_device (torch.device): desc
     """
 
-    @staticmethod
-    def update(value1, value2) -> None:
-        """Updates Tensor values with other Tensor values.
-
-        Args:
-            value1 (_type_): _description_
-            value2 (_type_): _description_
-        """
-        if isinstance(value1, torch.Tensor):
-            value1[:] = value2
-        elif isinstance(value1, list) or isinstance(value1, tuple):
-            for value_idx in range(len(value1)):
-                Node.update(value1[value_idx], value2[value_idx])
-        elif isinstance(value1, dict):
-            for key in value1:
-                Node.update(value1[key], value2[key])
-
-    @staticmethod
-    def target_name(target) -> str:
-        if isinstance(target, str):
-            name = target
-        elif callable(target):
-            name = target.__name__
-
-        return name
-
     def __init__(
         self,
         name: str,
@@ -187,17 +161,8 @@ class Node:
         # Prepare arguments.
         args, kwargs = self.prepare_inputs()
 
-        # If target is a string, it must be a method attribute on the first argument object.
-        if isinstance(self.target, str):
-            obj, *args = args
-
-            target = getattr(obj, self.target)
-        # Otherwise it must be the function itself.
-        else:
-            target = self.target
-
         # Call the target to get value.
-        output = target(*args, **kwargs)
+        output = self.target(*args, **kwargs)
 
         self.set_value(output)
 
