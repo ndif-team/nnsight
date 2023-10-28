@@ -103,7 +103,7 @@ class LanguageModel(AbstractModel):
             *args, **prepared_inputs.to(self.local_model.device), **kwargs
         )
 
-    def _generation(self, prepared_inputs, *args, **kwargs) -> Any:
+    def _generation(self, prepared_inputs, *args, max_new_tokens:int=1, **kwargs) -> Any:
         return self.local_model.generate(
-            *args, **prepared_inputs.to(self.local_model.device), **kwargs
+            *args, **prepared_inputs.to(self.local_model.device), max_new_tokens=max_new_tokens, **kwargs
         )
