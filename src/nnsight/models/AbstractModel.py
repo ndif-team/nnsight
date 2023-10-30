@@ -16,7 +16,7 @@ from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
 from ..intervention import HookModel, intervene
 from ..logger import logger
-from ..Module import Module
+from ..module import Module
 from ..patching import Patcher
 from ..tracing.Graph import Graph
 
@@ -33,7 +33,6 @@ class AbstractModel(ABC):
         custom_model (bool): If the value passed to repoid_path_model was a custom model.
         meta_model (nnsight.Module): Version of the root model where all parameters and tensors are on the 'meta'
             device. All modules are wrapped in nnsight.Module adding interleaving operation functionality.
-        tokenizer (_typ_): Tokenizer.
         local_model (torch.nn.Module): Locally loaded and dispatched model. Only loaded and dispatched on first use.
             This is the actual model that is ran with hooks added to it to enter the intervention graph.
     """
@@ -43,7 +42,6 @@ class AbstractModel(ABC):
         repoid_path_model: Union[str, torch.nn.Module],
         *args,
         alter: bool = True,
-        tokenizer=None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -55,7 +53,6 @@ class AbstractModel(ABC):
         self.dispatched = False
         self.custom_model = False
         self.meta_model: Module = None
-        self.tokenizer = tokenizer
         self.local_model: torch.nn.Module = None
         self.edits: List[Edit] = list()
 
@@ -189,7 +186,7 @@ class AbstractModel(ABC):
 
             increment_hook.remove()
 
-            self.local_model.eval() 
+            self.local_model.eval()
 
             logger.debug(f"Completed `{self.repoid_path_clsname}`")
 
@@ -300,7 +297,7 @@ class AbstractModel(ABC):
     @abstractmethod
     def _load_meta(self, repoid_or_path: str, *args, **kwargs) -> torch.nn.Module:
         """
-        Abstract method to initialize meta_model and tokenizer. To be implemented by inheritors.
+        Abstract method to initialize meta_model. To be implemented by inheritors.
 
         Args:
             repoid_or_path (str): Huggingface repo id or path to checkpoint.

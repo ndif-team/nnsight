@@ -33,9 +33,9 @@ class LanguageModel(AbstractModel):
 
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, tokenizer=None, **kwargs) -> None:
         self.config: PretrainedConfig = None
-        self.tokenizer: PreTrainedTokenizer = None
+        self.tokenizer: PreTrainedTokenizer = tokenizer
         self.meta_model: PreTrainedModel = None
         self.local_model: PreTrainedModel = None
 

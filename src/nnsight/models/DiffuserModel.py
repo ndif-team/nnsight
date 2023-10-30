@@ -1,20 +1,21 @@
 from __future__ import annotations
+import collections
 
-from typing import Any, List, Union
+from typing import Any, Dict, List, Union
 
 import diffusers
 import torch
 from diffusers import AutoencoderKL, SchedulerMixin, UNet2DConditionModel
 from PIL import Image
 from torch.utils.hooks import RemovableHandle
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import BatchEncoding, CLIPTextModel, CLIPTokenizer
 
 from .AbstractModel import AbstractModel
 
 
 class Diffuser(torch.nn.Module):
     def __init__(
-        self, repoid_or_path, tokenizer: CLIPTokenizer, *args, **kwargs
+        self, repoid_or_path, tokenizer: CLIPTokenizer, *args, device="meta", **kwargs
     ) -> None:
         super().__init__()
 
@@ -124,10 +125,10 @@ class Diffuser(torch.nn.Module):
 
 
 class DiffuserModel(AbstractModel):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, tokenizer=None, **kwargs) -> None:
         self.local_model: Diffuser = None
         self.meta_model: Diffuser = None
-        self.tokenizer: CLIPTokenizer = None
+        self.tokenizer: CLIPTokenizer = tokenizer
 
         super().__init__(*args, **kwargs)
 
@@ -135,13 +136,20 @@ class DiffuserModel(AbstractModel):
         return self.local_model.unet.register_forward_hook(hook)
 
     def _load_meta(
-        self, repoid_or_path, *args, device="cpu", **kwargs
+        self, repoid_or_path, *args, device=None, **kwargs
     ) -> torch.nn.Module:
         self.tokenizer = CLIPTokenizer.from_pretrained(
             repoid_or_path, *args, **kwargs, subfolder="tokenizer"
         )
 
-        return Diffuser(repoid_or_path, self.tokenizer, *args, **kwargs)
+        return Diffuser(
+            repoid_or_path,
+            self.tokenizer,
+            *args,
+            device="meta",
+            low_cpu_mem_usage=False,
+            **kwargs,
+        )
 
     def _load_local(
         self, repoid_or_path, *args, device="cpu", **kwargs
@@ -159,14 +167,32 @@ class DiffuserModel(AbstractModel):
 
         latents = self.meta_model.get_initial_latents(n_imgs, img_size, len(inputs))
 
-        text_tokens = self.meta_model.text_tokenize(inputs)
+        if isinstance(inputs, collections.abc.Mapping):
+            return BatchEncoding(inputs)
 
-        return text_tokens, latents
+        if isinstance(inputs, str) or (
+            isinstance(inputs, list) and isinstance(inputs[0], int)
+        ):
+            inputs = [inputs]
+
+        if isinstance(inputs, torch.Tensor) and inputs.ndim == 1:
+            inputs = inputs.unsqueeze(0)
+
+        if not isinstance(inputs[0], str):
+            inputs = [{"input_ids": ids} for ids in inputs]
+
+            return self.tokenizer.pad(inputs, return_tensors="pt"), latents
+
+        return self.tokenizer(
+            inputs,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+        ), latents
 
     def _scan(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
-        text_tokens, latents = self._prepare_inputs(
-            inputs, n_imgs=n_imgs, img_size=img_size
-        )
+        text_tokens, latents = inputs
 
         text_embeddings = self.meta_model.get_text_embeddings(text_tokens, n_imgs)
 
@@ -181,9 +207,7 @@ class DiffuserModel(AbstractModel):
         self.meta_model.vae.decode(latents)
 
     def _run_local(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
-        text_tokens, latents = self._prepare_inputs(
-            inputs, n_imgs=n_imgs, img_size=img_size
-        )
+        text_tokens, latents = inputs
 
         text_embeddings = self.meta_model.get_text_embeddings(text_tokens, n_imgs)
 
@@ -205,9 +229,7 @@ class DiffuserModel(AbstractModel):
         img_size=512,
         **kwargs,
     ) -> None:
-        text_tokens, latents = self._prepare_inputs(
-            inputs, n_imgs=n_imgs, img_size=img_size
-        )
+        text_tokens, latents = inputs
 
         text_embeddings = self.local_model.get_text_embeddings(text_tokens, n_imgs)
 
@@ -232,6 +254,12 @@ class DiffuserModel(AbstractModel):
 
         return self.local_model.vae.decode(latents).sample
 
+    def _batched_inputs(self, prepared_inputs: BatchEncoding) -> torch.Tensor:
+        return prepared_inputs[0]["input_ids"]
+
+    def _example_input(self) -> Dict[str, torch.Tensor]:
+        return "_"
+
     def to_image(self, latents) -> List[Image.Image]:
         """
         Function to convert latents to images
@@ -243,6 +271,3 @@ class DiffuserModel(AbstractModel):
         pil_images = [Image.fromarray(image) for image in images]
 
         return pil_images
-
-    def _example_input(self) -> None:
-        return "_"

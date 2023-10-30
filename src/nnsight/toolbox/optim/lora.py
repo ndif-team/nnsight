@@ -1,7 +1,7 @@
 from typing import Any
 import torch
 
-from ...Module import Module
+from ...module import Module
 from . import Optimization
 
 

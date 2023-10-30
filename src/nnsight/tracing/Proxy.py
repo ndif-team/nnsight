@@ -22,12 +22,12 @@ class Proxy:
     """
 
     @staticmethod
-    def proxy_update(value1, value2) -> None:
+    def proxy_update(value1: Any, value2: Any) -> None:
         """Updates Tensor values with other Tensor values.
 
         Args:
-            value1 (_type_): _description_
-            value2 (_type_): _description_
+            value1 (Any): _description_
+            value2 (Any): _description_
         """
         if isinstance(value1, torch.Tensor):
             value1[:] = value2
@@ -47,10 +47,10 @@ class Proxy:
 
     def __call__(self, *args, **kwargs) -> Proxy:
         """
-        Calling a Proxy object normally just creates a '__call__' operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
+        Calling a Proxy object normally just creates a Proxy.proxy_call operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
 
         Returns:
-            Proxy: New '__call__' proxy.
+            Proxy: New call proxy.
         """
         # If calling a method (not a sub-module) on the main module of this graph,
         # we want to trace into that method.
