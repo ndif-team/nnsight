@@ -204,6 +204,19 @@ class Proxy:
             kwargs=kwargs,
         )
 
+    def item(self):
+        proxy = self.node.graph.add(
+            value=self.node.proxy_value,
+            target=getattr,
+            args=[self.node, "item"],
+        )
+
+        return self.node.graph.add(
+            value=self.node.proxy_value,
+            target=Proxy.proxy_call,
+            args=[proxy.node],
+        )
+
 
 from functools import wraps
 
