@@ -128,3 +128,22 @@ DEFAULT_PATCHER.add(
 
 
 DEFAULT_PATCHER.__enter__()
+
+from torch._meta_registrations import register_meta, aten, global_decomposition_table, _meta_lib_dont_use_me_use_register_meta
+
+def activate_recent_meta():
+    op_overload, fn = list(global_decomposition_table['meta'].items())[-1]
+    op_overload.py_impl(torch._C.DispatchKey.Meta)(fn)
+    _meta_lib_dont_use_me_use_register_meta.impl(op_overload, fn)
+
+
+
+@register_meta(aten._local_scalar_dense)
+def local_scalar_dense_meta(A):
+
+    return 0
+
+activate_recent_meta()
+
+
+
