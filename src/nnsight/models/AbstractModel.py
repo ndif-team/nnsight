@@ -28,8 +28,9 @@ class AbstractModel(ABC):
         repoid_path_clsname (str): Hugging face repo id of model to load, path to checkpoint, or class name of custom model.
         args (List[Any]): Positional arguments used to initialize model.
         kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
-        alter (bool): If to check for alterations and apply them to the model.
+        alter (bool): If to check for alterations and apply them to the model. Defaults to True.
         dispatched (bool): If the local_model has bee loaded yet.
+        dispatch (bool): If to load and dispatch model on init. Defaults to False.
         custom_model (bool): If the value passed to repoid_path_model was a custom model.
         meta_model (nnsight.Module): Version of the root model where all parameters and tensors are on the 'meta'
             device. All modules are wrapped in nnsight.Module adding interleaving operation functionality.
@@ -41,6 +42,7 @@ class AbstractModel(ABC):
         self,
         repoid_path_model: Union[str, torch.nn.Module],
         *args,
+        dispatch: bool = False,
         alter: bool = True,
         **kwargs,
     ) -> None:
@@ -50,6 +52,7 @@ class AbstractModel(ABC):
         self.args = args
         self.kwargs = kwargs
         self.alter = alter
+        self.dispatch = dispatch
         self.dispatched = False
         self.custom_model = False
         self.meta_model: Module = None
@@ -91,6 +94,18 @@ class AbstractModel(ABC):
 
         # Run initial dummy string to populate Module shapes, dtypes etc
         self._scan(self._prepare_inputs(self._example_input()))
+
+        if not self.dispatch:
+            with self.alteration() if self.alter else Patcher():
+                self.local_model = self._load_local(
+                    self.repoid_path_clsname, *self.args, **self.kwargs
+                )
+
+                # By default, all params should be frozen.
+                for param in self.local_model.parameters():
+                    param.requires_grad = False
+
+            self.dispatched = True
 
         logger.debug(f"Initialized `{self.repoid_path_clsname}`")
 
