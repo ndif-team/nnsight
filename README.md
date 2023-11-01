@@ -1,4 +1,6 @@
-# nnsight API
+# nnsight
+
+![PyPI - Version](https://img.shields.io/pypi/v/nnsight)
 
 The `nnsight/` directory contains the nnsight package for interpreting and manipulating the internals of deep learning models.
 

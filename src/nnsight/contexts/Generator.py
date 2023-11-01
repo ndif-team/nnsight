@@ -10,20 +10,28 @@ from .Tracer import Tracer
 
 
 class Generator(Tracer):
-    """_summary_
+    """The Generator Tracer object manages the intervention tracing for a given model's _generation method.
+
+    Examples:
+
+    Below example shows accessing the input and output of a gpt2 module, saving them during execution, and printing the resulting values after execution:
+
+    >>> with model.generate() as generator:
+    >>>    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+    >>>        hidden_states = model.lm_head.input.save()
+    >>>        logits = model.lm_head.output.save()
+    >>> print(hidden_states.value)
+    >>> print(logits.value)
+
+    Below example shows accessing the output of a gpt2 module and setting the values to zero:
+
+    >>> with model.generate() as generator:
+    >>>    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+    >>>        model.transformer.h[0].output[0] = 0
 
     Attributes:
-        model (Model): Model object this is a generator for.
-        blocking (bool): If when using device_map='server', block and wait form responses. Otherwise have to manually
-            request a response.
-        args (List[Any]): Arguments for calling the model.
-        kwargs (Dict[str,Any]): Keyword arguments for calling the model.
-        generation_idx (int): Keeps track of what iteration of generation to do interventions at. Used by the Module class
-            to specify generation_idx for interventions and changed by the Invoker class using invoker.next().
-        batch_size (int): Current size of invocation batch. To be used by Module node creation
-        prompts (List[str]): Keeps track of prompts used by invokers.
-        graph (Graph): Graph of all user intervention operations.
-        output (??): desc
+        server (bool): If to use the remote NDIF server for execution of model and computation graph. (Assuming it's running/working)
+        blocking (bool): If when using the server option, to hang until job completion or return information you can use to retrieve the job result.
     """
 
     def __init__(
@@ -49,9 +57,14 @@ class Generator(Tracer):
             self.run_local()
 
     def run_local(self):
+        """Runs the local_model using it's _generation method."""
         # Run the model and store the output.
         self.output = self.model(
-            self.model._generation, self.batched_input, self.graph, *self.args, **self.kwargs
+            self.model._generation,
+            self.batched_input,
+            self.graph,
+            *self.args,
+            **self.kwargs,
         )
 
     def run_server(self):
@@ -108,4 +121,3 @@ class Generator(Tracer):
 
     def invoke(self, input, *args, **kwargs) -> Invoker:
         return Invoker(self, input, *args, **kwargs)
-    

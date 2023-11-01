@@ -1,12 +1,27 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict
+from contextlib import AbstractContextManager
+from typing import Dict
 
 from ..tracing.Proxy import Proxy
 from .Tracer import Tracer
 
 
-class Invoker:
+class Invoker(AbstractContextManager):
+    """An Invoker is meant to work in tandem with a :class:`nnsight.contexts.Tracer.Tracer` to enter input and manage intervention tracing.
+
+    Attributes:
+        tracer (nnsight.contexts.Tracer.Tracer): Tracer object to enter input and manage context.
+        input (Any): Initially entered input, then post-processed input from model's _prepare_inputs method.
+        scan (bool): If to use a 'meta' version of the  post-processed input to run through the model using it's _scan method,
+            in order to update the potential sizes/dtypes of all module's inputs/outputs as well as validate things work correctly.
+            Scanning is not free computation wise so you may want to turn this to false when running in a loop.
+            When making interventions, you made get shape errors if scan is false as it validates operations based on shapes so
+            for looped calls where shapes are consistent, you may want to have scan=True for the first loop. Defaults to True.
+        args (List[Any]): Positional arguments passed to the model's _prepare_inputs method and _scan method.
+        kwargs (Dict[str,Any]): Keyword arguments passed to the model's _prepare_inputs method and _scan method.
+    """
+
     def __init__(
         self,
         tracer: Tracer,
@@ -22,6 +37,17 @@ class Invoker:
         self.kwargs = kwargs
 
     def __enter__(self) -> Invoker:
+        """Enters a new invocation context with a given input.
+
+        Sets the generation_idx to 0.
+        Calls the model's _prepare_inputs method using the input and other arguments.
+        If scan is True, uses the model's _scan method to update and validate module inputs/outputs.
+        Gets a batched version of the post processed input using the model's _batched_inputs method to update the Tracer's
+            current batch_size and batched_input.
+
+        Returns:
+            Invoker: _description_
+        """
         # Were in a new invocation so set generation_idx to 0,
         self.tracer.generation_idx = 0
 
@@ -47,6 +73,11 @@ class Invoker:
         pass
 
     def next(self, increment: int = 1) -> None:
+        """Designates subsequent interventions should be applied to the next generation for multi-iteration generation runs.
+
+        Args:
+            increment (int): How many generation_idx to increment at once. Defaults to 1.
+        """
         # .next() increases which generation idx the interventions happen.
         self.tracer.generation_idx += increment
 
@@ -65,7 +96,7 @@ class Invoker:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]
 
         Returns:
-            Dict[str, Proxy]: _description_
+            Dict[str, Proxy]: Dictionary of all modules saved, keyed by their module_path.
         """
         result = {}
 

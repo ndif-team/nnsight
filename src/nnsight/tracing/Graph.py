@@ -14,14 +14,14 @@ from .Proxy import Proxy, proxy_wrapper
 class Graph:
     """Represents a computation graph involving a torch.nn.module.
 
-    Reserve target names:
-        'module' : There should only be the single root module as a node in the graph for tracing . Added on __init__ and when compiling,
-            the node's value is set to to be whatever module that is being interleaved with this computation graph.
-        'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names.
-            which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph
-            as entry points to kick of the execution of the graph.
-        'rtn' : Should only be one 'rtn' target named node as this is what is used.
-        'null' : Null nodes never get executed and therefore their listeners never get destroyed.
+    Reserved target names.
+    'module' : There should only be the single root module as a node in the graph for tracing . Added on __init__ and when compiling,
+        the node's value is set to to be whatever module that is being interleaved with this computation graph.
+    'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names.
+        which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph
+        as entry points to kick of the execution of the graph.
+    'rtn' : Should only be one 'rtn' target named node as this is what is used.
+    'null' : Null nodes never get executed and therefore their listeners never get destroyed.
 
     Attributes:
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.

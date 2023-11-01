@@ -1,0 +1,6 @@
+nnsight
+pydata_sphinx_theme
+sphinx
+sphinx_charts
+sphinx-copybutton
+plotly

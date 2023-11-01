@@ -123,11 +123,11 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     If exists, value is a list of node names to iterate through.
     Node args for argument type nodes should be [module_path, batch_size, batch_start]
     Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
-        only batch indexed tensors relevant to this intervention node. Sets the value of a node
-        using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
-        subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
-        tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
-        to the output from downstream intervention nodes in the graph.
+    only batch indexed tensors relevant to this intervention node. Sets the value of a node
+    using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
+    subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
+    tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
+    to the output from downstream intervention nodes in the graph.
 
     Args:
         activations (Any): Either the inputs or outputs of a torch module.

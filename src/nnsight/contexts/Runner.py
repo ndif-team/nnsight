@@ -10,6 +10,21 @@ if TYPE_CHECKING:
 
 
 class Runner(Invoker, Tracer):
+    """The Runner Tracer object manages the intervention tracing for a given model's _run_local method. Also acts as an invoker.
+
+    Example:
+
+        A simple entering of a runner context on a language model, and running a prompt with no interventions:
+
+        >>> with model.forward('The Eiffel Tower is in the city of') as invoker:
+        >>>         pass
+        >>> print(invoker.output)
+
+    Args:
+        Invoker (_type_): _description_
+        Tracer (_type_): _description_
+    """
+
     def __init__(
         self,
         model: AbstractModel,
