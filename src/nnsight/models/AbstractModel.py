@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from abc import ABC, abstractmethod
+import gc
 from typing import Any, Callable, Dict, List, Union
 
 import accelerate
@@ -204,6 +205,9 @@ class AbstractModel(ABC):
             self.local_model.eval()
 
             logger.debug(f"Completed `{self.repoid_path_clsname}`")
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
         return output
 
