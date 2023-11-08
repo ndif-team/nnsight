@@ -64,25 +64,14 @@ class Proxy:
             return value
         # Otherwise we just want to add a node saying we wish to call this module.
         else:
-            value = self.node.proxy_value(
-                *self.node.prepare_proxy_values(args),
-                **self.node.prepare_proxy_values(kwargs),
-            )
-
             return self.node.graph.add(
-                value=value,
                 target=Proxy.proxy_call,
                 args=[self.node] + list(args),
                 kwargs=kwargs,
             )
 
     def __getitem__(self, key: Union[Proxy, Any]) -> Proxy:
-        key = self.node.prepare_proxy_values(key)
-
-        value = self.node.proxy_value[key]
-
         return self.node.graph.add(
-            value=value,
             target=operator.getitem,
             args=[self.node, key],
         )
@@ -90,86 +79,55 @@ class Proxy:
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
         item_proxy = self[key]
 
-        Proxy.proxy_update(
-            item_proxy.node.proxy_value, item_proxy.node.prepare_proxy_values(value)
-        )
-
         item_proxy.node.graph.add(
-            value=item_proxy.node.proxy_value,
             target=Proxy.proxy_update,
             args=[item_proxy.node, value],
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
-        key = self.node.prepare_proxy_values(key)
-
-        value = util.fetch_attr(self.node.proxy_value, key)
-
         return self.node.graph.add(
-            value=value,
             target=util.fetch_attr,
             args=[self.node, key],
         )
 
     def __len__(self) -> Proxy:
-        value = len(self.node.proxy_value)
-
         return self.node.graph.add(
-            value=value,
             target=len,
             args=[self.node],
         )
 
     def __add__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value + self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
             target=operator.add,
             args=[self.node, other],
         )
 
     def __sub__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value - self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
             target=operator.sub,
             args=[self.node, other],
         )
 
     def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value ** self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
             target=pow,
             args=[self.node, other],
         )
 
     def __mul__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value * self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
             target=operator.mul,
             args=[self.node, other],
         )
 
     def __matmul__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value @ self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
             target=operator.matmul,
             args=[self.node, other],
         )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value / self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
             target=operator.truediv,
             args=[self.node, other],
         )
@@ -192,13 +150,7 @@ class Proxy:
 
         self: Proxy = args[0]
 
-        value = orig_method(
-            *self.node.prepare_proxy_values(args),
-            **self.node.prepare_proxy_values(kwargs),
-        )
-
         return self.node.graph.add(
-            value=value,
             target=orig_method,
             args=args,
             kwargs=kwargs,

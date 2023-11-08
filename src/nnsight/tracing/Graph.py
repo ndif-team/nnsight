@@ -24,6 +24,7 @@ class Graph:
     'null' : Null nodes never get executed and therefore their listeners never get destroyed.
 
     Attributes:
+        validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
         nodes (Dict[str, Node]): Mapping of node name to node.
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
@@ -137,9 +138,13 @@ class Graph:
         return args
 
     def __init__(
-        self, module: torch.nn.Module, proxy_class: Type[Proxy] = Proxy
+        self,
+        module: torch.nn.Module,
+        proxy_class: Type[Proxy] = Proxy,
+        validate: bool = True,
     ) -> None:
         self.proxy_class = proxy_class
+        self.validate = validate
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
@@ -178,8 +183,8 @@ class Graph:
 
     def add(
         self,
-        value: Any,
         target: Union[Callable, str],
+        value: Any = inspect._empty,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
         name: str = None,
@@ -199,6 +204,17 @@ class Graph:
         Raises:
             ValueError: If more than one "rtn" or "module" nodes are added to the graph.
         """
+
+        # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.
+        if self.validate and value is inspect._empty:
+            _args = args if args is not None else []
+            _kwargs = kwargs if kwargs is not None else {}
+
+            value = target(
+                *Node.prepare_proxy_values(_args),
+                **Node.prepare_proxy_values(_kwargs),
+            )
+
         target_name = target if isinstance(target, str) else target.__name__
 
         if target_name not in self.name_idx:
