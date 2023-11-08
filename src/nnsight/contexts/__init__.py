@@ -16,12 +16,9 @@ On entering the invoker context with some input, the invoker leverages the model
 Using the prepared inputs, it updates it's Tracer object with a batched version of the input, the size of the batched input, and the current generation idx.
 It also runs a 'meta' version of the input through the model's meta_model. This updates the sizes/dtypes of all of the Module's inputs and outputs based on the characteristics of the input.
 
-`nnsight` comes with two types of Tracers, `nnsight.contexts.Generator.Generator` and `nnsight.contexts.Runner.Runner`
+`nnsight` comes with an implementation of a Tracer which can access a models ._generation or ._forward method.
 
-The `nnsight.contexts.Generator.Generator` Tracer is the more feature rich context manager built for multi-iteration and multi-input executions of the model.
-Each generator context uses invoker contexts within to add new inputs to the eventual execution like `generator.invoke(...)`
-The Generator object also has logic to perform the execution of the traced computation graph on NDIF remote servers (assuming they are running!)
-
-The `nnsight.contexts.Runner.Runner` Tracer is a simpler context manager that is both a Tracer as well as an Invoker. Meaning you pass input directly to the Runner object and on it's contextual exit, executes the model and computation graph.
-
+The `nnsight.contexts.Runner.Runner` Tracer is a feature rich context manager built for multi-iteration and multi-input executions of the model.
+Each Runner context uses invoker contexts within to add new inputs to the eventual execution like `generator.invoke(...)`
+The Runner object also has logic to perform the execution of the traced computation graph on NDIF remote servers (assuming they are running!)
 """

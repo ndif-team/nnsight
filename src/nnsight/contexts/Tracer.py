@@ -4,6 +4,8 @@ from abc import abstractmethod
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, List
 
+import torch
+
 from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
 
@@ -29,6 +31,7 @@ class Tracer(AbstractContextManager):
         self,
         model: "AbstractModel",
         *args,
+        validate:bool = True,
         **kwargs,
     ) -> None:
         self.model = model
@@ -36,7 +39,7 @@ class Tracer(AbstractContextManager):
         self.args = args
         self.kwargs = kwargs
 
-        self.graph = Graph(self.model.meta_model, proxy_class=InterventionProxy)
+        self.graph = Graph(self.model.meta_model, proxy_class=InterventionProxy, validate=validate)
 
         self.batch_size: int = 0
         self.generation_idx: int = 0
@@ -46,7 +49,8 @@ class Tracer(AbstractContextManager):
 
         # Modules need to know about the current Tracer to create the correct proxies.
         for name, module in self.model.meta_model.named_modules():
-            module.tracer = self
+            if not isinstance(module, torch.nn.ModuleList):
+                module.tracer = self
 
     @abstractmethod
     def __enter__(self) -> Tracer:

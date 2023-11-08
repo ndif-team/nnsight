@@ -82,7 +82,7 @@ class Module(torch.nn.Module):
         if proxy:
             module_proxy = getattr(self.tracer.graph.module_proxy, self.module_path)
 
-            return module_proxy.forward(*args, **kwds)
+            return module_proxy(*args, **kwds)
 
         return super().__call__(*args, **kwds)
 

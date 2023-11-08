@@ -16,40 +16,39 @@ The wrapping of the underlying model is further encapsulated by both printing ou
 Printing out the wrapped module demonstrates this like:
 
 >>> print(model)
-
-GPT2LMHeadModel(
-  (transformer): GPT2Model(
-    (wte): Embedding(50257, 768)
-    (wpe): Embedding(1024, 768)
-    (drop): Dropout(p=0.1, inplace=False)
-    (h): ModuleList(
-      (0-11): 12 x GPT2Block(
-        (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
-        (attn): GPT2Attention(
-          (c_attn): Conv1D()
-          (c_proj): Conv1D()
-          (attn_dropout): Dropout(p=0.1, inplace=False)
-          (resid_dropout): Dropout(p=0.1, inplace=False)
-        )
-        (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
-        (mlp): GPT2MLP(
-          (c_fc): Conv1D()
-          (c_proj): Conv1D()
-          (act): NewGELUActivation()
-          (dropout): Dropout(p=0.1, inplace=False)
-        )
-      )
-    )
-    (ln_f): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
-  )
-  (lm_head): Linear(in_features=768, out_features=50257, bias=False)
-)
+>>> GPT2LMHeadModel(
+>>>   (transformer): GPT2Model(
+>>>     (wte): Embedding(50257, 768)
+>>>     (wpe): Embedding(1024, 768)
+>>>     (drop): Dropout(p=0.1, inplace=False)
+>>>     (h): ModuleList(
+>>>       (0-11): 12 x GPT2Block(
+>>>         (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+>>>         (attn): GPT2Attention(
+>>>           (c_attn): Conv1D()
+>>>           (c_proj): Conv1D()
+>>>           (attn_dropout): Dropout(p=0.1, inplace=False)
+>>>           (resid_dropout): Dropout(p=0.1, inplace=False)
+>>>         )
+>>>         (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+>>>         (mlp): GPT2MLP(
+>>>           (c_fc): Conv1D()
+>>>           (c_proj): Conv1D()
+>>>           (act): NewGELUActivation()
+>>>           (dropout): Dropout(p=0.1, inplace=False)
+>>>         )
+>>>       )
+>>>     )
+>>>     (ln_f): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+>>>   )
+>>>   (lm_head): Linear(in_features=768, out_features=50257, bias=False)
+>>> )
 
 The main two methods to interact and run the model are ``.generate(...)`` and ``.forward(...)``
 
 Both return context manager objects which when entered, track operations you perform on the inputs and outputs of modules.
 
-The generate context is meant for multi-iteration, and multi-input inference runs.
+The generate context is meant for multi-iteration, runs.
 Arguments passed to generate determine the generation behavior, in this case to generate three tokens.
 Within a generation context, invoker sub-contexts are entered using ``generator.invoke``. This is where input (or batch of inputs) to the model is accepted, and batched with other invocations.
 It's in these contexts where operations on inputs and outputs of modules are tracked and prepared for execution.
@@ -66,10 +65,11 @@ We also perform a ``.save()`` operation on the output of the lm_head module, the
 >>> print(logits2.value)
 >>> print(runner.output)
 
-The forward, runner context is meant for direct input to the underlying model (or module) in either inference or training mode where gradients are collected.
+The forward, runner context is meant for direct input to the underlying model (or module).
 
->>> model.forward("The Eiffel Tower is in the city of", inference=True) as runner:
->>>     logits = model.lm_head.output.save()
+>>> model.forward(inference=True) as runner:
+>>>     runner.invoke("The Eiffel Tower is in the city of") as invoker:
+>>>         logits = model.lm_head.output.save()
 >>> print(logits.value)
 
 See :mod:`nnsight.contexts`

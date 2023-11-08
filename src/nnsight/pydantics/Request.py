@@ -22,11 +22,12 @@ class RequestModel(BaseModel):
     model_name: str
     prompts: List[str]
     intervention_graph: Union[Graph, bytes, Dict[str, NodeModel]]
+    generation: bool
     # Edits
     # altered
 
     id: str = None
-    recieved: datetime = None
+    received: datetime = None
     blocking: bool = False
 
     @field_serializer("intervention_graph")

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import copy
-from abc import ABC, abstractmethod
 import gc
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Union
 
 import accelerate
@@ -10,7 +10,6 @@ import torch
 from torch.utils.hooks import RemovableHandle
 
 from ..alteration import REPOID_TO_ALTERATION
-from ..contexts.Generator import Generator
 from ..contexts.Runner import Runner
 from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
@@ -66,7 +65,7 @@ class AbstractModel(ABC):
             self.dispatched = True
             self.local_model = repoid_path_model
 
-        logger.debug(f"Initializing `{self.repoid_path_clsname}`...")
+        logger.info(f"Initializing `{self.repoid_path_clsname}`...")
 
         # If alter and alteration exist, use alteration patcher context while loading module.
         with self.alteration() if self.alter else Patcher():
@@ -108,7 +107,7 @@ class AbstractModel(ABC):
 
             self.dispatched = True
 
-        logger.debug(f"Initialized `{self.repoid_path_clsname}`")
+        logger.info(f"Initialized `{self.repoid_path_clsname}`")
 
     def __repr__(self) -> str:
         return repr(self.meta_model)
@@ -179,7 +178,7 @@ class AbstractModel(ABC):
                 ]
             )
 
-            logger.debug(f"Running `{self.repoid_path_clsname}`...")
+            logger.info(f"Running `{self.repoid_path_clsname}`...")
 
             graph.compile(self.local_model)
 
@@ -204,26 +203,26 @@ class AbstractModel(ABC):
 
             self.local_model.eval()
 
-            logger.debug(f"Completed `{self.repoid_path_clsname}`")
+            logger.info(f"Completed `{self.repoid_path_clsname}`")
 
             gc.collect()
             torch.cuda.empty_cache()
 
         return output
 
-    def generate(self, *args, **kwargs) -> Generator:
-        """Returns a Generator context for this model.
+    def generate(self, *args, **kwargs) -> Runner:
+        """Returns a Runner context for this model's _generation method.
 
-        Generator contexts are used to trace and interleave operations on the model's computation graph over some iterative generation process.
+        Runner contexts are used to trace and interleave operations on the model's computation graph.
 
         Arguments passed to ``.generate()`` are passed downstream to the model specific _generation method.
 
-        Generator's are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
+        Runners are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
 
-        The output of the generation is ultimately saved in the generator's ``.output`` attribute.
+        The output of the run is ultimately saved in the generator's ``.output`` attribute.
 
         Returns:
-            Generator: Generator.
+            Runner: Runner.
 
         Examples:
 
@@ -236,32 +235,38 @@ class AbstractModel(ABC):
 
             Keyword arguments like 'max_new_tokens' are model specific and in this case limits the amount of tokens to predict to one.
 
-            See the Generator docs for more information.
+            See the Runner docs for more information.
 
         """
-        return Generator(self, *args, **kwargs)
+        return Runner(self, *args, **kwargs, generation=True)
 
-    def forward(self, inputs, *args, **kwargs) -> Runner:
-        """Returns a Runner context for this model.
+    def forward(self, *args, **kwargs) -> Runner:
+        """Returns a Runner context for this model's _forward method.
 
-        Runner contexts are used to trace and interleave operations on the model's computation graph over a single input directly to the underlying model.
+        Runner contexts are used to trace and interleave operations on the model's computation graph.
 
-        Arguments passed to ``.forward()`` are passed downstream to the model specific _run_local method.
+        Arguments passed to ``.forward()`` are passed downstream to the model specific _forward method.
 
-        The output of the runner is ultimately saved in the runner's ``.output`` attribute.
+        Runners are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
+
+        The output of the run is ultimately saved in the runner's ``.output`` attribute.
 
         Returns:
             Runner: Runner.
 
-        Example:
+        Examples:
 
-            A simple entering of a runner context on a language model, and running a prompt with no interventions:
+            A simple entering of a forward context on a language model, and running a prompt with no interventions:
 
-            >>> with model.forward('The Eiffel Tower is in the city of') as invoker:
+            >>> with model.forward() as runner:
+            >>>     with runner.invoke('The Eiffel Tower is in the city of') as invoker:
             >>>         pass
-            >>> print(invoker.output)
+            >>> print(runner.output)
+
+            See the Runner docs for more information.
+
         """
-        return Runner(self, inputs, *args, **kwargs)
+        return Runner(self, *args, **kwargs, generation=False)
 
     def alteration(self) -> Patcher:
         return REPOID_TO_ALTERATION.get(self.repoid_path_clsname, Patcher())
@@ -332,7 +337,7 @@ class AbstractModel(ABC):
         Abstract method to initialize and dispatch the local_model. To be implemented by inheritors.
 
         Args:
-            repoid_or_path (str): Huggigface repo id or path to checkpoint.
+            repoid_or_path (str): Huggingface repo id or path to checkpoint.
 
         Returns:
             torch.nn.Module: Local version of model
@@ -352,7 +357,7 @@ class AbstractModel(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def _run_local(self, inputs, *args, **kwargs) -> Any:
+    def _forward(self, inputs, *args, **kwargs) -> Any:
         """
         Abstract method to directly call the local_model. To be implemented by inheritors.
 

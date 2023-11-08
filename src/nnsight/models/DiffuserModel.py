@@ -160,7 +160,7 @@ class DiffuserModel(AbstractModel):
     def _scan(self, inputs, *args, **kwargs) -> None:
         self.meta_model.scan(inputs, *args, **kwargs)
 
-    def _run_local(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
+    def _forward(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
         text_tokens, latents = inputs
 
         text_embeddings = self.meta_model.get_text_embeddings(text_tokens, n_imgs)

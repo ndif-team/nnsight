@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Dict
+from typing import Any, Dict
 
 from ..tracing.Proxy import Proxy
 from .Tracer import Tracer
@@ -18,14 +18,14 @@ class Invoker(AbstractContextManager):
             Scanning is not free computation wise so you may want to turn this to false when running in a loop.
             When making interventions, you made get shape errors if scan is false as it validates operations based on shapes so
             for looped calls where shapes are consistent, you may want to have scan=True for the first loop. Defaults to True.
-        args (List[Any]): Positional arguments passed to the model's _prepare_inputs method and _scan method.
-        kwargs (Dict[str,Any]): Keyword arguments passed to the model's _prepare_inputs method and _scan method.
+        args (List[Any]): Positional arguments passed to the model's _prepare_inputs method.
+        kwargs (Dict[str,Any]): Keyword arguments passed to the model's _prepare_inputs method.
     """
 
     def __init__(
         self,
         tracer: Tracer,
-        input,
+        input: Any,
         *args,
         scan: bool = True,
         **kwargs,
@@ -56,7 +56,7 @@ class Invoker(AbstractContextManager):
         )
 
         if self.scan:
-            self.tracer.model._scan(self.input, *self.args, **self.kwargs)
+            self.tracer.model._scan(self.input, *self.tracer.args, **self.tracer.kwargs)
         else:
             for name, module in self.tracer.model.meta_model.named_modules():
                 module._output = None
@@ -86,7 +86,9 @@ class Invoker(AbstractContextManager):
             self.inputs = self.tracer.model._prepare_inputs(
                 self.tracer.model._example_input(), *self.args, **self.kwargs
             )
-            self.tracer.model._scan(self.inputs, *self.args, **self.kwargs)
+            self.tracer.model._scan(
+                self.inputs, *self.tracer.args, **self.tracer.kwargs
+            )
         else:
             for name, module in self.tracer.model.meta_model.named_modules():
                 module._output = None
