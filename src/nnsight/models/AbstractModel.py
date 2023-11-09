@@ -11,6 +11,7 @@ from torch.utils.hooks import RemovableHandle
 
 from ..alteration import REPOID_TO_ALTERATION
 from ..contexts.Runner import Runner
+from ..contexts.DirectInvoker import DirectInvoker
 from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
@@ -273,6 +274,10 @@ class AbstractModel(ABC):
 
         """
         return Runner(self, *args, **kwargs, generation=False)
+    
+    def invoke(self, *args, **kwargs):
+
+        return DirectInvoker(self, *args, **kwargs)
 
     def alteration(self) -> Patcher:
         return REPOID_TO_ALTERATION.get(self.repoid_path_clsname, Patcher())
