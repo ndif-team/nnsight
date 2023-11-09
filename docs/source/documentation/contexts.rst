@@ -1,5 +1,5 @@
 nnsight.contexts
-------------
+----------------
 
 
 .. automodule:: nnsight.contexts

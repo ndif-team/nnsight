@@ -1,4 +1,4 @@
-"""Patching module handles patching of classes and functions in modules.
+"""The patching module handles patching of classes and functions in modules.
 
 Attributes:
     DEFAULT_PATCHER (Patcher): The default patcher that patches some torch functions on initialization. 
@@ -27,9 +27,16 @@ class Patch:
         """Carries out the replacement of an object in a module.
 
         Imports the objects module with:
-            >>> importlib.import_module(self.obj.__module__)
+        
+        .. code-block:: python
+
+            importlib.import_module(self.obj.__module__)
+
         And replaces it with:
-            >>> setattr(module, self.obj.__name__, self.replacement)
+
+        .. code-block:: python
+            
+            setattr(module, self.obj.__name__, self.replacement)
 
         """
         module = importlib.import_module(self.obj.__module__)
@@ -40,9 +47,16 @@ class Patch:
         """Carries out the restoration of the original object on the objects module.
 
         Imports the objects module with:
-            >>> importlib.import_module(self.obj.__module__)
+
+        .. code-block:: python
+
+            importlib.import_module(self.obj.__module__)
+            
         And replaces it with:
-            >>> setattr(module, self.obj.__name__, self.obj)
+
+        .. code-block:: python
+
+            setattr(module, self.obj.__name__, self.obj)
 
         """
         module = importlib.import_module(self.obj.__module__)

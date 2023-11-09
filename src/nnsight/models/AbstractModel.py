@@ -22,7 +22,7 @@ from ..tracing.Graph import Graph
 
 
 class AbstractModel(ABC):
-    """Abstract class to be implemented for pytorch models wishing to gain this package's functionality.
+    """Abstract class to be implemented for PyTorch models wishing to gain this package's functionality.
 
     Attributes:
         repoid_path_clsname (str): Hugging face repo id of model to load, path to checkpoint, or class name of custom model.
@@ -228,10 +228,13 @@ class AbstractModel(ABC):
 
             A simple entering of a generation context on a language model, and running a prompt with no interventions:
 
-            >>> with model.generate(max_new_tokens=1) as generator:
-            >>>     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-            >>>         pass
-            >>> print(generator.output)
+            .. code-block:: python
+            
+                with model.generate(max_new_tokens=1) as generator:
+                    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+                        pass
+
+                print(generator.output)
 
             Keyword arguments like 'max_new_tokens' are model specific and in this case limits the amount of tokens to predict to one.
 
@@ -258,10 +261,13 @@ class AbstractModel(ABC):
 
             A simple entering of a forward context on a language model, and running a prompt with no interventions:
 
-            >>> with model.forward() as runner:
-            >>>     with runner.invoke('The Eiffel Tower is in the city of') as invoker:
-            >>>         pass
-            >>> print(runner.output)
+            .. code-block:: python
+
+                with model.forward() as runner:
+                    with runner.invoke('The Eiffel Tower is in the city of') as invoker:
+                        pass
+
+                print(runner.output)
 
             See the Runner docs for more information.
 

@@ -1,24 +1,26 @@
-"""The Module object acts as the entrypoint into the interwoven intervention graph for manipulating the inputs and outputs of Modules as a model is running.
-Specifically, the `.output` and `.input` attributes are the root nodes of the intervention graph, and all operation performed on these Proxy objects are the downstream nodes that populate the graph.
-Requires a ``Tracer`` object to add the correct proxies to the intervention graph. 
+"""The Module object acts as the entrypoint into the interwoven intervention graph. Through it, one can manipulate the inputs and outputs of Modules as a model is running. Specifically, the ``.output`` and ``.input`` attributes are the root nodes of the intervention graph, and all operations performed on these Proxy objects are the downstream nodes that populate the graph. Requires a ``Tracer`` object to add the correct proxies to the intervention graph. 
 
-Examples:
+    Examples:
 
-    Below example shows accessing the input and output of a gpt2 module, saving them during execution, and printing the resulting values after execution:
+        The example below accesses the inputs and outputs of a gpt2 module, saves them during execution, and prints the resulting values:
+        
+        .. code-block:: python
 
-    >>> with model.generate() as generator:
-    >>>    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-    >>>        hidden_states = model.lm_head.input.save()
-    >>>        logits = model.lm_head.output.save()
-    >>> print(hidden_states.value)
-    >>> print(logits.value)
+            with model.generate() as generator:
+                with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+                    hidden_states = model.lm_head.input.save()
+                    logits = model.lm_head.output.save()
 
-    Below example shows accessing the output of a gpt2 module and setting the values to zero:
+            print(hidden_states.value)
+            print(logits.value)
 
-    >>> with model.generate() as generator:
-    >>>    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-    >>>        model.transformer.h[0].output[0] = 0
+        This example shows how to set the output of a gpt2 module to zero:
 
+        .. code-block:: python
+
+            with model.generate() as generator:
+                with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+                    model.transformer.h[0].output[0] = 0
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from .tracing.Proxy import Proxy
 
 
 class Module(torch.nn.Module):
-    """Class meant to wrap existing torch modules within a model's module tree in order to add nnsight functionality.
+    """Class that wraps existing torch modules within a model's module tree in order to add nnsight functionality.
     Proxies of it's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:

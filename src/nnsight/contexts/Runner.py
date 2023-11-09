@@ -14,20 +14,25 @@ class Runner(Tracer):
 
     Examples:
 
-    Below example shows accessing the input and output of a gpt2 module, saving them during execution, and printing the resulting values after execution:
+        Below example shows accessing the input and output of a gpt2 module, saving them during execution, and printing the resulting values after execution:
 
-    >>> with model.generate() as generator:
-    >>>    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-    >>>        hidden_states = model.lm_head.input.save()
-    >>>        logits = model.lm_head.output.save()
-    >>> print(hidden_states.value)
-    >>> print(logits.value)
+        .. code-block:: python
 
-    Below example shows accessing the output of a gpt2 module and setting the values to zero:
+            with model.generate() as generator:
+                with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+                    hidden_states = model.lm_head.input.save()
+                    logits = model.lm_head.output.save()
 
-    >>> with model.forward() as runner:
-    >>>    with runner.invoke('The Eiffel Tower is in the city of') as invoker:
-    >>>        model.transformer.h[0].output[0] = 0
+            print(hidden_states.value)
+            print(logits.value)
+
+        Below example shows accessing the output of a gpt2 module and setting the values to zero:
+
+        .. code-block:: python
+
+            with model.forward() as runner:
+                with runner.invoke('The Eiffel Tower is in the city of') as invoker:
+                    model.transformer.h[0].output[0] = 0
 
     Attributes:
         generation (bool): If to use the _generation method of the model. Otherwise the _run_local method

@@ -1,7 +1,4 @@
-.. nnsight documentation master file, created by
-   sphinx-quickstart on Thu Oct 19 13:19:07 2023.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
+:html_theme.sidebar_secondary.remove:
 
 nnsight documentation
 =====================

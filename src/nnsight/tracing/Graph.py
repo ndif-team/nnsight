@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Callable, Dict, List, Type, Union
-
 import torch
-
 from .. import util
 from ..patching import Patch, Patcher
 from .Node import Node
@@ -14,14 +12,12 @@ from .Proxy import Proxy, proxy_wrapper
 class Graph:
     """Represents a computation graph involving a torch.nn.module.
 
-    Reserved target names.
-    'module' : There should only be the single root module as a node in the graph for tracing . Added on __init__ and when compiling,
-        the node's value is set to to be whatever module that is being interleaved with this computation graph.
-    'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names.
-        which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph
-        as entry points to kick of the execution of the graph.
-    'rtn' : Should only be one 'rtn' target named node as this is what is used.
-    'null' : Null nodes never get executed and therefore their listeners never get destroyed.
+    Reserved target names:
+    
+    * 'module' : There should only be the single root module as a node in the graph for tracing. Added on __init__ and when compiling, the node's value is set to to be whatever module that is being interleaved with this computation graph.
+    * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
+    * 'rtn' : Should only be one 'rtn' target named node as this is what is used.
+    * 'null' : Null nodes never get executed and therefore their listeners never get destroyed.
 
     Attributes:
         validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
@@ -32,7 +28,6 @@ class Graph:
         module_proxy (Proxy): Proxy for given root meta module.
         argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
         generation_idx (int): Current generation index.
-
     """
 
     @staticmethod
