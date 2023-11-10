@@ -96,7 +96,7 @@ class AbstractModel(ABC):
         # Run initial dummy string to populate Module shapes, dtypes etc
         self._scan(self._prepare_inputs(self._example_input()))
 
-        if not self.dispatch:
+        if self.dispatch:
             with self.alteration() if self.alter else Patcher():
                 self.local_model = self._load_local(
                     self.repoid_path_clsname, *self.args, **self.kwargs

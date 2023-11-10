@@ -16,7 +16,9 @@ class DirectInvoker(Runner, Invoker):
         if fwd_args is None:
             fwd_args = dict()
 
-        Runner.__init__(self, model, **fwd_args)
+        self.fwd_args = fwd_args
+
+        Runner.__init__(self, model, **self.fwd_args)
 
         Invoker.__init__(self, self, *args, **kwargs)
 
@@ -28,5 +30,8 @@ class DirectInvoker(Runner, Invoker):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         Invoker.__exit__(self, exc_type, exc_val, exc_tb)
+
+        self.kwargs = self.fwd_args
+        self.args = []
 
         Runner.__exit__(self, exc_type, exc_val, exc_tb)
