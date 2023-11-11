@@ -1,4 +1,4 @@
-"""Patching module handles patching of classes and functions in modules.
+"""The patching module handles patching of classes and functions in modules.
 
 Attributes:
     DEFAULT_PATCHER (Patcher): The default patcher that patches some torch functions on initialization. 
@@ -27,9 +27,16 @@ class Patch:
         """Carries out the replacement of an object in a module.
 
         Imports the objects module with:
-            >>> importlib.import_module(self.obj.__module__)
+        
+        .. code-block:: python
+
+            importlib.import_module(self.obj.__module__)
+
         And replaces it with:
-            >>> setattr(module, self.obj.__name__, self.replacement)
+
+        .. code-block:: python
+            
+            setattr(module, self.obj.__name__, self.replacement)
 
         """
         module = importlib.import_module(self.obj.__module__)
@@ -40,9 +47,16 @@ class Patch:
         """Carries out the restoration of the original object on the objects module.
 
         Imports the objects module with:
-            >>> importlib.import_module(self.obj.__module__)
+
+        .. code-block:: python
+
+            importlib.import_module(self.obj.__module__)
+            
         And replaces it with:
-            >>> setattr(module, self.obj.__name__, self.obj)
+
+        .. code-block:: python
+
+            setattr(module, self.obj.__name__, self.obj)
 
         """
         module = importlib.import_module(self.obj.__module__)
@@ -128,3 +142,22 @@ DEFAULT_PATCHER.add(
 
 
 DEFAULT_PATCHER.__enter__()
+
+from torch._meta_registrations import register_meta, aten, global_decomposition_table, _meta_lib_dont_use_me_use_register_meta
+
+def activate_recent_meta():
+    op_overload, fn = list(global_decomposition_table['meta'].items())[-1]
+    op_overload.py_impl(torch._C.DispatchKey.Meta)(fn)
+    _meta_lib_dont_use_me_use_register_meta.impl(op_overload, fn)
+
+
+
+@register_meta(aten._local_scalar_dense)
+def local_scalar_dense_meta(A):
+
+    return 0
+
+activate_recent_meta()
+
+
+

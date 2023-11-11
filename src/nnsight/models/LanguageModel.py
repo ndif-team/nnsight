@@ -1,6 +1,6 @@
 from __future__ import annotations
-import collections
 
+import collections
 from typing import Any, Callable, Dict, List, Tuple, Union
 
 import torch
@@ -33,9 +33,9 @@ class LanguageModel(AbstractModel):
 
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, tokenizer=None, **kwargs) -> None:
         self.config: PretrainedConfig = None
-        self.tokenizer: PreTrainedTokenizer = None
+        self.tokenizer: PreTrainedTokenizer = tokenizer
         self.meta_model: PreTrainedModel = None
         self.local_model: PreTrainedModel = None
 
@@ -96,14 +96,22 @@ class LanguageModel(AbstractModel):
         return {"input_ids": torch.tensor([[0]])}
 
     def _scan(self, prepared_inputs, *args, **kwargs) -> None:
-        self.meta_model(*args, **prepared_inputs.copy().to("meta"), **kwargs)
+        #TODO
+        # Actually use args and kwargs. Dont do this now because the args may be specific to _generation which throws unused args errors
+        # Maybe inspect signature and filter out unused args.
+        self.meta_model(**prepared_inputs.copy().to("meta"))
 
-    def _run_local(self, prepared_inputs, *args, **kwargs) -> Any:
+    def _forward(self, prepared_inputs, *args, **kwargs) -> Any:
         return self.local_model(
             *args, **prepared_inputs.to(self.local_model.device), **kwargs
         )
 
-    def _generation(self, prepared_inputs, *args, **kwargs) -> Any:
+    def _generation(
+        self, prepared_inputs, *args, max_new_tokens: int = 1, **kwargs
+    ) -> Any:
         return self.local_model.generate(
-            *args, **prepared_inputs.to(self.local_model.device), **kwargs
+            *args,
+            **prepared_inputs.to(self.local_model.device),
+            max_new_tokens=max_new_tokens,
+            **kwargs,
         )

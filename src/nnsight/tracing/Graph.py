@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Callable, Dict, List, Type, Union
-
 import torch
-
 from .. import util
 from ..patching import Patch, Patcher
 from .Node import Node
@@ -14,16 +12,15 @@ from .Proxy import Proxy, proxy_wrapper
 class Graph:
     """Represents a computation graph involving a torch.nn.module.
 
-    Reserve target names:
-        'module' : There should only be the single root module as a node in the graph for tracing . Added on __init__ and when compiling,
-            the node's value is set to to be whatever module that is being interleaved with this computation graph.
-        'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names.
-            which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph
-            as entry points to kick of the execution of the graph.
-        'rtn' : Should only be one 'rtn' target named node as this is what is used.
-        'null' : Null nodes never get executed and therefore their listeners never get destroyed.
+    Reserved target names:
+    
+    * 'module' : There should only be the single root module as a node in the graph for tracing. Added on __init__ and when compiling, the node's value is set to to be whatever module that is being interleaved with this computation graph.
+    * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
+    * 'rtn' : Should only be one 'rtn' target named node as this is what is used.
+    * 'null' : Null nodes never get executed and therefore their listeners never get destroyed.
 
     Attributes:
+        validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
         nodes (Dict[str, Node]): Mapping of node name to node.
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
@@ -31,7 +28,6 @@ class Graph:
         module_proxy (Proxy): Proxy for given root meta module.
         argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
         generation_idx (int): Current generation index.
-
     """
 
     @staticmethod
@@ -137,9 +133,13 @@ class Graph:
         return args
 
     def __init__(
-        self, module: torch.nn.Module, proxy_class: Type[Proxy] = Proxy
+        self,
+        module: torch.nn.Module,
+        proxy_class: Type[Proxy] = Proxy,
+        validate: bool = True,
     ) -> None:
         self.proxy_class = proxy_class
+        self.validate = validate
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
@@ -178,8 +178,8 @@ class Graph:
 
     def add(
         self,
-        value: Any,
         target: Union[Callable, str],
+        value: Any = inspect._empty,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
         name: str = None,
@@ -199,7 +199,18 @@ class Graph:
         Raises:
             ValueError: If more than one "rtn" or "module" nodes are added to the graph.
         """
-        target_name = Node.target_name(target)
+
+        # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.
+        if self.validate and value is inspect._empty:
+            _args = args if args is not None else []
+            _kwargs = kwargs if kwargs is not None else {}
+
+            value = target(
+                *Node.prepare_proxy_values(_args),
+                **Node.prepare_proxy_values(_kwargs),
+            )
+
+        target_name = target if isinstance(target, str) else target.__name__
 
         if target_name not in self.name_idx:
             self.name_idx[target_name] = 0

@@ -1,189 +1,167 @@
 from __future__ import annotations
 
-from typing import Any, List, Union
+import collections
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import diffusers
 import torch
-from diffusers import AutoencoderKL, SchedulerMixin, UNet2DConditionModel
+from diffusers import DiffusionPipeline, SchedulerMixin
 from PIL import Image
 from torch.utils.hooks import RemovableHandle
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import BatchEncoding, CLIPTextModel, CLIPTokenizer
 
 from .AbstractModel import AbstractModel
 
 
 class Diffuser(torch.nn.Module):
-    def __init__(
-        self, repoid_or_path, tokenizer: CLIPTokenizer, *args, **kwargs
-    ) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__()
 
-        self.tokenizer = tokenizer
+        self.pipeline = DiffusionPipeline.from_pretrained(*args, **kwargs)
 
-        self.vae: AutoencoderKL = AutoencoderKL.from_pretrained(
-            repoid_or_path, *args, **kwargs, subfolder="vae"
-        )
-        self.unet: UNet2DConditionModel = UNet2DConditionModel.from_pretrained(
-            repoid_or_path, *args, **kwargs, subfolder="unet"
-        )
-        self.text_encoder: CLIPTextModel = CLIPTextModel.from_pretrained(
-            repoid_or_path, *args, **kwargs, subfolder="text_encoder"
-        )
+        for key, value in self.pipeline.__dict__.items():
+            if isinstance(value, torch.nn.Module):
+                setattr(self, key, value)
 
-    def get_text_embeddings(self, text_tokens, n_imgs) -> torch.Tensor:
-        text_ids = text_tokens.input_ids.to(self.text_encoder.device)
+        self.tokenizer = self.pipeline.tokenizer
 
-        text_embeddings = self.text_encoder(text_ids)[0]
-
-        unconditional_tokens = self.text_tokenize([""] * len(text_ids))
-
-        unconditional_ids = unconditional_tokens.input_ids.to(self.text_encoder.device)
-
-        unconditional_embeddings = self.text_encoder(unconditional_ids)[0]
-
-        text_embeddings = torch.repeat_interleave(
-            torch.cat([unconditional_embeddings, text_embeddings]), n_imgs, dim=0
-        )
-
-        return text_embeddings
-
-    def text_tokenize(self, prompts):
-        return self.tokenizer(
-            prompts,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-
-    def text_detokenize(self, tokens):
-        return [
-            self.tokenizer.decode(token)
-            for token in tokens
-            if token != self.tokenizer.vocab_size - 1
-        ]
-
-    def get_noise(self, batch_size, img_size) -> torch.Tensor:
-        return torch.randn(
-            (batch_size, self.unet.config.in_channels, img_size // 8, img_size // 8)
-        )
-
-    def get_initial_latents(self, n_imgs, img_size, n_prompts) -> torch.Tensor:
-        latents = self.get_noise(n_imgs, img_size).repeat(n_prompts, 1, 1, 1)
-
-        return latents
-
-    def decode(self, latents):
-        return self.vae.decode(1 / 0.18215 * latents).sample
-
-    def encode(self, tensors):
-        return self.vae.encode(tensors).latent_dist.mode() * 0.18215
-
-    def predict_noise(
-        self, scheduler, iteration, latents, text_embeddings, guidance_scale=7.5
+    @torch.no_grad()
+    def scan(
+        self,
+        prompt: Union[str, List[str]] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        num_images_per_prompt: Optional[int] = 1,
+        eta: float = 0.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        latents: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+        callback_steps: int = 1,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        guidance_rescale: float = 0.0,
     ):
-        # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
-        latents = torch.cat([latents] * 2)
-        latents = scheduler.scale_model_input(latents, scheduler.timesteps[iteration])
+
+        # 0. Default height and width to unet
+        height = height or self.pipeline.unet.config.sample_size * self.pipeline.vae_scale_factor
+        width = width or self.pipeline.unet.config.sample_size * self.pipeline.vae_scale_factor
+
+        # 1. Check inputs. Raise error if not correct
+        self.pipeline.check_inputs(
+            prompt, height, width, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds
+        )
+
+        # 2. Define call parameters
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        # 3. Encode input prompt
+        text_encoder_lora_scale = (
+            cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
+        )
+        prompt_embeds, negative_prompt_embeds = self.pipeline.encode_prompt(
+            prompt,
+            'meta',
+            num_images_per_prompt,
+            do_classifier_free_guidance,
+            negative_prompt,
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            lora_scale=text_encoder_lora_scale,
+        )
+        # For classifier free guidance, we need to do two forward passes.
+        # Here we concatenate the unconditional and text embeddings into a single batch
+        # to avoid doing two forward passes
+        if do_classifier_free_guidance:
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+
+        # 4. Prepare timesteps
+        timesteps = self.pipeline.scheduler.timesteps
+
+        # 5. Prepare latent variables
+        num_channels_latents = self.pipeline.unet.config.in_channels
+        latents = self.pipeline.prepare_latents(
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            'meta',
+            generator,
+            latents,
+        )
+
+        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        extra_step_kwargs = self.pipeline.prepare_extra_step_kwargs(generator, eta)
+
+
+        # expand the latents if we are doing classifier free guidance
+        latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
 
         # predict the noise residual
-        noise_prediction = self.unet(
-            latents,
-            scheduler.timesteps[iteration],
-            encoder_hidden_states=text_embeddings,
-        ).sample
+        noise_pred = self.pipeline.unet(
+            latent_model_input,
+            0,
+            encoder_hidden_states=prompt_embeds,
+            cross_attention_kwargs=cross_attention_kwargs,
+            return_dict=False,
+        )[0]
 
         # perform guidance
-        noise_prediction_uncond, noise_prediction_text = noise_prediction.chunk(2)
-        noise_prediction = noise_prediction_uncond + guidance_scale * (
-            noise_prediction_text - noise_prediction_uncond
-        )
+        if do_classifier_free_guidance:
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        return noise_prediction
 
-    def diffusion(
-        self,
-        scheduler,
-        latents,
-        text_embeddings,
-        end_iteration=1000,
-        start_iteration=0,
-        **kwargs,
-    ):
-        for iteration in range(start_iteration, end_iteration):
-            noise_pred = self.predict_noise(
-                scheduler, iteration, latents, text_embeddings, **kwargs
-            )
-
-            # compute the previous noisy sample x_t -> x_t-1
-            output = scheduler.step(noise_pred, scheduler.timesteps[iteration], latents)
-
-            latents = output.prev_sample
-
-        return latents
+        if not output_type == "latent":
+            image = self.pipeline.vae.decode(latents / self.pipeline.vae.config.scaling_factor, return_dict=False)[0]
+        else:
+            image = latents
+            has_nsfw_concept = None
 
 
 class DiffuserModel(AbstractModel):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, tokenizer=None, **kwargs) -> None:
         self.local_model: Diffuser = None
         self.meta_model: Diffuser = None
-        self.tokenizer: CLIPTokenizer = None
 
         super().__init__(*args, **kwargs)
 
     def _register_increment_hook(self, hook) -> RemovableHandle:
         return self.local_model.unet.register_forward_hook(hook)
 
-    def _load_meta(
-        self, repoid_or_path, *args, device="cpu", **kwargs
-    ) -> torch.nn.Module:
-        self.tokenizer = CLIPTokenizer.from_pretrained(
-            repoid_or_path, *args, **kwargs, subfolder="tokenizer"
+    def _load_meta(self, repoid_or_path, *args, device_map=None, **kwargs) -> torch.nn.Module:
+        return Diffuser(
+            repoid_or_path, *args, low_cpu_mem_usage=False, device_map=None, **kwargs
         )
 
-        return Diffuser(repoid_or_path, self.tokenizer, *args, **kwargs)
-
-    def _load_local(
-        self, repoid_or_path, *args, device="cpu", **kwargs
-    ) -> torch.nn.Module:
-        return Diffuser(repoid_or_path, self.tokenizer, *args, **kwargs).to(device)
+    def _load_local(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
+        return Diffuser(repoid_or_path, *args, **kwargs)
 
     def _prepare_inputs(
         self,
         inputs,
-        n_imgs=1,
-        img_size=512,
+
     ) -> Any:
-        if not isinstance(inputs, list):
-            inputs = [inputs]
+        return inputs
 
-        latents = self.meta_model.get_initial_latents(n_imgs, img_size, len(inputs))
+    def _scan(self, inputs, *args, **kwargs) -> None:
+        self.meta_model.scan(inputs, *args, **kwargs)
 
-        text_tokens = self.meta_model.text_tokenize(inputs)
-
-        return text_tokens, latents
-
-    def _scan(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
-        text_tokens, latents = self._prepare_inputs(
-            inputs, n_imgs=n_imgs, img_size=img_size
-        )
-
-        text_embeddings = self.meta_model.get_text_embeddings(text_tokens, n_imgs)
-
-        latents = torch.cat([latents] * 2).to("meta")
-
-        self.meta_model.unet(
-            latents,
-            torch.zeros((1,), device="meta"),
-            encoder_hidden_states=text_embeddings,
-        ).sample
-
-        self.meta_model.vae.decode(latents)
-
-    def _run_local(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
-        text_tokens, latents = self._prepare_inputs(
-            inputs, n_imgs=n_imgs, img_size=img_size
-        )
+    def _forward(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
+        text_tokens, latents = inputs
 
         text_embeddings = self.meta_model.get_text_embeddings(text_tokens, n_imgs)
 
@@ -199,50 +177,13 @@ class DiffuserModel(AbstractModel):
         self,
         inputs,
         *args,
-        n_steps=20,
-        scheduler="LMSDiscreteScheduler",
-        n_imgs=1,
-        img_size=512,
         **kwargs,
     ) -> None:
-        text_tokens, latents = self._prepare_inputs(
-            inputs, n_imgs=n_imgs, img_size=img_size
-        )
+       
+       return self.local_model.pipeline(inputs, *args, **kwargs)
 
-        text_embeddings = self.local_model.get_text_embeddings(text_tokens, n_imgs)
+    def _batched_inputs(self, prepared_inputs: BatchEncoding) -> torch.Tensor:
+        return prepared_inputs if not isinstance(prepared_inputs, str) else [prepared_inputs]
 
-        if isinstance(scheduler, str):
-            scheduler: SchedulerMixin = getattr(diffusers, scheduler).from_pretrained(
-                self.repoid_path_clsname, subfolder="scheduler"
-            )
-        scheduler.set_timesteps(n_steps)
-
-        latents = latents * scheduler.init_noise_sigma
-
-        latents = self.local_model.diffusion(
-            scheduler,
-            latents.to(self.local_model.unet.device),
-            text_embeddings.to(self.local_model.unet.device),
-            *args,
-            **kwargs,
-            end_iteration=n_steps,
-        )
-
-        latents = (1 / 0.18215) * latents
-
-        return self.local_model.vae.decode(latents).sample
-
-    def to_image(self, latents) -> List[Image.Image]:
-        """
-        Function to convert latents to images
-        """
-
-        image = (latents / 2 + 0.5).clamp(0, 1)
-        image = image.detach().cpu().permute(0, 2, 3, 1).numpy()
-        images = (image * 255).round().astype("uint8")
-        pil_images = [Image.fromarray(image) for image in images]
-
-        return pil_images
-
-    def _example_input(self) -> None:
+    def _example_input(self) -> Dict[str, torch.Tensor]:
         return "_"

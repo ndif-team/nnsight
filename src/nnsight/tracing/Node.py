@@ -13,47 +13,41 @@ if TYPE_CHECKING:
 
 
 class Node:
-    """_summary_
+    """A Node represents some action that should be carried out during execution of a Graph.
 
     Attributes:
-        name (str): _description_
-        graph (Graph): _description_
-        proxy_value (Any): _description_
-        target (Union[Callable, str]): _description_
-        args (List[Any], optional): _description_. Defaults to None.
-        kwargs (Dict[str, Any], optional): _description_. Defaults to None.
-        meta (Dict[str, Any], optional): _description_. Defaults to None.
-        listeners (List[Node]): desc
-        dependencies (List[Node]): desc
-        value (Any): desc
+        name (str): Unique name of node.
+        graph (Graph): Reference to parent Graph object.
+        proxy_value (Any): Meta version of value. Used when graph has validate = True.
+        target (Union[Callable, str]): Function to execute or reserved string name.
+        args (List[Any], optional): Positional arguments. Defaults to None.
+        kwargs (Dict[str, Any], optional): Keyword arguments. Defaults to None.
+        meta (Dict[str, Any], optional): Meta information (used when tracing whole modules). Defaults to None.
+        listeners (List[Node]): Nodes that depend on this node.
+        dependencies (List[Node]): Nodes that this node depends on.
+        value (Any): Actual value to be populated during execution.
         _proxy_device (torch.device): desc
     """
 
     @staticmethod
-    def update(value1, value2) -> None:
-        """Updates Tensor values with other Tensor values.
+    def prepare_proxy_values(values):
+        def slice_to_value(arg: slice):
+            return slice(
+                Node.prepare_proxy_values(arg.start),
+                Node.prepare_proxy_values(arg.stop),
+                Node.prepare_proxy_values(arg.step),
+            )
 
-        Args:
-            value1 (_type_): _description_
-            value2 (_type_): _description_
-        """
-        if isinstance(value1, torch.Tensor):
-            value1[:] = value2
-        elif isinstance(value1, list) or isinstance(value1, tuple):
-            for value_idx in range(len(value1)):
-                Node.update(value1[value_idx], value2[value_idx])
-        elif isinstance(value1, dict):
-            for key in value1:
-                Node.update(value1[key], value2[key])
+        # Convert proxies to their proxy_value
+        values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
+        # Convert nodes to their proxy_value
+        values = util.apply(values, lambda x: x.proxy_value, Node)
+        # Slices may have proxies as part of their attributes so convert those to their proxy_values
+        values = util.apply(values, slice_to_value, slice)
+        # Move tensors to 'meta'
+        values = util.apply(values, lambda x: x.to("meta"), torch.Tensor)
 
-    @staticmethod
-    def target_name(target) -> str:
-        if isinstance(target, str):
-            name = target
-        elif callable(target):
-            name = target.__name__
-
-        return name
+        return values
 
     def __init__(
         self,
@@ -121,23 +115,6 @@ class Node:
 
         return self._proxy_device
 
-    def prepare_proxy_values(self, values):
-        def slice_to_value(arg: slice):
-            return slice(
-                self.prepare_proxy_values(arg.start),
-                self.prepare_proxy_values(arg.stop),
-                self.prepare_proxy_values(arg.step),
-            )
-
-        # Convert proxies to their proxy_value
-        values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
-        # Slices may have proxies as part of their attributes so convert those to their proxy_values
-        values = util.apply(values, slice_to_value, slice)
-        # Move tensors to that of the proxy_device (probably 'meta')
-        values = util.apply(values, lambda x: x.to(self.proxy_device), torch.Tensor)
-
-        return values
-
     def compile(self) -> None:
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
@@ -187,24 +164,15 @@ class Node:
         # Prepare arguments.
         args, kwargs = self.prepare_inputs()
 
-        # If target is a string, it must be a method attribute on the first argument object.
-        if isinstance(self.target, str):
-            obj, *args = args
-
-            target = getattr(obj, self.target)
-        # Otherwise it must be the function itself.
-        else:
-            target = self.target
-
         # Call the target to get value.
-        output = target(*args, **kwargs)
+        output = self.target(*args, **kwargs)
 
         self.set_value(output)
 
     def set_value(self, value: Any):
         self.value = value
 
-        logger.debug(f"=> SET({self.name})")
+        logger.info(f"=> SET({self.name})")
 
         for listener in self.listeners:
             listener.remaining_dependencies -= 1
@@ -220,7 +188,7 @@ class Node:
 
     def destroy(self) -> None:
         """Removes the reference to the node's value and logs it's destruction."""
-        logger.debug(f"=> DEL({self.name})")
+        logger.info(f"=> DEL({self.name})")
 
         self.value = None
 

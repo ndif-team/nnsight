@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Union
 
@@ -9,31 +10,31 @@ import torch
 from torch.utils.hooks import RemovableHandle
 
 from ..alteration import REPOID_TO_ALTERATION
-from ..contexts.Generator import Generator
 from ..contexts.Runner import Runner
+from ..contexts.DirectInvoker import DirectInvoker
 from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
 from ..intervention import HookModel, intervene
 from ..logger import logger
-from ..Module import Module
+from ..module import Module
 from ..patching import Patcher
 from ..tracing.Graph import Graph
 
 
 class AbstractModel(ABC):
-    """Abstract class to be implemented for pytorch models wishing to gain this package's functionality.
+    """Abstract class to be implemented for PyTorch models wishing to gain this package's functionality.
 
     Attributes:
         repoid_path_clsname (str): Hugging face repo id of model to load, path to checkpoint, or class name of custom model.
         args (List[Any]): Positional arguments used to initialize model.
         kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
-        alter (bool): If to check for alterations and apply them to the model.
+        alter (bool): If to check for alterations and apply them to the model. Defaults to True.
         dispatched (bool): If the local_model has bee loaded yet.
+        dispatch (bool): If to load and dispatch model on init. Defaults to False.
         custom_model (bool): If the value passed to repoid_path_model was a custom model.
         meta_model (nnsight.Module): Version of the root model where all parameters and tensors are on the 'meta'
             device. All modules are wrapped in nnsight.Module adding interleaving operation functionality.
-        tokenizer (_typ_): Tokenizer.
         local_model (torch.nn.Module): Locally loaded and dispatched model. Only loaded and dispatched on first use.
             This is the actual model that is ran with hooks added to it to enter the intervention graph.
     """
@@ -42,8 +43,8 @@ class AbstractModel(ABC):
         self,
         repoid_path_model: Union[str, torch.nn.Module],
         *args,
+        dispatch: bool = False,
         alter: bool = True,
-        tokenizer=None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -52,10 +53,10 @@ class AbstractModel(ABC):
         self.args = args
         self.kwargs = kwargs
         self.alter = alter
+        self.dispatch = dispatch
         self.dispatched = False
         self.custom_model = False
         self.meta_model: Module = None
-        self.tokenizer = tokenizer
         self.local_model: torch.nn.Module = None
         self.edits: List[Edit] = list()
 
@@ -65,7 +66,7 @@ class AbstractModel(ABC):
             self.dispatched = True
             self.local_model = repoid_path_model
 
-        logger.debug(f"Initializing `{self.repoid_path_clsname}`...")
+        logger.info(f"Initializing `{self.repoid_path_clsname}`...")
 
         # If alter and alteration exist, use alteration patcher context while loading module.
         with self.alteration() if self.alter else Patcher():
@@ -95,7 +96,19 @@ class AbstractModel(ABC):
         # Run initial dummy string to populate Module shapes, dtypes etc
         self._scan(self._prepare_inputs(self._example_input()))
 
-        logger.debug(f"Initialized `{self.repoid_path_clsname}`")
+        if self.dispatch:
+            with self.alteration() if self.alter else Patcher():
+                self.local_model = self._load_local(
+                    self.repoid_path_clsname, *self.args, **self.kwargs
+                )
+
+                # By default, all params should be frozen.
+                for param in self.local_model.parameters():
+                    param.requires_grad = False
+
+            self.dispatched = True
+
+        logger.info(f"Initialized `{self.repoid_path_clsname}`")
 
     def __repr__(self) -> str:
         return repr(self.meta_model)
@@ -166,7 +179,7 @@ class AbstractModel(ABC):
                 ]
             )
 
-            logger.debug(f"Running `{self.repoid_path_clsname}`...")
+            logger.info(f"Running `{self.repoid_path_clsname}`...")
 
             graph.compile(self.local_model)
 
@@ -189,63 +202,82 @@ class AbstractModel(ABC):
 
             increment_hook.remove()
 
-            self.local_model.eval() 
+            self.local_model.eval()
 
-            logger.debug(f"Completed `{self.repoid_path_clsname}`")
+            logger.info(f"Completed `{self.repoid_path_clsname}`")
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
         return output
 
-    def generate(self, *args, **kwargs) -> Generator:
-        """Returns a Generator context for this model.
+    def generate(self, *args, **kwargs) -> Runner:
+        """Returns a Runner context for this model's _generation method.
 
-        Generator contexts are used to trace and interleave operations on the model's computation graph over some iterative generation process.
+        Runner contexts are used to trace and interleave operations on the model's computation graph.
 
         Arguments passed to ``.generate()`` are passed downstream to the model specific _generation method.
 
-        Generator's are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
+        Runners are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
 
-        The output of the generation is ultimately saved in the generator's ``.output`` attribute.
+        The output of the run is ultimately saved in the generator's ``.output`` attribute.
 
         Returns:
-            Generator: Generator.
+            Runner: Runner.
 
         Examples:
 
             A simple entering of a generation context on a language model, and running a prompt with no interventions:
 
-            >>> with model.generate(max_new_tokens=1) as generator:
-            >>>     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-            >>>         pass
-            >>> print(generator.output)
+            .. code-block:: python
+            
+                with model.generate(max_new_tokens=1) as generator:
+                    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+                        pass
+
+                print(generator.output)
 
             Keyword arguments like 'max_new_tokens' are model specific and in this case limits the amount of tokens to predict to one.
 
-            See the Generator docs for more information.
+            See the Runner docs for more information.
 
         """
-        return Generator(self, *args, **kwargs)
+        return Runner(self, *args, **kwargs, generation=True)
 
-    def forward(self, inputs, *args, **kwargs) -> Runner:
-        """Returns a Runner context for this model.
+    def forward(self, *args, **kwargs) -> Runner:
+        """Returns a Runner context for this model's _forward method.
 
-        Runner contexts are used to trace and interleave operations on the model's computation graph over a single input directly to the underlying model.
+        Runner contexts are used to trace and interleave operations on the model's computation graph.
 
-        Arguments passed to ``.forward()`` are passed downstream to the model specific _run_local method.
+        Arguments passed to ``.forward()`` are passed downstream to the model specific _forward method.
 
-        The output of the runner is ultimately saved in the runner's ``.output`` attribute.
+        Runners are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
+
+        The output of the run is ultimately saved in the runner's ``.output`` attribute.
 
         Returns:
             Runner: Runner.
 
-        Example:
+        Examples:
 
-            A simple entering of a runner context on a language model, and running a prompt with no interventions:
+            A simple entering of a forward context on a language model, and running a prompt with no interventions:
 
-            >>> with model.forward('The Eiffel Tower is in the city of') as invoker:
-            >>>         pass
-            >>> print(invoker.output)
+            .. code-block:: python
+
+                with model.forward() as runner:
+                    with runner.invoke('The Eiffel Tower is in the city of') as invoker:
+                        pass
+
+                print(runner.output)
+
+            See the Runner docs for more information.
+
         """
-        return Runner(self, inputs, *args, **kwargs)
+        return Runner(self, *args, **kwargs, generation=False)
+    
+    def invoke(self, *args, **kwargs):
+
+        return DirectInvoker(self, *args, **kwargs)
 
     def alteration(self) -> Patcher:
         return REPOID_TO_ALTERATION.get(self.repoid_path_clsname, Patcher())
@@ -300,7 +332,7 @@ class AbstractModel(ABC):
     @abstractmethod
     def _load_meta(self, repoid_or_path: str, *args, **kwargs) -> torch.nn.Module:
         """
-        Abstract method to initialize meta_model and tokenizer. To be implemented by inheritors.
+        Abstract method to initialize meta_model. To be implemented by inheritors.
 
         Args:
             repoid_or_path (str): Huggingface repo id or path to checkpoint.
@@ -316,7 +348,7 @@ class AbstractModel(ABC):
         Abstract method to initialize and dispatch the local_model. To be implemented by inheritors.
 
         Args:
-            repoid_or_path (str): Huggigface repo id or path to checkpoint.
+            repoid_or_path (str): Huggingface repo id or path to checkpoint.
 
         Returns:
             torch.nn.Module: Local version of model
@@ -336,7 +368,7 @@ class AbstractModel(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def _run_local(self, inputs, *args, **kwargs) -> Any:
+    def _forward(self, inputs, *args, **kwargs) -> Any:
         """
         Abstract method to directly call the local_model. To be implemented by inheritors.
 

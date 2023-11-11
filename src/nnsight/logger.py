@@ -8,7 +8,7 @@ logging_handler.setFormatter(
         "%(asctime)s %(processName)-10s %(name)s %(levelname)-8s %(message)s"
     )
 )
-logging_handler.setLevel(logging.DEBUG)
+logging_handler.setLevel(logging.INFO)
 logger = logging.getLogger("nnsight")
 logger.addHandler(logging_handler)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)

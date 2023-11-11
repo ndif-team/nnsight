@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union
+import operator
+from typing import TYPE_CHECKING, Any, Callable, Union
 
 import torch
 
@@ -20,15 +21,36 @@ class Proxy:
         node (Node): This proxy's node.
     """
 
+    @staticmethod
+    def proxy_update(value1: Any, value2: Any) -> None:
+        """Updates Tensor values with other Tensor values.
+
+        Args:
+            value1 (Any): _description_
+            value2 (Any): _description_
+        """
+        if isinstance(value1, torch.Tensor):
+            value1[:] = value2
+        elif isinstance(value1, list) or isinstance(value1, tuple):
+            for value_idx in range(len(value1)):
+                Proxy.proxy_update(value1[value_idx], value2[value_idx])
+        elif isinstance(value1, dict):
+            for key in value1:
+                Proxy.proxy_update(value1[key], value2[key])
+
+    @staticmethod
+    def proxy_call(callable: Callable, *args, **kwargs) -> None:
+        return callable(*args, **kwargs)
+
     def __init__(self, node: "Node") -> None:
         self.node = node
 
     def __call__(self, *args, **kwargs) -> Proxy:
         """
-        Calling a Proxy object normally just creates a '__call__' operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
+        Calling a Proxy object normally just creates a Proxy.proxy_call operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
 
         Returns:
-            Proxy: New '__call__' proxy.
+            Proxy: New call proxy.
         """
         # If calling a method (not a sub-module) on the main module of this graph,
         # we want to trace into that method.
@@ -42,104 +64,71 @@ class Proxy:
             return value
         # Otherwise we just want to add a node saying we wish to call this module.
         else:
-            value = self.node.proxy_value(
-                *self.node.prepare_proxy_values(args),
-                **self.node.prepare_proxy_values(kwargs),
-            )
-
             return self.node.graph.add(
-                value=value,
-                target="__call__",
+                target=Proxy.proxy_call,
                 args=[self.node] + list(args),
                 kwargs=kwargs,
             )
 
     def __getitem__(self, key: Union[Proxy, Any]) -> Proxy:
-        key = self.node.prepare_proxy_values(key)
-
-        value = self.node.proxy_value[key]
-
         return self.node.graph.add(
-            value=value,
-            target="__getitem__",
+            target=operator.getitem,
             args=[self.node, key],
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
         item_proxy = self[key]
 
-        update = item_proxy.node.__class__.update
-
-        update(item_proxy.node.proxy_value, item_proxy.node.prepare_proxy_values(value))
-
         item_proxy.node.graph.add(
-            value=item_proxy.node.proxy_value,
-            target=update,
+            target=Proxy.proxy_update,
             args=[item_proxy.node, value],
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
-        key = self.node.prepare_proxy_values(key)
-
-        value = util.fetch_attr(self.node.proxy_value, key)
-
         return self.node.graph.add(
-            value=value,
             target=util.fetch_attr,
             args=[self.node, key],
         )
 
     def __len__(self) -> Proxy:
-        value = len(self.node.proxy_value)
-
         return self.node.graph.add(
-            value=value,
             target=len,
             args=[self.node],
         )
 
     def __add__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value + self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
-            target="__add__",
+            target=operator.add,
             args=[self.node, other],
         )
 
     def __sub__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value - self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
-            target="__sub__",
+            target=operator.sub,
             args=[self.node, other],
         )
 
     def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value ** self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
             target=pow,
             args=[self.node, other],
         )
 
     def __mul__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value * self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
-            target="__mul__",
+            target=operator.mul,
+            args=[self.node, other],
+        )
+
+    def __matmul__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.matmul,
             args=[self.node, other],
         )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
-        value = self.node.proxy_value / self.node.prepare_proxy_values(other)
-
         return self.node.graph.add(
-            value=value,
-            target="__truediv__",
+            target=operator.truediv,
             args=[self.node, other],
         )
 
@@ -161,13 +150,7 @@ class Proxy:
 
         self: Proxy = args[0]
 
-        value = orig_method(
-            *self.node.prepare_proxy_values(args),
-            **self.node.prepare_proxy_values(kwargs),
-        )
-
         return self.node.graph.add(
-            value=value,
             target=orig_method,
             args=args,
             kwargs=kwargs,
@@ -207,9 +190,7 @@ def proxy_wrapper(fn) -> None:
                 **node.prepare_proxy_values(kwargs),
             )
 
-            return node.graph.add(
-                value=value, target=fn, args=args, kwargs=kwargs
-            )
+            return node.graph.add(value=value, target=fn, args=args, kwargs=kwargs)
 
         else:
             return fn(*args, **kwargs)

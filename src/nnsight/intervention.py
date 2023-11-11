@@ -1,11 +1,10 @@
 """This module contains logic to interleave a computation graph (an intervention graph) with the computation graph of a model.
 
-The class InterventionProxy extends the functionality of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
+The :class:`InterventionProxy <nnsight.intervention.InterventionProxy>` class extends the functionality of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
 
-The intervene function is the entry hook into the models computation graph in order to interleave an intervention graph.
+:func:`intervene() <nnsight.intervention.intervene>` is the entry hook into the models computation graph in order to interleave an intervention graph.
 
-The class HookModel provides a context manager for adding input and output hooks to modules and removing them upon context exit.
-
+The :class:`HookModel <nnsight.intervention.HookModel>` provides a context manager for adding input and output hooks to modules and removing them upon context exit.
 """
 from __future__ import annotations
 
@@ -28,27 +27,34 @@ class InterventionProxy(Proxy):
 
         Saving a proxy so it is both clones at the point of execution and not deleted at the completion of it's listeners is enabled with ``.save()``:
 
-        >>> with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-        >>>     hidden_states = model.lm_head.input.save()
-        >>>     logits = model.lm_head.output.save()
-        >>> print(hidden_states.value)
-        >>> print(logits.value)
+        .. code-block:: python
+
+            with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+                hidden_states = model.lm_head.input.save()
+                logits = model.lm_head.output.save()
+
+            print(hidden_states.value)
+            print(logits.value)
 
         This works and would output the inputs and outputs to the model.lm_head module.
         Had you not called .save(), calling .value would have thrown an error.
 
         Indexing by token of hidden states can easily done using ``.token[<idx>]`` or ``.t[<idx>]``
 
-        >>> with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-        >>>     logits = model.lm_head.output.t[0].save()
-        >>> print(logits.value)
+        .. code-block:: python
+
+            with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+                logits = model.lm_head.output.t[0].save()
+
+            print(logits.value)
 
         This would save only the first token of the output for this module.
 
         Calling ``.shape`` on an InterventionProxy returns the shape or collection of shapes for the tensors traced through this module.
 
         Calling ``.value`` on an InterventionProxy returns the actual populated values, updated during actual execution of the model.
-            Throws an error if this value is not populated.
+        
+        Throws an error if this value is not populated.
     """
 
     def save(self) -> InterventionProxy:
@@ -76,12 +82,16 @@ class InterventionProxy(Proxy):
         Makes positive indices negative as tokens are padded on the left.
 
         Example:
+            
+            .. code-block:: python
 
-            >>> model.transformer.h[0].mlp.output.token[0]
+                model.transformer.h[0].mlp.output.token[0]
 
             Is equivalent to:
 
-            >>> model.transformer.h[0].mlp.output.token[:,-3]
+            .. code-block:: python
+
+                model.transformer.h[0].mlp.output.token[:,-3]
 
             For a proxy tensor with 3 tokens.
 
@@ -121,13 +131,13 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     Forms the current module_path key in the form of <module path>.<output/input>.<graph generation index>
     Checks the graphs argument_node_names attribute for this key.
     If exists, value is a list of node names to iterate through.
-    Node args for argument type nodes should be [module_path, batch_size, batch_start]
+    Node args for argument type nodes should be ``[module_path, batch_size, batch_start]``.
     Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
-        only batch indexed tensors relevant to this intervention node. Sets the value of a node
-        using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
-        subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
-        tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
-        to the output from downstream intervention nodes in the graph.
+    only batch indexed tensors relevant to this intervention node. Sets the value of a node
+    using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
+    subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
+    tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
+    to the output from downstream intervention nodes in the graph.
 
     Args:
         activations (Any): Either the inputs or outputs of a torch module.

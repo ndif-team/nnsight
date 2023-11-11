@@ -2,7 +2,7 @@ from typing import Any
 
 import torch
 from nnsight import AbstractModel, LanguageModel, util
-from nnsight.Module import Module
+from nnsight.module import Module
 from nnsight.toolbox.optim.lora import LORA
 from torch.utils.data import DataLoader, Dataset
 
