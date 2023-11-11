@@ -1,9 +1,8 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "nnsight"
-version = "0.0.5"
 authors = [
   { name="Jaden Fiotto-Kaufman", email="jadenfk@outlook.com" },
 ]
@@ -34,4 +33,6 @@ dependencies = [
 include-package-data = true
 [tool.setuptools.package-data]
 nnsight = ["config.yaml", "nnsight.log"]
+[tool.setuptools_scm]
+
 
