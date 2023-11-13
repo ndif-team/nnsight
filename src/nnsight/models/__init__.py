@@ -13,11 +13,11 @@ The wrapping of the underlying model encompasses both the display of its module 
 
 Printing out the wrapped module returns its structure:
 
-.. jupyter-input::
+.. code-block:: python
 
     print(model)
 
-.. jupyter-output::
+.. code-block:: text
 
     GPT2LMHeadModel(
     (transformer): GPT2Model(

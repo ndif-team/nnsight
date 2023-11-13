@@ -35,6 +35,8 @@ html_theme = "pydata_sphinx_theme"
 
 html_static_path = ['_static']
 
+html_favicon = '_static/images/icon.ico'
+
 html_theme_options = {
   "logo": {"text":"nnsight"},
   "show_nav_level": 2,
@@ -52,4 +54,8 @@ html_theme_options = {
 html_context = {
    "default_mode": "light"
 }
+
+html_css_files = [
+    'css/custom.css',
+]
 

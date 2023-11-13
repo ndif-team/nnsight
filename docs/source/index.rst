@@ -1,46 +1,8 @@
 :html_theme.sidebar_secondary.remove:
+:sd_hide_title:
 
-nnsight documentation
-=====================
-
-**nnsight** (/ɛn.saɪt/) is a package for the interpreting and manipulating the internals of large models.
-
-**Useful Links:** :doc:`Get Started <start>` \| :ref:`installation` \| :doc:`Tutorials </tutorials/main_demo>` \| `Colab <https://colab.research.google.com/drive/1ASP4LlRqSTuNxdhyJzjaZ-6h2NXpP3uK?usp=drive_link>`_
-
-.. grid:: 2
-    :gutter: 2
-
-    .. grid-item-card:: Getting Started
-      :link: start
-      :link-type: doc
-
-      Check out the :doc:`getting started <start>` page for installation instructions and useful links.
-   
-    .. grid-item-card:: Tutorials
-      :link: tutorials
-      :link-type: doc
-
-      The :doc:`tutorials <tutorials>` section provides in-depth information on the key concepts of nnsight with useful background information and explanation.
-
-    
-.. grid:: 2
-    :gutter: 2
-
-    .. grid-item-card:: Documentation
-      :link: documentation
-      :link-type: doc
-
-      See the :doc:`documentation <documentation>` section for a detailed description of the functions, modules, and objects included in nnsight.
-
-    .. grid-item-card:: Source
-
-      Not all features and tools have been documented yet. 
-
-      - See the `Github <https://github.com/JadenFiotto-Kaufman/nnsight>`_ for more feature documentation.
-      - `nnsight/examples <https://github.com/JadenFiotto-Kaufman/nnsight/tree/main/examples>`_ contains in-depth usage of specific nnsight functions.  
-
-
-      
+nnsight
+=======
 
 .. toctree::
    :maxdepth: 1
@@ -49,3 +11,106 @@ nnsight documentation
    start
    documentation
    tutorials
+
+.. grid:: 1 1 2 2
+    :class-container: hero
+    :reverse:
+
+    .. grid-item:: 
+        .. div:: 
+
+          .. image:: _static/images/nnsigt.png
+            
+    .. grid-item:: 
+
+        .. div:: sd-fs-1 sd-font-weight-bold title-bot sd-text-primary image-container
+
+            nnsight
+
+        .. div:: sd-fs-4 sd-font-weight-bold sd-my-0 sub-bot image-container
+
+            interpretable neural networks
+
+        **nnsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models.
+
+        .. div:: button-group
+        
+          .. button-ref:: start
+              :color: primary
+              :shadow:
+
+                  Get Started
+
+          .. button-ref:: tutorials
+            :color: primary
+            :outline:
+            
+                Tutorials
+
+          .. button-ref:: documentation
+            :color: primary
+            :outline:
+            
+                Documentation
+
+
+.. div:: sd-fs-1 sd-font-weight-bold sd-text-center sd-text-primary sd-mb-5
+
+  Key Features
+
+.. grid:: 1 1 2 2
+    :gutter: 5
+    :class-container: container
+
+    .. grid-item::
+
+      .. div:: features-container
+
+        .. image:: _static/images/one.png
+          :width: 250
+
+        .. div:: 
+
+          **Integration**
+
+          Pass in a ID from any HuggingFace Transformer repo and access its weights with nnsight. 
+
+    .. grid-item::
+
+      .. div:: features-container
+
+        .. image:: _static/images/two.png
+          :width: 250
+
+        .. div:: 
+
+          **Interpretability**
+
+          Access the internal gradients and activations at any point or module in a model.
+    
+    .. grid-item::
+
+      .. div:: features-container
+
+        .. image:: _static/images/two.png
+          :width: 250
+
+        .. div:: 
+
+          **Intuitive**
+
+          Set up a context block and manipulate model internals with only a couple lines of code.
+
+    .. grid-item::
+
+      .. div:: features-container
+
+        .. image:: _static/images/one.png
+          :width: 250
+
+        .. div:: 
+
+          **Interoperable**
+
+          Enable grad and train interventions like LORA or probes on any point in a model.
+

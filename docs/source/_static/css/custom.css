@@ -1,0 +1,67 @@
+.button-group {
+	display: flex;
+	flex-direction: row;
+	flex-wrap: nowrap;
+	justify-content: flex-start;
+	align-items: center;
+	align-content: stretch;
+    gap: 10px;
+}
+
+.hero {
+    height: 90vh;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: center;
+    align-items: center;
+    align-content: stretch;
+    padding-bottom: 20vh;
+
+}
+
+
+.container { 
+    height: 65vh;
+}
+
+
+.image-container {
+    margin-top: 50px;
+}
+
+
+
+.title-bot {
+    margin-bottom: -10px !important;
+    line-height: normal !important;
+}
+
+.sub-bot {
+    margin-bottom: -10px !important;
+    /* margin-top: -20px !important; */
+    line-height: normal !important;
+}
+
+.features-container {
+    display: flex;
+    gap: 20px;
+}
+
+@media only screen and (max-width: 768px) { /* Adjust this value based on your breakpoint for mobile */
+    .front-container, .container {
+        height: auto; /* Change from fixed height to auto */
+        min-height: 50vh; /* Adjust this as needed */
+    }
+}
+
+
+@media only screen and (max-width: 768px) {
+    .features-container {
+        margin-bottom: 20px; /* Increase bottom margin */
+    }
+
+    .container {
+        margin-bottom: 30px; /* Adjust the bottom margin of the main container */
+    }
+}
