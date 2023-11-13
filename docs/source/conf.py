@@ -19,7 +19,6 @@ extensions = [
     'sphinx_copybutton', # Copy button for code blocks
     'sphinx_design', # Boostrap design components
     'nbsphinx', # Jupyter notebook support
-    "jupyter_sphinx", # Jupyter cell support
 ]
 
 templates_path = ['_templates']

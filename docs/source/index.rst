@@ -60,7 +60,7 @@ nnsight
 
 .. grid:: 1 1 2 2
     :gutter: 5
-    :class-container: container
+    :class-container: page-container
 
     .. grid-item::
 

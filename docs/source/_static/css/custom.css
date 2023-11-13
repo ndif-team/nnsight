@@ -20,8 +20,12 @@
 
 }
 
+html[data-theme="light"] {
+    --pst-color-secondary: #64ccdc;
+}
 
-.container { 
+
+.page-container { 
     height: 65vh;
 }
 
