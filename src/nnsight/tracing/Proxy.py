@@ -148,9 +148,14 @@ class Proxy:
         if kwargs is None:
             kwargs = dict()
 
-        self: Proxy = args[0]
+        proxy: Proxy = None
 
-        return self.node.graph.add(
+        for arg in args:
+            if isinstance(arg, Proxy):
+                proxy = arg
+                break
+
+        return proxy.node.graph.add(
             target=orig_method,
             args=args,
             kwargs=kwargs,
