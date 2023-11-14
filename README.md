@@ -1,8 +1,11 @@
-# nnsight
+<img src="./docs/source/_static/images/nnsigt.png" alt="drawing" style="width:200px;float:left"/>
 
+# nnsight 
 ![PyPI - Version](https://img.shields.io/pypi/v/nnsight)
 
-The `nnsight/` directory contains the nnsight package for interpreting and manipulating the internals of deep learning models.
+[nnsight.net](www.nnsight.net)
+
+The `nnsight`  package enables interpreting and manipulating the internals of deep learned models.
 
 #### Installation
 
@@ -416,27 +419,18 @@ output = generator.output
 hidden_states = hidden_states.value
 ```
 
-More examples can be found in `nnsight/examples/`
+More examples can be found in `nnsight/examples/` and at [nnsight.net](www.nnsight.net)
 
-## Inference Server
+### Citation
 
-Source for the NDIF server is found in the `server/` directory.
+If you use `nnsight` in your research, please cite using the following
 
-- Edit `server/config.yaml` for your requirements. 
-    - `PORT` : Flask port
-    - `RESPONSE_PATH` : Where to store disk offloaded response data
-
-#### Installation
-
-Clone this repository and create the `ndif` conda environment:
-
-```bash
-cd ndif
-conda env create -f server/environment.yaml
-```
-
-Start the server with:
-
-```bash
-python -m server
-``` 
+```bibtex
+@software{nnsight,
+author = {Jaden Fiotto-Kaufman},
+license = {MIT},
+title = {{nnsight: The package for interpreting and manipulating the internals of deep learned models.
+}},
+url = {https://github.com/JadenFiotto-Kaufman/nnsight}
+}
+``````
