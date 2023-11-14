@@ -19,7 +19,6 @@ extensions = [
     'sphinx_copybutton', # Copy button for code blocks
     'sphinx_design', # Boostrap design components
     'nbsphinx', # Jupyter notebook support
-    "jupyter_sphinx", # Jupyter cell support
 ]
 
 templates_path = ['_templates']
@@ -34,6 +33,8 @@ fixed_sidebar = True
 html_theme = "pydata_sphinx_theme"
 
 html_static_path = ['_static']
+
+html_favicon = '_static/images/icon.ico'
 
 html_theme_options = {
   "logo": {"text":"nnsight"},
@@ -52,4 +53,8 @@ html_theme_options = {
 html_context = {
    "default_mode": "light"
 }
+
+html_css_files = [
+    'css/custom.css',
+]
 
