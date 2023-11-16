@@ -10,15 +10,15 @@ import torch
 from torch.utils.hooks import RemovableHandle
 
 from ..alteration import REPOID_TO_ALTERATION
-from ..contexts.Runner import Runner
 from ..contexts.DirectInvoker import DirectInvoker
+from ..contexts.Runner import Runner
 from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
 from ..intervention import HookModel, intervene
 from ..logger import logger
 from ..module import Module
-from ..patching import Patcher
+from ..patching import Patch, Patcher
 from ..tracing.Graph import Graph
 
 
@@ -73,9 +73,31 @@ class AbstractModel(ABC):
             # Use accelerate and .to('meta') to assure tensors are loaded to 'meta' device
             with accelerate.init_empty_weights(include_buffers=True):
                 if self.custom_model:
-                    self.meta_model: Module = Module.wrap(
-                        copy.deepcopy(self.local_model).to("meta")
-                    )
+                    # Need to force parameters when deepcopied, to instead create a meta tensor of the same size/dtype
+                    def meta_deepcopy(self, memo):
+                        if id(self) in memo:
+                            return memo[id(self)]
+                        else:
+                            result = type(self)(
+                                torch.empty_like(
+                                    self.data, dtype=self.data.dtype, device="meta"
+                                ),
+                                self.requires_grad,
+                            )
+                            memo[id(self)] = result
+                            return result
+
+                    # Patching Parameter __deepcopy__
+                    with Patcher() as patcher:
+                        patcher.add(
+                            Patch(
+                                torch.nn.parameter.Parameter.__deepcopy__, meta_deepcopy
+                            )
+                        )
+
+                        self.meta_model: Module = Module.wrap(
+                            copy.deepcopy(self.local_model).to("meta")
+                        )
                 else:
                     self.meta_model: Module = Module.wrap(
                         self._load_meta(self.repoid_path_clsname, *args, **kwargs).to(
@@ -164,8 +186,6 @@ class AbstractModel(ABC):
             self.dispatched = True
 
         with Editor(self, edits):
-            # Send local_model to graph to re-compile
-
             increment_hook = self._register_increment_hook(
                 lambda module, input, output: graph.increment()
             )
@@ -181,6 +201,7 @@ class AbstractModel(ABC):
 
             logger.info(f"Running `{self.repoid_path_clsname}`...")
 
+            # Send local_model to graph to re-compile
             graph.compile(self.local_model)
 
             self.local_model.eval() if inference else self.local_model.train()
@@ -230,7 +251,7 @@ class AbstractModel(ABC):
             A simple entering of a generation context on a language model, and running a prompt with no interventions:
 
             .. code-block:: python
-            
+
                 with model.generate(max_new_tokens=1) as generator:
                     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
                         pass
@@ -274,9 +295,8 @@ class AbstractModel(ABC):
 
         """
         return Runner(self, *args, **kwargs, generation=False)
-    
-    def invoke(self, *args, **kwargs):
 
+    def invoke(self, *args, **kwargs):
         return DirectInvoker(self, *args, **kwargs)
 
     def alteration(self) -> Patcher:
