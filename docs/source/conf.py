@@ -4,7 +4,7 @@
 project = 'nnsight'
 copyright = '2023, NDIF'
 author = 'Jaden Fiotto-Kaufman'
-release = '0.0.6'
+release = '0.0.7'
 
 
 
