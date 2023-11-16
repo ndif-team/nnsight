@@ -23,6 +23,8 @@ class LanguageModel(AbstractModel):
         Tokenized prompts: (Union[List[List[int]], torch.Tensor])
         Direct input: (Dict[str,Any])
 
+    If using a custom model, you also need to provide the tokenizer like ``LanguageModel(custom_model, tokenizer=tokenizer)``
+
     Calls to generate pass arguments downstream to :func:`AutoModelForCausalLM.generate`
 
     Attributes:
@@ -96,7 +98,7 @@ class LanguageModel(AbstractModel):
         return {"input_ids": torch.tensor([[0]])}
 
     def _scan(self, prepared_inputs, *args, **kwargs) -> None:
-        #TODO
+        # TODO
         # Actually use args and kwargs. Dont do this now because the args may be specific to _generation which throws unused args errors
         # Maybe inspect signature and filter out unused args.
         self.meta_model(**prepared_inputs.copy().to("meta"))

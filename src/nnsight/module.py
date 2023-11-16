@@ -120,7 +120,7 @@ class Module(torch.nn.Module):
         Calling denotes the user wishes to set the output of this module and therefore we create a Proxy of that request.
 
         Args:
-            value (Union[Proxy, Any]): _description_
+            value (Union[Proxy, Any]): Value to set output to.
         """
 
         Proxy.proxy_update(
@@ -165,7 +165,7 @@ class Module(torch.nn.Module):
         Calling denotes the user wishes to set the input of this module and therefore we create a Proxy of that request.
 
         Args:
-            value (Union[Proxy, Any]): _description_
+            value (Union[Proxy, Any]): Value to set input to.
         """
 
         Proxy.proxy_update(

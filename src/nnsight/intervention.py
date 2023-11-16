@@ -25,11 +25,11 @@ class InterventionProxy(Proxy):
 
     Examples:
 
-        Saving a proxy so it is both clones at the point of execution and not deleted at the completion of it's listeners is enabled with ``.save()``:
+        Saving a proxy so it is not deleted at the completion of it's listeners is enabled with ``.save()``:
 
         .. code-block:: python
 
-            with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+            with runner.invoke('The Eiffel Tower is in the city of') as invoker:
                 hidden_states = model.lm_head.input.save()
                 logits = model.lm_head.output.save()
 
@@ -37,24 +37,24 @@ class InterventionProxy(Proxy):
             print(logits.value)
 
         This works and would output the inputs and outputs to the model.lm_head module.
-        Had you not called .save(), calling .value would have thrown an error.
+        Had you not called .save(), calling .value would have been None.
 
         Indexing by token of hidden states can easily done using ``.token[<idx>]`` or ``.t[<idx>]``
 
         .. code-block:: python
 
-            with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+            with runner.invoke('The Eiffel Tower is in the city of') as invoker:
                 logits = model.lm_head.output.t[0].save()
 
             print(logits.value)
 
         This would save only the first token of the output for this module.
+        This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
 
         Calling ``.shape`` on an InterventionProxy returns the shape or collection of shapes for the tensors traced through this module.
 
         Calling ``.value`` on an InterventionProxy returns the actual populated values, updated during actual execution of the model.
         
-        Throws an error if this value is not populated.
     """
 
     def save(self) -> InterventionProxy:

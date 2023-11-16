@@ -15,7 +15,6 @@ class Proxy:
     """Proxy objects are the actual objects that interact with operations in order to update the graph to create new nodes.
 
     The operations that are traceable on base Proxy objects are many python built-in and magic methods, as well as implementing __torch_function__ to trace torch operations.
-    When an operation is traced, arguments are converted into their 'meta' tensor values and ran through the operation in order to find out the shames and data types of the result.
 
     Attributes:
         node (Node): This proxy's node.
@@ -26,8 +25,8 @@ class Proxy:
         """Updates Tensor values with other Tensor values.
 
         Args:
-            value1 (Any): _description_
-            value2 (Any): _description_
+            value1 (Any): Collection with Tensors to update.
+            value2 (Any): Collection with Tensors to pull values from.
         """
         if isinstance(value1, torch.Tensor):
             value1[:] = value2
@@ -171,10 +170,10 @@ def proxy_wrapper(fn) -> None:
     Otherwise just run the function.
 
     Args:
-        fn (function): _description_
+        fn (function): Function to wrap.
 
     Returns:
-        _type_: _description_
+        function: Wrapped function.
     """
 
     @wraps(fn)

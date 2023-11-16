@@ -46,7 +46,7 @@ class Invoker(AbstractContextManager):
             current batch_size and batched_input.
 
         Returns:
-            Invoker: _description_
+            Invoker: Invoker.
         """
         # Were in a new invocation so set generation_idx to 0,
         self.tracer.generation_idx = 0

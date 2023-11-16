@@ -188,7 +188,7 @@ class Graph:
 
         Args:
             value (Any): 'meta' proxy value used for tracing the shapes and values.
-            target (Union[Callable, str]): Either the function to call for this node, or a string that's the name of a method attribute on the first arg.
+            target (Union[Callable, str]): Either the function to call for this node, or a string of a reserved target name.
             args (List[Any], optional): Positional arguments of node. Defaults to None.
             kwargs (Dict[str, Any], optional): Keyword arguments of node. Defaults to None.
             name (str, optional): Unique name of node. Otherwise pull name from target Defaults to None.
@@ -197,7 +197,7 @@ class Graph:
             Proxy: Proxy for the added node.
 
         Raises:
-            ValueError: If more than one "rtn" or "module" nodes are added to the graph.
+            ValueError: If more than one reserved "rtn" or "module" nodes are added to the graph.
         """
 
         # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.

@@ -2,18 +2,17 @@ import os
 
 import yaml
 
-from .pydantics.Config import ConfigModel
 from .patching import *
+from .pydantics.Config import ConfigModel
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
+from .models.AbstractModel import AbstractModel
 from .models.DiffuserModel import DiffuserModel
 from .models.LanguageModel import LanguageModel
-from .models.AbstractModel import AbstractModel
 from .module import Module
-
 from .patching import Patch, Patcher
 
 # Below do default patching:
@@ -24,6 +23,8 @@ from functools import wraps
 import torch
 
 
+# Need to patch repeat_interleave to work with meta tensors
+# Computes appropriate shape if meta. Otherwise just call repeat_interleave
 def repeat_interleave_wrapper(fn):
     @wraps(fn)
     def repeat_interleave(
@@ -59,18 +60,24 @@ DEFAULT_PATCHER.add(
 
 DEFAULT_PATCHER.__enter__()
 
-from torch._meta_registrations import register_meta, aten, global_decomposition_table, _meta_lib_dont_use_me_use_register_meta
+from torch._meta_registrations import (_meta_lib_dont_use_me_use_register_meta,
+                                       aten, global_decomposition_table,
+                                       register_meta)
 
+
+# Function which "activates" the most recent meta registered function.
 def activate_recent_meta():
-    op_overload, fn = list(global_decomposition_table['meta'].items())[-1]
+    op_overload, fn = list(global_decomposition_table["meta"].items())[-1]
     op_overload.py_impl(torch._C.DispatchKey.Meta)(fn)
     _meta_lib_dont_use_me_use_register_meta.impl(op_overload, fn)
 
 
-
+# Need to patch local_scalar_dense_meta for meta.
+# In non-meta tensors this returns the singular value in tensors with one value
+# In meta, lets just return 0
 @register_meta(aten._local_scalar_dense)
 def local_scalar_dense_meta(A):
-
     return 0
+
 
 activate_recent_meta()

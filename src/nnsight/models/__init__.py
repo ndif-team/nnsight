@@ -78,5 +78,6 @@ The :func:`forward <nnsight.models.AbstractModel.AbstractModel.forward>` context
 
     print(logits.value)
 
-See :mod:`nnsight.contexts`
+See :mod:`nnsight.contexts` for more.
+
 """

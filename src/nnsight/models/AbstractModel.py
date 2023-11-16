@@ -60,6 +60,7 @@ class AbstractModel(ABC):
         self.local_model: torch.nn.Module = None
         self.edits: List[Edit] = list()
 
+        # If using a custom passed in model.
         if isinstance(repoid_path_model, torch.nn.Module):
             self.repoid_path_clsname = repoid_path_model.__class__.__name__
             self.custom_model = True
@@ -167,7 +168,7 @@ class AbstractModel(ABC):
             inference (bool): If running in inference mode. Defaults to True.
 
         Returns:
-            Any: _description_
+            Any: Output of model.
         """
         if edits is None:
             edits = self.edits
@@ -297,6 +298,25 @@ class AbstractModel(ABC):
         return Runner(self, *args, **kwargs, generation=False)
 
     def invoke(self, *args, **kwargs):
+        """Returns a Runner context for this model's _forward method. Also acts as an invocation for the runner allowing you to create a Runner anf Invocation context in one go.
+        Gives option to create Runner context and call an invoke on it in one call. Adds an extra 'fwd_args' kwarg to allow the args normally passed to ``.forward()``
+        Returns:
+            Runner: Runner.
+
+        Examples:
+
+            A simple entering of a forward context on a language model, and running a prompt with no interventions:
+
+            .. code-block:: python
+
+                with model.invoke('The Eiffel Tower is in the city of', fwd_args={}) as invoker:
+                    pass
+
+                print(runner.output)
+
+            See the Runner docs for more information.
+
+        """
         return DirectInvoker(self, *args, **kwargs)
 
     def alteration(self) -> Patcher:
@@ -427,8 +447,22 @@ class AbstractModel(ABC):
 
     @abstractmethod
     def _example_input(self) -> Any:
+        """Abstract to provide an example input to be used with ``._scan(...)``
+
+        Returns:
+            Any: Example input.
+        """
         raise NotImplementedError()
 
     @abstractmethod
-    def _batched_inputs(self) -> List[Any]:
+    def _batched_inputs(self, prepared_inputs: Any) -> List[Any]:
+        """Abstract to return a version of the prepared inputs from ``._prepare_inputs(...)`` that can be batched with others.
+        For example with a LanguageModel, prepare_inputs returns a dictionary. The implementation for this method just returns the 'input_ids'.
+
+        Args:
+            prepared_inputs (Any): Inputs from ``._prepare_inputs(...)``
+
+        Returns:
+            List[Any]: Batched version of prepared_inputs.
+        """
         raise NotImplementedError()
