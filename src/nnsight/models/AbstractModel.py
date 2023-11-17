@@ -120,16 +120,7 @@ class AbstractModel(ABC):
         self._scan(self._prepare_inputs(self._example_input()))
 
         if self.dispatch:
-            with self.alteration() if self.alter else Patcher():
-                self.local_model = self._load_local(
-                    self.repoid_path_clsname, *self.args, **self.kwargs
-                )
-
-                # By default, all params should be frozen.
-                for param in self.local_model.parameters():
-                    param.requires_grad = False
-
-            self.dispatched = True
+            self.dispatch_local_model()
 
         logger.info(f"Initialized `{self.repoid_path_clsname}`")
 
@@ -175,16 +166,7 @@ class AbstractModel(ABC):
 
         # If local_model not yet loaded, do so.
         if not self.dispatched:
-            with self.alteration() if self.alter else Patcher():
-                self.local_model = self._load_local(
-                    self.repoid_path_clsname, *self.args, **self.kwargs
-                )
-
-                # By default, all params should be frozen.
-                for param in self.local_model.parameters():
-                    param.requires_grad = False
-
-            self.dispatched = True
+            self.dispatch_local_model()
 
         with Editor(self, edits):
             increment_hook = self._register_increment_hook(
@@ -206,7 +188,7 @@ class AbstractModel(ABC):
             graph.compile(self.local_model)
 
             self.local_model.eval() if inference else self.local_model.train()
-
+  
             inputs = self._prepare_inputs(inputs)
 
             with torch.inference_mode(mode=inference):
@@ -232,6 +214,18 @@ class AbstractModel(ABC):
             torch.cuda.empty_cache()
 
         return output
+
+    def dispatch_local_model(self, *args, **kwargs) -> None:
+        with self.alteration() if self.alter else Patcher():
+            self.local_model = self._load_local(
+                self.repoid_path_clsname, *self.args, *args, **kwargs, **self.kwargs
+            )
+
+            # By default, all params should be frozen.
+            for param in self.local_model.parameters():
+                param.requires_grad = False
+
+        self.dispatched = True
 
     def generate(self, *args, **kwargs) -> Runner:
         """Returns a Runner context for this model's _generation method.
