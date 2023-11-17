@@ -225,6 +225,9 @@ class Node:
             if dependency.redundant():
                 dependency.destroy()
 
+        if self.value is not None and self.redundant():
+            self.destroy()
+
     def destroy(self) -> None:
         """Removes the reference to the node's value and logs it's destruction."""
         logger.info(f"=> DEL({self.name})")
