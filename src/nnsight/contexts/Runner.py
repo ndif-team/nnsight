@@ -36,7 +36,7 @@ class Runner(Tracer):
 
     Attributes:
         generation (bool): If to use the _generation method of the model. Otherwise the _run_local method
-        server (bool): If to use the remote NDIF server for execution of model and computation graph. (Assuming it's running/working)
+        remote (bool): If to use the remote NDIF server for execution of model and computation graph. (Assuming it's running/working)
         blocking (bool): If when using the server option, to hang until job completion or return information you can use to retrieve the job result.
     """
 
@@ -45,13 +45,13 @@ class Runner(Tracer):
         *args,
         generation:bool = False,
         blocking: bool = True,
-        server: bool = False,
+        remote: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
 
         self.generation = generation
-        self.server = server
+        self.remote = remote
         self.blocking = blocking
 
     def __enter__(self) -> Runner:
@@ -59,7 +59,7 @@ class Runner(Tracer):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """On exit, run and generate using the model whether locally or on the server."""
-        if self.server:
+        if self.remote:
             self.run_server()
         else:
             self.run_local()
@@ -80,9 +80,10 @@ class Runner(Tracer):
         request = pydantics.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
-            model_name=self.model.model_name_or_path,
-            prompts=self.input_ids,
+            model_name=self.model.repoid_path_clsname,
+            batched_input=self.batched_input,
             intervention_graph=self.graph,
+            generation=self.generation
         )
 
         if self.blocking:
@@ -108,7 +109,7 @@ class Runner(Tracer):
             # Then disconnect and continue.
             if data.status == pydantics.JobStatus.COMPLETED:
                 for name, value in data.saves.items():
-                    self.graph.nodes[name].future.set_result(value)
+                    self.graph.nodes[name].value = value
 
                 self.output = data.output
 
