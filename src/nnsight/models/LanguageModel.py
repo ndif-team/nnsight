@@ -101,7 +101,8 @@ class LanguageModel(AbstractModel):
         # TODO
         # Actually use args and kwargs. Dont do this now because the args may be specific to _generation which throws unused args errors
         # Maybe inspect signature and filter out unused args.
-        self.meta_model(**prepared_inputs.copy().to("meta"))
+        with torch.inference_mode():
+            self.meta_model(**prepared_inputs.copy().to("meta"))
 
     def _forward(self, prepared_inputs, *args, **kwargs) -> Any:
         return self.local_model(
