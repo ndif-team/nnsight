@@ -103,7 +103,7 @@ class Module(torch.nn.Module):
             self._output = self.tracer.graph.add(
                 value=util.apply(
                     self.output_shape,
-                    lambda x: torch.empty(x, device="meta", requires_grad=True),
+                    lambda x: torch.empty(x, device="meta", requires_grad=True).clone(),
                     torch.Size,
                 ),
                 target="argument",
@@ -148,7 +148,7 @@ class Module(torch.nn.Module):
             self._input = self.tracer.graph.add(
                 value=util.apply(
                     self.input_shape,
-                    lambda x: torch.empty(x, device="meta", requires_grad=True),
+                    lambda x: torch.empty(x, device="meta", requires_grad=True).clone(),
                     torch.Size,
                 ),
                 target="argument",
