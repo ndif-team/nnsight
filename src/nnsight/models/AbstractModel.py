@@ -186,8 +186,6 @@ class AbstractModel(ABC):
 
             # Send local_model to graph to re-compile
             graph.compile(self.local_model)
-
-            self.local_model.eval() if inference else self.local_model.train()
   
             inputs = self._prepare_inputs(inputs)
 
@@ -201,12 +199,16 @@ class AbstractModel(ABC):
                     output_hook=lambda activations, module_path: intervene(
                         activations, module_path, graph, "output"
                     ),
+                    backward_input_hook=lambda activations, module_path: intervene(
+                        activations, module_path, graph, "backward_input"
+                    ),
+                    backward_output_hook=lambda activations, module_path: intervene(
+                        activations, module_path, graph, "backward_output"
+                    ),
                 ):
                     output = fn(inputs, *args, **kwargs)
 
             increment_hook.remove()
-
-            self.local_model.eval()
 
             logger.info(f"Completed `{self.repoid_path_clsname}`")
 
@@ -220,10 +222,6 @@ class AbstractModel(ABC):
             self.local_model = self._load_local(
                 self.repoid_path_clsname, *self.args, *args, **kwargs, **self.kwargs
             )
-
-            # By default, all params should be frozen.
-            for param in self.local_model.parameters():
-                param.requires_grad = False
 
         self.dispatched = True
 

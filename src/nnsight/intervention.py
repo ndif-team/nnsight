@@ -188,13 +188,15 @@ class HookModel(AbstractContextManager):
             Should have signature of [outputs(Any), module_path(str)] -> outputs(Any)
         handles (List[RemovableHandle]): Handles returned from registering hooks as to be used when removing hooks on __exit__.
     """
-
+    #TODO maybe only apply the necassay hooks (e.x if a module has a input hook, all hooks will be added)
     def __init__(
         self,
         model: torch.nn.Module,
         modules: List[str],
         input_hook: Callable = None,
         output_hook: Callable = None,
+        backward_input_hook:Callable = None,
+        backward_output_hook:Callable = None
     ) -> None:
         self.model = model
         self.modules: List[Tuple[torch.nn.Module, str]] = [
@@ -203,6 +205,8 @@ class HookModel(AbstractContextManager):
         ]
         self.input_hook = input_hook
         self.output_hook = output_hook
+        self.backward_input_hook = backward_input_hook
+        self.backward_output_hook = backward_output_hook
 
         self.handles: List[RemovableHandle] = []
 
@@ -227,6 +231,20 @@ class HookModel(AbstractContextManager):
                     return self.output_hook(output, module_path)
 
                 self.handles.append(module.register_forward_hook(output_hook))
+
+            if self.backward_input_hook is not None:
+
+                def backward_input_hook(module, input, module_path=module_path):
+                    return self.backward_input_hook(input, module_path)
+
+                self.handles.append(module.register_full_backward_pre_hook(backward_input_hook))
+
+            if self.backward_output_hook is not None:
+
+                def backward_output_hook(module, input, output, module_path=module_path):
+                    return self.backward_output_hook(output, module_path)
+
+                self.handles.append(module.register_full_backward_hook(backward_output_hook))
 
         return self
 

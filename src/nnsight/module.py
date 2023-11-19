@@ -60,6 +60,8 @@ class Module(torch.nn.Module):
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
+        self._backward_output: InterventionProxy = None
+        self._backward_input: InterventionProxy = None
         self._graph: Graph = None
 
         self.tracer: Tracer = None
@@ -84,7 +86,7 @@ class Module(torch.nn.Module):
         if proxy:
             module_proxy = getattr(self.tracer.graph.module_proxy, self.module_path)
 
-            return module_proxy(*args, **kwds)
+            return module_proxy.forward(*args, **kwds)
 
         return super().__call__(*args, **kwds)
 
@@ -101,7 +103,7 @@ class Module(torch.nn.Module):
             self._output = self.tracer.graph.add(
                 value=util.apply(
                     self.output_shape,
-                    lambda x: torch.empty(x, device="meta"),
+                    lambda x: torch.empty(x, device="meta", requires_grad=True),
                     torch.Size,
                 ),
                 target="argument",
@@ -146,7 +148,7 @@ class Module(torch.nn.Module):
             self._input = self.tracer.graph.add(
                 value=util.apply(
                     self.input_shape,
-                    lambda x: torch.empty(x, device="meta"),
+                    lambda x: torch.empty(x, device="meta", requires_grad=True),
                     torch.Size,
                 ),
                 target="argument",
@@ -179,6 +181,96 @@ class Module(torch.nn.Module):
         )
 
     @property
+    def backward_output(self) -> InterventionProxy:
+        """
+        Calling denotes the user wishes to get the backward_output of this module and therefore we create a Proxy of that request.
+        Only generates a proxy the first time it is references otherwise return the already set one.
+
+        Returns:
+            Proxy: backward_output proxy.
+        """
+        if self._backward_output is None:
+            self._backward_output = self.tracer.graph.add(
+                value=util.apply(
+                    self.output_shape,
+                    lambda x: torch.empty(x, device="meta"),
+                    torch.Size,
+                ),
+                target="argument",
+                args=[
+                    f"{self.module_path}.backward_output.{self.tracer.generation_idx}",
+                    self.tracer.batch_size,
+                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                ],
+            )
+
+        return self._backward_output
+
+    @backward_output.setter
+    def backward_output(self, value: Union[InterventionProxy, Any]) -> None:
+        """
+        Calling denotes the user wishes to set the backward_output of this module and therefore we create a Proxy of that request.
+
+        Args:
+            value (Union[Proxy, Any]): Value to set backward_output to.
+        """
+
+        Proxy.proxy_update(
+            self.backward_output.node.proxy_value, self.backward_output.node.prepare_proxy_values(value)
+        )
+
+        self.backward_output.node.graph.add(
+            value=self.backward_output.node.proxy_value,
+            target=Proxy.proxy_update,
+            args=[self.backward_output.node, value],
+        )
+
+    @property
+    def backward_input(self) -> InterventionProxy:
+        """
+        Calling denotes the user wishes to get the backward_input of this module and therefore we create a Proxy of that request.
+        Only generates a proxy the first time it is references otherwise return the already set one.
+
+        Returns:
+            Proxy: backward_input proxy.
+        """
+        if self._backward_input is None:
+            self._backward_input = self.tracer.graph.add(
+                value=util.apply(
+                    self.input_shape,
+                    lambda x: torch.empty(x, device="meta"),
+                    torch.Size,
+                ),
+                target="argument",
+                args=[
+                    f"{self.module_path}.backward_input.{self.tracer.generation_idx}",
+                    self.tracer.batch_size,
+                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                ],
+            )
+
+        return self._backward_input
+
+    @backward_input.setter
+    def backward_input(self, value: Union[InterventionProxy, Any]) -> None:
+        """
+        Calling denotes the user wishes to set the backward_input of this module and therefore we create a Proxy of that request.
+
+        Args:
+            value (Union[Proxy, Any]): Value to set backward_input to.
+        """
+
+        Proxy.proxy_update(
+            self.backward_input.node.proxy_value, self.backward_input.node.prepare_proxy_values(value)
+        )
+
+        self.backward_input.node.graph.add(
+            value=self.backward_input.node.proxy_value,
+            target=Proxy.proxy_update,
+            args=[self.backward_input.node, value],
+        )
+
+    @property
     def graph(self) -> Graph:
         if self._graph is None:
             self._graph = Graph.trace(
@@ -206,6 +298,8 @@ class Module(torch.nn.Module):
         def hook(module: Module, input: Any, output: Any):
             module._output = None
             module._input = None
+            module._backward_output = None
+            module._backward_input = None
             module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
             module.input_shape = util.apply(input, lambda x: x.shape, torch.Tensor)
             module.output_type = util.apply(output, lambda x: x.dtype, torch.Tensor)
