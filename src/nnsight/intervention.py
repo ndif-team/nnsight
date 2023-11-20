@@ -75,6 +75,20 @@ class InterventionProxy(Proxy):
 
         return self
 
+    def retain_grad(self):
+
+        self.node.graph.add(
+            target=torch.Tensor.retain_grad,
+            args=[self.node]
+        )
+
+        # We need to set the values of self to values of self to add this into the computation graph so grad flows through it
+        # This is because in intervene(), we call .narrow on activations which removes it from the grad path
+        self.node.graph.add(
+            target=Proxy.proxy_update,
+            args=[self.node, self.node]
+        )
+
     @property
     def token(self) -> TokenIndexer:
         """Property used to do token based indexing on a proxy.
