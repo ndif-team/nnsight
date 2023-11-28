@@ -167,6 +167,7 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
     if module_path in graph.argument_node_names:
+        
         argument_node_names = graph.argument_node_names[module_path]
 
         # multiple argument nodes can have same module_path if there are multiple invocations.
@@ -184,7 +185,6 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
                     torch.Tensor,
                 )
             )
-
     return activations
 
 
@@ -248,17 +248,17 @@ class HookModel(AbstractContextManager):
 
             if self.backward_input_hook is not None:
 
-                def backward_input_hook(module, input, module_path=module_path):
+                def backward_input_hook(module, input, output, module_path=module_path):
                     return self.backward_input_hook(input, module_path)
 
-                self.handles.append(module.register_full_backward_pre_hook(backward_input_hook))
+                self.handles.append(module.register_full_backward_hook(backward_input_hook))
 
             if self.backward_output_hook is not None:
 
-                def backward_output_hook(module, input, output, module_path=module_path):
+                def backward_output_hook(module, output, module_path=module_path):
                     return self.backward_output_hook(output, module_path)
 
-                self.handles.append(module.register_full_backward_hook(backward_output_hook))
+                self.handles.append(module.register_full_backward_pre_hook(backward_output_hook))
 
         return self
 
