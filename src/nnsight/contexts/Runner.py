@@ -94,7 +94,7 @@ class Runner(Tracer):
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
         sio = socketio.Client()
-        sio.connect(f"ws://{CONFIG.API.HOST}")
+        sio.connect(f"wss://{CONFIG.API.HOST}")
 
         # Called when receiving a response from the server.
         @sio.on("blocking_response")
