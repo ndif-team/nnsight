@@ -125,12 +125,7 @@ class Module(torch.nn.Module):
             value (Union[Proxy, Any]): Value to set output to.
         """
 
-        Proxy.proxy_update(
-            self.output.node.proxy_value, self.output.node.prepare_proxy_values(value)
-        )
-
         self.output.node.graph.add(
-            value=self.output.node.proxy_value,
             target=Proxy.proxy_update,
             args=[self.output.node, value],
         )
@@ -170,12 +165,7 @@ class Module(torch.nn.Module):
             value (Union[Proxy, Any]): Value to set input to.
         """
 
-        Proxy.proxy_update(
-            self.input.node.proxy_value, self.input.node.prepare_proxy_values(value)
-        )
-
         self.input.node.graph.add(
-            value=self.input.node.proxy_value,
             target=Proxy.proxy_update,
             args=[self.input.node, value],
         )
@@ -215,12 +205,7 @@ class Module(torch.nn.Module):
             value (Union[Proxy, Any]): Value to set backward_output to.
         """
 
-        Proxy.proxy_update(
-            self.backward_output.node.proxy_value, self.backward_output.node.prepare_proxy_values(value)
-        )
-
         self.backward_output.node.graph.add(
-            value=self.backward_output.node.proxy_value,
             target=Proxy.proxy_update,
             args=[self.backward_output.node, value],
         )
@@ -260,12 +245,7 @@ class Module(torch.nn.Module):
             value (Union[Proxy, Any]): Value to set backward_input to.
         """
 
-        Proxy.proxy_update(
-            self.backward_input.node.proxy_value, self.backward_input.node.prepare_proxy_values(value)
-        )
-
         self.backward_input.node.graph.add(
-            value=self.backward_input.node.proxy_value,
             target=Proxy.proxy_update,
             args=[self.backward_input.node, value],
         )
