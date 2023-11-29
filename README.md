@@ -1,4 +1,4 @@
-<img src="./docs/source/_static/images/nnsigt.png" alt="drawing" style="width:200px;float:left"/>
+<img src="./docs/source/_static/images/nnsight_logo.svg" alt="drawing" style="width:200px;float:left"/>
 
 # nnsight 
 ![PyPI - Version](https://img.shields.io/pypi/v/nnsight)

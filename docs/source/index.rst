@@ -19,7 +19,7 @@ nnsight
     .. grid-item:: 
         .. div:: 
 
-          .. image:: _static/images/nnsigt.png
+          .. image:: _static/images/nnsight_logo.svg
             
     .. grid-item:: 
 
