@@ -1,0 +1,20 @@
+<style>
+    #ndif_status {
+        height: 18px;
+        width: 18px;
+        background-color: red;
+        border-radius: 50%;
+        display: inline-block;
+        margin-left: 10px;
+    }
+</style>
+
+<div>NDIF Status: </div><span id="ndif_status"></span>
+
+<script>
+    console.log()
+    fetch("{{ndif_url}}")
+        .then((response) => document.getElementById("ndif_status").style.backgroundColor = "green")
+        .catch((response) => document.getElementById("ndif_status").style.backgroundColor = "red")
+
+</script>
