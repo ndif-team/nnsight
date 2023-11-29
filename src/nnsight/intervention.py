@@ -25,11 +25,11 @@ class InterventionProxy(Proxy):
 
     Examples:
 
-        Saving a proxy so it is both clones at the point of execution and not deleted at the completion of it's listeners is enabled with ``.save()``:
+        Saving a proxy so it is not deleted at the completion of it's listeners is enabled with ``.save()``:
 
         .. code-block:: python
 
-            with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+            with runner.invoke('The Eiffel Tower is in the city of') as invoker:
                 hidden_states = model.lm_head.input.save()
                 logits = model.lm_head.output.save()
 
@@ -37,24 +37,24 @@ class InterventionProxy(Proxy):
             print(logits.value)
 
         This works and would output the inputs and outputs to the model.lm_head module.
-        Had you not called .save(), calling .value would have thrown an error.
+        Had you not called .save(), calling .value would have been None.
 
         Indexing by token of hidden states can easily done using ``.token[<idx>]`` or ``.t[<idx>]``
 
         .. code-block:: python
 
-            with generator.invoke('The Eiffel Tower is in the city of') as invoker:
+            with runner.invoke('The Eiffel Tower is in the city of') as invoker:
                 logits = model.lm_head.output.t[0].save()
 
             print(logits.value)
 
         This would save only the first token of the output for this module.
+        This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
 
         Calling ``.shape`` on an InterventionProxy returns the shape or collection of shapes for the tensors traced through this module.
 
         Calling ``.value`` on an InterventionProxy returns the actual populated values, updated during actual execution of the model.
         
-        Throws an error if this value is not populated.
     """
 
     def save(self) -> InterventionProxy:
@@ -74,6 +74,20 @@ class InterventionProxy(Proxy):
         )
 
         return self
+
+    def retain_grad(self):
+
+        self.node.graph.add(
+            target=torch.Tensor.retain_grad,
+            args=[self.node]
+        )
+
+        # We need to set the values of self to values of self to add this into the computation graph so grad flows through it
+        # This is because in intervene(), we call .narrow on activations which removes it from the grad path
+        self.node.graph.add(
+            target=Proxy.proxy_update,
+            args=[self.node, self.node]
+        )
 
     @property
     def token(self) -> TokenIndexer:
@@ -153,6 +167,7 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
     if module_path in graph.argument_node_names:
+        
         argument_node_names = graph.argument_node_names[module_path]
 
         # multiple argument nodes can have same module_path if there are multiple invocations.
@@ -170,7 +185,6 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
                     torch.Tensor,
                 )
             )
-
     return activations
 
 
@@ -188,13 +202,15 @@ class HookModel(AbstractContextManager):
             Should have signature of [outputs(Any), module_path(str)] -> outputs(Any)
         handles (List[RemovableHandle]): Handles returned from registering hooks as to be used when removing hooks on __exit__.
     """
-
+    #TODO maybe only apply the necassay hooks (e.x if a module has a input hook, all hooks will be added)
     def __init__(
         self,
         model: torch.nn.Module,
         modules: List[str],
         input_hook: Callable = None,
         output_hook: Callable = None,
+        backward_input_hook:Callable = None,
+        backward_output_hook:Callable = None
     ) -> None:
         self.model = model
         self.modules: List[Tuple[torch.nn.Module, str]] = [
@@ -203,6 +219,8 @@ class HookModel(AbstractContextManager):
         ]
         self.input_hook = input_hook
         self.output_hook = output_hook
+        self.backward_input_hook = backward_input_hook
+        self.backward_output_hook = backward_output_hook
 
         self.handles: List[RemovableHandle] = []
 
@@ -227,6 +245,20 @@ class HookModel(AbstractContextManager):
                     return self.output_hook(output, module_path)
 
                 self.handles.append(module.register_forward_hook(output_hook))
+
+            if self.backward_input_hook is not None:
+
+                def backward_input_hook(module, input, output, module_path=module_path):
+                    return self.backward_input_hook(input, module_path)
+
+                self.handles.append(module.register_full_backward_hook(backward_input_hook))
+
+            if self.backward_output_hook is not None:
+
+                def backward_output_hook(module, output, module_path=module_path):
+                    return self.backward_output_hook(output, module_path)
+
+                self.handles.append(module.register_full_backward_pre_hook(backward_output_hook))
 
         return self
 

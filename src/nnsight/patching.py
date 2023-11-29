@@ -1,14 +1,12 @@
-"""The patching module handles patching of classes and functions in modules.
-
-Attributes:
-    DEFAULT_PATCHER (Patcher): The default patcher that patches some torch functions on initialization. 
-
-"""
+"""The patching module handles patching of classes and functions in modules."""
 from __future__ import annotations
 
 import importlib
+import types
 from contextlib import AbstractContextManager
 from typing import Any, List
+
+from . import util
 
 
 class Patch:
@@ -17,17 +15,30 @@ class Patch:
     Attributes:
         obj (Any): Object to replace.
         replacement (Any): Object that replaces.
+        parent (Any): Module or class to replace attribute.
     """
 
     def __init__(self, obj: Any, replacement: Any) -> None:
         self.obj = obj
         self.replacement = replacement
 
+        builtin: bool = isinstance(self.obj, types.BuiltinFunctionType)
+        module = importlib.import_module(self.obj.__module__)
+
+        if builtin:
+            self.parent = module
+        else:
+            parent_path = ".".join(self.obj.__qualname__.split(".")[:-1])
+
+            self.parent = (
+                util.fetch_attr(module, parent_path) if parent_path else module
+            )
+
     def patch(self) -> None:
-        """Carries out the replacement of an object in a module.
+        """Carries out the replacement of an object in a module/class.
 
         Imports the objects module with:
-        
+
         .. code-block:: python
 
             importlib.import_module(self.obj.__module__)
@@ -35,23 +46,21 @@ class Patch:
         And replaces it with:
 
         .. code-block:: python
-            
+
             setattr(module, self.obj.__name__, self.replacement)
 
         """
-        module = importlib.import_module(self.obj.__module__)
-
-        setattr(module, self.obj.__name__, self.replacement)
+        setattr(self.parent, self.obj.__name__, self.replacement)
 
     def restore(self) -> None:
-        """Carries out the restoration of the original object on the objects module.
+        """Carries out the restoration of the original object on the objects module/class.
 
         Imports the objects module with:
 
         .. code-block:: python
 
             importlib.import_module(self.obj.__module__)
-            
+
         And replaces it with:
 
         .. code-block:: python
@@ -59,9 +68,8 @@ class Patch:
             setattr(module, self.obj.__name__, self.obj)
 
         """
-        module = importlib.import_module(self.obj.__module__)
 
-        setattr(module, self.obj.__name__, self.obj)
+        setattr(self.parent, self.obj.__name__, self.obj)
 
 
 class Patcher(AbstractContextManager):
@@ -99,65 +107,3 @@ class Patcher(AbstractContextManager):
         """Calls `.restore()` on all patches."""
         for patch in self.patches:
             patch.restore()
-
-
-DEFAULT_PATCHER = Patcher()
-
-from functools import wraps
-
-import torch
-
-
-def repeat_interleave_wrapper(fn):
-    @wraps(fn)
-    def repeat_interleave(
-        input: torch.Tensor, repeats: torch.LongTensor, dim=None, output_size=None
-    ):
-        if input.device.type == "meta":
-            if not isinstance(repeats, torch.Tensor):
-                repeats = torch.LongTensor([repeats])
-
-            if dim is None:
-                input = input.flatten()
-                dim = 0
-
-            if repeats.dim() == 0 or (repeats.dim() == 1 and repeats.size(0) == 1):
-                repeats = repeats.reshape([1]).expand([input.size(dim)])
-
-            new_dim_size = repeats.cumsum(0)[-1].item()
-            new_output_shape = list(input.shape)
-            new_output_shape[dim] = new_dim_size
-
-            return torch.empty(new_output_shape, device="meta")
-
-        else:
-            return fn(input, repeats, dim=dim, output_size=output_size)
-
-    return repeat_interleave
-
-
-DEFAULT_PATCHER.add(
-    Patch(torch.repeat_interleave, repeat_interleave_wrapper(torch.repeat_interleave))
-)
-
-
-DEFAULT_PATCHER.__enter__()
-
-from torch._meta_registrations import register_meta, aten, global_decomposition_table, _meta_lib_dont_use_me_use_register_meta
-
-def activate_recent_meta():
-    op_overload, fn = list(global_decomposition_table['meta'].items())[-1]
-    op_overload.py_impl(torch._C.DispatchKey.Meta)(fn)
-    _meta_lib_dont_use_me_use_register_meta.impl(op_overload, fn)
-
-
-
-@register_meta(aten._local_scalar_dense)
-def local_scalar_dense_meta(A):
-
-    return 0
-
-activate_recent_meta()
-
-
-

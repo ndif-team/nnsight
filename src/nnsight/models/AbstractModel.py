@@ -10,15 +10,15 @@ import torch
 from torch.utils.hooks import RemovableHandle
 
 from ..alteration import REPOID_TO_ALTERATION
-from ..contexts.Runner import Runner
 from ..contexts.DirectInvoker import DirectInvoker
+from ..contexts.Runner import Runner
 from ..editing.Editor import Edit, Editor
 from ..editing.GraphEdit import GraphEdit
 from ..editing.WrapperModuleEdit import WrapperModuleEdit
 from ..intervention import HookModel, intervene
 from ..logger import logger
 from ..module import Module
-from ..patching import Patcher
+from ..patching import Patch, Patcher
 from ..tracing.Graph import Graph
 
 
@@ -60,6 +60,7 @@ class AbstractModel(ABC):
         self.local_model: torch.nn.Module = None
         self.edits: List[Edit] = list()
 
+        # If using a custom passed in model.
         if isinstance(repoid_path_model, torch.nn.Module):
             self.repoid_path_clsname = repoid_path_model.__class__.__name__
             self.custom_model = True
@@ -73,9 +74,31 @@ class AbstractModel(ABC):
             # Use accelerate and .to('meta') to assure tensors are loaded to 'meta' device
             with accelerate.init_empty_weights(include_buffers=True):
                 if self.custom_model:
-                    self.meta_model: Module = Module.wrap(
-                        copy.deepcopy(self.local_model).to("meta")
-                    )
+                    # Need to force parameters when deepcopied, to instead create a meta tensor of the same size/dtype
+                    def meta_deepcopy(self, memo):
+                        if id(self) in memo:
+                            return memo[id(self)]
+                        else:
+                            result = type(self)(
+                                torch.empty_like(
+                                    self.data, dtype=self.data.dtype, device="meta"
+                                ),
+                                self.requires_grad,
+                            )
+                            memo[id(self)] = result
+                            return result
+
+                    # Patching Parameter __deepcopy__
+                    with Patcher() as patcher:
+                        patcher.add(
+                            Patch(
+                                torch.nn.parameter.Parameter.__deepcopy__, meta_deepcopy
+                            )
+                        )
+
+                        self.meta_model: Module = Module.wrap(
+                            copy.deepcopy(self.local_model).to("meta")
+                        )
                 else:
                     self.meta_model: Module = Module.wrap(
                         self._load_meta(self.repoid_path_clsname, *args, **kwargs).to(
@@ -97,16 +120,7 @@ class AbstractModel(ABC):
         self._scan(self._prepare_inputs(self._example_input()))
 
         if self.dispatch:
-            with self.alteration() if self.alter else Patcher():
-                self.local_model = self._load_local(
-                    self.repoid_path_clsname, *self.args, **self.kwargs
-                )
-
-                # By default, all params should be frozen.
-                for param in self.local_model.parameters():
-                    param.requires_grad = False
-
-            self.dispatched = True
+            self.dispatch_local_model()
 
         logger.info(f"Initialized `{self.repoid_path_clsname}`")
 
@@ -145,27 +159,16 @@ class AbstractModel(ABC):
             inference (bool): If running in inference mode. Defaults to True.
 
         Returns:
-            Any: _description_
+            Any: Output of model.
         """
         if edits is None:
             edits = self.edits
 
         # If local_model not yet loaded, do so.
         if not self.dispatched:
-            with self.alteration() if self.alter else Patcher():
-                self.local_model = self._load_local(
-                    self.repoid_path_clsname, *self.args, **self.kwargs
-                )
-
-                # By default, all params should be frozen.
-                for param in self.local_model.parameters():
-                    param.requires_grad = False
-
-            self.dispatched = True
+            self.dispatch_local_model()
 
         with Editor(self, edits):
-            # Send local_model to graph to re-compile
-
             increment_hook = self._register_increment_hook(
                 lambda module, input, output: graph.increment()
             )
@@ -181,10 +184,9 @@ class AbstractModel(ABC):
 
             logger.info(f"Running `{self.repoid_path_clsname}`...")
 
+            # Send local_model to graph to re-compile
             graph.compile(self.local_model)
-
-            self.local_model.eval() if inference else self.local_model.train()
-
+  
             inputs = self._prepare_inputs(inputs)
 
             with torch.inference_mode(mode=inference):
@@ -197,12 +199,16 @@ class AbstractModel(ABC):
                     output_hook=lambda activations, module_path: intervene(
                         activations, module_path, graph, "output"
                     ),
+                    backward_input_hook=lambda activations, module_path: intervene(
+                        activations, module_path, graph, "backward_input"
+                    ),
+                    backward_output_hook=lambda activations, module_path: intervene(
+                        activations, module_path, graph, "backward_output"
+                    ),
                 ):
                     output = fn(inputs, *args, **kwargs)
 
             increment_hook.remove()
-
-            self.local_model.eval()
 
             logger.info(f"Completed `{self.repoid_path_clsname}`")
 
@@ -210,6 +216,14 @@ class AbstractModel(ABC):
             torch.cuda.empty_cache()
 
         return output
+
+    def dispatch_local_model(self, *args, **kwargs) -> None:
+        with self.alteration() if self.alter else Patcher():
+            self.local_model = self._load_local(
+                self.repoid_path_clsname, *self.args, *args, **kwargs, **self.kwargs
+            )
+
+        self.dispatched = True
 
     def generate(self, *args, **kwargs) -> Runner:
         """Returns a Runner context for this model's _generation method.
@@ -230,7 +244,7 @@ class AbstractModel(ABC):
             A simple entering of a generation context on a language model, and running a prompt with no interventions:
 
             .. code-block:: python
-            
+
                 with model.generate(max_new_tokens=1) as generator:
                     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
                         pass
@@ -274,9 +288,27 @@ class AbstractModel(ABC):
 
         """
         return Runner(self, *args, **kwargs, generation=False)
-    
-    def invoke(self, *args, **kwargs):
 
+    def invoke(self, *args, **kwargs):
+        """Returns a Runner context for this model's _forward method. Also acts as an invocation for the runner allowing you to create a Runner anf Invocation context in one go.
+        Gives option to create Runner context and call an invoke on it in one call. Adds an extra 'fwd_args' kwarg to allow the args normally passed to ``.forward()``
+        Returns:
+            Runner: Runner.
+
+        Examples:
+
+            A simple entering of a forward context on a language model, and running a prompt with no interventions:
+
+            .. code-block:: python
+
+                with model.invoke('The Eiffel Tower is in the city of', fwd_args={}) as invoker:
+                    pass
+
+                print(runner.output)
+
+            See the Runner docs for more information.
+
+        """
         return DirectInvoker(self, *args, **kwargs)
 
     def alteration(self) -> Patcher:
@@ -407,8 +439,22 @@ class AbstractModel(ABC):
 
     @abstractmethod
     def _example_input(self) -> Any:
+        """Abstract to provide an example input to be used with ``._scan(...)``
+
+        Returns:
+            Any: Example input.
+        """
         raise NotImplementedError()
 
     @abstractmethod
-    def _batched_inputs(self) -> List[Any]:
+    def _batched_inputs(self, prepared_inputs: Any) -> List[Any]:
+        """Abstract to return a version of the prepared inputs from ``._prepare_inputs(...)`` that can be batched with others.
+        For example with a LanguageModel, prepare_inputs returns a dictionary. The implementation for this method just returns the 'input_ids'.
+
+        Args:
+            prepared_inputs (Any): Inputs from ``._prepare_inputs(...)``
+
+        Returns:
+            List[Any]: Batched version of prepared_inputs.
+        """
         raise NotImplementedError()

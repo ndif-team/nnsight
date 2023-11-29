@@ -19,7 +19,9 @@ nnsight
     .. grid-item:: 
         .. div:: 
 
-          .. image:: _static/images/nnsigt.png
+          .. image:: _static/images/nnsight_logo.svg
+            :width: 400
+            :height: 276
             
     .. grid-item:: 
 

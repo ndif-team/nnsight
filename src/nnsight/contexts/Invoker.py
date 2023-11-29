@@ -46,7 +46,7 @@ class Invoker(AbstractContextManager):
             current batch_size and batched_input.
 
         Returns:
-            Invoker: _description_
+            Invoker: Invoker.
         """
         # Were in a new invocation so set generation_idx to 0,
         self.tracer.generation_idx = 0
@@ -61,6 +61,8 @@ class Invoker(AbstractContextManager):
             for name, module in self.tracer.model.meta_model.named_modules():
                 module._output = None
                 module._input = None
+                module._backward_output = None
+                module._backward_input = None
 
         batched_inputs = self.tracer.model._batched_inputs(self.input)
 
@@ -93,6 +95,8 @@ class Invoker(AbstractContextManager):
             for name, module in self.tracer.model.meta_model.named_modules():
                 module._output = None
                 module._input = None
+                module._backward_output = None
+                module._backward_input = None
 
     def save_all(self) -> Dict[str, Proxy]:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]

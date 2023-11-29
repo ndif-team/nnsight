@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import pickle
 from datetime import datetime
-from typing import Dict, List, Type, Union
+from typing import Dict, List, Type, Union, Any
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    field_serializer
-)
+from pydantic import BaseModel, ConfigDict, field_serializer
 
 from ..tracing.Graph import Graph
 from .tracing import NodeModel
@@ -20,7 +16,7 @@ class RequestModel(BaseModel):
     args: List
     kwargs: Dict
     model_name: str
-    prompts: List[str]
+    batched_input: Union[List[Any], bytes]
     intervention_graph: Union[Graph, bytes, Dict[str, NodeModel]]
     generation: bool
     # Edits
@@ -42,9 +38,12 @@ class RequestModel(BaseModel):
             value = nodes
 
         return pickle.dumps(value)
+    
+    @field_serializer("batched_input")
+    def serialize(self, value, _info) -> str:
+        return pickle.dumps(value)
 
     def graph(self):
-
         graph = Graph(None)
 
         for node in self.intervention_graph.values():

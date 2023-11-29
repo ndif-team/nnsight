@@ -30,7 +30,7 @@ class DirectInvoker(Runner, Invoker):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         Invoker.__exit__(self, exc_type, exc_val, exc_tb)
-
+        self.fwd_args.pop("validate", None)
         self.kwargs = self.fwd_args
         self.args = []
 

@@ -6,7 +6,7 @@ import nnsight
 
 @pytest.fixture(scope="module")
 def gpt2(device: str):
-    return nnsight.LanguageModel("gpt2", device_map=device)
+    return nnsight.LanguageModel("gpt2", device_map=device, dispatch=True)
 
 
 @pytest.fixture

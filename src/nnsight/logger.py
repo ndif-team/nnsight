@@ -9,6 +9,7 @@ logging_handler.setFormatter(
     )
 )
 logging_handler.setLevel(logging.INFO)
+
 logger = logging.getLogger("nnsight")
 logger.addHandler(logging_handler)
 logger.setLevel(logging.INFO)

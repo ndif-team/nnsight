@@ -4,15 +4,11 @@
 project = 'nnsight'
 copyright = '2023, NDIF'
 author = 'Jaden Fiotto-Kaufman'
-release = '0.0.6'
+release = '0.0.7'
 
 
 
 # General Configuration
-
-import sys
-sys.path.append('/home/caden/Programming/nnsight/src/nnsight')
-
 extensions = [
     'sphinx.ext.autodoc', # Auto documentation from docstrings
     'sphinx.ext.napoleon', # Support for NumPy and Google style docstrings
@@ -39,7 +35,7 @@ html_favicon = '_static/images/icon.ico'
 html_theme_options = {
   "logo": {"text":"nnsight"},
   "show_nav_level": 2,
-  "navbar_end": ["navbar-icon-links"],
+  "navbar_end": ["navbar-icon-links", "ndif_status"],
   "navbar_align": "left",
   "icon_links": [
         {
@@ -51,7 +47,8 @@ html_theme_options = {
 }
 
 html_context = {
-   "default_mode": "light"
+   "default_mode": "light",
+   "ndif_url" : "https://ndif.baulab.us/ping"
 }
 
 html_css_files = [

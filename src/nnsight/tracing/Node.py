@@ -31,6 +31,15 @@ class Node:
 
     @staticmethod
     def prepare_proxy_values(values):
+        """Prepare arguments for validating a node's target.
+        Converts Proxies and Nodes to their proxy_value and moves tensors to 'meta' device.
+
+        Args:
+            values (Any): Values to prepare.
+        Returns:
+            values (Any): Prepared values.
+        """
+
         def slice_to_value(arg: slice):
             return slice(
                 Node.prepare_proxy_values(arg.start),
@@ -116,16 +125,36 @@ class Node:
         return self._proxy_device
 
     def compile(self) -> None:
+        """Resets this Nodes remaining_listeners and remaining_dependencies and sets its value to None."""
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
+        self.value = None
 
     def fulfilled(self) -> bool:
+        """Returns true if remaining_dependencies is 0.
+
+        Returns:
+            bool: If fulfilled.
+        """
         return self.remaining_dependencies == 0
 
     def redundant(self) -> bool:
+        """Returns true if remaining_listeners is 0.
+
+        Returns:
+            bool: If redundant.
+        """
         return self.remaining_listeners == 0
 
     def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
+        """Prepare arguments for executing this node's target.
+        Converts Nodes in args and kwargs to their value and moves tensors to correct device.
+
+
+        Returns:
+            Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
+        """
+
         # Turn nodes into their value
         def _value(node: Node):
             return node.value
@@ -155,7 +184,10 @@ class Node:
         return args, kwargs
 
     def execute(self) -> None:
-        """Actually executes this node."""
+        """Actually executes this node.
+        If target is 'null' do nothing.
+        Prepares args and kwargs and passed them to target.
+        """
 
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
@@ -170,6 +202,13 @@ class Node:
         self.set_value(output)
 
     def set_value(self, value: Any):
+        """Sets the value of this Node and logs the event.
+        Updates remaining_dependencies of listeners. If they are now fulfilled, execute them.
+        Updates remaining_listeners of dependencies. If they are now redundant, destroy them.
+
+        Args:
+            value (Any): Value.
+        """
         self.value = value
 
         logger.info(f"=> SET({self.name})")
@@ -185,6 +224,9 @@ class Node:
 
             if dependency.redundant():
                 dependency.destroy()
+
+        if self.value is not None and self.redundant():
+            self.destroy()
 
     def destroy(self) -> None:
         """Removes the reference to the node's value and logs it's destruction."""
