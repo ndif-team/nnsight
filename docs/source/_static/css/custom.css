@@ -21,7 +21,10 @@
 }
 
 html[data-theme="light"] {
-    --pst-color-secondary: #64ccdc;
+    --pst-color-secondary: #b676b2;
+    --pst-color-primary: #4ca4d2;
+    --pst-color-primary-highlight: #b676b2;
+
 }
 
 

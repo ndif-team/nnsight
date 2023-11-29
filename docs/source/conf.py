@@ -9,10 +9,6 @@ release = '0.0.7'
 
 
 # General Configuration
-
-import sys
-sys.path.append('/home/caden/Programming/nnsight/src/nnsight')
-
 extensions = [
     'sphinx.ext.autodoc', # Auto documentation from docstrings
     'sphinx.ext.napoleon', # Support for NumPy and Google style docstrings
