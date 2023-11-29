@@ -52,7 +52,7 @@ html_theme_options = {
 
 html_context = {
    "default_mode": "light",
-   "ndif_url" : "ndif.baulab.us/ping"
+   "ndif_url" : "https://ndif.baulab.us/ping"
 }
 
 html_css_files = [

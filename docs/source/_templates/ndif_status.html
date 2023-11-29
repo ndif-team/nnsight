@@ -14,7 +14,14 @@
 <script>
     console.log()
     fetch("{{ndif_url}}")
-        .then((response) => document.getElementById("ndif_status").style.backgroundColor = "green")
+        .then((response) => {
+            if (response.status == 200) {
+                document.getElementById("ndif_status").style.backgroundColor = "green"
+            }
+            else {
+                document.getElementById("ndif_status").style.backgroundColor = "red"
+            }
+        })
         .catch((response) => document.getElementById("ndif_status").style.backgroundColor = "red")
 
 </script>
