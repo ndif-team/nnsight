@@ -72,7 +72,8 @@ class Invoker(AbstractContextManager):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        pass
+        if isinstance(exc_val, BaseException):
+            raise exc_val
 
     def next(self, increment: int = 1) -> None:
         """Designates subsequent interventions should be applied to the next generation for multi-iteration generation runs.
