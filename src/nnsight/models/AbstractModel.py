@@ -173,26 +173,17 @@ class AbstractModel(ABC):
                 lambda module, input, output: graph.increment()
             )
 
-            # The intervention graph for running a Model will have the modules that are involved
-            # in the graph's argument_node_names.
-            modules = set(
-                [
-                    ".".join(name.split(".")[:-2])
-                    for name in graph.argument_node_names.keys()
-                ]
-            )
-
             logger.info(f"Running `{self.repoid_path_clsname}`...")
 
             # Send local_model to graph to re-compile
             graph.compile(self.local_model)
-  
+
             inputs = self._prepare_inputs(inputs)
 
             with torch.inference_mode(mode=inference):
                 with HookModel(
                     self.local_model,
-                    list(modules),
+                    list(graph.argument_node_names.keys()),
                     input_hook=lambda activations, module_path: intervene(
                         activations, module_path, graph, "input"
                     ),

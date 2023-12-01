@@ -54,7 +54,7 @@ class InterventionProxy(Proxy):
         Calling ``.shape`` on an InterventionProxy returns the shape or collection of shapes for the tensors traced through this module.
 
         Calling ``.value`` on an InterventionProxy returns the actual populated values, updated during actual execution of the model.
-        
+
     """
 
     def save(self) -> InterventionProxy:
@@ -76,18 +76,11 @@ class InterventionProxy(Proxy):
         return self
 
     def retain_grad(self):
-
-        self.node.graph.add(
-            target=torch.Tensor.retain_grad,
-            args=[self.node]
-        )
+        self.node.graph.add(target=torch.Tensor.retain_grad, args=[self.node])
 
         # We need to set the values of self to values of self to add this into the computation graph so grad flows through it
         # This is because in intervene(), we call .narrow on activations which removes it from the grad path
-        self.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.node, self.node]
-        )
+        self.node.graph.add(target=Proxy.proxy_update, args=[self.node, self.node])
 
     @property
     def token(self) -> TokenIndexer:
@@ -96,7 +89,7 @@ class InterventionProxy(Proxy):
         Makes positive indices negative as tokens are padded on the left.
 
         Example:
-            
+
             .. code-block:: python
 
                 model.transformer.h[0].mlp.output.token[0]
@@ -167,7 +160,6 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
 
     if module_path in graph.argument_node_names:
-        
         argument_node_names = graph.argument_node_names[module_path]
 
         # multiple argument nodes can have same module_path if there are multiple invocations.
@@ -202,21 +194,19 @@ class HookModel(AbstractContextManager):
             Should have signature of [outputs(Any), module_path(str)] -> outputs(Any)
         handles (List[RemovableHandle]): Handles returned from registering hooks as to be used when removing hooks on __exit__.
     """
-    #TODO maybe only apply the necassay hooks (e.x if a module has a input hook, all hooks will be added)
+
     def __init__(
         self,
         model: torch.nn.Module,
-        modules: List[str],
+        module_keys: List[str],
         input_hook: Callable = None,
         output_hook: Callable = None,
-        backward_input_hook:Callable = None,
-        backward_output_hook:Callable = None
+        backward_input_hook: Callable = None,
+        backward_output_hook: Callable = None,
     ) -> None:
         self.model = model
-        self.modules: List[Tuple[torch.nn.Module, str]] = [
-            (util.fetch_attr(self.model, module_path), module_path)
-            for module_path in modules
-        ]
+        self.module_keys = module_keys
+
         self.input_hook = input_hook
         self.output_hook = output_hook
         self.backward_input_hook = backward_input_hook
@@ -231,34 +221,43 @@ class HookModel(AbstractContextManager):
             HookModel: HookModel object.
         """
 
-        for module, module_path in self.modules:
-            if self.input_hook is not None:
+        for module_key in self.module_keys:
+            *module_atoms, hook_type = module_key.split(".")[:-1]
+            module_path = ".".join(module_atoms)
+
+            module: torch.nn.Module = util.fetch_attr(self.model, module_path)
+
+            if hook_type == "input":
 
                 def input_hook(module, input, module_path=module_path):
                     return self.input_hook(input, module_path)
 
                 self.handles.append(module.register_forward_pre_hook(input_hook))
 
-            if self.output_hook is not None:
+            elif hook_type == "output":
 
                 def output_hook(module, input, output, module_path=module_path):
                     return self.output_hook(output, module_path)
 
                 self.handles.append(module.register_forward_hook(output_hook))
 
-            if self.backward_input_hook is not None:
+            elif hook_type == "backward_input":
 
                 def backward_input_hook(module, input, output, module_path=module_path):
                     return self.backward_input_hook(input, module_path)
 
-                self.handles.append(module.register_full_backward_hook(backward_input_hook))
+                self.handles.append(
+                    module.register_full_backward_hook(backward_input_hook)
+                )
 
-            if self.backward_output_hook is not None:
+            elif hook_type == "backward_output":
 
                 def backward_output_hook(module, output, module_path=module_path):
                     return self.backward_output_hook(output, module_path)
 
-                self.handles.append(module.register_full_backward_pre_hook(backward_output_hook))
+                self.handles.append(
+                    module.register_full_backward_pre_hook(backward_output_hook)
+                )
 
         return self
 
