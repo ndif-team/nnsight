@@ -17,7 +17,6 @@
     align-items: center;
     align-content: stretch;
     padding-bottom: 20vh;
-
 }
 
 html[data-theme="light"] {
@@ -28,8 +27,8 @@ html[data-theme="light"] {
 }
 
 
-.page-container { 
-    height: 65vh;
+.features { 
+    height: 60vh;
 }
 
 
@@ -60,15 +59,16 @@ html[data-theme="light"] {
         height: auto; /* Change from fixed height to auto */
         min-height: 50vh; /* Adjust this as needed */
     }
-}
 
-
-@media only screen and (max-width: 768px) {
     .features-container {
         margin-bottom: 20px; /* Increase bottom margin */
     }
 
     .container {
         margin-bottom: 30px; /* Adjust the bottom margin of the main container */
+    }
+
+    .features {
+        height: 90vh;
     }
 }

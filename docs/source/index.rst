@@ -53,7 +53,7 @@ nnsight
             :color: primary
             :outline:
             
-                Documentation
+                Docs
 
 
 .. div:: sd-fs-1 sd-font-weight-bold sd-text-center sd-text-primary sd-mb-5
@@ -61,8 +61,7 @@ nnsight
   Key Features
 
 .. grid:: 1 1 2 2
-    :gutter: 5
-    :class-container: page-container
+    :class-container: features
 
     .. grid-item::
 
