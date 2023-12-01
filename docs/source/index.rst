@@ -33,7 +33,7 @@ nnsight
 
             interpretable neural networks
 
-        **nnsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models.
+        **nnsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models
 
         .. div:: button-group
         
