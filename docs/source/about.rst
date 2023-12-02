@@ -1,78 +1,70 @@
-About nnsight
-==========
+About nnsight: a transparent science API for black-box inference
+================================================================
 
-.. card:: How can you study the internals of a deep network too large for you to run?
+.. card:: How can you study the internals of a deep network that is too large for you to run?
 
-    In the era of deep learning, the most interesting models for study require resources beyond the reach of many researchers. 
-    The nnsight library, backed by remote services like NDIF, solves this problem by running “deep inference” on models which are hosted on shared servers.
+    In this era of large-scale deep learning, the most interesting AI models are massive and hard to run.
+    Ordinary commercial inference service APIs let you interact with huge models, but they do not let you see model internals.
+    The nnsight library is different: it gives you full access to all the neural network internals.
+    When used together with a remote service like the National Deep Inference Facility (NDIF),
+    it lets you run expriments on huge open models easily, with full transparent access.
+    The nnsight library is also terrific for studying smaller local models.
 
 .. figure:: _static/images/remote_execution.png
 
-    An overview of the nnsight/NDIF pipeline. Researchers write simple, readable Python code specifying their experiments, and these experiments are run remotely on the NDIF server.
+    An overview of the nnsight/NDIF pipeline. Researchers write simple Python code to run along with the neural network locally or remotely. Unlike with commercial inference, the experiment code can read or write any of the internal states of the neural networks being studied.  This code creates a computation graph that is sent to the remote service (if needed) and then interleaved with the execution of the neural network.
 
-The nnsight library enables researchers to access the internals of large deep learned models. 
-It uses simple python developer friendly syntax to provide direct access into the computation graph of models, and tracks operations you make on the inputs and outputs of modules to build an intervention graph. 
-This intervention graph is then interleaved with that of the original model's computation graph locally, or remotely in conjunction with the NDIF (National Deep Inference Server)
+How you use nnsight
+-------------------
 
-What do you need to do?
-------------------------
+Nnsight is built on pytorch.
 
-As a researcher, your experience with nnsight is that of just running experiment code on your local work station, just like you would run a normal pytorch experiment. In fact, the same code can be used to execute experiments locally on small models or to execute experiments remotely on large models, just by switching a few arguments.
+Running inference on a huge remote model with nnsight is very similar to running a neural network locally on your own workstataion.  In fact, with nnsight, the same code for running experiments locally on small models can also be used on large models, just by changing a few arguments.
 
-The difference here is that when you use nnsight, the model internals are fully transparent to you enabling exponentially more avenues for experimentation.
-Instead of running the model as a black box, you have access to model internals by reading or writing the activations at any layer of your network.
-Configure your experiment by writing natural python code like the following:
+The difference between nnsight and normal inference is that when you use nnsight, you do not treat the model as an opaque black box.
+Instead, you set up a python `with` context that enables you to get direct access to model internals while the neural network runs.
+Here is how it looks:
 
 .. code-block:: python
     :linenos:
 
     from nnsight import LanguageModel
-
-    # Loading nnsight wrapped gpt2 model.
-    model = LanguageModel('gpt2')
-
-    # Enter intervention context to trace operations on the model and execute the resultant intervention graph remotely on NDIF
+    model = LanguageModel('llama-70b')
     with model.forward(remote=True) as runner:
-
-        # Denote we wish to enter a prompt, and have traced operation within it's context be performed on it.
         with runner.invoke('The Eiffel Tower is in the city of ') as invoker:
+            hidden_state = model.transformer.h[10].input.save()  # save one hidden state
+            model.transformer.h[11].mlp.output = 0  # change one MLP module output
+    print('The model predicts', runner.output)
+    print('The internal state was', hidden_state.value)
 
-            # Access the desired layer and ask for it's input to be stored and returned.
-            hidden_states = model.transformer.h[1].input.save()
+The library is easy to use. Any HuggingFace model can be loaded into a `LanguageModel` object, as you can wee on line 2.  Notice we are loading a 70-billion parameter model, which is ordinarily pretty difficult to load on a regular workstation since it would take 140-280 gigabytes of GPU RAM just to store the parameters. 
 
-            # Set the output values of a subsequent layer's mlp module to zero.
-            model.transformer.h[-1].mlp.output = 0
+The trick that lets us work with this huge model is on line 3.  We set the flag `remote=True` to indicate that we want to actually run the network on the remote service.  By default the remote service will be NDIF.  If we want to just run a smaller model quickly, we could leave it as `remote=False`.
 
-    # Upon exiting the context blocks, a request is made to NDIF containing the interventions we traced.
-    # The output of the execution is populated in runner.output.
-    output = runner.output
-    # The value we asked for is injected into hidden_states.value. 
-    hidden_states = hidden_states.value
+Then when we invoke the model on line 4, we do not just call it as a function. Instead, we use it as a `with` context manager.  The reason is that nnsight does not treat neural network models as black boxes; it provides direct access to model internals.
 
-The library is easy to use. Just import nnsight and like on line 4, you can instantiate any huggingface model by naming it using it's repo id. 
-The first trick is on line 7. Instead of invoking and executing the model with a single call, we use a context via python with blocks to trace operations you perform, only to eventually run the model with those operations.
-On line 10, an inner invocation context is created. This context now traces operations specific to the givin prompt.
-Lines 13 and 16 demonstrate the getting and setting operations on module inputs and output.
+You can see what simple direct access looks like on lines 5-6.  On line 5, we grab a hidden state at layer 10, and on layer 6, we change the output of an MLP module inside the transformer at layer 11.
 
-How does it work?
-------------------
-Again, these operations are not executed immediately but instead adds to an intervention graph that is executed alongside the model's computation graph upon exit of the with block.
+When you run this `with`-block code on lines 5 and 6 on your local workstation, it actually creates a computation graph storing all the calculations you want to do.  When the outermost `with` block is completed, all the defined caculations are sent to the remote server and executed there.  Then when it's all done, the results can be accessed on your local workstation as shown on line 7 and 8.
+
+What happens behind the scenes?
+-------------------------------
+When using nnsight, it is helpful to understand that the operations are not executed immediately but instead adds to an intervention graph that is executed alongside the model's computation graph upon exit of the with block.
+
 An example of one such intervention graph can be seen below:
 
 .. figure:: _static/images/intrgraph.png
 
     An example of an intervention graph. Operations in research code create nodes in the graph which depend on module inputs and outputs as well as other nodes. Then, this intervention graph is interleaved with the normal computation graph of the chosen model, and requested inputs and outputs are injected into the intervention graph for execution. 
-    
 
-Building from these simple features, techniques such as causal mediation analysis be constructed and executed on models like Llama-2-70b!
-In addition to getting and setting, nnsight gives full access to gradients and optimizations methods, out of order module applications, cross prompt interventions and much more.
+Basic access to model internals can give you a lot of insight about what is going on inside a large model as it runs.  For example, you can use the (link needed) *logit lens* to read internal hidden states as text.  And use can use (link needed) *causal tracing* to locate the layers and components within the network that play a decisive role in making a decision.
+
+And you can do them on large models like Llama-2-70b!
+
+The nnsight library also provies full access to gradients and optimizations methods, out of order module applications, cross prompt interventions and much more.
 
 See the :doc:`tutorials/notebooks/main_demo` and :doc:`tutorials/features` pages for more information on nnsight functionality.
 
-
 The project is currently in Alpha pre-release and is looking for early users/and contributors!
 
-Check out the `NDIF Discord <hhttps://discord.gg/ZRPgsf6P>`_ for updates, feature requests, bug reports and opportunities to help with the effort.
-
-
-
+If you are interested in contributing or being an early user, please join the `NDIF Discord <hhttps://discord.gg/ZRPgsf6P>`_ for updates, feature requests, bug reports and opportunities to help with the effort.
