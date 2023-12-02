@@ -11,6 +11,7 @@ nnsight
    start
    documentation
    tutorials
+   about
 
 .. grid:: 1 1 2 2
     :class-container: hero
