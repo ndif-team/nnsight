@@ -64,7 +64,7 @@ And you can do them on large models like Llama-2-70b!
 
 The nnsight library also provies full access to gradients and optimizations methods, out of order module applications, cross prompt interventions and much more.
 
-See the :doc:`tutorials/notebooks/main_demo` and :doc:`tutorials/features` pages for more information on nnsight functionality.
+See the :doc:`tutorials/basics` and :doc:`tutorials/features` pages for more information on nnsight functionality.
 
 The project is currently in Alpha pre-release and is looking for early users/and contributors!
 
