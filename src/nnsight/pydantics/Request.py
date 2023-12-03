@@ -27,7 +27,7 @@ class RequestModel(BaseModel):
     blocking: bool = False
 
     @field_serializer("intervention_graph")
-    def intervention_graph_serialize(self, value: Union[str, Graph], _info) -> str:
+    def intervention_graph_serialize(self, value: Union[str, Graph], _info) -> bytes:
         if isinstance(value, Graph):
             nodes = dict()
 
@@ -40,7 +40,7 @@ class RequestModel(BaseModel):
         return pickle.dumps(value)
     
     @field_serializer("batched_input")
-    def serialize(self, value, _info) -> str:
+    def serialize(self, value, _info) -> bytes:
         return pickle.dumps(value)
 
     def graph(self):

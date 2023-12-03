@@ -7,7 +7,7 @@ Check out the :bdg-link-primary:`main demo <tutorials/notebooks/main_demo.ipynb>
    :gutter: 3
 
    .. grid-item-card::  Basics
-      :link: basics
+      :link: tutorials/main_demo.ipynb
 
       Walk through the basic functionality of the package.
 
@@ -31,5 +31,6 @@ Check out the :bdg-link-primary:`main demo <tutorials/notebooks/main_demo.ipynb>
    :hidden:
    :maxdepth: 1
 
+   tutorials/main_demo.ipynb
    tutorials/basics
    tutorials/features

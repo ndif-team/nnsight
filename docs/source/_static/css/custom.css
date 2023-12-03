@@ -18,6 +18,7 @@
     align-content: stretch;
     padding-bottom: 20vh;
 
+    overflow: hidden;
 }
 
 html[data-theme="light"] {
@@ -28,8 +29,9 @@ html[data-theme="light"] {
 }
 
 
-.page-container { 
-    height: 65vh;
+.features { 
+    height: 60vh;
+    overflow: hidden;
 }
 
 
@@ -56,19 +58,20 @@ html[data-theme="light"] {
 }
 
 @media only screen and (max-width: 768px) { /* Adjust this value based on your breakpoint for mobile */
-    .front-container, .container {
+    .front-container, .hero {
         height: auto; /* Change from fixed height to auto */
         min-height: 50vh; /* Adjust this as needed */
     }
-}
 
-
-@media only screen and (max-width: 768px) {
     .features-container {
         margin-bottom: 20px; /* Increase bottom margin */
     }
 
-    .container {
+    .hero {
         margin-bottom: 30px; /* Adjust the bottom margin of the main container */
+    }
+
+    .features {
+        height: 110vh;
     }
 }

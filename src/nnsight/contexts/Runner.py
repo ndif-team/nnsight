@@ -43,7 +43,7 @@ class Runner(Tracer):
     def __init__(
         self,
         *args,
-        generation:bool = False,
+        generation: bool = False,
         blocking: bool = True,
         remote: bool = False,
         **kwargs,
@@ -59,6 +59,8 @@ class Runner(Tracer):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """On exit, run and generate using the model whether locally or on the server."""
+        if isinstance(exc_val, BaseException):
+            raise exc_val
         if self.remote:
             self.run_server()
         else:
@@ -83,7 +85,7 @@ class Runner(Tracer):
             model_name=self.model.repoid_path_clsname,
             batched_input=self.batched_input,
             intervention_graph=self.graph,
-            generation=self.generation
+            generation=self.generation,
         )
 
         if self.blocking:
@@ -94,7 +96,7 @@ class Runner(Tracer):
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
         sio = socketio.Client()
-        sio.connect(f"wss://{CONFIG.API.HOST}")
+        sio.connect(f"ws://{CONFIG.API.HOST}", transports=['websocket'])
 
         # Called when receiving a response from the server.
         @sio.on("blocking_response")

@@ -11,6 +11,7 @@ nnsight
    start
    documentation
    tutorials
+   About <about>
 
 .. grid:: 1 1 2 2
     :class-container: hero
@@ -33,7 +34,7 @@ nnsight
 
             interpretable neural networks
 
-        **nnsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models.
+        **nnsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models
 
         .. div:: button-group
         
@@ -53,7 +54,7 @@ nnsight
             :color: primary
             :outline:
             
-                Documentation
+                Docs
 
 
 .. div:: sd-fs-1 sd-font-weight-bold sd-text-center sd-text-primary sd-mb-5
@@ -61,8 +62,7 @@ nnsight
   Key Features
 
 .. grid:: 1 1 2 2
-    :gutter: 5
-    :class-container: page-container
+    :class-container: features
 
     .. grid-item::
 
