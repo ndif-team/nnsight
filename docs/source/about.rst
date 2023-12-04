@@ -1,11 +1,12 @@
 
-About nnsight: a transparent science API for black-box inference
-================================================================
+About nnsight: an API for transparent science on black-box models
+=================================================================
 
 .. card:: How can you study the internals of a deep network that is too large for you to run?
 
     In this era of large-scale deep learning, the most interesting AI models are massive and hard to run.
     Ordinary commercial inference service APIs let you interact with huge models, but they do not let you see model internals.
+
     The nnsight library is different: it gives you full access to all the neural network internals.
     When used together with a remote service like the National Deep Inference Facility (NDIF),
     it lets you run expriments on huge open models easily, with full transparent access.
@@ -13,7 +14,7 @@ About nnsight: a transparent science API for black-box inference
 
 .. figure:: _static/images/remote_execution.png
 
-    An overview of the nnsight/NDIF pipeline. Researchers write simple Python code to run along with the neural network locally or remotely. Unlike with commercial inference, the experiment code can read or write any of the internal states of the neural networks being studied.  This code creates a computation graph that is sent to the remote service (if needed) and then interleaved with the execution of the neural network.
+    An overview of the nnsight/NDIF pipeline. Researchers write simple Python code to run along with the neural network locally or remotely. Unlike commercial inference, the experiment code can read or write any of the internal states of the neural networks being studied.  This code creates a computation graph that can be sent to the remote service and interleaved with the execution of the neural network.
 
 How you use nnsight
 -------------------
