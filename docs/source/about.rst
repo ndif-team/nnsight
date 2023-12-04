@@ -12,8 +12,8 @@ An API for transparent science on black-box AI
     models, but they do not let you see model internals.
 
     The nnsight library is different: it gives you full access to all the neural network internals.
-    When used together with a remote service like the National Deep Inference Facility (NDIF),
-    it lets you run expriments on huge open models easily, with full transparent access.
+    When used together with a remote service like the `National Deep Inference Facility <https://ndif.us/>`_ (NDIF),
+    it lets you run experiments on huge open models easily, with full transparent access.
     The nnsight library is also terrific for studying smaller local models.
 
 .. figure:: _static/images/remote_execution.png
@@ -25,7 +25,7 @@ How you use nnsight
 
 Nnsight is built on pytorch.
 
-Running inference on a huge remote model with nnsight is very similar to running a neural network locally on your own workstataion.  In fact, with nnsight, the same code for running experiments locally on small models can also be used on large models, just by changing a few arguments.
+Running inference on a huge remote model with nnsight is very similar to running a neural network locally on your own workstation.  In fact, with nnsight, the same code for running experiments locally on small models can also be used on large models, just by changing a few arguments.
 
 The difference between nnsight and normal inference is that when you use nnsight, you do not treat the model as an opaque black box.
 Instead, you set up a python ``with`` context that enables you to get direct access to model internals while the neural network runs.
