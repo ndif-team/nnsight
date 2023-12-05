@@ -3,7 +3,7 @@
 # nnsight 
 ![PyPI - Version](https://img.shields.io/pypi/v/nnsight)
 
-[nnsight.net](www.nnsight.net)
+<a href="https://www.nnsight.net"><img src="https://img.shields.io/badge/-Read%20the%20Docs%20Here-blue?style=for-the-badge&logo=Read-the-Docs&logoColor=white"></img></a> <a href="https://discord.gg/ZRPgsf6P"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 
 The `nnsight`  package enables interpreting and manipulating the internals of deep learned models.
 
