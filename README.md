@@ -1,7 +1,7 @@
 <img src="./docs/source/_static/images/nnsight_logo.svg" alt="drawing" style="width:200px;float:left"/>
 
 # nnsight 
-![PyPI - Version](https://img.shields.io/pypi/v/nnsight)
+<a href="https://pypi.org/project/nnsight/"><img src="https://img.shields.io/pypi/v/nnsight?color=purple"></img></a>
 
 <a href="https://www.nnsight.net"><img src="https://img.shields.io/badge/-Read%20the%20Docs%20Here-blue?style=for-the-badge&logo=Read-the-Docs&logoColor=white"></img></a> <a href="https://discord.gg/ZRPgsf6P"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 
