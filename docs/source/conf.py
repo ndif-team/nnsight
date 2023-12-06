@@ -43,6 +43,11 @@ html_theme_options = {
             "url": "https://github.com/JadenFiotto-Kaufman/nnsight",
             "icon": "fa-brands fa-github",
         },
+        {
+            "name": "Discord",
+            "url": "https://discord.gg/ZRPgsf6P",
+            "icon": "fa-brands fa-discord",
+        },
   ]
 }
 

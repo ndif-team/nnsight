@@ -1,13 +1,13 @@
 Tutorials
 =========
 
-Check out the :bdg-link-primary:`main demo <tutorials/notebooks/main_demo.ipynb>` for a quick walkthrough of important nnsight functionality. You can also check out more tutorials for the package below! 
+Check out the :bdg-link-primary:`walkthrough <walkthrough>` for a quick walkthrough of important nnsight functionality. You can also check out more tutorials for the package below! 
 
 .. grid:: 2
    :gutter: 3
 
-   .. grid-item-card::  Basics
-      :link: tutorials/main_demo.ipynb
+   .. grid-item-card::  Walkthough
+      :link: tutorials/walkthrough.ipynb
 
       Walk through the basic functionality of the package.
 
@@ -31,6 +31,5 @@ Check out the :bdg-link-primary:`main demo <tutorials/notebooks/main_demo.ipynb>
    :hidden:
    :maxdepth: 1
 
-   tutorials/main_demo.ipynb
-   tutorials/basics
+   tutorials/walkthrough.ipynb
    tutorials/features
