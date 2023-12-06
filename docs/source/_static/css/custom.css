@@ -28,6 +28,10 @@ html[data-theme="light"] {
 
 }
 
+.bd-sidebar-primary {
+    width: 18% !important
+}
+
 
 .features { 
     height: 60vh;

@@ -4,8 +4,6 @@
 project = 'nnsight'
 copyright = '2023, NDIF'
 author = 'Jaden Fiotto-Kaufman'
-release = '0.0.7'
-
 
 
 # General Configuration
@@ -27,11 +25,11 @@ fixed_sidebar = True
 
 # See https://sphinx-themes.org/ for more
 html_theme = "pydata_sphinx_theme"
-
+html_title = "nnsight"
 html_static_path = ['_static']
 
 html_favicon = '_static/images/icon.ico'
-
+html_show_sourcelink = False
 html_theme_options = {
   "logo": {"text":"nnsight"},
   "show_nav_level": 2,

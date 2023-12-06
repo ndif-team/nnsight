@@ -19,15 +19,24 @@ First Steps
 -----------
 
 .. grid:: 2
-    :gutter: 2
+   :gutter: 2
 
-    .. grid-item-card:: Tutorials
+   .. grid-item-card:: Walkthrough
+      :link: notebooks/walkthrough.ipynb
+
+      Walk through the basic functionality of the package.
+
+   .. grid-item-card:: Features
+      :link: features
+      :link-type: doc
+
+      Check out the basic features provided by :bdg-primary:`nnsight`.
+
+   .. grid-item-card:: Tutorials
       :link: tutorials
       :link-type: doc
 
-      Check out the :bdg-primary:`tutorials` section for some examples on how to get started with nnsight.
+      See implementations of :bdg-primary:`nnsight` through common interpretability techniques.
 
-    .. grid-item-card:: Examples
-      :link: https://github.com/JadenFiotto-Kaufman/nnsight/tree/main/examples
 
-      Check out more examples on the package repository.
+
