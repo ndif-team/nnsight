@@ -29,7 +29,8 @@ html[data-theme="light"] {
 }
 
 .bd-sidebar-primary {
-    width: 18% !important
+    width: fit-content !important;
+    padding-right: 40px !important
 }
 
 

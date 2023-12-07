@@ -26,6 +26,7 @@ fixed_sidebar = True
 # See https://sphinx-themes.org/ for more
 html_theme = "pydata_sphinx_theme"
 html_title = "nnsight"
+html_logo = "_static/images/nnsight_logo.svg"
 html_static_path = ['_static']
 
 html_favicon = '_static/images/icon.ico'
