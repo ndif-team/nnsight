@@ -82,8 +82,8 @@ class Node:
         self.graph = graph
         self.proxy_value = value
         self.target = target
-        self.args = util.apply(args, lambda x: x.node, Proxy)
-        self.kwargs = util.apply(kwargs, lambda x: x.node, Proxy)
+        self.args: List = util.apply(args, lambda x: x.node, Proxy)
+        self.kwargs: Dict = util.apply(kwargs, lambda x: x.node, Proxy)
         self.meta = meta
 
         self.value: Any = inspect._empty
