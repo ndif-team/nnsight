@@ -9,6 +9,7 @@ The :class:`HookModel <nnsight.intervention.HookModel>` provides a context manag
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+import inspect
 from typing import Any, Callable, Collection, List, Tuple, Union
 
 import torch
@@ -128,6 +129,9 @@ class InterventionProxy(Proxy):
         Returns:
             Any: The stored value of the proxy, populated during execution of the model.
         """
+
+        if self.node.value is inspect._empty:
+            raise ValueError("Accessing Proxy value before it's been set.")
 
         return self.node.value
 
