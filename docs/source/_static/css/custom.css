@@ -28,6 +28,11 @@ html[data-theme="light"] {
 
 }
 
+.bd-sidebar-primary {
+    width: fit-content !important;
+    padding-right: 40px !important
+}
+
 
 .features { 
     height: 60vh;

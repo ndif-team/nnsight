@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Callable, Dict, List, Type, Union
+
 import torch
+
 from .. import util
 from ..patching import Patch, Patcher
 from .Node import Node
@@ -13,7 +15,7 @@ class Graph:
     """Represents a computation graph involving a torch.nn.module.
 
     Reserved target names:
-    
+
     * 'module' : There should only be the single root module as a node in the graph for tracing. Added on __init__ and when compiling, the node's value is set to to be whatever module that is being interleaved with this computation graph.
     * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
     * 'rtn' : Should only be one 'rtn' target named node as this is what is used.
@@ -300,6 +302,80 @@ class Graph:
         module.forward = forward
 
         return module
+
+    def vis(self):
+        import graphviz
+
+        def style(value: Any) -> Dict[str, Any]:
+            style = {}
+
+            if isinstance(value, Node):
+                if value.target == "null":
+                    style["color"] = "red"
+
+                elif value.target == "argument":
+                    style["color"] = "green"
+
+                elif value.target == "module":
+                    style["color"] = "green4"
+
+                else:
+                    style["color"] = "black"
+            else:
+                style["color"] = "grey"
+                style["shape"] = "box"
+
+            return style
+
+        arg_name_idx = 0
+
+        def add_node(value: Any, graph: graphviz.Digraph, kname: str = None) -> str:
+            nonlocal arg_name_idx
+
+            if isinstance(value, Node):
+                name = value.name
+                label = (
+                    value.target
+                    if isinstance(value.target, str)
+                    else value.target.__name__
+                )
+            else:
+                if isinstance(value, torch.Tensor):
+                    name = str(arg_name_idx)
+                    label = "Tensor"
+                elif isinstance(value, str):
+                    name = str(arg_name_idx)
+                    label = f'"{value}"'
+                else:
+                    name = str(arg_name_idx)
+                    label = str(value)
+
+                arg_name_idx += 1
+
+            if kname is not None:
+                label = f"{kname}={label}"
+
+            if f"\t{name}" not in graph.body:
+                graph.node(name, label=label, **style(value))
+
+            return name
+
+        graph = graphviz.Digraph("round-table", comment="The Round Table")
+
+        for node in self.nodes.values():
+            add_node(node, graph)
+
+            for arg in node.args:
+                name = add_node(arg, graph)
+
+                graph.edge(name, node.name)
+
+            for kname, arg in node.kwargs.items():
+                name = add_node(arg, graph, kname=kname)
+
+                graph.edge(name, node.name)
+
+        graph.render(filename="graph", format="png")
 
     def __str__(self) -> str:
         result = ""

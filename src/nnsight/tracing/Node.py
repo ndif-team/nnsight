@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
 import torch
@@ -81,11 +82,11 @@ class Node:
         self.graph = graph
         self.proxy_value = value
         self.target = target
-        self.args = util.apply(args, lambda x: x.node, Proxy)
-        self.kwargs = util.apply(kwargs, lambda x: x.node, Proxy)
+        self.args: List = util.apply(args, lambda x: x.node, Proxy)
+        self.kwargs: Dict = util.apply(kwargs, lambda x: x.node, Proxy)
         self.meta = meta
 
-        self.value: Any = None
+        self.value: Any = inspect._empty
 
         self.listeners: List[Node] = list()
         self.dependencies: List[Node] = list()
@@ -128,7 +129,7 @@ class Node:
         """Resets this Nodes remaining_listeners and remaining_dependencies and sets its value to None."""
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
-        self.value = None
+        self.value = inspect._empty
 
     def fulfilled(self) -> bool:
         """Returns true if remaining_dependencies is 0.
@@ -232,7 +233,7 @@ class Node:
         """Removes the reference to the node's value and logs it's destruction."""
         logger.info(f"=> DEL({self.name})")
 
-        self.value = None
+        self.value = inspect._empty
 
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)

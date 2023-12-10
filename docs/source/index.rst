@@ -10,6 +10,7 @@ nnsight
 
    start
    documentation
+   features
    tutorials
    About <about>
 

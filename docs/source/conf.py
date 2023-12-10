@@ -4,8 +4,6 @@
 project = 'nnsight'
 copyright = '2023, NDIF'
 author = 'Jaden Fiotto-Kaufman'
-release = '0.0.7'
-
 
 
 # General Configuration
@@ -27,11 +25,12 @@ fixed_sidebar = True
 
 # See https://sphinx-themes.org/ for more
 html_theme = "pydata_sphinx_theme"
-
+html_title = "nnsight"
+html_logo = "_static/images/nnsight_logo.svg"
 html_static_path = ['_static']
 
 html_favicon = '_static/images/icon.ico'
-
+html_show_sourcelink = False
 html_theme_options = {
   "logo": {"text":"nnsight"},
   "show_nav_level": 2,
@@ -43,12 +42,17 @@ html_theme_options = {
             "url": "https://github.com/JadenFiotto-Kaufman/nnsight",
             "icon": "fa-brands fa-github",
         },
+        {
+            "name": "Discord",
+            "url": "https://discord.gg/P6mQrKbz",
+            "icon": "fa-brands fa-discord",
+        },
   ]
 }
 
 html_context = {
    "default_mode": "light",
-   "ndif_url" : "http://10.201.22.179:443/ping"
+   "ndif_url" : "https://ndif.baulab.us/ping"
 }
 
 html_css_files = [
