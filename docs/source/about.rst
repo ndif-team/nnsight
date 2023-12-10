@@ -73,4 +73,4 @@ See the :doc:`start` and :doc:`features` pages for more information on nnsight f
 
 The project is currently in Alpha pre-release and is looking for early users/and contributors!
 
-If you are interested in contributing or being an early user, join the `NDIF Discord <https://discord.gg/ZRPgsf6P>`_ for updates, feature requests, bug reports and opportunities to help with the effort.
+If you are interested in contributing or being an early user, join the `NDIF Discord <https://discord.gg/P6mQrKbz>`_ for updates, feature requests, bug reports and opportunities to help with the effort.
