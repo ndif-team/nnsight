@@ -8,12 +8,12 @@ from torch.utils.hooks import RemovableHandle
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, PretrainedConfig, PreTrainedModel,
                           PreTrainedTokenizer)
-
+from transformers.models.auto import modeling_auto
 from .AbstractModel import AbstractModel
 
 
 class LanguageModel(AbstractModel):
-    """LanguageModels are nnsight wrappers around AutoModelForCausalLM models.
+    """LanguageModels are nnsight wrappers around transformer auto models.
 
     Inputs can be in the form of:
         Prompt: (str)
@@ -25,21 +25,23 @@ class LanguageModel(AbstractModel):
 
     If using a custom model, you also need to provide the tokenizer like ``LanguageModel(custom_model, tokenizer=tokenizer)``
 
-    Calls to generate pass arguments downstream to :func:`AutoModelForCausalLM.generate`
+    Calls to generate pass arguments downstream to :func:`GenerationMixin.generate`
 
     Attributes:
         config (PretrainedConfig): Huggingface config file loaded from repository or checkpoint.
         tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
-        meta_model (PreTrainedModel): Meta version of underlying AutoModelForCausalLM model.
-        local_model (PreTrainedModel): Local version of underlying AutoModelForCausalLM model.
+        automodel (type): AutoModel type from transformer auto models.
+        meta_model (PreTrainedModel): Meta version of underlying auto model.
+        local_model (PreTrainedModel): Local version of underlying auto model.
 
     """
 
-    def __init__(self, *args, tokenizer=None, **kwargs) -> None:
+    def __init__(self, *args, tokenizer=None, automodel=AutoModelForCausalLM, **kwargs) -> None:
         self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = tokenizer
         self.meta_model: PreTrainedModel = None
         self.local_model: PreTrainedModel = None
+        self.automodel = automodel if not isinstance(automodel, str) else getattr(modeling_auto, automodel)
 
         super().__init__(*args, **kwargs)
 
@@ -54,10 +56,10 @@ class LanguageModel(AbstractModel):
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        return AutoModelForCausalLM.from_config(self.config, trust_remote_code=True)
+        return self.automodel.from_config(self.config, trust_remote_code=True)
 
     def _load_local(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        return AutoModelForCausalLM.from_pretrained(
+        return self.automodel.from_pretrained(
             repoid_or_path, *args, config=self.config, **kwargs
         )
 
@@ -117,7 +119,7 @@ class LanguageModel(AbstractModel):
                 _inputs["labels"] = labels["input_ids"]
 
             return _inputs
-
+        
         inputs = self._tokenize(inputs)
 
         if labels is not None:
@@ -144,7 +146,7 @@ class LanguageModel(AbstractModel):
         return batched_inputs, len(prepared_inputs["input_ids"])
 
     def _example_input(self) -> Dict[str, torch.Tensor]:
-        return BatchEncoding({"input_ids": torch.tensor([[0]])})
+        return BatchEncoding({"input_ids": torch.tensor([[0]]), "labels": torch.tensor([[0]])})
 
     def _scan(self, prepared_inputs, *args, **kwargs) -> None:
         # TODO
