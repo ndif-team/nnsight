@@ -64,10 +64,9 @@ class Invoker(AbstractContextManager):
                 module._backward_output = None
                 module._backward_input = None
 
-        batched_inputs = self.tracer.model._batched_inputs(self.input)
-
-        self.tracer.batch_size = len(batched_inputs)
-        self.tracer.batched_input.extend(batched_inputs)
+        self.tracer.batch_start += self.tracer.batch_size
+    
+        self.tracer.batched_input, self.tracer.batch_size = self.tracer.model._batch_inputs(self.input, self.tracer.batched_input)
 
         return self
 
