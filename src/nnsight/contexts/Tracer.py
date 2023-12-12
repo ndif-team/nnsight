@@ -22,8 +22,9 @@ class Tracer(AbstractContextManager):
         args (List[Any]): Positional arguments to be passed to function that executes the model.
         kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
         batch_size (int): Batch size of the most recent input. Used by Module to create input/output proxies.
+        batch_start (int): Batch start of the most recent input. Used by Module to create input/output proxies.
         generation_idx (int): Current generation idx for multi-iteration generation. Used by Module to create input/output proxies.
-        batched_input (List[Any]): Batched version of all inputs involved in this Tracer.
+        batched_input Any: Batched version of all inputs involved in this Tracer.
         output (Any): Output of execution after __exit__
     """
 
@@ -42,8 +43,9 @@ class Tracer(AbstractContextManager):
         self.graph = Graph(self.model.meta_model, proxy_class=InterventionProxy, validate=validate)
 
         self.batch_size: int = 0
+        self.batch_start: int = 0
         self.generation_idx: int = 0
-        self.batched_input: List[Any] = []
+        self.batched_input: Any = None
 
         self.output = None
 

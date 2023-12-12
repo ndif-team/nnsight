@@ -182,7 +182,7 @@ class DiffuserModel(AbstractModel):
        
        return self.local_model.pipeline(inputs, *args, **kwargs)
 
-    def _batched_inputs(self, prepared_inputs: BatchEncoding) -> torch.Tensor:
+    def _batch_inputs(self, prepared_inputs: BatchEncoding) -> torch.Tensor:
         return prepared_inputs if not isinstance(prepared_inputs, str) else [prepared_inputs]
 
     def _example_input(self) -> Dict[str, torch.Tensor]:

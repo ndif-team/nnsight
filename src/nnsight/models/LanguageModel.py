@@ -61,7 +61,7 @@ class LanguageModel(AbstractModel):
             repoid_or_path, *args, config=self.config, **kwargs
         )
 
-    def _prepare_inputs(
+    def _tokenize(
         self,
         inputs: Union[
             str,
@@ -72,9 +72,9 @@ class LanguageModel(AbstractModel):
             torch.Tensor,
             Dict[str, Any],
         ],
-    ) -> BatchEncoding:
-        if isinstance(inputs, collections.abc.Mapping):
-            return BatchEncoding(inputs)
+    ):
+        if isinstance(inputs, BatchEncoding):
+            return inputs
 
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
@@ -91,11 +91,60 @@ class LanguageModel(AbstractModel):
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True)
 
-    def _batched_inputs(self, prepared_inputs: BatchEncoding) -> torch.Tensor:
-        return prepared_inputs["input_ids"]
+    def _prepare_inputs(
+        self,
+        inputs: Union[
+            str,
+            List[str],
+            List[List[str]],
+            List[int],
+            List[List[int]],
+            torch.Tensor,
+            Dict[str, Any],
+            BatchEncoding,
+        ],
+        labels: Any = None,
+        **kwargs,
+    ) -> BatchEncoding:
+        if isinstance(inputs, dict):
+            _inputs = self._tokenize(inputs["input_ids"])
+
+            _inputs = self._tokenize(_inputs)
+
+            if "labels" in inputs:
+                labels = self._tokenize(inputs["labels"])
+                labels = self._tokenize(labels)
+                _inputs["labels"] = labels["input_ids"]
+
+            return _inputs
+
+        inputs = self._tokenize(inputs)
+
+        if labels is not None:
+            labels = self._tokenize(labels)
+
+            inputs["labels"] = labels["input_ids"]
+
+        return inputs
+
+    def _batch_inputs(
+        self, prepared_inputs: BatchEncoding, batched_inputs: Dict
+    ) -> torch.Tensor:
+        if batched_inputs is None:
+            batched_inputs = {"input_ids": []}
+
+            if "labels" in prepared_inputs:
+                batched_inputs["labels"] = []
+
+        batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
+
+        if "labels" in prepared_inputs:
+            batched_inputs["labels"].extend(prepared_inputs["labels"])
+
+        return batched_inputs, len(prepared_inputs["input_ids"])
 
     def _example_input(self) -> Dict[str, torch.Tensor]:
-        return {"input_ids": torch.tensor([[0]])}
+        return BatchEncoding({"input_ids": torch.tensor([[0]])})
 
     def _scan(self, prepared_inputs, *args, **kwargs) -> None:
         # TODO
