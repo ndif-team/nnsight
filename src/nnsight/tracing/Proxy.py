@@ -21,23 +21,6 @@ class Proxy:
     """
 
     @staticmethod
-    def proxy_update(value1: Any, value2: Any) -> None:
-        """Updates Tensor values with other Tensor values.
-
-        Args:
-            value1 (Any): Collection with Tensors to update.
-            value2 (Any): Collection with Tensors to pull values from.
-        """
-        if isinstance(value1, torch.Tensor):
-            value1[:] = value2
-        elif isinstance(value1, list) or isinstance(value1, tuple):
-            for value_idx in range(len(value1)):
-                Proxy.proxy_update(value1[value_idx], value2[value_idx])
-        elif isinstance(value1, dict):
-            for key in value1:
-                Proxy.proxy_update(value1[key], value2[key])
-
-    @staticmethod
     def proxy_call(callable: Callable, *args, **kwargs) -> None:
         return callable(*args, **kwargs)
 
@@ -76,11 +59,9 @@ class Proxy:
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
-        item_proxy = self[key]
-
-        item_proxy.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[item_proxy.node, value],
+        self.node.graph.add(
+            target=operator.setitem,
+            args=[self.node, key, value],
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
