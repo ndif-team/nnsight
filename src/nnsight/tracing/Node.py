@@ -193,6 +193,11 @@ class Node:
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
+        elif self.target == "swp":
+
+            self.graph.swap = self.args[1]
+
+            return
 
         # Prepare arguments.
         args, kwargs = self.prepare_inputs()

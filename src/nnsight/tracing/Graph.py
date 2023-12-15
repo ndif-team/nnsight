@@ -151,6 +151,8 @@ class Graph:
 
         self.generation_idx = 0
 
+        self.swap:Proxy = None
+
     def increment(self) -> None:
         """Increments the generation_idx by one. Should be called by a forward hook on the model being used for generation."""
         self.generation_idx += 1

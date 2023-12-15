@@ -39,12 +39,12 @@ def test_save(gpt2: nnsight.LanguageModel):
     assert hs_input.value.ndim == 3
 
 
-def test_set(gpt2: nnsight.LanguageModel):
+def test_set1(gpt2: nnsight.LanguageModel):
     with gpt2.generate(max_new_tokens=1) as generator:
         with generator.invoke("Hello world") as invoker:
             pre = gpt2.transformer.h[-1].output[0].clone().save()
 
-            gpt2.transformer.h[-1].output[0] = 0
+            gpt2.transformer.h[-1].output[0][:] = 0
 
             post = gpt2.transformer.h[-1].output[0].save()
 
@@ -53,6 +53,22 @@ def test_set(gpt2: nnsight.LanguageModel):
     assert not (pre.value == 0).all().item()
     assert (post.value == 0).all().item()
     assert output != "Madison Square Garden is located in the city of New"
+
+def test_set2(gpt2: nnsight.LanguageModel):
+    with gpt2.generate(max_new_tokens=1) as generator:
+        with generator.invoke("Hello world") as invoker:
+            pre = gpt2.transformer.h[-1].mlp.output.clone().save()
+
+            gpt2.transformer.h[-1].mlp.output = gpt2.transformer.h[-1].mlp.output * 0
+
+            post = gpt2.transformer.h[-1].mlp.output.save()
+
+    output = gpt2.tokenizer.decode(generator.output[0])
+
+    assert not (pre.value == 0).all().item()
+    assert (post.value == 0).all().item()
+    assert output != "Madison Square Garden is located in the city of New"
+
 
 
 def test_adhoc_module(gpt2: nnsight.LanguageModel):
