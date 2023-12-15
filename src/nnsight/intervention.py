@@ -17,8 +17,9 @@ from torch.utils.hooks import RemovableHandle
 
 from . import util
 from .tracing.Graph import Graph
-from .tracing.Proxy import Proxy
 from .tracing.Node import Node
+from .tracing.Proxy import Proxy
+
 
 class InterventionProxy(Proxy):
 
@@ -138,9 +139,8 @@ class InterventionProxy(Proxy):
 
 def check_swap(graph: Graph, activations: Any, batch_start: int, batch_size: int):
     if graph.swap is not None:
-        
+
         def concat(values):
-            
             if isinstance(values[0], torch.Tensor):
                 return torch.concatenate(values)
             elif isinstance(values[0], list) or isinstance(values[0], tuple):
@@ -164,13 +164,14 @@ def check_swap(graph: Graph, activations: Any, batch_start: int, batch_size: int
             torch.Tensor,
         )
 
-        value = graph.swap
+        def get_value(node: Node):
+            value = node.value
 
-        if isinstance(value, Node):
+            node.set_value(True)
 
-            _value = value.value
-            value.set_value(True)
-            value = _value
+            return value
+
+        value = util.apply(graph.swap, get_value, Node)
 
         activations = concat([pre, value, post])
 
@@ -225,6 +226,8 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
                 )
             )
 
+            # Check if through the previous value injection, there was a 'swp' intervention.
+            # This would mean we want to replace activations for this batch with some other ones.
             activations = check_swap(graph, activations, batch_start, batch_size)
 
     return activations

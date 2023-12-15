@@ -59,7 +59,6 @@ class Proxy:
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
-        
         self.node.graph.add(
             target=operator.setitem,
             args=[self.node, key, value],

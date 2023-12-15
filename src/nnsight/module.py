@@ -126,9 +126,7 @@ class Module(torch.nn.Module):
         """
 
         self.output.node.graph.add(
-            target='swp',
-            args=[self.output.node, value],
-            value=True
+            target="swp", args=[self.output.node, value], value=True
         )
 
         self._output = None
@@ -169,9 +167,7 @@ class Module(torch.nn.Module):
         """
 
         self.input.node.graph.add(
-            target='swp',
-            args=[self.input.node, value],
-            value=True
+            target="swp", args=[self.input.node, value], value=True
         )
 
         self._input = None
@@ -212,9 +208,7 @@ class Module(torch.nn.Module):
         """
 
         self.backward_output.node.graph.add(
-            target='swp',
-            args=[self.backward_output.node, value],
-            value=True
+            target="swp", args=[self.backward_output.node, value], value=True
         )
 
         self._backward_output = None
@@ -255,9 +249,7 @@ class Module(torch.nn.Module):
         """
 
         self.backward_input.node.graph.add(
-            target='swp',
-            args=[self.backward_input.node, value],
-            value=True
+            target="swp", args=[self.backward_input.node, value], value=True
         )
 
         self._backward_input = None
