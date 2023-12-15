@@ -10,3 +10,8 @@ Tutorials
    notebooks/tutorials/future_lens.ipynb
    notebooks/tutorials/function_vectors.ipynb
    notebooks/tutorials/dictionary_learning.ipynb
+
+.. toctree::
+   :hidden:
+
+   notebooks/tutorials/sae.ipynb
