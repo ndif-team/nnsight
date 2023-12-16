@@ -30,7 +30,7 @@ class Graph:
         module_proxy (Proxy): Proxy for given root meta module.
         argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
         generation_idx (int): Current generation index.
-        swap (Any): Attribute to store swap values from 'swp' nodes.
+        swap (Node): Attribute to store swap values from 'swp' nodes.
     """
 
     @staticmethod
@@ -129,7 +129,7 @@ class Graph:
 
         self.generation_idx = 0
 
-        self.swap: Any = None
+        self.swap: Node = None
 
     def increment(self) -> None:
         """Increments the generation_idx by one. Should be called by a forward hook on the model being used for generation."""
