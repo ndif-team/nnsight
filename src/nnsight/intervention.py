@@ -138,6 +138,7 @@ class InterventionProxy(Proxy):
 
 
 def check_swap(graph: Graph, activations: Any, batch_start: int, batch_size: int):
+    # If swap is populated due to a 'swp' intervention.
     if graph.swap is not None:
 
         def concat(values):
@@ -154,27 +155,31 @@ def check_swap(graph: Graph, activations: Any, batch_start: int, batch_size: int
                     for key in values[0].keys()
                 }
 
+        # As interventions are scoped only to their relevant batch, if we want to swap in values for this batch
+        # we need to concatenate the batches before and after the relevant batch with the new values.
+        # Getting batch data before.
         pre = util.apply(
             activations, lambda x: x.narrow(0, 0, batch_start), torch.Tensor
         )
         post_batch_start = batch_start + batch_size
+        # Getting batch data after.
         post = util.apply(
             activations,
             lambda x: x.narrow(0, post_batch_start, x.shape[0] - post_batch_start),
             torch.Tensor,
         )
 
-        def get_value(node: Node):
-            value = node.value
+        # Second argument of 'swp' interventions is the new value.
+        # Convert all Nodes in the value to their value.
+        value = util.apply(graph.swap.args[1], lambda x: x.value, Node)
 
-            node.set_value(True)
-
-            return value
-
-        value = util.apply(graph.swap, get_value, Node)
-
+        # Concatenate
         activations = concat([pre, value, post])
 
+        # Set value of 'swp' node so it destroys itself and listeners.
+        graph.swap.set_value(True)
+
+        # Un-set swap.
         graph.swap = None
 
     return activations

@@ -194,7 +194,7 @@ class Node:
         if self.target == "null":
             return
         elif self.target == "swp":
-            self.graph.swap = self.args[1]
+            self.graph.swap = self
 
             return
 
@@ -230,7 +230,7 @@ class Node:
             if dependency.redundant():
                 dependency.destroy()
 
-        if self.value is not None and self.redundant():
+        if self.value is not inspect._empty and self.redundant():
             self.destroy()
 
     def destroy(self) -> None:
