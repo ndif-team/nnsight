@@ -54,9 +54,25 @@ def repeat_interleave_wrapper(fn):
 
 
 DEFAULT_PATCHER.add(
-    Patch(torch.repeat_interleave, repeat_interleave_wrapper(torch.repeat_interleave))
+    Patch(
+        torch, repeat_interleave_wrapper(torch.repeat_interleave), "repeat_interleave"
+    )
 )
 
+
+def cpu_wrapper(fn):
+    @wraps(fn)
+    def cpu(input: torch.Tensor, *args, **kwargs):
+        if input.device.type == "meta":
+            return input
+
+        else:
+            return fn(input, *args, **kwargs)
+
+    return cpu
+
+
+DEFAULT_PATCHER.add(Patch(torch.Tensor, cpu_wrapper(torch.Tensor.cpu), "cpu"))
 
 DEFAULT_PATCHER.__enter__()
 

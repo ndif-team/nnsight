@@ -194,6 +194,9 @@ class Node:
         if self.target == "null":
             return
         elif self.target == "swp":
+            if self.graph.swap is not None:
+                self.graph.swap.set_value(False)
+
             self.graph.swap = self
 
             return
