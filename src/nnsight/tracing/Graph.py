@@ -303,7 +303,7 @@ class Graph:
 
         return module
 
-    def vis(self):
+    def vis(self, filename:str="graph", format:str="png"):
         import graphviz
 
         def style(value: Any) -> Dict[str, Any]:
@@ -365,8 +365,18 @@ class Graph:
         for node in self.nodes.values():
             add_node(node, graph)
 
-            for arg in node.args:
-                name = add_node(arg, graph)
+            for i, arg in enumerate(node.args):
+                kname = None
+
+                if node.target == "argument":
+                    if i == 0:
+                        kname = "key"
+                    elif i == 1:
+                        kname = "batch_size"
+                    elif i == 2:
+                        kname = "batch_start"
+
+                name = add_node(arg, graph, kname=kname)
 
                 graph.edge(name, node.name)
 
@@ -375,7 +385,7 @@ class Graph:
 
                 graph.edge(name, node.name)
 
-        graph.render(filename="graph", format="png")
+        graph.render(filename=filename, format=format)
 
     def __str__(self) -> str:
         result = ""
