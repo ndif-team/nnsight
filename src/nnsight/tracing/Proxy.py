@@ -90,7 +90,7 @@ class Proxy:
 
     def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
-            target=pow,
+            target=operator.pow,
             args=[self.node, other],
         )
 
@@ -170,12 +170,7 @@ def proxy_wrapper(fn) -> None:
                 break
 
         if node is not None:
-            value = fn(
-                *node.prepare_proxy_values(args),
-                **node.prepare_proxy_values(kwargs),
-            )
-
-            return node.graph.add(value=value, target=fn, args=args, kwargs=kwargs)
+            return node.graph.add(target=fn, args=args, kwargs=kwargs)
 
         else:
             return fn(*args, **kwargs)

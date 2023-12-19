@@ -85,6 +85,6 @@ class GPT2AttentionAltered(gpt2.modeling_gpt2.GPT2Attention):
         return outputs  # a, present, (attentions)
 
 
-GPT2Patcher = Patcher([
-    Patch(gpt2.modeling_gpt2.GPT2Attention, GPT2AttentionAltered)
-    ])
+GPT2Patcher = Patcher(
+    [Patch(gpt2.modeling_gpt2, GPT2AttentionAltered, "GPT2Attention")]
+)

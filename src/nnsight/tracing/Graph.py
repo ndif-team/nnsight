@@ -98,9 +98,9 @@ class Graph:
         # Some methods cannot be caught because they aren't torch functions or dont play nice with __torch_function__.
         # So the patcher replaces the methods with something to catch proxies and return proxies.
         with Patcher() as patcher:
-            patcher.add(Patch(torch.full, proxy_wrapper(torch.full)))
-            patcher.add(Patch(torch.finfo, proxy_wrapper(torch.finfo)))
-            patcher.add(Patch(torch.arange, proxy_wrapper(torch.arange)))
+            patcher.add(Patch(torch, proxy_wrapper(torch.full), 'full'))
+            patcher.add(Patch(torch, proxy_wrapper(torch.finfo), 'finfo'))
+            patcher.add(Patch(torch, proxy_wrapper(torch.arange), 'arange'))
 
             # Run forward with root module proxy and arguments
             output: Proxy = forward(graph.module_proxy, *arguments)
