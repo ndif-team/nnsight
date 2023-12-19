@@ -8,12 +8,12 @@ from torch.utils.hooks import RemovableHandle
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, PretrainedConfig, PreTrainedModel,
                           PreTrainedTokenizer)
-
+from transformers.models.auto import modeling_auto
 from .AbstractModel import AbstractModel
 
 
 class LanguageModel(AbstractModel):
-    """LanguageModels are nnsight wrappers around AutoModelForCausalLM models.
+    """LanguageModels are nnsight wrappers around transformer auto models.
 
     Inputs can be in the form of:
         Prompt: (str)
@@ -25,21 +25,23 @@ class LanguageModel(AbstractModel):
 
     If using a custom model, you also need to provide the tokenizer like ``LanguageModel(custom_model, tokenizer=tokenizer)``
 
-    Calls to generate pass arguments downstream to :func:`AutoModelForCausalLM.generate`
+    Calls to generate pass arguments downstream to :func:`GenerationMixin.generate`
 
     Attributes:
         config (PretrainedConfig): Huggingface config file loaded from repository or checkpoint.
         tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
-        meta_model (PreTrainedModel): Meta version of underlying AutoModelForCausalLM model.
-        local_model (PreTrainedModel): Local version of underlying AutoModelForCausalLM model.
+        automodel (type): AutoModel type from transformer auto models.
+        meta_model (PreTrainedModel): Meta version of underlying auto model.
+        local_model (PreTrainedModel): Local version of underlying auto model.
 
     """
 
-    def __init__(self, *args, tokenizer=None, **kwargs) -> None:
+    def __init__(self, *args, tokenizer=None, automodel=AutoModelForCausalLM, **kwargs) -> None:
         self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = tokenizer
         self.meta_model: PreTrainedModel = None
         self.local_model: PreTrainedModel = None
+        self.automodel = automodel if not isinstance(automodel, str) else getattr(modeling_auto, automodel)
 
         super().__init__(*args, **kwargs)
 
@@ -54,14 +56,14 @@ class LanguageModel(AbstractModel):
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        return AutoModelForCausalLM.from_config(self.config, trust_remote_code=True)
+        return self.automodel.from_config(self.config, trust_remote_code=True)
 
     def _load_local(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        return AutoModelForCausalLM.from_pretrained(
+        return self.automodel.from_pretrained(
             repoid_or_path, *args, config=self.config, **kwargs
         )
 
-    def _prepare_inputs(
+    def _tokenize(
         self,
         inputs: Union[
             str,
@@ -72,9 +74,9 @@ class LanguageModel(AbstractModel):
             torch.Tensor,
             Dict[str, Any],
         ],
-    ) -> BatchEncoding:
-        if isinstance(inputs, collections.abc.Mapping):
-            return BatchEncoding(inputs)
+    ):
+        if isinstance(inputs, BatchEncoding):
+            return inputs
 
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
@@ -91,11 +93,60 @@ class LanguageModel(AbstractModel):
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True)
 
-    def _batched_inputs(self, prepared_inputs: BatchEncoding) -> torch.Tensor:
-        return prepared_inputs["input_ids"]
+    def _prepare_inputs(
+        self,
+        inputs: Union[
+            str,
+            List[str],
+            List[List[str]],
+            List[int],
+            List[List[int]],
+            torch.Tensor,
+            Dict[str, Any],
+            BatchEncoding,
+        ],
+        labels: Any = None,
+        **kwargs,
+    ) -> BatchEncoding:
+        if isinstance(inputs, dict):
+            _inputs = self._tokenize(inputs["input_ids"])
+
+            _inputs = self._tokenize(_inputs)
+
+            if "labels" in inputs:
+                labels = self._tokenize(inputs["labels"])
+                labels = self._tokenize(labels)
+                _inputs["labels"] = labels["input_ids"]
+
+            return _inputs
+        
+        inputs = self._tokenize(inputs)
+
+        if labels is not None:
+            labels = self._tokenize(labels)
+
+            inputs["labels"] = labels["input_ids"]
+
+        return inputs
+
+    def _batch_inputs(
+        self, prepared_inputs: BatchEncoding, batched_inputs: Dict
+    ) -> torch.Tensor:
+        if batched_inputs is None:
+            batched_inputs = {"input_ids": []}
+
+            if "labels" in prepared_inputs:
+                batched_inputs["labels"] = []
+
+        batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
+
+        if "labels" in prepared_inputs:
+            batched_inputs["labels"].extend(prepared_inputs["labels"])
+
+        return batched_inputs, len(prepared_inputs["input_ids"])
 
     def _example_input(self) -> Dict[str, torch.Tensor]:
-        return {"input_ids": torch.tensor([[0]])}
+        return BatchEncoding({"input_ids": torch.tensor([[0]]), "labels": torch.tensor([[0]])})
 
     def _scan(self, prepared_inputs, *args, **kwargs) -> None:
         # TODO

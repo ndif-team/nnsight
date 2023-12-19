@@ -18,7 +18,7 @@ class Graph:
 
     * 'module' : There should only be the single root module as a node in the graph for tracing. Added on __init__ and when compiling, the node's value is set to to be whatever module that is being interleaved with this computation graph.
     * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
-    * 'rtn' : Should only be one 'rtn' target named node as this is what is used.
+    * 'swp' : swp nodes indicate populating the graph's swap attribute. When executed, its value is not set. Logic involving the swap value should set its value after using it.
     * 'null' : Null nodes never get executed and therefore their listeners never get destroyed.
 
     Attributes:
@@ -30,6 +30,7 @@ class Graph:
         module_proxy (Proxy): Proxy for given root meta module.
         argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
         generation_idx (int): Current generation index.
+        swap (Node): Attribute to store swap values from 'swp' nodes.
     """
 
     @staticmethod
@@ -104,35 +105,12 @@ class Graph:
             # Run forward with root module proxy and arguments
             output: Proxy = forward(graph.module_proxy, *arguments)
 
-            # Get proxy_value for return
-            value = util.apply(output, lambda x: x.node.proxy_value, Proxy)
-
-            # Create the 'rtn_0' return proxy
+            # Create the 'swap' return proxy
             return_proxy = graph.add(
-                graph=graph, value=value, target=Graph.rtn, args=output
-            )
-
-            # This is how we tell the graph not to destroy a proxy after it's listeners are completed.
-            # Create a 'null' proxy. The return proxy listens to the 'null' proxy with args=[return_proxy.node] but 'null' will never be completed.
-            graph.add(
-                graph=graph,
-                value=None,
-                target="null",
-                args=[return_proxy.node],
+                graph=graph, value=True, target="swp", args=[output.node, output.node]
             )
 
         return graph
-
-    @staticmethod
-    def rtn(*args, **kwargs):
-        """
-        Function to just pass through data for returning data in a graph forward method.
-
-        Returns:
-            _type_: _description_
-        """
-
-        return args
 
     def __init__(
         self,
@@ -150,6 +128,8 @@ class Graph:
         self.argument_node_names: Dict[str, List[str]] = dict()
 
         self.generation_idx = 0
+
+        self.swap: Node = None
 
     def increment(self) -> None:
         """Increments the generation_idx by one. Should be called by a forward hook on the model being used for generation."""
@@ -199,7 +179,7 @@ class Graph:
             Proxy: Proxy for the added node.
 
         Raises:
-            ValueError: If more than one reserved "rtn" or "module" nodes are added to the graph.
+            ValueError: If more than one reserved "module" nodes are added to the graph.
         """
 
         # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.
@@ -217,8 +197,6 @@ class Graph:
         if target_name not in self.name_idx:
             self.name_idx[target_name] = 0
         else:
-            if target_name == "rtn":
-                raise ValueError("Can only have one return ('rtn') node.")
             if target_name == "module":
                 raise ValueError("Can only have one module node.")
 
@@ -293,9 +271,9 @@ class Graph:
                 if key in self.argument_node_names:
                     self.nodes[self.argument_node_names[key][0]].set_value(arg)
 
-            # 'rtn_0' should have the value we need to return.
-            return_value = self.nodes["rtn_0"].value
-            self.nodes["rtn_0"].destroy()
+            # should have the value we need to return.
+            return_value = self.swap
+            self.swap.set_value(True)
             return return_value
 
         # Replace forward method with custom graph execution method.

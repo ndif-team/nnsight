@@ -2670,3 +2670,4 @@
 2023-11-17 14:17:35,028 MainProcess nnsight INFO     => DEL(getitem_15)
 2023-11-17 14:17:35,028 MainProcess nnsight INFO     => DEL(argument_15)
 2023-11-17 14:17:35,029 MainProcess nnsight INFO     Completed `EleutherAI/pythia-1B`
+2023-12-15 00:41:27,708 MainProcess nnsight INFO     Initializing `gpt2`...

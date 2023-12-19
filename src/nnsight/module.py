@@ -110,7 +110,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.output.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -126,9 +126,10 @@ class Module(torch.nn.Module):
         """
 
         self.output.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.output.node, value],
+            target="swp", args=[self.output.node, value], value=True
         )
+
+        self._output = None
 
     @property
     def input(self) -> InterventionProxy:
@@ -150,7 +151,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.input.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -166,9 +167,10 @@ class Module(torch.nn.Module):
         """
 
         self.input.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.input.node, value],
+            target="swp", args=[self.input.node, value], value=True
         )
+
+        self._input = None
 
     @property
     def backward_output(self) -> InterventionProxy:
@@ -190,7 +192,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.backward_output.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -206,9 +208,10 @@ class Module(torch.nn.Module):
         """
 
         self.backward_output.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.backward_output.node, value],
+            target="swp", args=[self.backward_output.node, value], value=True
         )
+
+        self._backward_output = None
 
     @property
     def backward_input(self) -> InterventionProxy:
@@ -230,7 +233,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.backward_input.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -246,9 +249,10 @@ class Module(torch.nn.Module):
         """
 
         self.backward_input.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.backward_input.node, value],
+            target="swp", args=[self.backward_input.node, value], value=True
         )
+
+        self._backward_input = None
 
     @property
     def graph(self) -> Graph:

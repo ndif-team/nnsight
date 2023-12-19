@@ -193,6 +193,10 @@ class Node:
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
+        elif self.target == "swp":
+            self.graph.swap = self
+
+            return
 
         # Prepare arguments.
         args, kwargs = self.prepare_inputs()
@@ -226,7 +230,7 @@ class Node:
             if dependency.redundant():
                 dependency.destroy()
 
-        if self.value is not None and self.redundant():
+        if self.value is not inspect._empty and self.redundant():
             self.destroy()
 
     def destroy(self) -> None:
