@@ -16,7 +16,7 @@ class RequestModel(BaseModel):
     args: List
     kwargs: Dict
     model_name: str
-    batched_input: Union[List[Any], bytes]
+    batched_input: Union[Any, bytes]
     intervention_graph: Union[Graph, bytes, Dict[str, NodeModel]]
     generation: bool
     # Edits
