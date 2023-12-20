@@ -98,9 +98,9 @@ class Graph:
         # Some methods cannot be caught because they aren't torch functions or dont play nice with __torch_function__.
         # So the patcher replaces the methods with something to catch proxies and return proxies.
         with Patcher() as patcher:
-            patcher.add(Patch(torch.full, proxy_wrapper(torch.full)))
-            patcher.add(Patch(torch.finfo, proxy_wrapper(torch.finfo)))
-            patcher.add(Patch(torch.arange, proxy_wrapper(torch.arange)))
+            patcher.add(Patch(torch, proxy_wrapper(torch.full), 'full'))
+            patcher.add(Patch(torch, proxy_wrapper(torch.finfo), 'finfo'))
+            patcher.add(Patch(torch, proxy_wrapper(torch.arange), 'arange'))
 
             # Run forward with root module proxy and arguments
             output: Proxy = forward(graph.module_proxy, *arguments)
@@ -281,7 +281,7 @@ class Graph:
 
         return module
 
-    def vis(self):
+    def vis(self, filename:str="graph", format:str="png"):
         import graphviz
 
         def style(value: Any) -> Dict[str, Any]:
@@ -343,8 +343,18 @@ class Graph:
         for node in self.nodes.values():
             add_node(node, graph)
 
-            for arg in node.args:
-                name = add_node(arg, graph)
+            for i, arg in enumerate(node.args):
+                kname = None
+
+                if node.target == "argument":
+                    if i == 0:
+                        kname = "key"
+                    elif i == 1:
+                        kname = "batch_size"
+                    elif i == 2:
+                        kname = "batch_start"
+
+                name = add_node(arg, graph, kname=kname)
 
                 graph.edge(name, node.name)
 
@@ -353,7 +363,7 @@ class Graph:
 
                 graph.edge(name, node.name)
 
-        graph.render(filename="graph", format="png")
+        graph.render(filename=filename, format=format)
 
     def __str__(self) -> str:
         result = ""

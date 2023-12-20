@@ -18,58 +18,20 @@ class Patch:
         parent (Any): Module or class to replace attribute.
     """
 
-    def __init__(self, obj: Any, replacement: Any) -> None:
-        self.obj = obj
+    def __init__(self, parent: Any, replacement: Any, key: str) -> None:
+        self.parent = parent
         self.replacement = replacement
-
-        builtin: bool = isinstance(self.obj, types.BuiltinFunctionType)
-        module = importlib.import_module(self.obj.__module__)
-
-        if builtin:
-            self.parent = module
-        else:
-            parent_path = ".".join(self.obj.__qualname__.split(".")[:-1])
-
-            self.parent = (
-                util.fetch_attr(module, parent_path) if parent_path else module
-            )
+        self.key = key
+        self.orig = getattr(self.parent, key)
 
     def patch(self) -> None:
-        """Carries out the replacement of an object in a module/class.
-
-        Imports the objects module with:
-
-        .. code-block:: python
-
-            importlib.import_module(self.obj.__module__)
-
-        And replaces it with:
-
-        .. code-block:: python
-
-            setattr(module, self.obj.__name__, self.replacement)
-
-        """
-        setattr(self.parent, self.obj.__name__, self.replacement)
+        """Carries out the replacement of an object in a module/class."""
+        setattr(self.parent, self.key, self.replacement)
 
     def restore(self) -> None:
-        """Carries out the restoration of the original object on the objects module/class.
+        """Carries out the restoration of the original object on the objects module/class."""
 
-        Imports the objects module with:
-
-        .. code-block:: python
-
-            importlib.import_module(self.obj.__module__)
-
-        And replaces it with:
-
-        .. code-block:: python
-
-            setattr(module, self.obj.__name__, self.obj)
-
-        """
-
-        setattr(self.parent, self.obj.__name__, self.obj)
+        setattr(self.parent, self.key, self.orig)
 
 
 class Patcher(AbstractContextManager):

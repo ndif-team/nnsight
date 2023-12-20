@@ -45,7 +45,7 @@ class Module(torch.nn.Module):
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
         output_shape (torch.Size): Shape of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
         output_type (torch.dtype): Dtype of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
-        output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
+        input (nnsight.intervention.InterventionProxy): Proxy object representing the input of this module. Reset on pass through.
         input_shape (torch.Size): Shape of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
         input_type (torch.dtype): Dtype of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
         tracer (nnsight.context.Tracer.Tracer): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.

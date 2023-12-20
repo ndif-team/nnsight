@@ -113,3 +113,24 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     assert output1 == "Madison Square Garden is located in the city of New York City"
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
+
+
+def test_grad(gpt2: nnsight.LanguageModel):
+    with gpt2.forward(inference=False) as runner:
+        with runner.invoke("Hello World") as invoker:
+            hidden_states = gpt2.transformer.h[-1].output[0].save()
+            hidden_states.retain_grad()
+
+            logits = gpt2.lm_head.output
+
+            logits.sum().backward()
+
+    with gpt2.forward(inference=False) as runner:
+        with runner.invoke("Hello World") as invoker:
+            hidden_states_grad = gpt2.transformer.h[-1].backward_output[0].save()
+
+            logits = gpt2.lm_head.output
+
+            logits.sum().backward()
+
+    assert (hidden_states_grad.value == hidden_states.value.grad).all().item()

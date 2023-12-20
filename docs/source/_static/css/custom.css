@@ -1,10 +1,10 @@
 .button-group {
-	display: flex;
-	flex-direction: row;
-	flex-wrap: nowrap;
-	justify-content: flex-start;
-	align-items: center;
-	align-content: stretch;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    align-items: center;
+    align-content: stretch;
     gap: 10px;
 }
 
@@ -34,7 +34,7 @@ html[data-theme="light"] {
 }
 
 
-.features { 
+.features {
     height: 60vh;
     overflow: hidden;
 }
@@ -44,7 +44,9 @@ html[data-theme="light"] {
     margin-top: 50px;
 }
 
-
+img {
+    pointer-events: none;
+}
 
 .title-bot {
     margin-bottom: -10px !important;
@@ -62,18 +64,25 @@ html[data-theme="light"] {
     gap: 20px;
 }
 
-@media only screen and (max-width: 768px) { /* Adjust this value based on your breakpoint for mobile */
-    .front-container, .hero {
-        height: auto; /* Change from fixed height to auto */
-        min-height: 50vh; /* Adjust this as needed */
+@media only screen and (max-width: 768px) {
+
+    /* Adjust this value based on your breakpoint for mobile */
+    .front-container,
+    .hero {
+        height: auto;
+        /* Change from fixed height to auto */
+        min-height: 50vh;
+        /* Adjust this as needed */
     }
 
     .features-container {
-        margin-bottom: 20px; /* Increase bottom margin */
+        margin-bottom: 20px;
+        /* Increase bottom margin */
     }
 
     .hero {
-        margin-bottom: 30px; /* Adjust the bottom margin of the main container */
+        margin-bottom: 30px;
+        /* Adjust the bottom margin of the main container */
     }
 
     .features {
