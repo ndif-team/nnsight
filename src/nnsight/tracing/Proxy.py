@@ -72,7 +72,6 @@ class Proxy:
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
-        breakpoint()
         return self.node.graph.add(
             target=util.fetch_attr,
             args=[self.node, key],
