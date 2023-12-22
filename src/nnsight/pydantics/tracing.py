@@ -42,7 +42,6 @@ class NodeModel(BaseModel):
             return graph.nodes[node_model.name]
 
         graph.add(
-            value=None,
             target=node_model.target,
             args=args,
             kwargs=kwargs,
