@@ -6,6 +6,7 @@ import causal_conv1d_cuda
 import mamba_ssm
 import selective_scan_cuda
 import torch
+from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 from mamba_ssm import MambaLMHeadModel
 from torch.utils.hooks import RemovableHandle
 from transformers import (
@@ -17,6 +18,7 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
 )
+from mamba_ssm.models.config_mamba import MambaConfig
 
 from ..patching import Patch, Patcher
 from .AbstractModel import AbstractModel
@@ -26,13 +28,17 @@ class Mamba(AbstractModel):
     def _register_increment_hook(self, hook: Callable) -> RemovableHandle:
         return self.local_model.register_forward_hook(hook)
 
-    def _load_meta(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
+    def _load_meta(self, repoid_or_path, *args, device=None, **kwargs) -> PreTrainedModel:
         self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
         self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        return MambaLMHeadModel.from_pretrained(repoid_or_path, device="meta")
+        config_data = load_config_hf(repoid_or_path)
+        self.config = MambaConfig(**config_data)
+        return MambaLMHeadModel(self.config, device='meta', dtype=None, **kwargs)
 
     def _load_local(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        return MambaLMHeadModel.from_pretrained(repoid_or_path, **kwargs)
+        model = MambaLMHeadModel(self.config, **kwargs)
+        model.load_state_dict(load_state_dict_hf(repoid_or_path, **kwargs))
+        return model
 
     def _tokenize(
         self,
@@ -104,15 +110,10 @@ class Mamba(AbstractModel):
         self, prepared_inputs: BatchEncoding, batched_inputs: Dict
     ) -> torch.Tensor:
         if batched_inputs is None:
-            batched_inputs = {"input_ids": []}
+            batched_inputs = {"input_ids": prepared_inputs["input_ids"]}
 
-            if "labels" in prepared_inputs:
-                batched_inputs["labels"] = []
-
-        batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
-
-        if "labels" in prepared_inputs:
-            batched_inputs["labels"].extend(prepared_inputs["labels"])
+        else:
+            batched_inputs["input_ids"] = torch.concatenate([batched_inputs["input_ids"], prepared_inputs["input_ids"]])
 
         return batched_inputs, len(prepared_inputs["input_ids"])
 
