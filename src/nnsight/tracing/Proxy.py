@@ -27,6 +27,12 @@ class Proxy:
     def __init__(self, node: "Node") -> None:
         self.node = node
 
+    def __getstate__(self):
+        return self.__dict__
+    
+    def __setstate__(self, d: dict):
+        self.__dict__ = d
+
     def __call__(self, *args, **kwargs) -> Proxy:
         """
         Calling a Proxy object normally just creates a Proxy.proxy_call operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
@@ -39,6 +45,7 @@ class Proxy:
         if self.node.args[0] is self.node.graph.module_proxy.node and not isinstance(
             self.node.proxy_value, torch.nn.Module
         ):
+
             value = self.node.proxy_value.__func__(
                 self.node.graph.module_proxy, *args, **kwargs
             )
@@ -65,6 +72,7 @@ class Proxy:
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
+        breakpoint()
         return self.node.graph.add(
             target=util.fetch_attr,
             args=[self.node, key],

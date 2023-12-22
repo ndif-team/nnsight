@@ -7,7 +7,7 @@ import socketio
 from .. import CONFIG, pydantics
 from .Invoker import Invoker
 from .Tracer import Tracer
-
+from ..logger import logger
 
 class Runner(Tracer):
     """The Runner object manages the intervention tracing for a given model's _generation method or _run_local method.
@@ -79,6 +79,7 @@ class Runner(Tracer):
 
     def run_server(self):
         # Create the pydantic class for the request.
+        
         request = pydantics.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
@@ -95,8 +96,9 @@ class Runner(Tracer):
 
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
-        sio = socketio.Client()
-        sio.connect(f"wss://{CONFIG.API.HOST}", transports=["websocket"])
+        sio = socketio.Client(logger=logger, reconnection_attempts=5)
+
+        sio.connect(f"wss://{CONFIG.API.HOST}", transports=["websocket"], wait_timeout=240)
 
         # Called when receiving a response from the server.
         @sio.on("blocking_response")
@@ -119,7 +121,7 @@ class Runner(Tracer):
             # Or if there was some error.
             elif data.status == pydantics.JobStatus.ERROR:
                 sio.disconnect()
-
+        
         sio.emit(
             "blocking_request",
             request.model_dump(exclude_defaults=True, exclude_none=True),
