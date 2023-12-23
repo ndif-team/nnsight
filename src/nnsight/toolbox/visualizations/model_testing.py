@@ -32,7 +32,7 @@ def test_prompt(
     sorted_indices = t.argsort(probs, descending=True)
     # Tokenize answer if it is a string
     if type(answer) == str:
-        answer = model.tokenizer(answer).input_ids[0]
+        answer = model.tokenizer(answer).input_ids[1]
     
     # Initialize table
     table = Table(title="Top K Tokens")
