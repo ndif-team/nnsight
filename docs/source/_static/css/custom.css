@@ -28,6 +28,10 @@ html[data-theme="light"] {
 
 }
 
+.ndif {
+    color: "green";
+}
+
 .bd-sidebar-primary {
     width: fit-content !important;
     padding-right: 40px !important
@@ -46,6 +50,15 @@ html[data-theme="light"] {
 
 img {
     pointer-events: none;
+}
+
+.img-bottom-sizing {
+    max-height: 10vh;
+    width: auto
+}
+
+.body-sizing{
+    height: 10vh;
 }
 
 .title-bot {
