@@ -83,7 +83,7 @@ class Runner(Tracer):
         request = pydantics.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
-            model_name=self.model.repoid_path_clsname,
+            repo_id=self.model.repoid_path_clsname,
             batched_input=self.batched_input,
             intervention_graph=self.graph,
             generation=self.generation,
@@ -96,9 +96,9 @@ class Runner(Tracer):
 
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
-        sio = socketio.Client(logger=logger, reconnection_attempts=5)
+        sio = socketio.Client(logger=logger)
 
-        sio.connect(f"wss://{CONFIG.API.HOST}", transports=["websocket"], wait_timeout=240)
+        sio.connect(f"wss://{CONFIG.API.HOST}", socketio_path="/ws/socket.io", transports=["websocket"])
 
         # Called when receiving a response from the server.
         @sio.on("blocking_response")
@@ -111,7 +111,7 @@ class Runner(Tracer):
 
             # If the status of the response is completed, update the local nodes that the user specified to save.
             # Then disconnect and continue.
-            if data.status == pydantics.JobStatus.COMPLETED:
+            if data.status.value == pydantics.ResponseModel.JobStatus.COMPLETED.value:
                 for name, value in data.saves.items():
                     self.graph.nodes[name].value = value
 
@@ -119,7 +119,7 @@ class Runner(Tracer):
 
                 sio.disconnect()
             # Or if there was some error.
-            elif data.status == pydantics.JobStatus.ERROR:
+            elif data.status.value == pydantics.ResponseModel.JobStatus.ERROR.value:
                 sio.disconnect()
         
         sio.emit(
