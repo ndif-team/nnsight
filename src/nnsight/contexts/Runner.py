@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import pickle
-
 import socketio
 
 from .. import CONFIG, pydantics
+from ..logger import logger
 from .Invoker import Invoker
 from .Tracer import Tracer
-from ..logger import logger
+
 
 class Runner(Tracer):
     """The Runner object manages the intervention tracing for a given model's _generation method or _run_local method.
@@ -79,7 +78,7 @@ class Runner(Tracer):
 
     def run_server(self):
         # Create the pydantic class for the request.
-        
+
         request = pydantics.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
@@ -98,30 +97,34 @@ class Runner(Tracer):
         # Create a socketio connection to the server.
         sio = socketio.Client(logger=logger)
 
-        sio.connect(f"wss://{CONFIG.API.HOST}", socketio_path="/ws/socket.io", transports=["websocket"])
+        sio.connect(
+            f"wss://{CONFIG.API.HOST}",
+            socketio_path="/ws/socket.io",
+            transports=["websocket"],
+        )
 
         # Called when receiving a response from the server.
         @sio.on("blocking_response")
         def blocking_response(data):
             # Load the data into the ResponseModel pydantic class.
-            data: pydantics.ResponseModel = pickle.loads(data)
+            response = pydantics.ResponseModel(**data)
 
             # Print response for user ( should be logger.info and have an info handler print to stdout)
-            print(str(data))
+            print(str(response))
 
             # If the status of the response is completed, update the local nodes that the user specified to save.
             # Then disconnect and continue.
-            if data.status.value == pydantics.ResponseModel.JobStatus.COMPLETED.value:
-                for name, value in data.saves.items():
+            if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
+                for name, value in response.saves.items():
                     self.graph.nodes[name].value = value
 
-                self.output = data.output
+                self.output = response.output
 
                 sio.disconnect()
             # Or if there was some error.
-            elif data.status.value == pydantics.ResponseModel.JobStatus.ERROR.value:
+            elif response.status == pydantics.ResponseModel.JobStatus.ERROR:
                 sio.disconnect()
-        
+
         sio.emit(
             "blocking_request",
             request.model_dump(exclude_defaults=True, exclude_none=True),
