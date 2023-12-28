@@ -130,6 +130,7 @@ class Node:
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
         self.value = inspect._empty
+        self.meta = dict()
 
     def fulfilled(self) -> bool:
         """Returns true if remaining_dependencies is 0.
