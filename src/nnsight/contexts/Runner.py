@@ -95,12 +95,13 @@ class Runner(Tracer):
 
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
-        sio = socketio.Client(logger=logger)
+        sio = socketio.Client(logger=logger, reconnection_attempts=10)
 
         sio.connect(
             f"wss://{CONFIG.API.HOST}",
             socketio_path="/ws/socket.io",
             transports=["websocket"],
+            wait_timeout=10
         )
 
         # Called when receiving a response from the server.
