@@ -92,7 +92,7 @@ class AbstractModel(ABC):
                     with Patcher() as patcher:
                         patcher.add(
                             Patch(
-                                torch.nn.parameter.Parameter.__deepcopy__, meta_deepcopy
+                                torch.nn.parameter.Parameter, meta_deepcopy, "__deepcopy__"
                             )
                         )
 
