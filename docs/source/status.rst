@@ -1,65 +1,19 @@
 :html_theme.sidebar_secondary.remove:
 :sd_hide_title:
 
-nnsight
-=======
+status
+======
 
 .. toctree::
    :maxdepth: 1
    :hidden:
 
-   start
-   documentation
-   features
-   tutorials
-   About <about>
 
-.. toctree::
-    :hidden:
-    status
 
-.. grid:: 1 1 2 2
-    :class-container: hero
-    :reverse:
+.. card::
 
-    .. grid-item:: 
-        .. div:: 
+    All Systems Are Operational
 
-          .. image:: _static/images/nnsight_logo.svg
-            :width: 400
-            :height: 276
-            
-    .. grid-item:: 
-
-        .. div:: sd-fs-1 sd-font-weight-bold title-bot sd-text-primary image-container
-
-            nnsight
-
-        .. div:: sd-fs-4 sd-font-weight-bold sd-my-0 sub-bot image-container
-
-            interpretable neural networks
-
-        **nnsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models
-
-        .. div:: button-group
-        
-          .. button-ref:: start
-              :color: primary
-              :shadow:
-
-                  Get Started
-
-          .. button-ref:: tutorials
-            :color: primary
-            :outline:
-            
-                Tutorials
-
-          .. button-ref:: documentation
-            :color: primary
-            :outline:
-            
-                Docs
 
 
 .. div:: sd-fs-1 sd-font-weight-bold sd-text-center sd-text-primary sd-mb-5

@@ -31,9 +31,10 @@ html_static_path = ["_static"]
 html_favicon = "_static/images/icon.ico"
 html_show_sourcelink = False
 html_theme_options = {
-    "logo": {"text": "nnsight"},
+    # "logo": {"text": "nnsight"},
     "show_nav_level": 2,
     "navbar_end": ["navbar-icon-links", "ndif_status"],
+    # "navbar_end": ["navbar-icon-links"],
     "navbar_align": "left",
     "icon_links": [
         {
@@ -45,6 +46,12 @@ html_theme_options = {
             "name": "Discord",
             "url": "https://discord.gg/6uFJmCSwW7",
             "icon": "fa-brands fa-discord",
+        },
+        {
+            "name": "Status",
+            "url": "https://discord.gg/6uFJmCSwW7",
+            "icon": "fa-solid fa-circle-check",
+            "attributes": {"class": "ndif"},
         },
     ],
 }
