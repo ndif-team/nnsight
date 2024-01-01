@@ -151,6 +151,7 @@ def concat(activations: Any, value: Any, batch_start: int, batch_size: int):
                 key: _concat([value[key] for value in values])
                 for key in values[0].keys()
             }
+        return values[0]
 
     # As interventions are scoped only to their relevant batch, if we want to swap in values for this batch
     # we need to concatenate the batches before and after the relevant batch with the new values.
@@ -194,7 +195,7 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
 
     # Key to module activation argument nodes has format: <module path>.<output/input>.<generation index>
     module_path = f"{module_path}.{key}.{graph.generation_idx}"
-
+    
     if module_path in graph.argument_node_names:
         argument_node_names = graph.argument_node_names[module_path]
 
@@ -206,6 +207,7 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
             _, batch_size, batch_start = node.args
 
             # We set its result to the activations, indexed by only the relevant batch idxs.
+
             value = util.apply(
                 activations,
                 lambda x: x.narrow(0, batch_start, batch_size),
@@ -279,10 +281,10 @@ class HookModel(AbstractContextManager):
 
             if hook_type == "input":
 
-                def input_hook(module, input, module_path=module_path):
-                    return self.input_hook(input, module_path)
+                def input_hook(module, input, kwargs, module_path=module_path):
+                    return self.input_hook((input, kwargs), module_path)
 
-                self.handles.append(module.register_forward_pre_hook(input_hook))
+                self.handles.append(module.register_forward_pre_hook(input_hook, with_kwargs=True))
 
             elif hook_type == "output":
 

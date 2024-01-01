@@ -28,7 +28,7 @@ def test_save(gpt2: nnsight.LanguageModel):
     with gpt2.generate(max_new_tokens=1) as generator:
         with generator.invoke("Hello world") as invoker:
             hs = gpt2.transformer.h[-1].output[0].save()
-            hs_input = gpt2.transformer.h[-1].input[0].save()
+            hs_input = gpt2.transformer.h[-1].input[0][0].save()
 
     assert hs.value is not None
     assert isinstance(hs.value, torch.Tensor)

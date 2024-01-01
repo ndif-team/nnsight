@@ -198,7 +198,7 @@ model = LanguageModel('gpt2', device_map='cuda')
 with model.generate(max_new_tokens=1) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
-        hidden_states_pre = model.transformer.h[-1].mlp.output.save()
+        hidden_states_pre = model.transformer.h[-1].mlp.output.clone().save()
 
         noise = (0.001**0.5)*torch.randn(hidden_states_pre.shape)
 

@@ -38,7 +38,7 @@ Here is how it looks:
     model = LanguageModel('meta-llama/Llama-2-70b-hf')
     with model.forward(remote=True) as runner:
         with runner.invoke('The Eiffel Tower is in the city of ') as invoker:
-            hidden_state = model.layers[10].input.save()  # save one hidden state
+            hidden_state = model.layers[10].input[0].save()  # save one hidden state
             model.layers[11].mlp.output = 0  # change one MLP module output
     print('The model predicts', runner.output)
     print('The internal state was', hidden_state.value)
