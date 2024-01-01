@@ -9,6 +9,16 @@ from typing import Any, Union
 from pydantic import BaseModel, field_validator
 
 
+class ResultModel(BaseModel):
+    id: str
+    output: Any = None
+    saves: Any = None
+
+    @field_validator("output", "saves")
+    def unpickle(cls, value: bytes):
+        return pickle.loads(value)
+
+
 class ResponseModel(BaseModel):
     class JobStatus(Enum):
         RECEIVED = "RECEIVED"
@@ -22,10 +32,10 @@ class ResponseModel(BaseModel):
     description: str
 
     received: datetime = None
-    saves: Union[bytes, Any] = None
-    output: Union[bytes, Any] = None
     session_id: str = None
     blocking: bool = False
+
+    result: Union[bytes, ResultModel] = None
 
     def __str__(self) -> str:
         return f"{self.id} - {self.status.name}: {self.description}"
@@ -37,8 +47,3 @@ class ResponseModel(BaseModel):
             logger.info(str(self))
 
         return self
-
-    @field_validator("output", "saves")
-    @classmethod
-    def unpickle(cls, value):
-        return pickle.loads(value)

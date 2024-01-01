@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pickle
+
+import requests
 import socketio
 
 from .. import CONFIG, pydantics
@@ -101,7 +104,7 @@ class Runner(Tracer):
             f"wss://{CONFIG.API.HOST}",
             socketio_path="/ws/socket.io",
             transports=["websocket"],
-            wait_timeout=10
+            wait_timeout=10,
         )
 
         # Called when receiving a response from the server.
@@ -116,10 +119,15 @@ class Runner(Tracer):
             # If the status of the response is completed, update the local nodes that the user specified to save.
             # Then disconnect and continue.
             if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
-                for name, value in response.saves.items():
+                with requests.get(
+                    url=f"https://{CONFIG.API.HOST}/retrieve/{response.id}", stream=True
+                ) as stream:
+                    result_response = pydantics.ResponseModel(**pickle.load(stream.raw))
+
+                for name, value in result_response.result.saves.items():
                     self.graph.nodes[name].value = value
 
-                self.output = response.output
+                self.output = result_response.result.output
 
                 sio.disconnect()
             # Or if there was some error.
