@@ -1,5 +1,5 @@
 <script>
-    let statusIcon = document.querySelector('.ndif .fa-circle-check');
+    var statusIcon = document.querySelector('.ndif .fa-circle-check');
     fetch("{{ndif_url}}")
         .then((response) => {
             if (response.status == 200) {
