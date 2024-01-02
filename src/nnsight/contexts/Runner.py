@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 import pickle
 
 import requests
 import socketio
+from tqdm import tqdm
 
 from .. import CONFIG, pydantics
 from ..logger import logger
@@ -118,16 +120,34 @@ class Runner(Tracer):
 
             # If the status of the response is completed, update the local nodes that the user specified to save.
             # Then disconnect and continue.
-            if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
-                with requests.get(
-                    url=f"https://{CONFIG.API.HOST}/retrieve/{response.id}", stream=True
-                ) as stream:
-                    result_response = pydantics.ResponseModel(**pickle.load(stream.raw))
 
-                for name, value in result_response.result.saves.items():
+            if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
+                
+                result_bytes = io.BytesIO()
+                result_bytes.seek(0)
+
+                with requests.get(
+                    url=f"https://{CONFIG.API.HOST}/result/{response.id}", stream=True
+                ) as stream:
+                    total_size = float(stream.headers["Content-length"])
+
+                    with tqdm(
+                        total=total_size, unit="B", unit_scale=True
+                    ) as progress_bar:
+                        for data in stream.iter_content(chunk_size=4000000):
+                            progress_bar.update(len(data))
+                            result_bytes.write(data)
+
+                result_bytes.seek(0)
+
+                result = pydantics.ResultModel(**pickle.load(result_bytes))
+
+                result_bytes.close()
+
+                for name, value in result.saves.items():
                     self.graph.nodes[name].value = value
 
-                self.output = result_response.result.output
+                self.output = result.output
 
                 sio.disconnect()
             # Or if there was some error.
