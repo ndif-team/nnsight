@@ -122,6 +122,7 @@ class Runner(Tracer):
             # Then disconnect and continue.
 
             if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
+                
                 result_bytes = io.BytesIO()
                 result_bytes.seek(0)
 

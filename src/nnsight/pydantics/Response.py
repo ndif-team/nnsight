@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import logging
-import pickle
 from datetime import datetime
 from enum import Enum
-from typing import Any, Union
+from typing import Any, Dict, Union
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 
 class ResultModel(BaseModel):
     id: str
     output: Any = None
-    saves: Any = None
-
-    @field_validator("output", "saves")
-    def unpickle(cls, value: bytes):
-        return pickle.loads(value)
+    saves: Dict[str, Any] = None
 
 
 class ResponseModel(BaseModel):
