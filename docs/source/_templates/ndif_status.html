@@ -1,27 +1,33 @@
-<style>
-    .ndif_status {
-        height: 18px;
-        width: 18px;
-        background-color: red;
-        border-radius: 50%;
-        display: inline-block;
-        margin-left: 5px;
-        vertical-align: middle;
-    }
-</style>
-
-<span><span>NDIF Status: </span><span class="ndif_status"></span></span>
-
 <script>
+    var statusIcon = document.querySelector('.ndif .fa-circle-check');
     fetch("{{ndif_url}}")
         .then((response) => {
             if (response.status == 200) {
-                Array.from(document.getElementsByClassName("ndif_status")).forEach((elm) => elm.style.backgroundColor = "green");
+                Array.from(document.getElementsByClassName("ndif")).forEach((ndifElement) => {
+                    Array.from(ndifElement.getElementsByTagName('span')).forEach((spanElement) => {
+                        spanElement.style.setProperty('color', '#23C552', 'important');
+                    });
+                });
             }
             else {
-                Array.from(document.getElementsByClassName("ndif_status")).forEach((elm) => elm.style.backgroundColor = "red");
+                Array.from(document.getElementsByClassName("ndif")).forEach((ndifElement) => {
+                    Array.from(ndifElement.getElementsByTagName('span')).forEach((spanElement) => {
+                        spanElement.style.setProperty('color', '#F84F31', 'important');
+                    });
+                });
+                if (statusIcon) {
+                    statusIcon.classList.replace('fa-circle-check', 'fa-circle-xmark'); 
+                }
             }
         })
-        .catch((response) => Array.from(document.getElementsByClassName("ndif_status")).forEach((elm) => elm.style.backgroundColor = "red"))
-
+        .catch((response) => {
+            Array.from(document.getElementsByClassName("ndif")).forEach((ndifElement) => {
+                Array.from(ndifElement.getElementsByTagName('span')).forEach((spanElement) => {
+                    spanElement.style.setProperty('color', '#F84F31', 'important');
+                });
+            });
+            if (statusIcon) {
+                statusIcon.classList.replace('fa-circle-check', 'fa-circle-xmark');
+            }
+        })
 </script>

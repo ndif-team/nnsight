@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import io
+import pickle
+
+import requests
 import socketio
+from tqdm import tqdm
 
 from .. import CONFIG, pydantics
 from ..logger import logger
@@ -45,6 +50,7 @@ class Runner(Tracer):
         generation: bool = False,
         blocking: bool = True,
         remote: bool = False,
+        remote_include_output: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -52,6 +58,7 @@ class Runner(Tracer):
         self.generation = generation
         self.remote = remote
         self.blocking = blocking
+        self.remote_include_output = remote_include_output
 
     def __enter__(self) -> Runner:
         return self
@@ -86,6 +93,7 @@ class Runner(Tracer):
             batched_input=self.batched_input,
             intervention_graph=self.graph,
             generation=self.generation,
+            include_output=self.remote_include_output,
         )
 
         if self.blocking:
@@ -101,7 +109,7 @@ class Runner(Tracer):
             f"wss://{CONFIG.API.HOST}",
             socketio_path="/ws/socket.io",
             transports=["websocket"],
-            wait_timeout=10
+            wait_timeout=10,
         )
 
         # Called when receiving a response from the server.
@@ -115,11 +123,36 @@ class Runner(Tracer):
 
             # If the status of the response is completed, update the local nodes that the user specified to save.
             # Then disconnect and continue.
+
             if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
-                for name, value in response.saves.items():
+                result_bytes = io.BytesIO()
+                result_bytes.seek(0)
+
+                with requests.get(
+                    url=f"https://{CONFIG.API.HOST}/result/{response.id}", stream=True
+                ) as stream:
+                    total_size = float(stream.headers["Content-length"])
+
+                    with tqdm(
+                        total=total_size,
+                        unit="B",
+                        unit_scale=True,
+                        desc="Downloading result",
+                    ) as progress_bar:
+                        for data in stream.iter_content(chunk_size=4000000):
+                            progress_bar.update(len(data))
+                            result_bytes.write(data)
+
+                result_bytes.seek(0)
+
+                result = pydantics.ResultModel(**pickle.load(result_bytes))
+
+                result_bytes.close()
+
+                for name, value in result.saves.items():
                     self.graph.nodes[name].value = value
 
-                self.output = response.output
+                self.output = result.output
 
                 sio.disconnect()
             # Or if there was some error.
