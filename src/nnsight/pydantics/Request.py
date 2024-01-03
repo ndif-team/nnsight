@@ -17,6 +17,7 @@ class RequestModel(BaseModel):
     session_id: str = None
     received: datetime = None
     blocking: bool = False
+    include_output: bool = False
 
     @field_serializer("intervention_graph")
     def intervention_graph_serialize(self, value, _info) -> bytes:
