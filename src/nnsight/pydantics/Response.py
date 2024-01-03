@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import logging
-import pickle
 from datetime import datetime
 from enum import Enum
-from typing import Any, Union
+from typing import Any, Dict, Union
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
+
+
+class ResultModel(BaseModel):
+    id: str
+    output: Any = None
+    saves: Dict[str, Any] = None
 
 
 class ResponseModel(BaseModel):
@@ -22,10 +27,10 @@ class ResponseModel(BaseModel):
     description: str
 
     received: datetime = None
-    saves: Union[bytes, Any] = None
-    output: Union[bytes, Any] = None
     session_id: str = None
     blocking: bool = False
+
+    result: Union[bytes, ResultModel] = None
 
     def __str__(self) -> str:
         return f"{self.id} - {self.status.name}: {self.description}"
@@ -37,8 +42,3 @@ class ResponseModel(BaseModel):
             logger.info(str(self))
 
         return self
-
-    @field_validator("output", "saves")
-    @classmethod
-    def unpickle(cls, value):
-        return pickle.loads(value)
