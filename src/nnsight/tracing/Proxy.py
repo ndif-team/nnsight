@@ -159,6 +159,12 @@ class Proxy:
             target=operator.matmul,
             args=[self.node, other],
         )
+    
+    def __rmatmul__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.matmul,
+            args=[self.node, other],
+        )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
