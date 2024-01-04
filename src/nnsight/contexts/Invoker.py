@@ -3,6 +3,9 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from typing import Any, Dict
 
+import torch
+
+from ..module import Module
 from ..tracing.Proxy import Proxy
 from .Tracer import Tracer
 
@@ -59,14 +62,15 @@ class Invoker(AbstractContextManager):
             self.tracer.model._scan(self.input, *self.tracer.args, **self.tracer.kwargs)
         else:
             for name, module in self.tracer.model.meta_model.named_modules():
-                module._output = None
-                module._input = None
-                module._backward_output = None
-                module._backward_input = None
+                if isinstance(module, Module):
+                    module.clear()
 
         self.tracer.batch_start += self.tracer.batch_size
-    
-        self.tracer.batched_input, self.tracer.batch_size = self.tracer.model._batch_inputs(self.input, self.tracer.batched_input)
+
+        (
+            self.tracer.batched_input,
+            self.tracer.batch_size,
+        ) = self.tracer.model._batch_inputs(self.input, self.tracer.batched_input)
 
         return self
 
@@ -93,10 +97,8 @@ class Invoker(AbstractContextManager):
             )
         else:
             for name, module in self.tracer.model.meta_model.named_modules():
-                module._output = None
-                module._input = None
-                module._backward_output = None
-                module._backward_input = None
+                if isinstance(module, Module):
+                    module.clear()
 
     def save_all(self) -> Dict[str, Proxy]:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]

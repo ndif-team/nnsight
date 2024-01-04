@@ -1,16 +1,22 @@
-import pickle
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Any, Dict, List, Union
+from typing import Dict, List, Union
 
-from pydantic import BaseModel, field_serializer
+from pydantic import BaseModel, ConfigDict
 
+from ..tracing.Graph import Graph
+from .format import types
+from .format.types import *
 
 class RequestModel(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     args: List
     kwargs: Dict
     repo_id: str
-    batched_input: Union[bytes, Any]
-    intervention_graph: Union[bytes, Any]
+    batched_input: types.ValueTypes
+    intervention_graph: Union[Dict[str, Union[types.NodeType, types.NodeModel]], Graph]
     generation: bool
 
     id: str = None
@@ -19,15 +25,17 @@ class RequestModel(BaseModel):
     blocking: bool = False
     include_output: bool = False
 
-    @field_serializer("intervention_graph")
-    def intervention_graph_serialize(self, value, _info) -> bytes:
-        value.compile(None)
+    def compile(self) -> RequestModel:
+        graph = Graph(None, validate=False)
 
-        for node in value.nodes.values():
-            node.proxy_value = None
+        for node in self.intervention_graph.values():
+            node.compile(graph, self.intervention_graph)
 
-        return pickle.dumps(value)
+        self.intervention_graph = graph
 
-    @field_serializer("batched_input")
-    def serialize(self, value, _info) -> bytes:
-        return pickle.dumps(value)
+        self.batched_input = self.batched_input.compile(None, None)
+
+        return self
+
+
+RequestModel.model_rebuild()

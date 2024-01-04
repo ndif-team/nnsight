@@ -32,7 +32,7 @@ class Tracer(AbstractContextManager):
         self,
         model: "AbstractModel",
         *args,
-        validate:bool = True,
+        validate: bool = True,
         **kwargs,
     ) -> None:
         self.model = model
@@ -40,7 +40,9 @@ class Tracer(AbstractContextManager):
         self.args = args
         self.kwargs = kwargs
 
-        self.graph = Graph(self.model.meta_model, proxy_class=InterventionProxy, validate=validate)
+        self.graph = Graph(
+            self.model.meta_model, proxy_class=InterventionProxy, validate=validate
+        )
 
         self.batch_size: int = 0
         self.batch_start: int = 0
