@@ -279,11 +279,14 @@ class Module(torch.nn.Module):
             Module: The wrapped Module.
         """
 
-        def hook(module: Module, input: Any, output: Any):
+        def hook(module: Module, input: Any, input_kwargs:Dict, output: Any):
             module._output = None
             module._input = None
             module._backward_output = None
             module._backward_input = None
+
+            input = (input, input_kwargs)
+
             module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
             module.input_shape = util.apply(input, lambda x: x.shape, torch.Tensor)
             module.output_type = util.apply(output, lambda x: x.dtype, torch.Tensor)
@@ -297,6 +300,6 @@ class Module(torch.nn.Module):
 
         util.wrap(module, Module)
 
-        module.register_forward_hook(hook)
+        module.register_forward_hook(hook, with_kwargs=True)
 
         return module

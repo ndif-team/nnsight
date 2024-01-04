@@ -29,7 +29,7 @@ class Proxy:
 
     def __getstate__(self):
         return self.__dict__
-    
+
     def __setstate__(self, d: dict):
         self.__dict__ = d
 
@@ -45,7 +45,6 @@ class Proxy:
         if self.node.args[0] is self.node.graph.module_proxy.node and not isinstance(
             self.node.proxy_value, torch.nn.Module
         ):
-
             value = self.node.proxy_value.__func__(
                 self.node.graph.module_proxy, *args, **kwargs
             )
@@ -83,10 +82,28 @@ class Proxy:
             args=[self.node],
         )
 
+    def __abs__(self) -> Proxy:
+        return self.node.graph.add(
+            target=operator.abs,
+            args=[self.node],
+        )
+
+    def __invert__(self) -> Proxy:
+        return self.node.graph.add(
+            target=operator.invert,
+            args=[self.node],
+        )
+
     def __add__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.add,
             args=[self.node, other],
+        )
+
+    def __radd__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.add,
+            args=[other, self.node],
         )
 
     def __sub__(self, other: Union[Proxy, Any]) -> Proxy:
@@ -95,10 +112,22 @@ class Proxy:
             args=[self.node, other],
         )
 
+    def __rsub__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.sub,
+            args=[other, self.node],
+        )
+
     def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.pow,
             args=[self.node, other],
+        )
+
+    def __rpow__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.pow,
+            args=[other, self.node],
         )
 
     def __mul__(self, other: Union[Proxy, Any]) -> Proxy:
@@ -107,16 +136,46 @@ class Proxy:
             args=[self.node, other],
         )
 
+    def __rmul__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.mul,
+            args=[other, self.node],
+        )
+
+    def __mod__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.mod,
+            args=[self.node, other],
+        )
+
+    def __rmod__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.mod,
+            args=[other, self.node],
+        )
+
     def __matmul__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.matmul,
             args=[self.node, other],
+        )
+    
+    def __rmatmul__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.matmul,
+            args=[other, self.node],
         )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.truediv,
             args=[self.node, other],
+        )
+
+    def __rtruediv__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.truediv,
+            args=[other, self.node],
         )
 
     def __bool__(self) -> bool:
