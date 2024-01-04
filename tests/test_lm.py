@@ -28,7 +28,7 @@ def test_save(gpt2: nnsight.LanguageModel):
     with gpt2.generate(max_new_tokens=1) as generator:
         with generator.invoke("Hello world") as invoker:
             hs = gpt2.transformer.h[-1].output[0].save()
-            hs_input = gpt2.transformer.h[-1].input[0].save()
+            hs_input = gpt2.transformer.h[-1].input[0][0].save()
 
     assert hs.value is not None
     assert isinstance(hs.value, torch.Tensor)
@@ -39,14 +39,30 @@ def test_save(gpt2: nnsight.LanguageModel):
     assert hs_input.value.ndim == 3
 
 
-def test_set(gpt2: nnsight.LanguageModel):
+def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=1) as generator:
-        with generator.invoke("Hello world") as invoker:
+        with generator.invoke(MSG_prompt) as invoker:
             pre = gpt2.transformer.h[-1].output[0].clone().save()
 
-            gpt2.transformer.h[-1].output[0] = 0
+            gpt2.transformer.h[-1].output[0][:] = 0
 
             post = gpt2.transformer.h[-1].output[0].save()
+
+    output = gpt2.tokenizer.decode(generator.output[0])
+
+    assert not (pre.value == 0).all().item()
+    assert (post.value == 0).all().item()
+    assert output != "Madison Square Garden is located in the city of New"
+
+
+def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.generate(max_new_tokens=1) as generator:
+        with generator.invoke(MSG_prompt) as invoker:
+            pre = gpt2.transformer.wte.output.clone().save()
+
+            gpt2.transformer.wte.output = gpt2.transformer.wte.output * 0
+
+            post = gpt2.transformer.wte.output.save()
 
     output = gpt2.tokenizer.decode(generator.output[0])
 
@@ -97,3 +113,24 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     assert output1 == "Madison Square Garden is located in the city of New York City"
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
+
+
+def test_grad(gpt2: nnsight.LanguageModel):
+    with gpt2.forward(inference=False) as runner:
+        with runner.invoke("Hello World") as invoker:
+            hidden_states = gpt2.transformer.h[-1].output[0].save()
+            hidden_states.retain_grad()
+
+            logits = gpt2.lm_head.output
+
+            logits.sum().backward()
+
+    with gpt2.forward(inference=False) as runner:
+        with runner.invoke("Hello World") as invoker:
+            hidden_states_grad = gpt2.transformer.h[-1].backward_output[0].save()
+
+            logits = gpt2.lm_head.output
+
+            logits.sum().backward()
+
+    assert (hidden_states_grad.value == hidden_states.value.grad).all().item()

@@ -3,7 +3,7 @@
 # nnsight 
 <a href="https://pypi.org/project/nnsight/"><img src="https://img.shields.io/pypi/v/nnsight?color=purple"></img></a>
 
-<a href="https://www.nnsight.net"><img src="https://img.shields.io/badge/-Read%20the%20Docs%20Here-blue?style=for-the-badge&logo=Read-the-Docs&logoColor=white"></img></a> <a href="https://discord.gg/ZRPgsf6P"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+<a href="https://www.nnsight.net"><img src="https://img.shields.io/badge/-Read%20the%20Docs%20Here-blue?style=for-the-badge&logo=Read-the-Docs&logoColor=white"></img></a> <a href="https://discord.gg/6uFJmCSwW7"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 
 The `nnsight`  package enables interpreting and manipulating the internals of deep learned models.
 
@@ -198,18 +198,18 @@ model = LanguageModel('gpt2', device_map='cuda')
 with model.generate(max_new_tokens=1) as generator:
     with generator.invoke('The Eiffel Tower is in the city of') as invoker:
 
-        hidden_states_pre = model.transformer.h[-1].output[0].save()
+        hidden_states_pre = model.transformer.h[-1].mlp.output.clone().save()
 
         noise = (0.001**0.5)*torch.randn(hidden_states_pre.shape)
 
-        model.transformer.h[-1].output[0] = hidden_states_pre + noise
+        model.transformer.h[-1].mlp.output = hidden_states_pre + noise
 
-        hidden_states_post = model.transformer.h[-1].output[0].save()
+        hidden_states_post = model.transformer.h[-1].mlp.output.save()
 
 print(hidden_states_pre.value)
 print(hidden_states_post.value)
 ```
-In this example, we create a tensor of noise to add to the hidden states. We then add it, use the assigment `=` operator to update the tensors of `.output[0]` with these new noised values. 
+In this example, we create a tensor of noise to add to the hidden states. We then add it, use the assigment `=` operator to update the value of `.output` with these new noised activations. 
 
 We can see the change in the results:
 
@@ -231,8 +231,6 @@ tensor([[[ 0.0674, -0.1741, -0.1771,  ..., -0.9811,  0.1972, -1.0645],
          [ 6.6764,  1.7416,  4.8027,  ...,  7.6507,  3.0754,  2.0218]]],
        device='cuda:0')
 ```
-
-Note: Only assigment updates of tensors works with this functionality. 
 
 ---
 ###### Multiple Token Generation

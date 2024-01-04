@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import gc
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Union
+from typing import Any, Callable, Dict, List, Tuple, Union
 
 import accelerate
 import torch
@@ -92,7 +92,7 @@ class AbstractModel(ABC):
                     with Patcher() as patcher:
                         patcher.add(
                             Patch(
-                                torch.nn.parameter.Parameter.__deepcopy__, meta_deepcopy
+                                torch.nn.parameter.Parameter, meta_deepcopy, "__deepcopy__"
                             )
                         )
 
@@ -438,14 +438,18 @@ class AbstractModel(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def _batched_inputs(self, prepared_inputs: Any) -> List[Any]:
-        """Abstract to return a version of the prepared inputs from ``._prepare_inputs(...)`` that can be batched with others.
-        For example with a LanguageModel, prepare_inputs returns a dictionary. The implementation for this method just returns the 'input_ids'.
+    def _batch_inputs(
+        self, prepared_inputs: Any, batched_inputs: Any
+    ) -> Tuple[Any, int]:
+        """Abstract to return a batched version of the prepared inputs from ``._prepare_inputs(...)`` that can be batched with others as well as the size of the batch being added.
+        Should batch prepared_inputs with batched_inputs and return it with the current batch_size.
 
         Args:
             prepared_inputs (Any): Inputs from ``._prepare_inputs(...)``
+            batched_inputs (Any): Current state of batched_inputs
 
         Returns:
-            List[Any]: Batched version of prepared_inputs.
+            Any: prepared_inputs batched with batched_inputs.
+            int: Batch size of prepared_inputs.
         """
         raise NotImplementedError()

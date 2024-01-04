@@ -45,7 +45,7 @@ class Module(torch.nn.Module):
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
         output_shape (torch.Size): Shape of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
         output_type (torch.dtype): Dtype of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
-        output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
+        input (nnsight.intervention.InterventionProxy): Proxy object representing the input of this module. Reset on pass through.
         input_shape (torch.Size): Shape of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
         input_type (torch.dtype): Dtype of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
         tracer (nnsight.context.Tracer.Tracer): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.
@@ -110,7 +110,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.output.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -126,9 +126,10 @@ class Module(torch.nn.Module):
         """
 
         self.output.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.output.node, value],
+            target="swp", args=[self.output.node, value], value=True
         )
+
+        self._output = None
 
     @property
     def input(self) -> InterventionProxy:
@@ -150,7 +151,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.input.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -166,9 +167,10 @@ class Module(torch.nn.Module):
         """
 
         self.input.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.input.node, value],
+            target="swp", args=[self.input.node, value], value=True
         )
+
+        self._input = None
 
     @property
     def backward_output(self) -> InterventionProxy:
@@ -190,7 +192,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.backward_output.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -206,9 +208,10 @@ class Module(torch.nn.Module):
         """
 
         self.backward_output.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.backward_output.node, value],
+            target="swp", args=[self.backward_output.node, value], value=True
         )
+
+        self._backward_output = None
 
     @property
     def backward_input(self) -> InterventionProxy:
@@ -230,7 +233,7 @@ class Module(torch.nn.Module):
                 args=[
                     f"{self.module_path}.backward_input.{self.tracer.generation_idx}",
                     self.tracer.batch_size,
-                    len(self.tracer.batched_input) - self.tracer.batch_size,
+                    self.tracer.batch_start,
                 ],
             )
 
@@ -246,9 +249,10 @@ class Module(torch.nn.Module):
         """
 
         self.backward_input.node.graph.add(
-            target=Proxy.proxy_update,
-            args=[self.backward_input.node, value],
+            target="swp", args=[self.backward_input.node, value], value=True
         )
+
+        self._backward_input = None
 
     @property
     def graph(self) -> Graph:
@@ -275,11 +279,14 @@ class Module(torch.nn.Module):
             Module: The wrapped Module.
         """
 
-        def hook(module: Module, input: Any, output: Any):
+        def hook(module: Module, input: Any, input_kwargs:Dict, output: Any):
             module._output = None
             module._input = None
             module._backward_output = None
             module._backward_input = None
+
+            input = (input, input_kwargs)
+
             module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
             module.input_shape = util.apply(input, lambda x: x.shape, torch.Tensor)
             module.output_type = util.apply(output, lambda x: x.dtype, torch.Tensor)
@@ -293,6 +300,6 @@ class Module(torch.nn.Module):
 
         util.wrap(module, Module)
 
-        module.register_forward_hook(hook)
+        module.register_forward_hook(hook, with_kwargs=True)
 
         return module

@@ -54,9 +54,54 @@ def repeat_interleave_wrapper(fn):
 
 
 DEFAULT_PATCHER.add(
-    Patch(torch.repeat_interleave, repeat_interleave_wrapper(torch.repeat_interleave))
+    Patch(
+        torch, repeat_interleave_wrapper(torch.repeat_interleave), "repeat_interleave"
+    )
 )
 
+
+def noop_wrapper(fn):
+    @wraps(fn)
+    def noop(input: torch.Tensor, *args, **kwargs):
+        if input.device.type == "meta":
+            return input
+
+        else:
+            return fn(input, *args, **kwargs)
+
+    return noop
+
+
+DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper(torch.Tensor.cpu), "cpu"))
+
+def onehot_wrapper(fn):
+    @wraps(fn)
+    def onehot(input: torch.Tensor, num_classes=-1):
+        if input.device.type == "meta":
+            return torch.zeros((*input.shape, num_classes), device='meta')
+
+        else:
+            return fn(input, num_classes=num_classes)
+
+    return onehot
+
+
+DEFAULT_PATCHER.add(Patch(torch.nn.functional, onehot_wrapper(torch.nn.functional.one_hot), "one_hot"))
+
+def where_wrapper(fn):
+    @wraps(fn)
+    def where(input: torch.Tensor, *args, **kwargs):
+        if input.device.type == "meta":
+            return input.to(torch.int)
+
+        else:
+            return fn(input, *args, **kwargs)
+
+    return where
+
+DEFAULT_PATCHER.add(Patch(torch, where_wrapper(torch.where), "where"))
+
+DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper(torch.Tensor.tolist), "tolist"))
 
 DEFAULT_PATCHER.__enter__()
 
@@ -78,6 +123,5 @@ def activate_recent_meta():
 @register_meta(aten._local_scalar_dense)
 def local_scalar_dense_meta(A):
     return 0
-
 
 activate_recent_meta()

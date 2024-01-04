@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
 import pickle
 
+import requests
 import socketio
+from tqdm import tqdm
 
 from .. import CONFIG, pydantics
+from ..logger import logger
 from .Invoker import Invoker
 from .Tracer import Tracer
 
@@ -46,6 +50,7 @@ class Runner(Tracer):
         generation: bool = False,
         blocking: bool = True,
         remote: bool = False,
+        remote_include_output: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -53,6 +58,7 @@ class Runner(Tracer):
         self.generation = generation
         self.remote = remote
         self.blocking = blocking
+        self.remote_include_output = remote_include_output
 
     def __enter__(self) -> Runner:
         return self
@@ -79,13 +85,15 @@ class Runner(Tracer):
 
     def run_server(self):
         # Create the pydantic class for the request.
+
         request = pydantics.RequestModel(
             args=self.args,
             kwargs=self.kwargs,
-            model_name=self.model.repoid_path_clsname,
+            repo_id=self.model.repoid_path_clsname,
             batched_input=self.batched_input,
             intervention_graph=self.graph,
             generation=self.generation,
+            include_output=self.remote_include_output,
         )
 
         if self.blocking:
@@ -95,29 +103,60 @@ class Runner(Tracer):
 
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
-        sio = socketio.Client()
-        sio.connect(f"ws://{CONFIG.API.HOST}", transports=['websocket'])
+        sio = socketio.Client(logger=logger, reconnection_attempts=10)
+
+        sio.connect(
+            f"wss://{CONFIG.API.HOST}",
+            socketio_path="/ws/socket.io",
+            transports=["websocket"],
+            wait_timeout=10,
+        )
 
         # Called when receiving a response from the server.
         @sio.on("blocking_response")
         def blocking_response(data):
             # Load the data into the ResponseModel pydantic class.
-            data: pydantics.ResponseModel = pickle.loads(data)
+            response = pydantics.ResponseModel(**data)
 
             # Print response for user ( should be logger.info and have an info handler print to stdout)
-            print(str(data))
+            print(str(response))
 
             # If the status of the response is completed, update the local nodes that the user specified to save.
             # Then disconnect and continue.
-            if data.status == pydantics.JobStatus.COMPLETED:
-                for name, value in data.saves.items():
+
+            if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
+                result_bytes = io.BytesIO()
+                result_bytes.seek(0)
+
+                with requests.get(
+                    url=f"https://{CONFIG.API.HOST}/result/{response.id}", stream=True
+                ) as stream:
+                    total_size = float(stream.headers["Content-length"])
+
+                    with tqdm(
+                        total=total_size,
+                        unit="B",
+                        unit_scale=True,
+                        desc="Downloading result",
+                    ) as progress_bar:
+                        for data in stream.iter_content(chunk_size=4000000):
+                            progress_bar.update(len(data))
+                            result_bytes.write(data)
+
+                result_bytes.seek(0)
+
+                result = pydantics.ResultModel(**pickle.load(result_bytes))
+
+                result_bytes.close()
+
+                for name, value in result.saves.items():
                     self.graph.nodes[name].value = value
 
-                self.output = data.output
+                self.output = result.output
 
                 sio.disconnect()
             # Or if there was some error.
-            elif data.status == pydantics.JobStatus.ERROR:
+            elif response.status == pydantics.ResponseModel.JobStatus.ERROR:
                 sio.disconnect()
 
         sio.emit(

@@ -130,6 +130,7 @@ class Node:
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
         self.value = inspect._empty
+        self.meta = dict()
 
     def fulfilled(self) -> bool:
         """Returns true if remaining_dependencies is 0.
@@ -193,6 +194,13 @@ class Node:
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
+        elif self.target == "swp":
+            if self.graph.swap is not None:
+                self.graph.swap.set_value(False)
+
+            self.graph.swap = self
+
+            return
 
         # Prepare arguments.
         args, kwargs = self.prepare_inputs()
@@ -226,7 +234,7 @@ class Node:
             if dependency.redundant():
                 dependency.destroy()
 
-        if self.value is not None and self.redundant():
+        if self.value is not inspect._empty and self.redundant():
             self.destroy()
 
     def destroy(self) -> None:
