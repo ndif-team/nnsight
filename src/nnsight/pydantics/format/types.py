@@ -116,9 +116,7 @@ class DictModel(BaseModel):
     values: Dict[str, ValueTypes]
 
     def compile(self, graph: Graph, nodes: [str, NodeModel]) -> dict:
-        return tuple(
-            {key: value.compile(graph, nodes) for key, value in self.values.items()}
-        )
+        return {key: value.compile(graph, nodes) for key, value in self.values.items()}
 
 
 class FunctionWhitelistError(Exception):
