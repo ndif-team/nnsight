@@ -103,7 +103,7 @@ class Proxy:
     def __radd__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.add,
-            args=[self.node, other],
+            args=[other, self.node],
         )
 
     def __sub__(self, other: Union[Proxy, Any]) -> Proxy:
@@ -115,7 +115,7 @@ class Proxy:
     def __rsub__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.sub,
-            args=[self.node, other],
+            args=[other, self.node],
         )
 
     def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
@@ -127,7 +127,7 @@ class Proxy:
     def __rpow__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.pow,
-            args=[self.node, other],
+            args=[other, self.node],
         )
 
     def __mul__(self, other: Union[Proxy, Any]) -> Proxy:
@@ -139,7 +139,7 @@ class Proxy:
     def __rmul__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.mul,
-            args=[self.node, other],
+            args=[other, self.node],
         )
 
     def __mod__(self, other: Union[Proxy, Any]) -> Proxy:
@@ -151,13 +151,19 @@ class Proxy:
     def __rmod__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.mod,
-            args=[self.node, other],
+            args=[other, self.node],
         )
 
     def __matmul__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.matmul,
             args=[self.node, other],
+        )
+    
+    def __rmatmul__(self, other: Union[Proxy, Any]) -> Proxy:
+        return self.node.graph.add(
+            target=operator.matmul,
+            args=[other, self.node],
         )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
@@ -169,7 +175,7 @@ class Proxy:
     def __rtruediv__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.truediv,
-            args=[self.node, other],
+            args=[other, self.node],
         )
 
     def __bool__(self) -> bool:
