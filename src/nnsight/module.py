@@ -53,6 +53,7 @@ class Module(torch.nn.Module):
 
     def __init__(self) -> None:
         self.module_path: str = None
+
         self.input_shape: torch.Size = None
         self.input_type: torch.dtype = None
         self.output_shape: torch.Size = None
@@ -62,9 +63,16 @@ class Module(torch.nn.Module):
         self._input: InterventionProxy = None
         self._backward_output: InterventionProxy = None
         self._backward_input: InterventionProxy = None
+
         self._graph: Graph = None
 
         self.tracer: Tracer = None
+
+    def clear(self):
+        self._output: InterventionProxy = None
+        self._input: InterventionProxy = None
+        self._backward_output: InterventionProxy = None
+        self._backward_input: InterventionProxy = None
 
     def __call__(
         self, *args: List[Any], **kwds: Dict[str, Any]
@@ -279,11 +287,9 @@ class Module(torch.nn.Module):
             Module: The wrapped Module.
         """
 
-        def hook(module: Module, input: Any, input_kwargs:Dict, output: Any):
-            module._output = None
-            module._input = None
-            module._backward_output = None
-            module._backward_input = None
+        def hook(module: Module, input: Any, input_kwargs: Dict, output: Any):
+            
+            module.clear()
 
             input = (input, input_kwargs)
 
