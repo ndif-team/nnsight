@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from types import BuiltinFunctionType, FunctionType, MethodDescriptorType
+from types import BuiltinFunctionType
+from types import FunctionType as FuncType
+from types import MethodDescriptorType
 from typing import Dict, List, Literal, Union
 
 import torch
@@ -12,7 +14,7 @@ from ...tracing.Graph import Graph
 from ...tracing.Node import Node
 from . import FUNCTIONS_WHITELIST
 
-FUNCTION = Union[BuiltinFunctionType, FunctionType, MethodDescriptorType, str]
+FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, str]
 PRIMITIVE = Union[int, float, str, bool, None]
 
 
@@ -20,13 +22,11 @@ class NodeModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     class Reference(BaseModel):
-        model_config = ConfigDict(arbitrary_types_allowed=True)
-
         type_name: Literal["NODE_REFERENCE"] = "NODE_REFERENCE"
 
         name: str
 
-        def compile(self, graph: Graph, nodes: [str, NodeModel]) -> Node:
+        def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> Node:
             return nodes[self.name].compile(graph, nodes)
 
     name: str
@@ -34,7 +34,7 @@ class NodeModel(BaseModel):
     args: List[ValueTypes]
     kwargs: Dict[str, ValueTypes]
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> Node:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> Node:
         if self.name in graph.nodes:
             return graph.nodes[self.name]
 
@@ -50,11 +50,10 @@ class NodeModel(BaseModel):
 
 
 class PrimitiveModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
     type_name: Literal["PRIMITIVE"] = "PRIMITIVE"
     value: PRIMITIVE
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> PRIMITIVE:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> PRIMITIVE:
         return self.value
 
 
@@ -65,7 +64,7 @@ class TensorModel(BaseModel):
 
     values: List
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> torch.Tensor:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> torch.Tensor:
         return torch.tensor(self.values)
 
 
@@ -78,7 +77,7 @@ class SliceModel(BaseModel):
     stop: ValueTypes
     step: ValueTypes
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> slice:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> slice:
         return slice(
             self.start.compile(graph, nodes),
             self.stop.compile(graph, nodes),
@@ -93,7 +92,7 @@ class ListModel(BaseModel):
 
     values: List[ValueTypes]
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> list:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> list:
         return [value.compile(graph, nodes) for value in self.values]
 
 
@@ -104,7 +103,7 @@ class TupleModel(BaseModel):
 
     values: List[ValueTypes]
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> tuple:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> tuple:
         return tuple([value.compile(graph, nodes) for value in self.values])
 
 
@@ -115,7 +114,7 @@ class DictModel(BaseModel):
 
     values: Dict[str, ValueTypes]
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> dict:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> dict:
         return {key: value.compile(graph, nodes) for key, value in self.values.items()}
 
 
@@ -140,7 +139,7 @@ class FunctionModel(BaseModel):
 
         return qualname
 
-    def compile(self, graph: Graph, nodes: [str, NodeModel]) -> FUNCTION:
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> FUNCTION:
         return FUNCTIONS_WHITELIST[self.function_name]
 
 
