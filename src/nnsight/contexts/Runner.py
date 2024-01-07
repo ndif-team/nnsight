@@ -91,7 +91,7 @@ class Runner(Tracer):
             kwargs=self.kwargs,
             repo_id=self.model.repoid_path_clsname,
             batched_input=self.batched_input,
-            intervention_graph=self.graph,
+            intervention_graph=self.graph.nodes,
             generation=self.generation,
             include_output=self.remote_include_output,
         )
@@ -161,7 +161,9 @@ class Runner(Tracer):
 
         sio.emit(
             "blocking_request",
-            request.model_dump(exclude_defaults=True, exclude_none=True),
+            request.model_dump(
+                mode="json", exclude=["session_id", "received", "blocking", "id"]
+            ),
         )
 
         sio.wait()
