@@ -191,6 +191,9 @@ class Node:
         Prepares args and kwargs and passed them to target.
         """
 
+        # Prepare arguments.
+        args, kwargs = self.prepare_inputs()
+
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
@@ -202,8 +205,18 @@ class Node:
 
             return
 
-        # Prepare arguments.
-        args, kwargs = self.prepare_inputs()
+        elif self.target == "grad":
+
+            def grad(value):
+                self.set_value(value)
+
+                value = self.graph.get_swap(value)
+
+                return value
+
+            args[0].register_hook(lambda value: grad(value))
+
+            return
 
         # Call the target to get value.
         output = self.target(*args, **kwargs)

@@ -20,6 +20,7 @@ class Graph:
     * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
     * 'swp' : swp nodes indicate populating the graph's swap attribute. When executed, its value is not set. Logic involving the swap value should set its value after using it.
     * 'null' : Null nodes never get executed and therefore their listeners never get destroyed.
+    * 'grad' : grad nodes indicates adding a `.register_hook()` to a tensor proxy
 
     Attributes:
         validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
@@ -98,9 +99,9 @@ class Graph:
         # Some methods cannot be caught because they aren't torch functions or dont play nice with __torch_function__.
         # So the patcher replaces the methods with something to catch proxies and return proxies.
         with Patcher() as patcher:
-            patcher.add(Patch(torch, proxy_wrapper(torch.full), 'full'))
-            patcher.add(Patch(torch, proxy_wrapper(torch.finfo), 'finfo'))
-            patcher.add(Patch(torch, proxy_wrapper(torch.arange), 'arange'))
+            patcher.add(Patch(torch, proxy_wrapper(torch.full), "full"))
+            patcher.add(Patch(torch, proxy_wrapper(torch.finfo), "finfo"))
+            patcher.add(Patch(torch, proxy_wrapper(torch.arange), "arange"))
 
             # Run forward with root module proxy and arguments
             output: Proxy = forward(graph.module_proxy, *arguments)
@@ -130,6 +131,34 @@ class Graph:
         self.generation_idx = 0
 
         self.swap: Node = None
+
+    def get_swap(self, value):
+        if self.swap is not None:
+            device = None
+
+            def _device(value: torch.Tensor):
+                nonlocal device
+
+                device = value.device
+
+            util.apply(value, _device, torch.Tensor)
+
+            value = util.apply(self.swap.args[1], lambda x: x.value, Node)
+
+            if device is not None:
+
+                def _to(value: torch.Tensor):
+                    return value.to(device)
+
+                value = util.apply(value, _to, torch.Tensor)
+
+            # Set value of 'swp' node so it destroys itself and listeners.
+            self.swap.set_value(True)
+
+            # Un-set swap.
+            self.swap = None
+
+        return value
 
     def increment(self) -> None:
         """Increments the generation_idx by one. Should be called by a forward hook on the model being used for generation."""
@@ -281,7 +310,7 @@ class Graph:
 
         return module
 
-    def vis(self, filename:str="graph", format:str="png"):
+    def vis(self, filename: str = "graph", format: str = "png"):
         import graphviz
 
         def style(value: Any) -> Dict[str, Any]:

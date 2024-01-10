@@ -32,6 +32,7 @@ FUNCTIONS_WHITELIST.update(
         "module": "module",
         "argument": "argument",
         "swp": "swp",
+        "grad": "grad",
         "fetch_attr": util.fetch_attr,
         "Proxy.proxy_call": Proxy.proxy_call,
     }

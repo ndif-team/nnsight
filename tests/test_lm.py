@@ -152,7 +152,7 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     _test_serialize(generator)
 
 
-def test_grad(gpt2: nnsight.LanguageModel):
+def test_retain_grad(gpt2: nnsight.LanguageModel):
     with gpt2.forward(inference=False) as runner:
         with runner.invoke("Hello World") as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
@@ -164,14 +164,37 @@ def test_grad(gpt2: nnsight.LanguageModel):
 
     _test_serialize(runner)
 
+
+def test_grad(gpt2: nnsight.LanguageModel):
     with gpt2.forward(inference=False) as runner:
         with runner.invoke("Hello World") as invoker:
-            hidden_states_grad = gpt2.transformer.h[-1].backward_output[0].save()
+            hidden_states = gpt2.transformer.h[-1].output[0].save()
+            hidden_states_grad = hidden_states.grad.save()
+            hidden_states_grad[:] = 0
 
             logits = gpt2.lm_head.output
 
             logits.sum().backward()
 
+    hidden_states.value
+
+    assert (hidden_states_grad.value == 0).all().item()
+
     _test_serialize(runner)
 
-    assert (hidden_states_grad.value == hidden_states.value.grad).all().item()
+    with gpt2.forward(inference=False) as runner:
+        with runner.invoke("Hello World") as invoker:
+            hidden_states = gpt2.transformer.h[-1].output[0].save()
+            grad = hidden_states.grad.clone()
+            grad[:] = 0
+            hidden_states.grad = grad
+            hidden_states_grad[:] = 0
+
+            logits = gpt2.lm_head.output
+
+            logits.sum().backward()
+
+    hidden_states.value
+    assert (hidden_states_grad.value == 0).all().item()
+
+    _test_serialize(runner)
