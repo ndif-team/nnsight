@@ -196,10 +196,13 @@ class Proxy:
 
         proxy: Proxy = None
 
-        for arg in args:
-            if isinstance(arg, Proxy):
-                proxy = arg
-                break
+        def get_proxy(arg):
+
+            nonlocal proxy
+
+            proxy = arg
+
+        util.apply(args, get_proxy, Proxy)
 
         return proxy.node.graph.add(
             target=orig_method,
