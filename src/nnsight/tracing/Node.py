@@ -92,16 +92,41 @@ class Node:
         self.dependencies: List[Node] = list()
 
         # Add all arguments that are nodes to nodes dependencies
-        util.apply(self.args, lambda x: self.dependencies.append(x), Node)
-        util.apply(self.kwargs, lambda x: self.dependencies.append(x), Node)
+        util.apply(
+            self.args,
+            lambda x: self.dependencies.append(x) if not x.done() else None,
+            Node,
+        )
+        util.apply(
+            self.kwargs,
+            lambda x: self.dependencies.append(x) if not x.done() else None,
+            Node,
+        )
         # Add node to all arguments that are nodes' listeners
-        util.apply(self.args, lambda x: x.listeners.append(self), Node)
-        util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
+        util.apply(
+            self.args,
+            lambda x: x.listeners.append(self) if not x.done() else None,
+            Node,
+        )
+        util.apply(
+            self.kwargs,
+            lambda x: x.listeners.append(self) if not x.done() else None,
+            Node,
+        )
 
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
         self._proxy_device: torch.device = None
+
+        self.compile()
+
+        if self.fulfilled() and not isinstance(self.target, str):
+
+            self.remaining_listeners = 1
+
+            self.execute()
+
 
     @property
     def proxy_device(self) -> torch.device:
@@ -131,6 +156,14 @@ class Node:
         self.remaining_dependencies = len(self.dependencies)
         self.value = inspect._empty
         self.meta = dict()
+
+    def done(self) -> bool:
+        """Returns true if the value of this node has been set.
+
+        Returns:
+            bool: If done.
+        """
+        return self.value is not inspect._empty
 
     def fulfilled(self) -> bool:
         """Returns true if remaining_dependencies is 0.
@@ -214,7 +247,9 @@ class Node:
 
                 return value
 
-            args[0].register_hook(lambda value: grad(value))
+            tensor: torch.Tensor = args[0]
+
+            tensor.register_hook(lambda value: grad(value))
 
             return
 
@@ -247,7 +282,7 @@ class Node:
             if dependency.redundant():
                 dependency.destroy()
 
-        if self.value is not inspect._empty and self.redundant():
+        if self.done() and self.redundant():
             self.destroy()
 
     def destroy(self) -> None:

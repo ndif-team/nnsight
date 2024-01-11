@@ -164,6 +164,8 @@ def test_retain_grad(gpt2: nnsight.LanguageModel):
 
     _test_serialize(runner)
 
+    assert hidden_states.value.grad is not None
+
 
 def test_grad(gpt2: nnsight.LanguageModel):
     with gpt2.forward(inference=False) as runner:
@@ -188,7 +190,6 @@ def test_grad(gpt2: nnsight.LanguageModel):
             grad = hidden_states.grad.clone()
             grad[:] = 0
             hidden_states.grad = grad
-            hidden_states_grad[:] = 0
 
             logits = gpt2.lm_head.output
 

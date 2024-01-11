@@ -247,15 +247,17 @@ class Graph:
             meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
         )
 
-        self.nodes[name] = node
+        if not node.done():
 
-        if target_name == "argument":
-            module_path = args[0]
+            self.nodes[name] = node
 
-            if module_path not in self.argument_node_names:
-                self.argument_node_names[module_path] = []
+            if target_name == "argument":
+                module_path = args[0]
 
-            self.argument_node_names[module_path].append(name)
+                if module_path not in self.argument_node_names:
+                    self.argument_node_names[module_path] = []
+
+                self.argument_node_names[module_path].append(name)
 
         return self.proxy(node)
 

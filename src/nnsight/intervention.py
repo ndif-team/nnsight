@@ -158,7 +158,7 @@ class InterventionProxy(Proxy):
             Any: The stored value of the proxy, populated during execution of the model.
         """
 
-        if self.node.value is inspect._empty:
+        if not self.node.done():
             raise ValueError("Accessing Proxy value before it's been set.")
 
         return self.node.value
