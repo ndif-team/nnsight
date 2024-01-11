@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import collections
-from typing import Any, Callable, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Union
 
 import torch
-from torch.utils.hooks import RemovableHandle
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, PretrainedConfig, PreTrainedModel,
                           PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
-from .AbstractModel import AbstractModel
+from .NNsightModel import NNsightModel
 
 
-class LanguageModel(AbstractModel):
+class LanguageModel(NNsightModel):
     """LanguageModels are nnsight wrappers around transformer auto models.
 
     Inputs can be in the form of:
@@ -51,9 +49,6 @@ class LanguageModel(AbstractModel):
         )
 
         super().__init__(*args, **kwargs)
-
-    def _register_increment_hook(self, hook: Callable) -> RemovableHandle:
-        return self.local_model.register_forward_hook(hook)
 
     def _load_meta(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
         self.config = AutoConfig.from_pretrained(repoid_or_path, *args, **kwargs)
@@ -160,23 +155,9 @@ class LanguageModel(AbstractModel):
             {"input_ids": torch.tensor([[0]]), "labels": torch.tensor([[0]])}
         )
 
-    def _scan(self, prepared_inputs, *args, **kwargs) -> None:
-        # TODO
-        # Actually use args and kwargs. Dont do this now because the args may be specific to _generation which throws unused args errors
-        # Maybe inspect signature and filter out unused args.
-        self.meta_model(**prepared_inputs.copy().to("meta"))
-
-    def _forward(self, prepared_inputs, *args, **kwargs) -> Any:
-        return self.local_model(
-            *args, **prepared_inputs.to(self.local_model.device), **kwargs
-        )
-
     def _generation(
         self, prepared_inputs, *args, max_new_tokens: int = 1, **kwargs
     ) -> Any:
-        return self.local_model.generate(
-            *args,
-            **prepared_inputs.to(self.local_model.device),
-            max_new_tokens=max_new_tokens,
-            **kwargs,
+        return super()._generation(
+            prepared_inputs, *args, max_new_tokens=max_new_tokens, **kwargs
         )

@@ -10,7 +10,7 @@ from PIL import Image
 from torch.utils.hooks import RemovableHandle
 from transformers import BatchEncoding, CLIPTextModel, CLIPTokenizer
 
-from .AbstractModel import AbstractModel
+from .NNsightModel import NNsightModel
 
 
 class Diffuser(torch.nn.Module):
@@ -132,7 +132,7 @@ class Diffuser(torch.nn.Module):
             has_nsfw_concept = None
 
 
-class DiffuserModel(AbstractModel):
+class DiffuserModel(NNsightModel):
     def __init__(self, *args, tokenizer=None, **kwargs) -> None:
         self.local_model: Diffuser = None
         self.meta_model: Diffuser = None

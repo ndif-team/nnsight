@@ -42,7 +42,7 @@ class Module(torch.nn.Module):
     Proxies of it's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:
-        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by AbstractModel on initialization of meta model.
+        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsightModel on initialization of meta model.
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
         output_shape (torch.Size): Shape of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
         output_type (torch.dtype): Dtype of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
