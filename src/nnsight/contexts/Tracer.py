@@ -10,14 +10,14 @@ from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
 
 if TYPE_CHECKING:
-    from ..models.AbstractModel import AbstractModel
+    from ..models.NNsightModel import NNsightModel
 
 
 class Tracer(AbstractContextManager):
-    """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the meta_model of a :class:`nnsight.models.AbstractModel.AbstractModel` which tracks and manages the operations performed on the inputs and outputs of said model.
+    """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the meta_model of a :class:`nnsight.models.NNsightModel.NNsightModel` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
-        model (nnsight.models.AbstractModel.AbstractModel): nnsight Model object that ths context manager traces and executes.
+        model (nnsight.models.NNsightModel.NNsightModel): nnsight Model object that ths context manager traces and executes.
         graph (nnsight.tracing.Graph.Graph): Graph which operations performed on the input and output of Modules are added and later executed.
         args (List[Any]): Positional arguments to be passed to function that executes the model.
         kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
@@ -30,7 +30,7 @@ class Tracer(AbstractContextManager):
 
     def __init__(
         self,
-        model: "AbstractModel",
+        model: "NNsightModel",
         *args,
         validate: bool = True,
         **kwargs,
@@ -63,3 +63,6 @@ class Tracer(AbstractContextManager):
     @abstractmethod
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         raise NotImplementedError()
+
+    def apply(self, target, *args, **kwargs):
+        return self.graph.add(target=target, args=args, kwargs=kwargs)

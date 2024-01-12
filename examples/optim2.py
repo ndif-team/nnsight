@@ -1,7 +1,7 @@
 from typing import Any
 
 import torch
-from nnsight import AbstractModel, LanguageModel, util
+from nnsight import NNsightModel, LanguageModel, util
 from nnsight.module import Module
 from torch.utils.data import DataLoader, Dataset
 

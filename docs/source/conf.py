@@ -56,7 +56,7 @@ html_theme_options = {
     ],
 }
 
-html_context = {"default_mode": "light", "ndif_url": "https://ndif.dev/ping"}
+html_context = {"default_mode": "auto", "ndif_url": "https://ndif.dev/ping"}
 
 html_css_files = [
     "css/custom.css",

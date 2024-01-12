@@ -6,12 +6,12 @@ from .Invoker import Invoker
 from .Runner import Runner
 
 if TYPE_CHECKING:
-    from ..models.AbstractModel import AbstractModel
+    from ..models.NNsightModel import NNsightModel
 
 
 class DirectInvoker(Runner, Invoker):
     def __init__(
-        self, model: "AbstractModel", *args, fwd_args: Dict[str, Any] = None, **kwargs
+        self, model: "NNsightModel", *args, fwd_args: Dict[str, Any] = None, **kwargs
     ):
         if fwd_args is None:
             fwd_args = dict()

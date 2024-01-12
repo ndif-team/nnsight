@@ -52,7 +52,7 @@ Printing out the wrapped module returns its structure:
 
 The primary methods of interacting and running the model are ``.generate(...)`` and ``.forward(...)``. Both return context manager objects which, when entered, track operations performed on the inputs and outputs of modules.
 
-The :func:`generate <nnsight.models.AbstractModel.AbstractModel.generate>` context is meant for multi-iteration runs. Arguments passed to generate determine the generation behavior — in this case to generate three tokens.
+The :func:`generate <nnsight.models.NNsightModel.NNsightModel.generate>` context is meant for multi-iteration runs. Arguments passed to generate determine the generation behavior — in this case to generate three tokens.
 Within a generation context, invoker sub-contexts are entered using ``generator.invoke``. This is where an input (or batch of inputs) to the model is accepted, and batched with other invocations. It's in these contexts where operations on inputs and outputs of modules are tracked and prepared for execution.
 
 In this example, we run two prompts on the language model in order to generate three tokens. We also perform a ``.save()`` operation on the output of the lm_head module (the logit outputs) in order to save these activations and access them after generation is over:
@@ -68,7 +68,7 @@ In this example, we run two prompts on the language model in order to generate t
     print(logits1.value)
     print(logits2.value)
 
-The :func:`forward <nnsight.models.AbstractModel.AbstractModel.forward>` context is meant for direct input to the underlying model (or module).
+The :func:`forward <nnsight.models.NNsightModel.NNsightModel.forward>` context is meant for direct input to the underlying model (or module).
 
 .. code-block:: python
 

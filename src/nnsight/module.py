@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Union
 
 import torch
@@ -41,7 +42,7 @@ class Module(torch.nn.Module):
     Proxies of it's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:
-        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by AbstractModel on initialization of meta model.
+        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsightModel on initialization of meta model.
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
         output_shape (torch.Size): Shape of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
         output_type (torch.dtype): Dtype of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
@@ -181,88 +182,6 @@ class Module(torch.nn.Module):
         self._input = None
 
     @property
-    def backward_output(self) -> InterventionProxy:
-        """
-        Calling denotes the user wishes to get the backward_output of this module and therefore we create a Proxy of that request.
-        Only generates a proxy the first time it is references otherwise return the already set one.
-
-        Returns:
-            Proxy: backward_output proxy.
-        """
-        if self._backward_output is None:
-            self._backward_output = self.tracer.graph.add(
-                value=util.apply(
-                    self.output_shape,
-                    lambda x: torch.empty(x, device="meta"),
-                    torch.Size,
-                ),
-                target="argument",
-                args=[
-                    f"{self.module_path}.backward_output.{self.tracer.generation_idx}",
-                    self.tracer.batch_size,
-                    self.tracer.batch_start,
-                ],
-            )
-
-        return self._backward_output
-
-    @backward_output.setter
-    def backward_output(self, value: Union[InterventionProxy, Any]) -> None:
-        """
-        Calling denotes the user wishes to set the backward_output of this module and therefore we create a Proxy of that request.
-
-        Args:
-            value (Union[Proxy, Any]): Value to set backward_output to.
-        """
-
-        self.backward_output.node.graph.add(
-            target="swp", args=[self.backward_output.node, value], value=True
-        )
-
-        self._backward_output = None
-
-    @property
-    def backward_input(self) -> InterventionProxy:
-        """
-        Calling denotes the user wishes to get the backward_input of this module and therefore we create a Proxy of that request.
-        Only generates a proxy the first time it is references otherwise return the already set one.
-
-        Returns:
-            Proxy: backward_input proxy.
-        """
-        if self._backward_input is None:
-            self._backward_input = self.tracer.graph.add(
-                value=util.apply(
-                    self.input_shape,
-                    lambda x: torch.empty(x, device="meta"),
-                    torch.Size,
-                ),
-                target="argument",
-                args=[
-                    f"{self.module_path}.backward_input.{self.tracer.generation_idx}",
-                    self.tracer.batch_size,
-                    self.tracer.batch_start,
-                ],
-            )
-
-        return self._backward_input
-
-    @backward_input.setter
-    def backward_input(self, value: Union[InterventionProxy, Any]) -> None:
-        """
-        Calling denotes the user wishes to set the backward_input of this module and therefore we create a Proxy of that request.
-
-        Args:
-            value (Union[Proxy, Any]): Value to set backward_input to.
-        """
-
-        self.backward_input.node.graph.add(
-            target="swp", args=[self.backward_input.node, value], value=True
-        )
-
-        self._backward_input = None
-
-    @property
     def graph(self) -> Graph:
         if self._graph is None:
             self._graph = Graph.trace(
@@ -288,7 +207,6 @@ class Module(torch.nn.Module):
         """
 
         def hook(module: Module, input: Any, input_kwargs: Dict, output: Any):
-            
             module.clear()
 
             input = (input, input_kwargs)
@@ -304,7 +222,40 @@ class Module(torch.nn.Module):
         if isinstance(module, (Module, torch.nn.ModuleList)):
             return module
 
+        original_output = getattr(module, "output", None)
+        original_input = getattr(module, "input", None)
+        original_cls = type(module)
+
         util.wrap(module, Module)
+
+        if original_output is not None or original_input is not None:
+            warnings.warn(
+                f"Module of type `{original_cls}` has pre-defined either an `output` attribute or an `input` attribute. nnsight input and output access will be mounted at `.nns_output` and `.nns_input instead of `.output` and `.input` respectively for this module only."
+            )
+
+            module_cls = Module
+
+            new_module_cls = type(f"{module_cls.__name__}.Preserved", (module_cls,), {})
+
+            nns_output = getattr(new_module_cls, "output")
+            nns_input = getattr(new_module_cls, "input")
+
+            setattr(new_module_cls, "nns_output", nns_output)
+            setattr(new_module_cls, "output", original_output)
+
+            setattr(new_module_cls, "nns_input", nns_input)
+            setattr(new_module_cls, "input", original_input)
+
+            new_cls = type(
+                f"{module.__class__.__name__}.Preserved",
+                (
+                    new_module_cls,
+                    module.__class__.__bases__[1],
+                ),
+                {},
+            )
+
+            module.__class__ = new_cls
 
         module.register_forward_hook(hook, with_kwargs=True)
 

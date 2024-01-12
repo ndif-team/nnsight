@@ -6,7 +6,7 @@ nnsight.models
    :members:
 
 
-.. automodule:: nnsight.models.AbstractModel
+.. automodule:: nnsight.models.NNsightModel
    :members:
 
 

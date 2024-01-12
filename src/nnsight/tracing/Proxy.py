@@ -159,7 +159,7 @@ class Proxy:
             target=operator.matmul,
             args=[self.node, other],
         )
-    
+
     def __rmatmul__(self, other: Union[Proxy, Any]) -> Proxy:
         return self.node.graph.add(
             target=operator.matmul,
@@ -196,10 +196,12 @@ class Proxy:
 
         proxy: Proxy = None
 
-        for arg in args:
-            if isinstance(arg, Proxy):
-                proxy = arg
-                break
+        def get_proxy(arg):
+            nonlocal proxy
+
+            proxy = arg
+
+        util.apply(args, get_proxy, Proxy)
 
         return proxy.node.graph.add(
             target=orig_method,
