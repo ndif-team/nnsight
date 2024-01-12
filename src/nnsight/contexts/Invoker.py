@@ -78,6 +78,9 @@ class Invoker(AbstractContextManager):
         if isinstance(exc_val, BaseException):
             raise exc_val
 
+    def apply(self, target, *args, **kwargs):
+        return self.tracer.graph.add(target=target, args=args, kwargs=kwargs)
+
     def next(self, increment: int = 1) -> None:
         """Designates subsequent interventions should be applied to the next generation for multi-iteration generation runs.
 

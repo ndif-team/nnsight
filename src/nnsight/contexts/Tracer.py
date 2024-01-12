@@ -63,6 +63,3 @@ class Tracer(AbstractContextManager):
     @abstractmethod
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         raise NotImplementedError()
-
-    def apply(self, target, *args, **kwargs):
-        return self.graph.add(target=target, args=args, kwargs=kwargs)
