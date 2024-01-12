@@ -247,6 +247,7 @@ class Graph:
             meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
         )
 
+        # (for when you want to apply things to proxies after model execution?)
         if not node.done():
 
             self.nodes[name] = node
