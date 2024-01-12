@@ -92,16 +92,43 @@ class Node:
         self.dependencies: List[Node] = list()
 
         # Add all arguments that are nodes to nodes dependencies
-        util.apply(self.args, lambda x: self.dependencies.append(x), Node)
-        util.apply(self.kwargs, lambda x: self.dependencies.append(x), Node)
+        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
+        util.apply(
+            self.args,
+            lambda x: self.dependencies.append(x) if not x.done() else None,
+            Node,
+        )
+        util.apply(
+            self.kwargs,
+            lambda x: self.dependencies.append(x) if not x.done() else None,
+            Node,
+        )
         # Add node to all arguments that are nodes' listeners
-        util.apply(self.args, lambda x: x.listeners.append(self), Node)
-        util.apply(self.kwargs, lambda x: x.listeners.append(self), Node)
+        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
+        util.apply(
+            self.args,
+            lambda x: x.listeners.append(self) if not x.done() else None,
+            Node,
+        )
+        util.apply(
+            self.kwargs,
+            lambda x: x.listeners.append(self) if not x.done() else None,
+            Node,
+        )
 
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
         self._proxy_device: torch.device = None
+
+        self.compile()
+
+        # (for when you want to apply things to proxies after model execution?)
+        if self.fulfilled() and not isinstance(self.target, str):
+            # So it doesn't get destroyed.
+            self.remaining_listeners = 1
+
+            self.execute()
 
     @property
     def proxy_device(self) -> torch.device:
@@ -131,6 +158,14 @@ class Node:
         self.remaining_dependencies = len(self.dependencies)
         self.value = inspect._empty
         self.meta = dict()
+
+    def done(self) -> bool:
+        """Returns true if the value of this node has been set.
+
+        Returns:
+            bool: If done.
+        """
+        return self.value is not inspect._empty
 
     def fulfilled(self) -> bool:
         """Returns true if remaining_dependencies is 0.
@@ -191,6 +226,9 @@ class Node:
         Prepares args and kwargs and passed them to target.
         """
 
+        # Prepare arguments.
+        args, kwargs = self.prepare_inputs()
+
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
@@ -202,8 +240,20 @@ class Node:
 
             return
 
-        # Prepare arguments.
-        args, kwargs = self.prepare_inputs()
+        elif self.target == "grad":
+
+            def grad(value):
+                self.set_value(value)
+
+                value = self.graph.get_swap(value)
+
+                return value
+
+            tensor: torch.Tensor = args[0]
+
+            tensor.register_hook(lambda value: grad(value))
+
+            return
 
         # Call the target to get value.
         output = self.target(*args, **kwargs)
@@ -234,7 +284,7 @@ class Node:
             if dependency.redundant():
                 dependency.destroy()
 
-        if self.value is not inspect._empty and self.redundant():
+        if self.done() and self.redundant():
             self.destroy()
 
     def destroy(self) -> None:

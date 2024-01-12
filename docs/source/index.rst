@@ -14,10 +14,6 @@ nnsight
    tutorials
    About <about>
 
-.. toctree::
-    :hidden:
-    status
-
 .. grid:: 1 1 2 2
     :class-container: hero
     :reverse:

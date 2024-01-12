@@ -59,6 +59,11 @@ class InterventionProxy(Proxy):
 
     """
 
+    def __init__(self, node: Node) -> None:
+        super().__init__(node)
+
+        self._grad: InterventionProxy = None
+
     def save(self) -> InterventionProxy:
         """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
 
@@ -76,6 +81,35 @@ class InterventionProxy(Proxy):
         )
 
         return self
+
+    @property
+    def grad(self) -> InterventionProxy:
+        """
+        Calling denotes the user wishes to get the grad of proxy tensor and therefore we create a Proxy of that request.
+        Only generates a proxy the first time it is references otherwise return the already set one.
+
+        Returns:
+            Proxy: Grad proxy.
+        """
+        if self._grad is None:
+            self._grad = self.node.graph.add(
+                value=self.node.proxy_value, target="grad", args=[self.node]
+            )
+
+        return self._grad
+
+    @grad.setter
+    def grad(self, value: Union[InterventionProxy, Any]) -> None:
+        """
+        Calling denotes the user wishes to set the grad of this proxy tensor and therefore we create a Proxy of that request.
+
+        Args:
+            value (Union[InterventionProxy, Any]): Value to set output to.
+        """
+
+        self.node.graph.add(target="swp", args=[self.grad.node, value], value=True)
+
+        self._grad = None
 
     @property
     def token(self) -> TokenIndexer:
@@ -124,7 +158,7 @@ class InterventionProxy(Proxy):
             Any: The stored value of the proxy, populated during execution of the model.
         """
 
-        if self.node.value is inspect._empty:
+        if not self.node.done():
             raise ValueError("Accessing Proxy value before it's been set.")
 
         return self.node.value
@@ -218,30 +252,7 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
 
             # Check if through the previous value injection, there was a 'swp' intervention.
             # This would mean we want to replace activations for this batch with some other ones.
-            if graph.swap is not None:
-                device = None
-
-                def _device(value: torch.Tensor):
-                    nonlocal device
-
-                    device = value.device
-
-                util.apply(value, _device, torch.Tensor)
-
-                value = util.apply(graph.swap.args[1], lambda x: x.value, Node)
-
-                if device is not None:
-
-                    def _to(value: torch.Tensor):
-                        return value.to(device)
-
-                    value = util.apply(value, _to, torch.Tensor)
-
-                # Set value of 'swp' node so it destroys itself and listeners.
-                graph.swap.set_value(True)
-
-                # Un-set swap.
-                graph.swap = None
+            value = graph.get_swap(value)
 
             activations = concat(activations, value, batch_start, batch_size)
 

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import copy
 import gc
-from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Tuple, Union
 
 import accelerate
 import torch
 from torch.utils.hooks import RemovableHandle
+from transformers import AutoConfig, AutoModel
 
-from ..alteration import REPOID_TO_ALTERATION
 from ..contexts.DirectInvoker import DirectInvoker
 from ..contexts.Runner import Runner
 from ..editing.Editor import Edit, Editor
@@ -22,14 +21,13 @@ from ..patching import Patch, Patcher
 from ..tracing.Graph import Graph
 
 
-class AbstractModel(ABC):
-    """Abstract class to be implemented for PyTorch models wishing to gain this package's functionality.
+class NNsightModel:
+    """Class to be implemented for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
 
     Attributes:
         repoid_path_clsname (str): Hugging face repo id of model to load, path to checkpoint, or class name of custom model.
         args (List[Any]): Positional arguments used to initialize model.
         kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
-        alter (bool): If to check for alterations and apply them to the model. Defaults to True.
         dispatched (bool): If the local_model has bee loaded yet.
         dispatch (bool): If to load and dispatch model on init. Defaults to False.
         custom_model (bool): If the value passed to repoid_path_model was a custom model.
@@ -44,7 +42,6 @@ class AbstractModel(ABC):
         repoid_path_model: Union[str, torch.nn.Module],
         *args,
         dispatch: bool = False,
-        alter: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -52,7 +49,6 @@ class AbstractModel(ABC):
         self.repoid_path_clsname = repoid_path_model
         self.args = args
         self.kwargs = kwargs
-        self.alter = alter
         self.dispatch = dispatch
         self.dispatched = False
         self.custom_model = False
@@ -69,42 +65,40 @@ class AbstractModel(ABC):
 
         logger.info(f"Initializing `{self.repoid_path_clsname}`...")
 
-        # If alter and alteration exist, use alteration patcher context while loading module.
-        with self.alteration() if self.alter else Patcher():
-            # Use accelerate and .to('meta') to assure tensors are loaded to 'meta' device
-            with accelerate.init_empty_weights(include_buffers=True):
-                if self.custom_model:
-                    # Need to force parameters when deepcopied, to instead create a meta tensor of the same size/dtype
-                    def meta_deepcopy(self, memo):
-                        if id(self) in memo:
-                            return memo[id(self)]
-                        else:
-                            result = type(self)(
-                                torch.empty_like(
-                                    self.data, dtype=self.data.dtype, device="meta"
-                                ),
-                                self.requires_grad,
-                            )
-                            memo[id(self)] = result
-                            return result
-
-                    # Patching Parameter __deepcopy__
-                    with Patcher() as patcher:
-                        patcher.add(
-                            Patch(
-                                torch.nn.parameter.Parameter, meta_deepcopy, "__deepcopy__"
-                            )
+        # Use accelerate and .to('meta') to assure tensors are loaded to 'meta' device
+        with accelerate.init_empty_weights(include_buffers=True):
+            if self.custom_model:
+                # Need to force parameters when deepcopied, to instead create a meta tensor of the same size/dtype
+                def meta_deepcopy(self: torch.nn.parameter.Parameter, memo):
+                    if id(self) in memo:
+                        return memo[id(self)]
+                    else:
+                        result = type(self)(
+                            torch.empty_like(
+                                self.data, dtype=self.data.dtype, device="meta"
+                            ),
+                            self.requires_grad,
                         )
+                        memo[id(self)] = result
+                        return result
 
-                        self.meta_model: Module = Module.wrap(
-                            copy.deepcopy(self.local_model).to("meta")
-                        )
-                else:
-                    self.meta_model: Module = Module.wrap(
-                        self._load_meta(self.repoid_path_clsname, *args, **kwargs).to(
-                            "meta"
+                # Patching Parameter __deepcopy__
+                with Patcher() as patcher:
+                    patcher.add(
+                        Patch(
+                            torch.nn.parameter.Parameter, meta_deepcopy, "__deepcopy__"
                         )
                     )
+
+                    self.meta_model: Module = Module.wrap(
+                        copy.deepcopy(self.local_model).to("meta")
+                    )
+            else:
+                self.meta_model: Module = Module.wrap(
+                    self._load_meta(self.repoid_path_clsname, *args, **kwargs).to(
+                        "meta"
+                    )
+                )
 
         # Wrap all modules in our Module class.
         for name, module in self.meta_model.named_children():
@@ -128,7 +122,7 @@ class AbstractModel(ABC):
         return repr(self.meta_model)
 
     def __getattr__(self, key: Any) -> Any:
-        """Allows access of sub-modules on meta_model directly from AbstractModel object
+        """Allows access of sub-modules on meta_model
 
         Args:
             key (Any): Key.
@@ -209,12 +203,15 @@ class AbstractModel(ABC):
         return output
 
     def dispatch_local_model(self, *args, **kwargs) -> None:
-        with self.alteration() if self.alter else Patcher():
-            self.local_model = self._load_local(
-                self.repoid_path_clsname, *self.args, *args, **kwargs, **self.kwargs
-            )
+        logger.info(f"Dispatching `{self.repoid_path_clsname}`...")
+
+        self.local_model = self._load_local(
+            self.repoid_path_clsname, *self.args, *args, **kwargs, **self.kwargs
+        )
 
         self.dispatched = True
+
+        logger.info(f"Dispatched `{self.repoid_path_clsname}`")
 
     def generate(self, *args, **kwargs) -> Runner:
         """Returns a Runner context for this model's _generation method.
@@ -302,9 +299,6 @@ class AbstractModel(ABC):
         """
         return DirectInvoker(self, *args, **kwargs)
 
-    def alteration(self) -> Patcher:
-        return REPOID_TO_ALTERATION.get(self.repoid_path_clsname, Patcher())
-
     def modulize(self, module: Module, node_name: str, module_name: str) -> None:
         """_summary_
 
@@ -340,7 +334,6 @@ class AbstractModel(ABC):
         self.edits.append(wme)
         self.edits.append(ge)
 
-    @abstractmethod
     def _prepare_inputs(self, inputs: Any, **kwargs) -> Any:
         """Abstract method which prepares inputs. To be implemented by inheritors.
 
@@ -350,9 +343,8 @@ class AbstractModel(ABC):
         Returns:
             Any: Prepared inputs.
         """
-        raise NotImplementedError()
+        return inputs
 
-    @abstractmethod
     def _load_meta(self, repoid_or_path: str, *args, **kwargs) -> torch.nn.Module:
         """
         Abstract method to initialize meta_model. To be implemented by inheritors.
@@ -363,9 +355,10 @@ class AbstractModel(ABC):
         Returns:
             torch.nn.Module: Meta version of model
         """
-        raise NotImplementedError()
+        self.config = AutoConfig.from_pretrained(repoid_or_path, *args, **kwargs)
 
-    @abstractmethod
+        return AutoModel.from_config(self.config, trust_remote_code=True)
+
     def _load_local(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
         """
         Abstract method to initialize and dispatch the local_model. To be implemented by inheritors.
@@ -376,47 +369,51 @@ class AbstractModel(ABC):
         Returns:
             torch.nn.Module: Local version of model
         """
-        raise NotImplementedError()
+        return AutoModel.from_pretrained(
+            repoid_or_path, *args, config=self.config, **kwargs
+        )
 
-    @abstractmethod
-    def _scan(self, inputs, *args, **kwargs) -> None:
+    def _scan(self, prepared_inputs, *args, **kwargs) -> None:
         """
         Abstract method to directly call the meta_model and therefore populate the input/output shapes etc. To be implemented by inheritors.
 
         Used for tracing operations and their input/output shapes/dtypes.
 
         Args:
-            inputs (Any): Inputs.
+            prepared_inputs (Any): Prepared inputs.
         """
-        raise NotImplementedError()
+        return self.meta_model(**prepared_inputs.copy().to("meta"))
 
-    @abstractmethod
-    def _forward(self, inputs, *args, **kwargs) -> Any:
+    def _forward(self, prepared_inputs, *args, **kwargs) -> Any:
         """
         Abstract method to directly call the local_model. To be implemented by inheritors.
 
         Args:
-            inputs (Any): Inputs.
+            prepared_inputs (Any): Prepared inputs.
 
         Returns:
             Any: Output.
         """
-        raise NotImplementedError()
+        return self.local_model(
+            *args, **prepared_inputs.to(self.local_model.device), **kwargs
+        )
 
-    @abstractmethod
-    def _generation(self, inputs, *args, **kwargs) -> Any:
+    def _generation(self, prepared_inputs, *args, **kwargs) -> Any:
         """
         Abstract method to do iterative generation on the local_model. To be implemented by inheritors.
 
         Args:
-            inputs (Any): Inputs.
+            prepared_inputs (Any): Prepared inputs.
 
         Returns:
             Any: Output.
         """
-        raise NotImplementedError()
+        return self.local_model.generate(
+            *args,
+            **prepared_inputs.to(self.local_model.device),
+            **kwargs,
+        )
 
-    @abstractmethod
     def _register_increment_hook(self, hook: Callable) -> RemovableHandle:
         """Abstract method to hook a function on the local_model on the main module that is incremented during generation.
 
@@ -426,18 +423,16 @@ class AbstractModel(ABC):
         Returns:
             RemovableHandle: Handle to remove the applied hook after generation is done.
         """
-        raise NotImplementedError()
+        return self.local_model.register_forward_hook(hook)
 
-    @abstractmethod
     def _example_input(self) -> Any:
         """Abstract to provide an example input to be used with ``._scan(...)``
 
         Returns:
             Any: Example input.
         """
-        raise NotImplementedError()
+        return torch.tensor([0])
 
-    @abstractmethod
     def _batch_inputs(
         self, prepared_inputs: Any, batched_inputs: Any
     ) -> Tuple[Any, int]:
@@ -452,4 +447,10 @@ class AbstractModel(ABC):
             Any: prepared_inputs batched with batched_inputs.
             int: Batch size of prepared_inputs.
         """
-        raise NotImplementedError()
+        if batched_inputs is None:
+            batched_inputs = prepared_inputs
+
+        else:
+            batched_inputs = torch.concatenate([batched_inputs, prepared_inputs])
+
+        return batched_inputs, len(prepared_inputs)
