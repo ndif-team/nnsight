@@ -92,6 +92,7 @@ class Node:
         self.dependencies: List[Node] = list()
 
         # Add all arguments that are nodes to nodes dependencies
+        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
         util.apply(
             self.args,
             lambda x: self.dependencies.append(x) if not x.done() else None,
@@ -103,6 +104,7 @@ class Node:
             Node,
         )
         # Add node to all arguments that are nodes' listeners
+        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
         util.apply(
             self.args,
             lambda x: x.listeners.append(self) if not x.done() else None,
@@ -121,12 +123,12 @@ class Node:
 
         self.compile()
 
+        # (for when you want to apply things to proxies after model execution?)
         if self.fulfilled() and not isinstance(self.target, str):
-
+            # So it doesn't get destroyed.
             self.remaining_listeners = 1
 
             self.execute()
-
 
     @property
     def proxy_device(self) -> torch.device:
