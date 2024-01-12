@@ -135,18 +135,15 @@ class LanguageModel(NNsightModel):
         self, prepared_inputs: BatchEncoding, batched_inputs: Dict
     ) -> torch.Tensor:
         if batched_inputs is None:
-            batched_inputs = {"input_ids": prepared_inputs["input_ids"]}
-            if "labels" in prepared_inputs:
-                batched_inputs["labels"] = prepared_inputs["labels"]
+            batched_inputs = {"input_ids": []}
 
-        else:
-            batched_inputs["input_ids"] = torch.concatenate(
-                [batched_inputs["input_ids"], prepared_inputs["input_ids"]]
-            )
             if "labels" in prepared_inputs:
-                batched_inputs["labels"] = torch.concatenate(
-                    [batched_inputs["labels"], prepared_inputs["labels"]]
-                )
+                batched_inputs["labels"] = []
+
+        batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
+
+        if "labels" in prepared_inputs:
+            batched_inputs["labels"].extend(prepared_inputs["labels"])
 
         return batched_inputs, len(prepared_inputs["input_ids"])
 
