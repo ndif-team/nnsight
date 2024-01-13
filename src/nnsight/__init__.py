@@ -74,11 +74,12 @@ def noop_wrapper(fn):
 
 DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper(torch.Tensor.cpu), "cpu"))
 
+
 def onehot_wrapper(fn):
     @wraps(fn)
     def onehot(input: torch.Tensor, num_classes=-1):
         if input.device.type == "meta":
-            return torch.zeros((*input.shape, num_classes), device='meta')
+            return torch.zeros((*input.shape, num_classes), device="meta")
 
         else:
             return fn(input, num_classes=num_classes)
@@ -86,42 +87,66 @@ def onehot_wrapper(fn):
     return onehot
 
 
-DEFAULT_PATCHER.add(Patch(torch.nn.functional, onehot_wrapper(torch.nn.functional.one_hot), "one_hot"))
+DEFAULT_PATCHER.add(
+    Patch(torch.nn.functional, onehot_wrapper(torch.nn.functional.one_hot), "one_hot")
+)
 
-def where_wrapper(fn):
+
+DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper(torch.Tensor.tolist), "tolist"))
+
+
+def meta_nonzero(input: torch.Tensor, *args, as_tuple=False, **kwargs):
+    output = torch.zeros((input.numel(), input.ndim), device="meta", dtype=torch.long)
+
+    if as_tuple:
+        return tuple([output[:, i] for i in range(input.ndim)])
+
+    return output
+
+
+def meta_nonzero_wrapper(fn):
+    @wraps(fn)
+    def inner(input: torch.Tensor, *args, **kwargs):
+        if input.device.type == "meta":
+            print(input, args, kwargs, 'nz')
+            return meta_nonzero(input, *args, **kwargs)
+
+        else:
+            return fn(input, *args, **kwargs)
+
+    return inner
+
+
+DEFAULT_PATCHER.add(
+    Patch(torch.Tensor, meta_nonzero_wrapper(torch.Tensor.nonzero), "nonzero")
+)
+
+
+def meta_where_wrapper(fn):
     @wraps(fn)
     def where(input: torch.Tensor, *args, **kwargs):
         if input.device.type == "meta":
-            return input
-        
+            if len(args) > 0:
+                return input
+            return meta_nonzero(input, as_tuple=True)
 
         else:
             return fn(input, *args, **kwargs)
 
     return where
 
-DEFAULT_PATCHER.add(Patch(torch, where_wrapper(torch.where), "where"))
 
-DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper(torch.Tensor.tolist), "tolist"))
-
-def noop_wrapper2(fn):
-    @wraps(fn)
-    def noop(input: torch.Tensor, *args, **kwargs):
-        if input.device.type == "meta":
-            return input.unsqueeze(0)
-
-        else:
-            return fn(input, *args, **kwargs)
-
-    return noop
-DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper2(torch.Tensor.nonzero), "nonzero"))
+DEFAULT_PATCHER.add(Patch(torch, meta_where_wrapper(torch.where), "where"))
 
 
 DEFAULT_PATCHER.__enter__()
 
-from torch._meta_registrations import (_meta_lib_dont_use_me_use_register_meta,
-                                       aten, global_decomposition_table,
-                                       register_meta)
+from torch._meta_registrations import (
+    _meta_lib_dont_use_me_use_register_meta,
+    aten,
+    global_decomposition_table,
+    register_meta,
+)
 
 
 # Function which "activates" the most recent meta registered function.
@@ -137,5 +162,6 @@ def activate_recent_meta():
 @register_meta(aten._local_scalar_dense)
 def local_scalar_dense_meta(A):
     return 0
+
 
 activate_recent_meta()
