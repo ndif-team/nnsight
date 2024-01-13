@@ -92,7 +92,8 @@ def where_wrapper(fn):
     @wraps(fn)
     def where(input: torch.Tensor, *args, **kwargs):
         if input.device.type == "meta":
-            return input.to(torch.int)
+            return input
+        
 
         else:
             return fn(input, *args, **kwargs)
@@ -102,6 +103,19 @@ def where_wrapper(fn):
 DEFAULT_PATCHER.add(Patch(torch, where_wrapper(torch.where), "where"))
 
 DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper(torch.Tensor.tolist), "tolist"))
+
+def noop_wrapper2(fn):
+    @wraps(fn)
+    def noop(input: torch.Tensor, *args, **kwargs):
+        if input.device.type == "meta":
+            return input.unsqueeze(0)
+
+        else:
+            return fn(input, *args, **kwargs)
+
+    return noop
+DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper2(torch.Tensor.nonzero), "nonzero"))
+
 
 DEFAULT_PATCHER.__enter__()
 
