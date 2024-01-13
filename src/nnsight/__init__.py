@@ -108,7 +108,6 @@ def meta_nonzero_wrapper(fn):
     @wraps(fn)
     def inner(input: torch.Tensor, *args, **kwargs):
         if input.device.type == "meta":
-            print(input, args, kwargs, 'nz')
             return meta_nonzero(input, *args, **kwargs)
 
         else:
@@ -127,7 +126,8 @@ def meta_where_wrapper(fn):
     def where(input: torch.Tensor, *args, **kwargs):
         if input.device.type == "meta":
             if len(args) > 0:
-                return input
+                dtype = args[0].dtype if isinstance(args[0], torch.Tensor) else type(args[0])
+                return torch.zeros_like(input, dtype=input.dtype, device='meta')
             return meta_nonzero(input, as_tuple=True)
 
         else:
