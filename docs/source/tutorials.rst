@@ -7,7 +7,7 @@ Tutorials
    .. grid-item-card:: Walkthrough
       :link: notebooks/walkthrough.ipynb
 
-      Main features of the nnsight library.
+      :bdg-primary:`Main Features`
 
    .. grid-item-card:: IOI Patching
       :link: notebooks/tutorials/ioi_patching.ipynb

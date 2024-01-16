@@ -29,13 +29,13 @@ nnsight
 
         .. div:: sd-fs-1 sd-font-weight-bold title-bot sd-text-primary image-container
 
-            nnsight
+            NNsight
 
         .. div:: sd-fs-4 sd-font-weight-bold sd-my-0 sub-bot image-container
 
             interpretable neural networks
 
-        **nnsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models
+        **NNsight** (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of large models
 
         .. div:: button-group
         
