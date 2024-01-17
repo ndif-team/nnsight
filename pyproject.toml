@@ -18,7 +18,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "transformers",
+    "transformers@git+https://github.com/huggingface/transformers",
     "protobuf",
     "python-socketio[client]",
     "tokenizers>=0.13.0",
