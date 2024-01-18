@@ -14,6 +14,10 @@ from .models.DiffuserModel import DiffuserModel
 from .models.LanguageModel import LanguageModel
 from .module import Module
 from .patching import Patch, Patcher
+from .logger import logger
+
+logger.disabled = not CONFIG.APP.LOGGING
+
 
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
