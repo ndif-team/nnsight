@@ -2,7 +2,8 @@
 :sd_hide_title:
 
 .. raw:: html
-
+    
+    <link rel="stylesheet" href="../_static/css/status.css">
     <script>
         fetch("https://ndif.dev/ping")
             .then((response) => {
@@ -35,6 +36,11 @@
                                         Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
                                             text.innerHTML = infoString;
                                         });
+                                    });
+
+                                    Array.from(document.getElementsByClassName("page-hook")).forEach((elm) => {
+                                        elm.innerHTML = `<button class="accordion">Section 1</button><div class="panel"><p>Lorem ipsum...</p></div>`;
+                                        
                                     });
 
                                     console.log('Stats success');
@@ -71,6 +77,28 @@
             });
     </script>
 
+.. raw:: html
+
+    <script>
+        var acc = document.getElementsByClassName("accordion");
+        var i;
+
+        for (i = 0; i < acc.length; i++) {
+        acc[i].addEventListener("click", function() {
+            /* Toggle between adding and removing the "active" class,
+            to highlight the button that controls the panel */
+            this.classList.toggle("active");
+
+            /* Toggle between hiding and showing the active panel */
+            var panel = this.nextElementSibling;
+            if (panel.style.display === "block") {
+            panel.style.display = "none";
+            } else {
+            panel.style.display = "block";
+            }
+        });
+        }
+    </script>
 
 Status
 ======
@@ -79,14 +107,9 @@ Status
    :maxdepth: 1
    :hidden:
 
-
-
 .. card::
     :class-card: status-container
     
     All Systems Are Operational
 
-.. card::
-    :class-card: status-message
-    
-    Loading...
+.. div:: page-hook
