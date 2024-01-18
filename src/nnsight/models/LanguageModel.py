@@ -76,6 +76,7 @@ class LanguageModel(NNsightModel):
             torch.Tensor,
             Dict[str, Any],
         ],
+        **kwargs,
     ):
         if isinstance(inputs, BatchEncoding):
             return inputs
@@ -93,7 +94,7 @@ class LanguageModel(NNsightModel):
 
             return self.tokenizer.pad(inputs, return_tensors="pt")
 
-        return self.tokenizer(inputs, return_tensors="pt", padding=True)
+        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
 
     def _prepare_inputs(
         self,
@@ -111,21 +112,23 @@ class LanguageModel(NNsightModel):
         **kwargs,
     ) -> BatchEncoding:
         if isinstance(inputs, dict):
-            _inputs = self._tokenize(inputs["input_ids"])
+            _inputs = self._tokenize(inputs["input_ids"], **kwargs)
 
-            _inputs = self._tokenize(_inputs)
+            if "attention_mask" in inputs:
+                for ai, attn_mask in enumerate(inputs["attention_mask"]):
+                    _inputs["attention_mask"][ai, -len(attn_mask) :] = attn_mask
 
             if "labels" in inputs:
-                labels = self._tokenize(inputs["labels"])
-                labels = self._tokenize(labels)
+                labels = self._tokenize(inputs["labels"], **kwargs)
+
                 _inputs["labels"] = labels["input_ids"]
 
             return _inputs
 
-        inputs = self._tokenize(inputs)
+        inputs = self._tokenize(inputs, **kwargs)
 
         if labels is not None:
-            labels = self._tokenize(labels)
+            labels = self._tokenize(labels, **kwargs)
 
             inputs["labels"] = labels["input_ids"]
 
@@ -140,10 +143,15 @@ class LanguageModel(NNsightModel):
             if "labels" in prepared_inputs:
                 batched_inputs["labels"] = []
 
+            if "attention_mask" in prepared_inputs:
+                batched_inputs["attention_mask"] = []
+
         batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
 
         if "labels" in prepared_inputs:
             batched_inputs["labels"].extend(prepared_inputs["labels"])
+        if "attention_mask" in prepared_inputs:
+            batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
 
         return batched_inputs, len(prepared_inputs["input_ids"])
 
