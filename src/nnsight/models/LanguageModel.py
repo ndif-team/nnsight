@@ -76,7 +76,7 @@ class LanguageModel(NNsightModel):
             torch.Tensor,
             Dict[str, Any],
         ],
-        **kwargs
+        **kwargs,
     ):
         if isinstance(inputs, BatchEncoding):
             return inputs
@@ -114,9 +114,9 @@ class LanguageModel(NNsightModel):
         if isinstance(inputs, dict):
             _inputs = self._tokenize(inputs["input_ids"], **kwargs)
 
-            for ai, attn_mask in enumerate(inputs['attention_mask']):
-
-                _inputs['attention_mask'][ai, -len(attn_mask):] = attn_mask
+            if "attention_mask" in inputs:
+                for ai, attn_mask in enumerate(inputs["attention_mask"]):
+                    _inputs["attention_mask"][ai, -len(attn_mask) :] = attn_mask
 
             if "labels" in inputs:
                 labels = self._tokenize(inputs["labels"], **kwargs)
