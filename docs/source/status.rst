@@ -79,7 +79,7 @@
                                         // Convert the object back into a string with indentation
                                         let prettyPrintedJson = JSON.stringify(jsonObject, null, 4);
 
-                                        prettyPrintedJson = prettyPrintedJson.replace(/"([^"]+)":/g, '<span style="background-color: lightgrey;">"$1":</span>');
+                                        prettyPrintedJson = prettyPrintedJson.replace(/"([^"]+)":/g, '"<b>$1</b>":');
                                         let huggingFaceLink = `<a href="http://huggingface.co/${key}" target="_blank">HuggingFace Model Repository ↗</a>`;
                                         
                                         infoString += `<div class="accordion-item"> <h2 class="accordion-header" id="${headingId}"> <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}"> (${summaryItem.number_of_copies}x) ${key} </button> </h2> <div id="${collapseId}" class="accordion-collapse collapse" aria-labelledby="${headingId}" data-bs-parent="#accordionExample"> <div class="accordion-body">${huggingFaceLink}</i> <pre>${prettyPrintedJson}</pre></div> </div> </div>`;
