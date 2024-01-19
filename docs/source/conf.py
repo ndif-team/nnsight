@@ -49,7 +49,7 @@ html_theme_options = {
         },
         {
             "name": "Status",
-            "url": "https://discord.gg/6uFJmCSwW7",
+            "url": "/status",
             "icon": "fa-solid fa-circle-check",
             "attributes": {"class": "ndif"},
         },

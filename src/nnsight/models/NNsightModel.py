@@ -382,7 +382,8 @@ class NNsightModel:
         Args:
             prepared_inputs (Any): Prepared inputs.
         """
-        return self.meta_model(**prepared_inputs.copy().to("meta"))
+        with accelerate.init_empty_weights(include_buffers=True):
+            return self.meta_model(**prepared_inputs.copy().to("meta"))
 
     def _forward(self, prepared_inputs, *args, **kwargs) -> Any:
         """
