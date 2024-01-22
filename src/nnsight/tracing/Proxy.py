@@ -231,11 +231,12 @@ def proxy_wrapper(fn) -> None:
 
         node = None
 
-        for arg in arguments:
-            if isinstance(arg, Proxy):
-                node = arg.node
+        def get_node(proxy: Proxy):
+            nonlocal node
 
-                break
+            node = proxy.node
+
+        util.apply(list(args) + list(kwargs.values()), get_node, Proxy)
 
         if node is not None:
             return node.graph.add(target=fn, args=args, kwargs=kwargs)
