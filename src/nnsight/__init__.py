@@ -9,12 +9,13 @@ PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
-from .models.NNsightModel import NNsightModel
+from .logger import logger
 from .models.DiffuserModel import DiffuserModel
 from .models.LanguageModel import LanguageModel
+from .models.NNsightModel import NNsightModel
 from .module import Module
 from .patching import Patch, Patcher
-from .logger import logger
+from .tracing.Proxy import proxy_wrapper
 
 logger.disabled = not CONFIG.APP.LOGGING
 
@@ -23,8 +24,16 @@ logger.disabled = not CONFIG.APP.LOGGING
 DEFAULT_PATCHER = Patcher()
 
 from functools import wraps
+from inspect import getmembers, isfunction
 
+import einops
 import torch
+
+for key, value in getmembers(einops.einops, isfunction):
+    DEFAULT_PATCHER.add(Patch(einops.einops, proxy_wrapper(value), key))
+
+
+DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.gather), "gather"))
 
 
 # Need to patch repeat_interleave to work with meta tensors
@@ -130,8 +139,12 @@ def meta_where_wrapper(fn):
     def where(input: torch.Tensor, *args, **kwargs):
         if input.device.type == "meta":
             if len(args) > 0:
-                dtype = args[0].dtype if isinstance(args[0], torch.Tensor) else type(args[0])
-                return torch.zeros_like(input, dtype=input.dtype, device='meta')
+                dtype = (
+                    args[0].dtype
+                    if isinstance(args[0], torch.Tensor)
+                    else type(args[0])
+                )
+                return torch.zeros_like(input, dtype=input.dtype, device="meta")
             return meta_nonzero(input, as_tuple=True)
 
         else:
@@ -145,12 +158,9 @@ DEFAULT_PATCHER.add(Patch(torch, meta_where_wrapper(torch.where), "where"))
 
 DEFAULT_PATCHER.__enter__()
 
-from torch._meta_registrations import (
-    _meta_lib_dont_use_me_use_register_meta,
-    aten,
-    global_decomposition_table,
-    register_meta,
-)
+from torch._meta_registrations import (_meta_lib_dont_use_me_use_register_meta,
+                                       aten, global_decomposition_table,
+                                       register_meta)
 
 
 # Function which "activates" the most recent meta registered function.

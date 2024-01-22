@@ -133,7 +133,6 @@ class WrapperModule(torch.nn.Module):
     """
 
     def forward(self, *args, **kwargs):
-        # TODO document
         if len(args) == 1:
             args = args[0]
 

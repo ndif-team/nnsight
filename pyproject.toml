@@ -27,7 +27,8 @@ dependencies = [
     "sentencepiece",
     "torchvision",
     "accelerate",
-    "diffusers"
+    "diffusers",
+    "einops"
     ]
 [project.urls]
 "Homepage" = "https://github.com/JadenFiotto-Kaufman/nnsight"
