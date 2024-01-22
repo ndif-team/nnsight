@@ -1,5 +1,6 @@
 import operator
-from inspect import getmembers, isbuiltin, isfunction, ismethoddescriptor
+from inspect import (getmembers, isbuiltin, isfunction, ismethod,
+                     ismethoddescriptor)
 
 import einops
 import torch
@@ -8,11 +9,19 @@ from ... import util
 from ...tracing.Proxy import Proxy
 
 
-def get_function_name(fn):
+def get_function_name(fn, module_name=None):
     if isinstance(fn, str):
         return fn
 
-    return f"{getattr(fn, '__module__', '')}.{fn.__qualname__}"
+    if module_name is not None:
+        return f"{module_name}.{fn.__name__}"
+
+    module_name = getattr(fn, "__module__", None)
+
+    if module_name is None:
+        return fn.__qualname__
+
+    return f"{module_name}.{fn.__qualname__}"
 
 
 FUNCTIONS_WHITELIST = {}
@@ -30,8 +39,8 @@ FUNCTIONS_WHITELIST.update(
 )
 FUNCTIONS_WHITELIST.update(
     {
-        get_function_name(value): value
-        for key, value in getmembers(torch._C._TensorBase, ismethoddescriptor)
+        get_function_name(value, module_name="Tensor"): value
+        for key, value in getmembers(torch.Tensor, ismethoddescriptor)
     }
 )
 FUNCTIONS_WHITELIST.update(
