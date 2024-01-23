@@ -9,6 +9,7 @@ from ..tracing.Graph import Graph
 from .format import types
 from .format.types import *
 
+
 class RequestModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -22,7 +23,6 @@ class RequestModel(BaseModel):
     id: str = None
     session_id: str = None
     received: datetime = None
-    blocking: bool = False
     include_output: bool = False
 
     def compile(self) -> RequestModel:
