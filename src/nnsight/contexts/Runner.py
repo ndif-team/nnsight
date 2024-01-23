@@ -118,7 +118,7 @@ class Runner(Tracer):
 
             # Get result from result url using job id.
             with requests.get(
-                url=f"http://{CONFIG.API.HOST}/result/{response.id}", stream=True
+                url=f"https://{CONFIG.API.HOST}/result/{response.id}", stream=True
             ) as stream:
                 
                 # Total size of incoming data.
@@ -163,16 +163,19 @@ class Runner(Tracer):
         # Create a socketio connection to the server.
         with socketio.SimpleClient(logger=logger, reconnection_attempts=10) as sio:
 
+            # Connect
             sio.connect(
-                f"ws://{CONFIG.API.HOST}",
+                f"wss://{CONFIG.API.HOST}",
                 socketio_path="/ws/socket.io",
                 transports=["websocket"],
                 wait_timeout=10,
             )
 
+            # Give request session ID so server knows to respond via websockets to us.
             request.session_id = sio.sid
 
-            response = requests.post(f"http://{CONFIG.API.HOST}/request", json=request.model_dump(exclude_none=True, mode='json'))
+            # Submit request via 
+            response = requests.post(f"https://{CONFIG.API.HOST}/request", json=request.model_dump(exclude_none=True, mode='json'))
             response = pydantics.ResponseModel(**response.json())
 
             print(response)
