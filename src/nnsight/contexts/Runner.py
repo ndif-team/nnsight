@@ -175,7 +175,7 @@ class Runner(Tracer):
             request.session_id = sio.sid
 
             # Submit request via 
-            response = requests.post(f"https://{CONFIG.API.HOST}/request", json=request.model_dump(exclude_none=True, mode='json'))
+            response = requests.post(f"https://{CONFIG.API.HOST}/request", json=request.model_dump(exclude=['id', 'received']))
             response = pydantics.ResponseModel(**response.json())
 
             print(response)
