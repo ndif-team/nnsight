@@ -12,7 +12,7 @@ from typing_extensions import Annotated
 
 from ...tracing.Graph import Graph
 from ...tracing.Node import Node
-from . import FUNCTIONS_WHITELIST
+from . import FUNCTIONS_WHITELIST, get_function_name
 
 FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, str]
 PRIMITIVE = Union[int, float, str, bool, None]
@@ -168,11 +168,7 @@ DictType = Annotated[dict, AfterValidator(lambda value: DictModel(values=value))
 
 FunctionType = Annotated[
     FUNCTION,
-    AfterValidator(
-        lambda value: FunctionModel(
-            function_name=value.__qualname__ if not isinstance(value, str) else value
-        )
-    ),
+    AfterValidator(lambda value: FunctionModel(function_name=get_function_name(value))),
 ]
 
 NodeReferenceType = Annotated[

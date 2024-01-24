@@ -101,84 +101,89 @@ class Runner(Tracer):
         else:
             self.non_blocking_request(request)
 
+    def handle_response(self, event:str, data) -> bool:
+        # Load the data into the ResponseModel pydantic class.
+        response = pydantics.ResponseModel(**data)
+
+        # Print response for user ( should be logger.info and have an info handler print to stdout)
+        print(str(response))
+
+        # If the status of the response is completed, update the local nodes that the user specified to save.
+        # Then disconnect and continue.
+        if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
+
+            # Create BytesIO object to store bytes received from server in.
+            result_bytes = io.BytesIO()
+            result_bytes.seek(0)
+
+            # Get result from result url using job id.
+            with requests.get(
+                url=f"https://{CONFIG.API.HOST}/result/{response.id}", stream=True
+            ) as stream:
+                
+                # Total size of incoming data.
+                total_size = float(stream.headers["Content-length"])
+
+                with tqdm(
+                    total=total_size,
+                    unit="B",
+                    unit_scale=True,
+                    desc="Downloading result",
+                ) as progress_bar:
+                    # chunk_size=None so server determines chunk size.
+                    for data in stream.iter_content(chunk_size=None):
+                        progress_bar.update(len(data))
+                        result_bytes.write(data)
+
+            # Move cursor to beginning of bytes.
+            result_bytes.seek(0)
+
+            # Decode bytes with pickle and then into pydantic object.
+            result = pydantics.ResultModel(**pickle.load(result_bytes))
+
+            # Close bytes
+            result_bytes.close()
+
+            # Set save data.
+            for name, value in result.saves.items():
+                self.graph.nodes[name].value = value
+
+            # Set output data.
+            self.output = result.output
+
+            return True
+        # Or if there was some error.
+        elif response.status == pydantics.ResponseModel.JobStatus.ERROR:
+            return True
+        
+        return False
+
+
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
-        sio = socketio.Client(logger=logger, reconnection_attempts=10)
+        with socketio.SimpleClient(logger=logger, reconnection_attempts=10) as sio:
 
-        sio.connect(
-            f"wss://{CONFIG.API.HOST}",
-            socketio_path="/ws/socket.io",
-            transports=["websocket"],
-            wait_timeout=10,
-        )
+            # Connect
+            sio.connect(
+                f"wss://{CONFIG.API.HOST}",
+                socketio_path="/ws/socket.io",
+                transports=["websocket"],
+                wait_timeout=10,
+            )
 
-        # Called when receiving a response from the server.
-        @sio.on("blocking_response")
-        def blocking_response(data):
-            # Load the data into the ResponseModel pydantic class.
-            response = pydantics.ResponseModel(**data)
+            # Give request session ID so server knows to respond via websockets to us.
+            request.session_id = sio.sid
 
-            # Print response for user ( should be logger.info and have an info handler print to stdout)
-            print(str(response))
+            # Submit request via 
+            response = requests.post(f"https://{CONFIG.API.HOST}/request", json=request.model_dump(exclude=['id', 'received']))
+            response = pydantics.ResponseModel(**response.json())
 
-            # If the status of the response is completed, update the local nodes that the user specified to save.
-            # Then disconnect and continue.
-            if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
+            print(response)
 
-                # Create BytesIO object to store bytes received from server in.
-                result_bytes = io.BytesIO()
-                result_bytes.seek(0)
+            while True:
 
-                # Get result from result url using job id.
-                with requests.get(
-                    url=f"https://{CONFIG.API.HOST}/result/{response.id}", stream=True
-                ) as stream:
-                    
-                    # Total size of incoming data.
-                    total_size = float(stream.headers["Content-length"])
-
-                    with tqdm(
-                        total=total_size,
-                        unit="B",
-                        unit_scale=True,
-                        desc="Downloading result",
-                    ) as progress_bar:
-                        # chunk_size=None so server determines chunk size.
-                        for data in stream.iter_content(chunk_size=None):
-                            progress_bar.update(len(data))
-                            result_bytes.write(data)
-
-                # Move cursor to beginning of bytes.
-                result_bytes.seek(0)
-
-                # Decode bytes with pickle and then into pydantic object.
-                result = pydantics.ResultModel(**pickle.load(result_bytes))
-
-                # Close bytes
-                result_bytes.close()
-
-                # Set save data.
-                for name, value in result.saves.items():
-                    self.graph.nodes[name].value = value
-
-                # Set output data.
-                self.output = result.output
-
-                # Disconnect and continue program.
-                sio.disconnect()
-
-            # Or if there was some error.
-            elif response.status == pydantics.ResponseModel.JobStatus.ERROR:
-                sio.disconnect()
-
-        sio.emit(
-            "blocking_request",
-            request.model_dump(
-                mode="json", exclude=["session_id", "received", "blocking", "id"]
-            ),
-        )
-
-        sio.wait()
+                if self.handle_response(*sio.receive()):
+                    break
 
     def non_blocking_request(self, request: pydantics.RequestModel):
         pass
