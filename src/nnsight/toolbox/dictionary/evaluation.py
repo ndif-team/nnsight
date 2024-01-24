@@ -134,5 +134,3 @@ def evaluate(
         out['percent_recovered'] = (loss_reconstructed - loss_zero) / (loss_original - loss_zero)
 
         return out
-
-# %%

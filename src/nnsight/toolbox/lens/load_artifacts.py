@@ -1,7 +1,5 @@
 """Load lens artifacts from the hub or locally storage.
 
-Thanks to Belrose et. al for many pretrained lenses and a bulk of the code.
-
 See https://github.com/AlignmentResearch/tuned-lens for more.
 """
 import os
