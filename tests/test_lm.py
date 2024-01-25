@@ -28,7 +28,7 @@ def _test_serialize(runner: Runner):
     )
 
     request_json = request.model_dump(
-        mode="json", exclude=["session_id", "received", "blocking", "id"]
+        mode="json", exclude=["session_id", "received", "id"]
     )
 
     request2 = RequestModel(**request_json)
