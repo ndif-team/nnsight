@@ -13,6 +13,7 @@ from .logger import logger
 from .models.DiffuserModel import DiffuserModel
 from .models.LanguageModel import LanguageModel
 from .models.NNsightModel import NNsightModel
+from .models.UnifiedTransformer import UnifiedTransformer
 from .module import Module
 from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper
