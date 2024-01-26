@@ -3,10 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Union
 
 import torch
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, PretrainedConfig, PreTrainedModel,
-                          PreTrainedTokenizer)
-from transformers.models.auto import modeling_auto
+from transformers import (BatchEncoding, PreTrainedModel,)
 
 from .NNsightModel import NNsightModel
 
@@ -27,7 +24,7 @@ class UnifiedTransformer(NNsightModel):
     Calls to generate pass arguments downstream to :func:`GenerationMixin.generate`
 
     Attributes:
-        config (HookedTransformerConfig): Huggingface config file loaded from repository or checkpoint.
+        config (HookedTransformerConfig): HookedTransformer config file.
         tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
         meta_model (PreTrainedModel): Meta version of underlying auto model.
         local_model (HookedTransformer): Local version of underlying HookedTransformer.
