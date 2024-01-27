@@ -65,15 +65,16 @@ Tutorials
    .. grid-item::
 
       .. card::
-         :img-top: images/particle_background.jpg
+         :img-top: _static/images/tutorials/walkthrough.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
+         :class-body: sd-font-weight-bold
 
          Walkthrough
    
    .. grid-item::
 
       .. card::
-         :img-top: images/particle_background.jpg
+         :img-top: _static/images/tutorials/activation_patching.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
          
          Activation Patching
@@ -81,7 +82,7 @@ Tutorials
    .. grid-item::
 
       .. card::
-         :img-top: images/particle_background.jpg
+         :img-top: _static/images/tutorials/attribution_patching.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
 
          Attribution Patching
@@ -89,10 +90,35 @@ Tutorials
    .. grid-item::
 
       .. card::
-         :img-top: images/particle_background.jpg
+         :img-top: _static/images/tutorials/logit_lens.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
 
          Logit Lens
+
+   .. grid-item::
+
+      .. card::
+         :img-top: _static/images/tutorials/future_lens.png
+         :class-card: sd-text-black sd-border-0 tutorials-cards
+
+         Future Lens
+
+   .. grid-item::
+
+      .. card::
+         :img-top: _static/images/tutorials/function_vectors.png
+         :class-card: sd-text-black sd-border-0 tutorials-cards
+
+         Function Vectors
+
+   .. grid-item::
+
+      .. card::
+         :img-top: _static/images/tutorials/dictionary_learning.png
+         :class-card: sd-text-black sd-border-0 tutorials-cards
+
+         Dictionary Learning
+      
    
 
 
