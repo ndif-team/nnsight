@@ -3,19 +3,19 @@
     fetch("{{ndif_url}}")
         .then((response) => {
             if (response.status == 200) {
-                Array.from(document.getElementsByClassName("ndif-status-button")).forEach((ndifElement) => {
+                Array.from(document.getElementsByClassName("ndif")).forEach((ndifElement) => {
                     Array.from(ndifElement.getElementsByTagName('span')).forEach((spanElement) => {
                         spanElement.style.setProperty('color', '#23C552', 'important');
                     });
                 });
             }
             else {
-                Array.from(document.getElementsByClassName("ndif-status-button")).forEach((ndifElement) => {
+                Array.from(document.getElementsByClassName("ndif")).forEach((ndifElement) => {
                     Array.from(ndifElement.getElementsByTagName('span')).forEach((spanElement) => {
                         spanElement.style.setProperty('color', '#F84F31', 'important');
                     });
                 });
-                var statusIcon = document.querySelector('.ndif-status-button .fa-circle-check');
+                var statusIcon = document.querySelector('.ndif .fa-circle-check');
                 if (statusIcon) {
                     // not here
                     statusIcon.classList.replace('fa-circle-check', 'fa-circle-xmark'); 
@@ -23,12 +23,12 @@
             }
         })
         .catch((response) => {
-            Array.from(document.getElementsByClassName("ndif-status-button")).forEach((ndifElement) => {
+            Array.from(document.getElementsByClassName("ndif")).forEach((ndifElement) => {
                 Array.from(ndifElement.getElementsByTagName('span')).forEach((spanElement) => {
                     spanElement.style.setProperty('color', '#F84F31', 'important');
                 });
             });
-            var statusIcon = document.querySelector('.ndif-status-button .fa-circle-check');
+            var statusIcon = document.querySelector('.ndif .fa-circle-check');
             if (statusIcon) {
                 statusIcon.classList.replace('fa-circle-check', 'fa-circle-xmark');
             }
