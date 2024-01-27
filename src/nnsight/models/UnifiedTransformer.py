@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Union
 
 import torch
-from transformers import (BatchEncoding, PreTrainedModel,)
+from transformers import BatchEncoding
+from transformer_lens import HookedTransformer, HookedTransformerConfig
 
 from .NNsightModel import NNsightModel
 
@@ -19,38 +20,46 @@ class UnifiedTransformer(NNsightModel):
         Tokenized prompts: (Union[List[List[int]], torch.Tensor])
         Direct input: (Dict[str,Any])
 
-    If using a custom model, you also need to provide the tokenizer like ``UnifiedTransformer(custom_model, tokenizer=tokenizer)``
-
+    TransformerLens processing arguments can be passed as kwargs to the constructor. 
+    Pass `processing=False` to call `from_pretrained_no_processing` instead of `from_pretrained`.
+        
     Calls to generate pass arguments downstream to :func:`GenerationMixin.generate`
 
     Attributes:
         config (HookedTransformerConfig): HookedTransformer config file.
         tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
-        meta_model (PreTrainedModel): Meta version of underlying auto model.
+        meta_model (HookedTransformer): Meta version of underlying auto model.
         local_model (HookedTransformer): Local version of underlying HookedTransformer.
 
     """
 
     def __init__(
         self, 
+        model: str,
+        device: str,
         *args, 
-        device: str, 
+        processing: bool = True,
         **kwargs
     ) -> None:
-        self.meta_model: PreTrainedModel = None
-        self.local_model: PreTrainedModel = None
+        if processing:
+            hooked_model = HookedTransformer.from_pretrained(model, *args, **kwargs)
+        else:
+            hooked_model = HookedTransformer.from_pretrained_no_processing(model, *args, **kwargs)
 
-        super().__init__(*args, **kwargs)
+        self.meta_model: HookedTransformer = None
+        self.local_model: HookedTransformer = None
 
-        self.tokenizer = self.local_model.tokenizer
+        super().__init__(hooked_model, *args, **kwargs)
+
+        self.tokenizer: HookedTransformerConfig = self.local_model.tokenizer
         self.config = self.local_model.cfg
         self.local_model.device = device
 
-    def _load_meta(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        raise NotImplementedError("This subclass does not implement this method.")
+    def _load_meta(self, repoid_or_path, *args, **kwargs) -> HookedTransformer:
+        raise NotImplementedError
 
-    def _load_local(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        raise NotImplementedError("This subclass does not implement this method.")
+    def _load_local(self, repoid_or_path, *args, **kwargs) -> HookedTransformer:
+        raise NotImplementedError
 
     def _tokenize(
         self,
@@ -144,7 +153,7 @@ class UnifiedTransformer(NNsightModel):
         self, prepared_inputs, *args, max_new_tokens: int = 1, **kwargs
     ) -> Any:
 
-        # HookedTransformer uses attention_mask in forward, but not generate
+        # HookedTransformer uses attention_mask in forward but not in generate.
         if "attention_mask" in prepared_inputs:
             prepared_inputs.pop("attention_mask")
 

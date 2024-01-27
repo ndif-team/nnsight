@@ -81,3 +81,5 @@ The :func:`forward <nnsight.models.NNsightModel.NNsightModel.forward>` context i
 See :mod:`nnsight.contexts` for more.
 
 """
+
+from .UnifiedTransformer import UnifiedTransformer
