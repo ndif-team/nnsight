@@ -13,6 +13,7 @@ extensions = [
     "sphinx_copybutton",  # Copy button for code blocks
     "sphinx_design",  # Boostrap design components
     "nbsphinx",  # Jupyter notebook support
+    "myst_parser",  # Markdown support
 ]
 
 templates_path = ["_templates"]
@@ -54,10 +55,19 @@ html_theme_options = {
             "attributes": {"class": "ndif"},
         },
     ],
+    "show_prev_next": False,
 }
 
 html_context = {"default_mode": "auto", "ndif_url": "https://ndif.dev/ping"}
 
 html_css_files = [
     "css/custom.css",
+    "css/tutorials.css",
 ]
+
+
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.txt': 'markdown',
+    '.md': 'markdown',
+}
