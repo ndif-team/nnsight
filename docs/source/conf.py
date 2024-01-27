@@ -13,7 +13,6 @@ extensions = [
     "sphinx_copybutton",  # Copy button for code blocks
     "sphinx_design",  # Boostrap design components
     "nbsphinx",  # Jupyter notebook support
-    "myst_parser",  # Markdown support
 ]
 
 templates_path = ["_templates"]
@@ -64,10 +63,3 @@ html_css_files = [
     "css/custom.css",
     "css/tutorials.css",
 ]
-
-
-source_suffix = {
-    '.rst': 'restructuredtext',
-    '.txt': 'markdown',
-    '.md': 'markdown',
-}

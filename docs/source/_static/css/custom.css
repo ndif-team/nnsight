@@ -2,10 +2,6 @@
     display: none;
 }
 
-.example::-webkit-scrollbar {
-    display: none;
-  }
-
 .button-group {
     display: flex;
     flex-direction: row;
@@ -24,7 +20,7 @@
     justify-content: center;
     align-items: center;
     align-content: stretch;
-    padding-bottom: 20vh;
+    padding-bottom: 17vh;
 
     overflow: hidden;
 }

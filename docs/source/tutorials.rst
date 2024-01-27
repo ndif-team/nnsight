@@ -1,3 +1,6 @@
+.. role:: raw-html(raw)
+   :format: html
+
 .. raw:: html
    
    <script>
@@ -5,23 +8,31 @@
       const info = {
          "tutorial-card-0": {
             "title": "Walkthrough",
-            "text": "Main Features",
+            "text": "Learn how to use the central components of the library.",
          },
          "tutorial-card-1": {
-            "title": "IOI Patching",
-            "text": "arXiv:2211.00593",
+            "title": "Activation Patching",
+            "text": "Using causal interventions to identify which activations in a model matter for producing some output.",
          },
          "tutorial-card-2": {
             "title": "Attribution Patching",
-            "text": "arXiv:2308.09124",
+            "text": "Using gradients to take a linear approximation of activation patching.",
          },
          "tutorial-card-3": {
             "title": "Logit Lens",
-            "text": "nostalgebraist",
+            "text": "Decoding activations into vocabulary space.",
          },
          "tutorial-card-4": {
             "title": "Future Lens",
-            "text": "arXiv:2311.04897",
+            "text": "Anticipating subsequent tokens from a single hidden state.",
+         },
+         "tutorial-card-5": {
+            "title": "Function Vectors",
+            "text": "How do language models represent functions?",
+         },
+         "tutorial-card-6": {
+            "title": "Dictionary Learning",
+            "text": "Finding highly interpretable features in langauge models.",
          },
       }
 
@@ -57,9 +68,10 @@ Tutorials
    :class-body: page-info 
    :shadow: none 
 
-   Activation patching!
+   **Click for more information**
+   :raw-html:`<br />` & scroll for more
 
-.. grid:: 4
+.. grid:: 2 2 3 4
    :class-container: tutorial-card-section
 
    .. grid-item::
@@ -69,96 +81,61 @@ Tutorials
          :class-card: sd-text-black sd-border-0 tutorials-cards
          :class-body: sd-font-weight-bold
 
-         Walkthrough
+         `Walkthrough <notebooks/tutorials/walkthrough.ipynb>`_
    
    .. grid-item::
 
       .. card::
          :img-top: _static/images/tutorials/activation_patching.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
+         :class-body: sd-font-weight-bold
          
-         Activation Patching
+         `Activation Patching <notebooks/tutorials/ioi_patching.ipynb>`_
 
    .. grid-item::
 
       .. card::
          :img-top: _static/images/tutorials/attribution_patching.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
+         :class-body: sd-font-weight-bold
 
-         Attribution Patching
+         `Attribution Patching <notebooks/tutorials/attribution_patching.ipynb>`_
    
    .. grid-item::
 
       .. card::
          :img-top: _static/images/tutorials/logit_lens.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
+         :class-body: sd-font-weight-bold
 
-         Logit Lens
+         `Logit Lens <notebooks/tutorials/logit_lens.ipynb>`_
 
    .. grid-item::
 
       .. card::
          :img-top: _static/images/tutorials/future_lens.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
+         :class-body: sd-font-weight-bold
 
-         Future Lens
+         `Future Lens <notebooks/tutorials/future_lens.ipynb>`_
 
    .. grid-item::
 
       .. card::
          :img-top: _static/images/tutorials/function_vectors.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
+         :class-body: sd-font-weight-bold
 
-         Function Vectors
+         `Function Vectors <notebooks/tutorials/function_vectors.ipynb>`_
 
    .. grid-item::
 
       .. card::
          :img-top: _static/images/tutorials/dictionary_learning.png
          :class-card: sd-text-black sd-border-0 tutorials-cards
+         :class-body: sd-font-weight-bold
 
-         Dictionary Learning
-      
-   
-
-
-.. .. grid:: 2
-..    :gutter: 2
-
-..    .. grid-item-card:: Walkthrough
-..       :link: notebooks/walkthrough.ipynb
-
-..       :bdg-primary:`Main Features`
-
-..    .. grid-item-card:: IOI Patching
-..       :link: notebooks/tutorials/ioi_patching.ipynb
-
-..       :bdg-primary:`arXiv:2211.00593`
-
-..    .. grid-item-card:: Attribution Patching
-..       :link: notebooks/tutorials/attribution_patching.ipynb
-
-..       :bdg-primary:`arXiv:2308.09124`
-
-..    .. grid-item-card:: Logit Lens
-..       :link: notebooks/tutorials/logit_lens.ipynb
-
-..       :bdg-primary:`nostalgebraist`
-
-..    .. grid-item-card:: Future Lens
-..       :link: notebooks/tutorials/future_lens.ipynb
-
-..       :bdg-primary:`arXiv:2311.04897`
-   
-..    .. grid-item-card:: Function Vectors
-..       :link: notebooks/tutorials/function_vectors.ipynb
-
-..       :bdg-primary:`arXiv:2310.15213`
-   
-..    .. grid-item-card:: Dictionary Learning
-..       :link: notebooks/tutorials/sae.ipynb
-   
-..       :bdg-primary:`arXiv:2309.08600`
+         `Dictionary Learning <notebooks/tutorials/sae.ipynb>`_
 
 
 .. div:: hidden-toc
@@ -166,6 +143,7 @@ Tutorials
    .. toctree::
       :maxdepth: 1
 
+      notebooks/tutorials/walkthrough.ipynb
       notebooks/tutorials/ioi_patching.ipynb
       notebooks/tutorials/attribution_patching.ipynb
       notebooks/tutorials/logit_lens.ipynb

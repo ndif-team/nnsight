@@ -1,7 +1,7 @@
 Getting Started
 ===============
 
-**nnsight** (/ɛn.saɪt/) is a package for the interpreting and manipulating the internals of deep learning models.
+**NNsight** (/ɛn.saɪt/) is a package for the interpreting and manipulating the internals of deep learning models.
 
 .. _installation:
 
@@ -22,7 +22,7 @@ First Steps
    :gutter: 2
 
    .. grid-item-card:: Walkthrough
-      :link: notebooks/walkthrough.ipynb
+      :link: notebooks/tutorials/walkthrough.ipynb
 
       Walk through the basic functionality of the package.
 

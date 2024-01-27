@@ -1,9 +1,9 @@
 
-About nnsight
+About NNsight
 =============
 
-An API for transparent science on black-box AI
-----------------------------------------------
+An API for transparent science on black-box AI.
+-----------------------------------------------
 
 .. card:: How can you study the internals of a deep network that is too large for you to run?
 
@@ -20,8 +20,8 @@ An API for transparent science on black-box AI
 
     An overview of the nnsight/NDIF pipeline. Researchers write simple Python code to run along with the neural network locally or remotely. Unlike commercial inference, the experiment code can read or write any of the internal states of the neural networks being studied.  This code creates a computation graph that can be sent to the remote service and interleaved with the execution of the neural network.
 
-How you use nnsight
--------------------
+How do I use NNsight?
+---------------------
 
 Nnsight is built on pytorch.
 

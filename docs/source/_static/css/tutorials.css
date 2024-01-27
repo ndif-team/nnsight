@@ -10,3 +10,7 @@
 .tutorial-card-section::-webkit-scrollbar {
     display: none;
 }
+
+.page-info {
+    z-index: 100;
+}
