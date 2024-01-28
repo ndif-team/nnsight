@@ -83,7 +83,7 @@ class Graph:
                     value=args[idx], target="argument", args=[param.name]
                 ))
             # If param name in provided kwargs, create a proxy for that arg instead of default.
-            if param.name in kwargs:
+            elif param.name in kwargs and type(kwargs[param.name]) != type(param.default):
                 trace_kwargs[param.name] = graph.add(
                     value=kwargs[param.name],
                     target="argument",
