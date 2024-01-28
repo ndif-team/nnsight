@@ -63,9 +63,11 @@ class TensorModel(BaseModel):
     type_name: Literal["TENSOR"] = "TENSOR"
 
     values: List
+    dtype: str
 
     def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> torch.Tensor:
-        return torch.tensor(self.values)
+        dtype = getattr(torch, self.dtype)
+        return torch.tensor(self.values, dtype=dtype)
 
 
 class SliceModel(BaseModel):
@@ -148,7 +150,12 @@ PrimitiveType = Annotated[
 ]
 
 TensorType = Annotated[
-    torch.Tensor, AfterValidator(lambda value: TensorModel(values=value.tolist()))
+    torch.Tensor,
+    AfterValidator(
+        lambda value: TensorModel(
+            values=value.tolist(), dtype=str(value.dtype).split(".")[-1]
+        )
+    ),
 ]
 
 SliceType = Annotated[

@@ -20,14 +20,16 @@ def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
     """
     if isinstance(data, cls):
         return fn(data)
+    
+    data_type = type(data)
 
-    if isinstance(data, list):
+    if data_type == list:
         return [apply(_data, fn, cls) for _data in data]
 
-    if isinstance(data, tuple):
+    if data_type == tuple:
         return tuple([apply(_data, fn, cls) for _data in data])
 
-    if isinstance(data, dict):
+    if data_type == dict:
         return {key: apply(value, fn, cls) for key, value in data.items()}
 
     return data
