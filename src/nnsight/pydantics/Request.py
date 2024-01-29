@@ -35,4 +35,9 @@ class RequestModel(BaseModel):
 
         self.batched_input = self.batched_input.compile(None, None)
 
+        self.args = [arg.compile(None, None) for arg in self.args]
+        self.kwargs = {
+            key: value.compile(None, None) for key, value in self.kwargs.items()
+        }
+
         return self

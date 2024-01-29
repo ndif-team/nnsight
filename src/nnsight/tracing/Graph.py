@@ -62,6 +62,9 @@ class Graph:
         # Inspect forward signature to collect all parameters
         signature = inspect.signature(forward)
 
+        trace_args = []
+        trace_kwargs = {}
+
         def get_argument_value(param: inspect.Parameter, idx: int):
             """Gets the correct argument to pass to forward method.
 
@@ -76,19 +79,19 @@ class Graph:
 
             # If idx in range of provided args, create a proxy for that arg instead of default.
             if idx < len(args):
-                return graph.add(
-                    graph=graph, value=args[idx], target="argument", args=[param.name]
-                )
+                trace_args.append(graph.add(
+                    value=args[idx], target="argument", args=[param.name]
+                ))
             # If param name in provided kwargs, create a proxy for that arg instead of default.
-            if param.name in kwargs:
-                return graph.add(
-                    graph=graph,
+            elif param.name in kwargs and type(kwargs[param.name]) != type(param.default):
+                trace_kwargs[param.name] = graph.add(
                     value=kwargs[param.name],
                     target="argument",
                     args=[param.name],
                 )
-            # Otherwise just return default
-            return param.default
+            else:
+                # Otherwise just return default
+                trace_kwargs[param.name] = param.default
 
         # Create the appropriate proxies/values for the forward method in order to trace.
         arguments = [
@@ -104,12 +107,7 @@ class Graph:
             patcher.add(Patch(torch, proxy_wrapper(torch.arange), "arange"))
 
             # Run forward with root module proxy and arguments
-            output: Proxy = forward(graph.module_proxy, *arguments)
-
-            # Create the 'swap' return proxy
-            return_proxy = graph.add(
-                graph=graph, value=True, target="swp", args=[output.node, output.node]
-            )
+            output = forward(graph.module_proxy, *trace_args, **trace_kwargs)
 
         return graph
 
