@@ -44,26 +44,18 @@ class Module(torch.nn.Module):
     Attributes:
         module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsightModel on initialization of meta model.
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
-        output_shape (torch.Size): Shape of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
-        output_type (torch.dtype): Dtype of the tensor outputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
         input (nnsight.intervention.InterventionProxy): Proxy object representing the input of this module. Reset on pass through.
-        input_shape (torch.Size): Shape of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.Size.
-        input_type (torch.dtype): Dtype of the tensor inputs to this module. Populated by most recent pass through. Can also be a nested list of torch.dtype.
         tracer (nnsight.context.Tracer.Tracer): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.
     """
 
     def __init__(self) -> None:
         self.module_path: str = None
 
-        self.input_shape: torch.Size = None
-        self.input_type: torch.dtype = None
-        self.output_shape: torch.Size = None
-        self.output_type: torch.dtype = None
+        self.meta_output = None
+        self.meta_input = None
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
-        self._backward_output: InterventionProxy = None
-        self._backward_input: InterventionProxy = None
 
         self._graph: Graph = None
 
@@ -77,23 +69,30 @@ class Module(torch.nn.Module):
 
     def __call__(
         self, *args: List[Any], **kwds: Dict[str, Any]
-    ) -> Union[Any, InterventionProxy]:
-        """Override __call__ to check for InterventionProxy arguments.
-        If there are any, we should return an InterventionProxy denoting we want to call the given module with arguments.
+    ) -> Union[Any, Proxy]:
+        """Override __call__ to check for Proxy arguments.
+        If there are any, we should return an Proxy denoting we want to call the given module with arguments.
 
         Args:
             args (List[Any]): Positional arguments.
             kwargs (Dict[str,Any]): Keyword arguments
 
         Returns:
-            Union[Any,InterventionProxy]: Either the output of the module if not tracing or a Proxy if tracing.
+            Union[Any,Proxy]: Either the output of the module if not tracing or a Proxy if tracing.
         """
-        proxy = any(
-            isinstance(x, InterventionProxy) for x in list(args) + list(kwds.values())
-        )
+        proxy: Proxy = None
 
-        if proxy:
-            module_proxy = getattr(self.tracer.graph.module_proxy, self.module_path)
+        def get_proxy(_proxy:Proxy):
+
+            nonlocal proxy
+
+            proxy = _proxy
+
+
+        util.apply(list(args) + list(kwds.values()), get_proxy, Proxy)
+
+        if proxy is not None:
+            module_proxy = getattr(proxy.node.graph.module_proxy, self.module_path)
 
             return module_proxy.forward(*args, **kwds)
 
@@ -110,11 +109,7 @@ class Module(torch.nn.Module):
         """
         if self._output is None:
             self._output = self.tracer.graph.add(
-                value=util.apply(
-                    self.output_shape,
-                    lambda x: torch.empty(x, device="meta", requires_grad=True).clone(),
-                    torch.Size,
-                ),
+                value=self.meta_output,
                 target="argument",
                 args=[
                     f"{self.module_path}.output.{self.tracer.generation_idx}",
@@ -151,11 +146,7 @@ class Module(torch.nn.Module):
         """
         if self._input is None:
             self._input = self.tracer.graph.add(
-                value=util.apply(
-                    self.input_shape,
-                    lambda x: torch.empty(x, device="meta", requires_grad=True).clone(),
-                    torch.Size,
-                ),
+                value=self.meta_input,
                 target="argument",
                 args=[
                     f"{self.module_path}.input.{self.tracer.generation_idx}",
@@ -186,11 +177,8 @@ class Module(torch.nn.Module):
         if self._graph is None:
             self._graph = Graph.trace(
                 self,
-                *util.apply(
-                    self.input_shape,
-                    lambda x: torch.empty(x, device="meta"),
-                    torch.Size,
-                ),
+                *self.meta_input[0],
+                **self.meta_input[1],
             )
 
         return self._graph
@@ -211,10 +199,8 @@ class Module(torch.nn.Module):
 
             input = (input, input_kwargs)
 
-            module.output_shape = util.apply(output, lambda x: x.shape, torch.Tensor)
-            module.input_shape = util.apply(input, lambda x: x.shape, torch.Tensor)
-            module.output_type = util.apply(output, lambda x: x.dtype, torch.Tensor)
-            module.input_type = util.apply(input, lambda x: x.dtype, torch.Tensor)
+            module.meta_output = util.apply(output, lambda x : torch.empty_like(x, dtype=x.dtype, device='meta', requires_grad=x.requires_grad).clone(), torch.Tensor)
+            module.meta_input = util.apply(input, lambda x : torch.empty_like(x, dtype=x.dtype, device='meta', requires_grad=x.requires_grad).clone(), torch.Tensor)
 
         for name, _module in module.named_children():
             setattr(module, name, Module.wrap(_module))
