@@ -3,10 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Union
 
 import torch
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, PretrainedConfig, PreTrainedModel,
-                          PreTrainedTokenizer)
-from transformers.models.auto import modeling_auto
+from transformers import BatchEncoding, PreTrainedTokenizer
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 
 from .LanguageModel import LanguageModel
@@ -49,8 +46,12 @@ class UnifiedTransformer(LanguageModel):
         else:
             hooked_model = HookedTransformer.from_pretrained_no_processing(model, *args, **kwargs)
 
-        super().__init__(hooked_model, tokenizer=hooked_model.tokenizer, *args, **kwargs)
-    
+        self.tokenizer: = hooked_model.tokenizer
+        self.meta_model: HookedTransformer = None
+        self.local_model: HookedTransformer = None
+
+        super().__init__(hooked_model, tokenizer=self.tokenizer, *args, **kwargs)
+        
         self.config: HookedTransformerConfig = self.local_model.cfg
         self.local_model.device = device
 
