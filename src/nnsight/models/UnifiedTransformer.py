@@ -46,7 +46,7 @@ class UnifiedTransformer(LanguageModel):
         else:
             hooked_model = HookedTransformer.from_pretrained_no_processing(model, *args, **kwargs)
 
-        self.tokenizer: = hooked_model.tokenizer
+        self.tokenizer = hooked_model.tokenizer
         self.meta_model: HookedTransformer = None
         self.local_model: HookedTransformer = None
 
