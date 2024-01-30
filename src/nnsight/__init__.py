@@ -144,7 +144,7 @@ def meta_where_wrapper(fn):
                     if isinstance(args[0], torch.Tensor)
                     else type(args[0])
                 )
-                return torch.zeros_like(input, dtype=input.dtype, device="meta")
+                return torch.zeros_like(torch.broadcast_tensors(input, args[0])[0], dtype=input.dtype, device="meta")
             return meta_nonzero(input, as_tuple=True)
 
         else:
