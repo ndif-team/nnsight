@@ -3,13 +3,16 @@ from __future__ import annotations
 from typing import Any, Dict, List, Union
 
 import torch
-from transformers import BatchEncoding
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          BatchEncoding, PretrainedConfig, PreTrainedModel,
+                          PreTrainedTokenizer)
+from transformers.models.auto import modeling_auto
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 
-from .NNsightModel import NNsightModel
+from .LanguageModel import LanguageModel
 
 
-class UnifiedTransformer(NNsightModel):
+class UnifiedTransformer(LanguageModel):
     """UnifiedTransformer is an nnsight wrapper around TransformerLens's HookedTransformer.
 
     Inputs can be in the form of:
@@ -38,7 +41,7 @@ class UnifiedTransformer(NNsightModel):
         model: str,
         device: str,
         *args, 
-        processing: bool = True,
+        processing: bool = True, 
         **kwargs
     ) -> None:
         if processing:
@@ -46,20 +49,10 @@ class UnifiedTransformer(NNsightModel):
         else:
             hooked_model = HookedTransformer.from_pretrained_no_processing(model, *args, **kwargs)
 
-        self.meta_model: HookedTransformer = None
-        self.local_model: HookedTransformer = None
-
-        super().__init__(hooked_model, *args, **kwargs)
-
-        self.tokenizer: HookedTransformerConfig = self.local_model.tokenizer
-        self.config = self.local_model.cfg
+        super().__init__(hooked_model, tokenizer=hooked_model.tokenizer, *args, **kwargs)
+    
+        self.config: HookedTransformerConfig = self.local_model.cfg
         self.local_model.device = device
-
-    def _load_meta(self, repoid_or_path, *args, **kwargs) -> HookedTransformer:
-        raise NotImplementedError
-
-    def _load_local(self, repoid_or_path, *args, **kwargs) -> HookedTransformer:
-        raise NotImplementedError
 
     def _tokenize(
         self,
