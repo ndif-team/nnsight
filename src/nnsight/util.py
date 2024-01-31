@@ -1,6 +1,7 @@
 """Module for utility functions and classes used throughout the package."""
 
 import time
+import types
 from functools import wraps
 from typing import Any, Callable, Collection, Type
 
@@ -20,7 +21,7 @@ def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
     """
     if isinstance(data, cls):
         return fn(data)
-    
+
     data_type = type(data)
 
     if data_type == list:
@@ -65,7 +66,12 @@ def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
     if isinstance(object, wrapper):
         return object
 
-    object.__class__ = type(object.__class__.__name__, (wrapper, object.__class__), {})
+    new_class = types.new_class(
+        object.__class__.__name__,
+        (object.__class__, wrapper),
+    )
+
+    object.__class__ = new_class
 
     wrapper.__init__(object, *args, **kwargs)
 
