@@ -90,18 +90,9 @@ class Invoker(AbstractContextManager):
         # .next() increases which generation idx the interventions happen.
         self.tracer.generation_idx += increment
 
-        if self.scan:
-            # Run graph with singe token input.
-            self.inputs = self.tracer.model._prepare_inputs(
-                self.tracer.model._example_input(), *self.args, **self.kwargs
-            )
-            self.tracer.model._scan(
-                self.inputs, *self.tracer.args, **self.tracer.kwargs
-            )
-        else:
-            for name, module in self.tracer.model.meta_model.named_modules():
-                if isinstance(module, Module):
-                    module.clear()
+        for name, module in self.tracer.model.meta_model.named_modules():
+            if isinstance(module, Module):
+                module.clear()
 
     def save_all(self) -> Dict[str, Proxy]:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]
