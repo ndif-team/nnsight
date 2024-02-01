@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import pickle
-
+import torch
 import requests
 import socketio
 from tqdm import tqdm
@@ -84,7 +84,6 @@ class Runner(Tracer):
         )
 
     def run_server(self):
-
         # Create the pydantic object for the request.
         request = pydantics.RequestModel(
             args=self.args,
@@ -101,7 +100,7 @@ class Runner(Tracer):
         else:
             self.non_blocking_request(request)
 
-    def handle_response(self, event:str, data) -> bool:
+    def handle_response(self, event: str, data) -> bool:
         # Load the data into the ResponseModel pydantic class.
         response = pydantics.ResponseModel(**data)
 
@@ -111,7 +110,6 @@ class Runner(Tracer):
         # If the status of the response is completed, update the local nodes that the user specified to save.
         # Then disconnect and continue.
         if response.status == pydantics.ResponseModel.JobStatus.COMPLETED:
-
             # Create BytesIO object to store bytes received from server in.
             result_bytes = io.BytesIO()
             result_bytes.seek(0)
@@ -120,7 +118,6 @@ class Runner(Tracer):
             with requests.get(
                 url=f"https://{CONFIG.API.HOST}/result/{response.id}", stream=True
             ) as stream:
-                
                 # Total size of incoming data.
                 total_size = float(stream.headers["Content-length"])
 
@@ -139,7 +136,7 @@ class Runner(Tracer):
             result_bytes.seek(0)
 
             # Decode bytes with pickle and then into pydantic object.
-            result = pydantics.ResultModel(**pickle.load(result_bytes))
+            result = pydantics.ResultModel(**torch.load(result_bytes, map_location='cpu'))
 
             # Close bytes
             result_bytes.close()
@@ -155,14 +152,12 @@ class Runner(Tracer):
         # Or if there was some error.
         elif response.status == pydantics.ResponseModel.JobStatus.ERROR:
             return True
-        
-        return False
 
+        return False
 
     def blocking_request(self, request: pydantics.RequestModel):
         # Create a socketio connection to the server.
         with socketio.SimpleClient(logger=logger, reconnection_attempts=10) as sio:
-
             # Connect
             sio.connect(
                 f"wss://{CONFIG.API.HOST}",
@@ -174,14 +169,16 @@ class Runner(Tracer):
             # Give request session ID so server knows to respond via websockets to us.
             request.session_id = sio.sid
 
-            # Submit request via 
-            response = requests.post(f"https://{CONFIG.API.HOST}/request", json=request.model_dump(exclude=['id', 'received']))
+            # Submit request via
+            response = requests.post(
+                f"https://{CONFIG.API.HOST}/request",
+                json=request.model_dump(exclude=["id", "received"]),
+            )
             response = pydantics.ResponseModel(**response.json())
 
             print(response)
 
             while True:
-
                 if self.handle_response(*sio.receive()):
                     break
 
