@@ -20,3 +20,6 @@ The :class:`Runner <nnsight.contexts.Runner.Runner>` class is a feature rich con
 Each Runner context uses invoker contexts within to add new inputs to the eventual execution like ``generator.invoke(...)``
 The Runner object also has logic to perform the execution of the traced computation graph on NDIF remote servers (assuming they are running!).
 """
+
+from .Runner import Runner
+from .DirectInvoker import DirectInvoker

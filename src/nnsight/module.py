@@ -49,10 +49,13 @@ class Module(torch.nn.Module):
     """
 
     def __init__(self) -> None:
+
         self.module_path: str = None
 
-        self.meta_output = None
-        self.meta_input = None
+        self.call_iter = 0
+
+        self.meta_output: List[torch.Tensor] = []
+        self.meta_inputs: List[torch.Tensor] = []
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
@@ -61,15 +64,25 @@ class Module(torch.nn.Module):
 
         self.tracer: Tracer = None
 
-    def clear(self):
+    def clear_proxies(self):
+
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
-        self._backward_output: InterventionProxy = None
-        self._backward_input: InterventionProxy = None
 
-    def __call__(
-        self, *args: List[Any], **kwds: Dict[str, Any]
-    ) -> Union[Any, Proxy]:
+    def clear(self):
+
+        self.clear_proxies()
+
+        self.meta_outputs = []
+        self.meta_inputs = []
+
+    def next(self, iteration: int = 1):
+
+        self.call_iter += iteration
+
+        self.clear_proxies()
+
+    def __call__(self, *args: List[Any], **kwds: Dict[str, Any]) -> Union[Any, Proxy]:
         """Override __call__ to check for Proxy arguments.
         If there are any, we should return an Proxy denoting we want to call the given module with arguments.
 
@@ -82,12 +95,11 @@ class Module(torch.nn.Module):
         """
         proxy: Proxy = None
 
-        def get_proxy(_proxy:Proxy):
+        def get_proxy(_proxy: Proxy):
 
             nonlocal proxy
 
             proxy = _proxy
-
 
         util.apply(list(args) + list(kwds.values()), get_proxy, Proxy)
 
@@ -109,10 +121,11 @@ class Module(torch.nn.Module):
         """
         if self._output is None:
             self._output = self.tracer.graph.add(
-                value=self.meta_output,
+                value=self.meta_outputs[self.call_iter],
                 target="argument",
                 args=[
-                    f"{self.module_path}.output.{self.tracer.generation_idx}",
+                    f"{self.module_path}.output",
+                    self.call_iter,
                     self.tracer.batch_size,
                     self.tracer.batch_start,
                 ],
@@ -130,7 +143,7 @@ class Module(torch.nn.Module):
         """
 
         self.output.node.graph.add(
-            target="swp", args=[self.output.node, value], value=True
+            target="swap", args=[self.output.node, value], value=True
         )
 
         self._output = None
@@ -146,10 +159,11 @@ class Module(torch.nn.Module):
         """
         if self._input is None:
             self._input = self.tracer.graph.add(
-                value=self.meta_input,
+                value=self.meta_inputs[self.call_iter],
                 target="argument",
                 args=[
-                    f"{self.module_path}.input.{self.tracer.generation_idx}",
+                    f"{self.module_path}.input",
+                    self.call_iter,
                     self.tracer.batch_size,
                     self.tracer.batch_start,
                 ],
@@ -167,7 +181,7 @@ class Module(torch.nn.Module):
         """
 
         self.input.node.graph.add(
-            target="swp", args=[self.input.node, value], value=True
+            target="swap", args=[self.input.node, value], value=True
         )
 
         self._input = None
@@ -177,8 +191,8 @@ class Module(torch.nn.Module):
         if self._graph is None:
             self._graph = Graph.trace(
                 self,
-                *self.meta_input[0],
-                **self.meta_input[1],
+                *self.meta_inputs[self.call_iter][0],
+                **self.meta_inputs[self.call_iter][1],
             )
 
         return self._graph
@@ -195,18 +209,29 @@ class Module(torch.nn.Module):
         """
 
         def hook(module: Module, input: Any, input_kwargs: Dict, output: Any):
-            module.clear()
+
+            module.clear_proxies()
 
             input = (input, input_kwargs)
 
-            module.meta_output = util.apply(output, lambda x : torch.empty_like(x, dtype=x.dtype, device='meta', requires_grad=x.requires_grad).clone(), torch.Tensor)
-            module.meta_input = util.apply(input, lambda x : torch.empty_like(x, dtype=x.dtype, device='meta', requires_grad=x.requires_grad).clone(), torch.Tensor)
-
-        for name, _module in module.named_children():
-            setattr(module, name, Module.wrap(_module))
-
-        if isinstance(module, (Module, torch.nn.ModuleList)):
-            return module
+            module.meta_outputs.append(
+                util.apply(
+                    output,
+                    lambda x: torch.empty_like(
+                        x, dtype=x.dtype, device="meta", requires_grad=x.requires_grad
+                    ).clone(),
+                    torch.Tensor,
+                )
+            )
+            module.meta_inputs.append(
+                util.apply(
+                    input,
+                    lambda x: torch.empty_like(
+                        x, dtype=x.dtype, device="meta", requires_grad=x.requires_grad
+                    ).clone(),
+                    torch.Tensor,
+                )
+            )
 
         original_output = getattr(module, "output", None)
         original_input = getattr(module, "input", None)

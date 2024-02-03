@@ -16,9 +16,8 @@ class Graph:
 
     Reserved target names:
 
-    * 'module' : There should only be the single root module as a node in the graph for tracing. Added on __init__ and when compiling, the node's value is set to to be whatever module that is being interleaved with this computation graph.
     * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
-    * 'swp' : swp nodes indicate populating the graph's swap attribute. When executed, its value is not set. Logic involving the swap value should set its value after using it.
+    * 'swap' : swp nodes indicate populating the graph's swap attribute. When executed, its value is not set. Logic involving the swap value should set its value after using it.
     * 'null' : Null nodes never get executed and therefore their listeners never get destroyed.
     * 'grad' : grad nodes indicates adding a `.register_hook()` to a tensor proxy
 
@@ -79,11 +78,13 @@ class Graph:
 
             # If idx in range of provided args, create a proxy for that arg instead of default.
             if idx < len(args):
-                trace_args.append(graph.add(
-                    value=args[idx], target="argument", args=[param.name]
-                ))
+                trace_args.append(
+                    graph.add(value=args[idx], target="argument", args=[param.name])
+                )
             # If param name in provided kwargs, create a proxy for that arg instead of default.
-            elif param.name in kwargs and type(kwargs[param.name]) != type(param.default):
+            elif param.name in kwargs and type(kwargs[param.name]) != type(
+                param.default
+            ):
                 trace_kwargs[param.name] = graph.add(
                     value=kwargs[param.name],
                     target="argument",
@@ -117,16 +118,18 @@ class Graph:
         proxy_class: Type[Proxy] = Proxy,
         validate: bool = True,
     ) -> None:
+
         self.proxy_class = proxy_class
         self.validate = validate
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
 
-        self.module_proxy = self.add(value=module, target="module")
-        self.argument_node_names: Dict[str, List[str]] = dict()
+        self.module_proxy = self.add(
+            value=module, target="argument", args=["nnsight_root_module"]
+        )
 
-        self.generation_idx = 0
+        self.argument_node_names: Dict[str, List[str]] = dict()
 
         self.swap: Node = None
 
@@ -158,16 +161,12 @@ class Graph:
 
         return value
 
-    def increment(self) -> None:
-        """Increments the generation_idx by one. Should be called by a forward hook on the model being used for generation."""
-        self.generation_idx += 1
-
     def compile(self, module: torch.nn.Module) -> None:
         """Re-compile graph to prepare for a new execution of the graph.
 
-        Compiles all nodes and sets generation_idx to 0.
+        Compiles all nodes.
 
-        Finally, sets the "module_0" node's value to the module that is being interleaved.
+        Finally, sets the "nnsight_root_module" node's value to the module that is being interleaved.
 
         Args:
             module (torch.nn.Module): Module to be considered the root module of the graph.
@@ -180,10 +179,8 @@ class Graph:
         for node in self.nodes.values():
             node.compile()
 
-        self.generation_idx = 0
-
         # Setting the root module kicks off the graph execution.
-        self.nodes["module_0"].set_value(module)
+        self.module_proxy.node.set_value(module)
 
     def add(
         self,
@@ -223,9 +220,6 @@ class Graph:
 
         if target_name not in self.name_idx:
             self.name_idx[target_name] = 0
-        else:
-            if target_name == "module":
-                raise ValueError("Can only have one module node.")
 
         if name is None:
             name = f"{target_name}_{self.name_idx[target_name]}"
@@ -301,9 +295,8 @@ class Graph:
                 if key in self.argument_node_names:
                     self.nodes[self.argument_node_names[key][0]].set_value(arg)
 
-            # should have the value we need to return.
-            return_value = self.swap
-            self.swap.set_value(True)
+            self.output_proxy
+
             return return_value
 
         # Replace forward method with custom graph execution method.

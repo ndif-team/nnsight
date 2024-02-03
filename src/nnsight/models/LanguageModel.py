@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 
 import torch
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
@@ -8,10 +8,10 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
-from .NNsightModel import NNsightModel
+from . import NNsight
 
 
-class LanguageModel(NNsightModel):
+class LanguageModel(NNsight):
     """LanguageModels are nnsight wrappers around transformer auto models.
 
     Inputs can be in the form of:
@@ -50,7 +50,7 @@ class LanguageModel(NNsightModel):
 
         super().__init__(*args, **kwargs)
 
-    def _load_meta(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
+    def _load_meta(self, repoid_or_path: str, *args, **kwargs) -> PreTrainedModel:
         self.config = AutoConfig.from_pretrained(repoid_or_path, *args, **kwargs)
 
         if self.tokenizer is None:
@@ -143,7 +143,7 @@ class LanguageModel(NNsightModel):
         return inputs
 
     def _batch_inputs(
-        self, prepared_inputs: BatchEncoding, batched_inputs: Dict
+        self, prepared_inputs: BatchEncoding, batched_inputs: Optional[Dict]
     ) -> torch.Tensor:
         if batched_inputs is None:
             batched_inputs = {"input_ids": []}

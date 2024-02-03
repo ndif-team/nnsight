@@ -232,7 +232,7 @@ class Node:
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
-        elif self.target == "swp":
+        elif self.target == "swap":
             if self.graph.swap is not None:
                 self.graph.swap.set_value(False)
 

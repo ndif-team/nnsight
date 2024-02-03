@@ -61,7 +61,7 @@ FUNCTIONS_WHITELIST.update(
         "null": "null",
         "module": "module",
         "argument": "argument",
-        "swp": "swp",
+        "swap": "swap",
         "grad": "grad",
         get_function_name(util.fetch_attr): util.fetch_attr,
         get_function_name(Proxy.proxy_call): Proxy.proxy_call,
