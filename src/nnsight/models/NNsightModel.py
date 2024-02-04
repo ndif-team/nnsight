@@ -10,15 +10,18 @@ from transformers import AutoConfig, AutoModel
 
 from .. import util
 from ..contexts.Runner import Runner
-from ..intervention import HookModel, InterventionHandler, intervene
+from ..contexts.Tracer import Tracer
+from ..intervention import (HookModel, InterventionHandler, InterventionProxy,
+                            intervene)
 from ..logger import logger
 from ..module import Module
 from ..patching import Patch, Patcher
 from ..tracing.Graph import Graph
-from ..contexts.Tracer import Tracer
 
 
 class NNsight:
+
+    proxy_class = InterventionProxy
 
     def __init__(
         self,
@@ -103,7 +106,6 @@ class NNsight:
         inputs: Any,
         graph: Graph,
         *args,
-        grad: bool = False,
         **kwargs,
     ) -> Any:
 
@@ -120,10 +122,6 @@ class NNsight:
 
         intervention_handler = InterventionHandler(graph, total_batch_size)
 
-        if not grad:
-
-            torch.no_grad().__enter__()
-
         with HookModel(
             self.local_model,
             list(graph.argument_node_names.keys()),
@@ -135,10 +133,6 @@ class NNsight:
             ),
         ):
             output = fn(inputs, *args, **kwargs)
-
-        if not grad:
-
-            torch.no_grad().__exit__(None, None, None)
 
         logger.info(f"Completed `{self.model_key}`")
 

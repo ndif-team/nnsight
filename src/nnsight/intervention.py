@@ -107,7 +107,7 @@ class InterventionProxy(Proxy):
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
 
-        self.node.graph.add(target="swp", args=[self.grad.node, value], value=True)
+        self.node.graph.add(target="swap", args=[self.grad.node, value], value=True)
 
         self._grad = None
 

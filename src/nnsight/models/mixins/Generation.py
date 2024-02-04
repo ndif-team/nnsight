@@ -5,9 +5,9 @@ from ...contexts import Runner
 
 class GenerationMixin:
 
-    def generate(self, *args, **kwargs):
+    def generate(self, *args, **kwargs) -> Runner:
 
-        Runner(self, *args, generate=True, **kwargs)
+        return Runner(self, *args, generate=True, **kwargs)
 
     def _execute(self, prepared_inputs: Any, *args, generate=False, **kwargs) -> Any:
 

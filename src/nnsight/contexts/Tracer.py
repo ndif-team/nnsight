@@ -42,7 +42,7 @@ class Tracer:
         self.kwargs = kwargs
 
         self.graph = Graph(
-            self.model.meta_model, proxy_class=InterventionProxy, validate=validate
+            self.model.meta_model, proxy_class=model.proxy_class, validate=validate
         )
 
         self.batch_size: int = 0

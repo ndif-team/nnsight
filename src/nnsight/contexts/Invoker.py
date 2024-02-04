@@ -60,12 +60,16 @@ class Invoker(AbstractContextManager):
         )
 
         if self.scan:
-            self.tracer.model._scan(self.input, *self.tracer.args, **self.tracer.kwargs)
-        else:
             for name, module in self.tracer.model.meta_model.named_modules():
                 if not isinstance(module, torch.nn.ModuleList):
                     module.clear()
             self.tracer.model.meta_model.clear()
+            self.tracer.model._scan(self.input, *self.tracer.args, **self.tracer.kwargs)
+        else:
+            for name, module in self.tracer.model.meta_model.named_modules():
+                if not isinstance(module, torch.nn.ModuleList):
+                    module.clear_proxies()
+            self.tracer.model.meta_model.clear_proxies()
 
         self.tracer.batch_start += self.tracer.batch_size
 

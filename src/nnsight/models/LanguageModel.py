@@ -10,8 +10,71 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
 from transformers.models.auto import modeling_auto
 
 from .. import util
+from ..intervention import InterventionProxy
 from . import NNsight
 from .mixins import GenerationMixin
+
+
+class TokenIndexer:
+    """Helper class to directly access token indices of hidden states.
+    Directly indexes the second dimension of tensors.
+    Makes positive indices negative as tokens are padded on the left.
+
+    Args:
+        proxy (InterventionProxy): Proxy to aid in token indexing.
+    """
+
+    def __init__(self, proxy: InterventionProxy) -> None:
+        self.proxy = proxy
+
+    def convert_idx(self, idx: int):
+        if idx >= 0:
+            n_tokens = self.proxy.node.proxy_value.shape[1]
+            idx = -(n_tokens - idx)
+
+        return idx
+
+    def __getitem__(self, key: int) -> LanguageModelProxy:
+        key = self.convert_idx(key)
+
+        return self.proxy[:, key]
+
+    def __setitem__(self, key: int, value: Union[LanguageModelProxy, Any]) -> None:
+        key = self.convert_idx(key)
+
+        self.proxy[:, key] = value
+
+
+class LanguageModelProxy(InterventionProxy):
+    @property
+    def token(self) -> TokenIndexer:
+        """Property used to do token based indexing on a proxy.
+        Directly indexes the second dimension of tensors.
+        Makes positive indices negative as tokens are padded on the left.
+
+        Example:
+
+            .. code-block:: python
+
+                model.transformer.h[0].mlp.output.token[0]
+
+            Is equivalent to:
+
+            .. code-block:: python
+
+                model.transformer.h[0].mlp.output.token[:,-3]
+
+            For a proxy tensor with 3 tokens.
+
+        Returns:
+            TokenIndexer: Object to do token based indexing.
+        """
+        return TokenIndexer(self)
+
+    @property
+    def t(self) -> TokenIndexer:
+        """Property as alias for InterventionProxy.token"""
+        return self.token
 
 
 class LanguageModel(GenerationMixin, NNsight):
@@ -37,6 +100,8 @@ class LanguageModel(GenerationMixin, NNsight):
         local_model (PreTrainedModel): Local version of underlying auto model.
 
     """
+
+    proxy_class = LanguageModelProxy
 
     def __init__(
         self, *args, tokenizer=None, automodel=AutoModelForCausalLM, **kwargs
