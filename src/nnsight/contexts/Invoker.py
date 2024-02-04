@@ -65,6 +65,7 @@ class Invoker(AbstractContextManager):
             for name, module in self.tracer.model.meta_model.named_modules():
                 if not isinstance(module, torch.nn.ModuleList):
                     module.clear()
+            self.tracer.model.meta_model.clear()
 
         self.tracer.batch_start += self.tracer.batch_size
 
@@ -92,18 +93,8 @@ class Invoker(AbstractContextManager):
         for name, module in self.tracer.model.meta_model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
                 module.clear_proxies()
+                module.next(increment)
+                
+        self.tracer.model.meta_model.clear_proxies()
+        self.tracer.model.meta_model.next()
 
-            module.next(increment)
-
-    def save_all(self) -> Dict[str, Proxy]:
-        """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]
-
-        Returns:
-            Dict[str, Proxy]: Dictionary of all modules saved, keyed by their module_path.
-        """
-        result = {}
-
-        for name, module in self.tracer.model.meta_model.named_modules():
-            result[module.module_path] = module.output.save()
-
-        return result

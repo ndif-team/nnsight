@@ -50,7 +50,7 @@ class Module(torch.nn.Module):
 
     def __init__(self) -> None:
 
-        self.module_path: str = None
+        self.module_path: str = ""
 
         self.call_iter = 0
 

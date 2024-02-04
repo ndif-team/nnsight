@@ -11,9 +11,10 @@ from transformers.models.auto import modeling_auto
 
 from .. import util
 from . import NNsight
+from .mixins import GenerationMixin
 
 
-class LanguageModel(NNsight):
+class LanguageModel(GenerationMixin, NNsight):
     """LanguageModels are nnsight wrappers around transformer auto models.
 
     Inputs can be in the form of:
@@ -172,21 +173,7 @@ class LanguageModel(NNsight):
             {"input_ids": torch.tensor([[0]]), "labels": torch.tensor([[0]])}
         )
 
-    def _generation(
-        self, prepared_inputs, *args, max_new_tokens: int = 1, **kwargs
-    ) -> Any:
-        return super()._generation(
-            prepared_inputs, *args, max_new_tokens=max_new_tokens, **kwargs
-        )
-
-    def _scan(self, prepared_inputs: Any, *args, **kwargs) -> None:
-
-        device = torch.device("meta")
-
-        with accelerate.init_empty_weights(include_buffers=True):
-            return self.meta_model(*args, **prepared_inputs.copy().to(device), **kwargs)
-
-    def _execute(self, prepared_inputs: Any, *args, **kwargs) -> Any:
+    def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
         device = next(self.local_model.parameters()).device
 
@@ -199,3 +186,39 @@ class LanguageModel(NNsight):
             **prepared_inputs.copy().to(device),
             **kwargs,
         )
+
+    def _execute_generate(
+        self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
+    ):
+
+        device = next(self.local_model.parameters()).device
+
+        prepared_inputs = util.apply(
+            prepared_inputs, lambda x: x.to(device), torch.Tensor
+        )
+
+        return self.local_model.generate(
+            *args,
+            **prepared_inputs.copy().to(device),
+            max_new_tokens=max_new_tokens,
+            **kwargs,
+        )
+
+    def _scan_forward(self, prepared_inputs: Any, *args, **kwargs):
+
+        device = torch.device("meta")
+
+        with accelerate.init_empty_weights(include_buffers=True):
+            return self.meta_model(*args, **prepared_inputs.copy().to(device), **kwargs)
+
+    def _scan_generate(self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs):
+
+        device = torch.device("meta")
+
+        with accelerate.init_empty_weights(include_buffers=True):
+            return self.meta_model.generate(
+                *args,
+                **prepared_inputs.copy().to(device),
+                max_new_tokens=max_new_tokens,
+                **kwargs,
+            )

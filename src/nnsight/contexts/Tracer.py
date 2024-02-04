@@ -56,6 +56,8 @@ class Tracer:
         for name, module in self.model.meta_model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
                 module.tracer = self
+        self.model.meta_model.tracer = self
+        
 
     def __enter__(self) -> Tracer:
         return self
