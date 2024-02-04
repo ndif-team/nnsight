@@ -125,13 +125,13 @@ class Graph:
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
 
-        self.module_proxy = self.add(
-            value=module, target="argument", args=["nnsight_root_module"]
-        )
-
         self.argument_node_names: Dict[str, List[str]] = dict()
 
         self.swap: Node = None
+
+        self.module_proxy = self.add(
+            value=module, target="argument", args=["nnsight_root_module"]
+        )
 
     def get_swap(self, value):
         if self.swap is not None:

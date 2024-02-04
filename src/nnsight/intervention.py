@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import inspect
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, List, Tuple, Union
+from typing import Any, Callable, Collection, Dict, List, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -195,18 +195,28 @@ def concat(
 
 
 def intervene(
-    activations: Any, module_path: str, graph: Graph, key: str, total_batch_size: int
+    activations: Any,
+    module_path: str,
+    key: str,
+    intervention_handler: InterventionHandler,
 ):
 
     module_path = f"{module_path}.{key}"
 
-    if module_path in graph.argument_node_names:
-        argument_node_names = graph.argument_node_names[module_path]
+    if module_path in intervention_handler.graph.argument_node_names:
+        argument_node_names = intervention_handler.graph.argument_node_names[
+            module_path
+        ]
 
         for argument_node_name in argument_node_names:
-            node = graph.nodes[argument_node_name]
+
+            node = intervention_handler.graph.nodes[argument_node_name]
 
             _, batch_size, batch_start, call_iter = node.args
+
+            if call_iter != intervention_handler.count(argument_node_name):
+
+                continue
 
             narrowed = False
 
@@ -214,7 +224,10 @@ def intervene(
 
                 nonlocal narrowed
 
-                if batch_size != total_batch_size and total_batch_size == acts.shape[0]:
+                if (
+                    batch_size != intervention_handler.total_batch_size
+                    and intervention_handler.total_batch_size == acts.shape[0]
+                ):
                     narrowed = True
                     return acts.narrow(0, batch_start, batch_size)
 
@@ -228,12 +241,16 @@ def intervene(
 
             node.set_value(value)
 
-            value = graph.get_swap(value)
+            value = intervention_handler.graph.get_swap(value)
 
             if narrowed:
 
                 activations = concat(
-                    activations, value, batch_start, batch_size, total_batch_size
+                    activations,
+                    value,
+                    batch_start,
+                    batch_size,
+                    intervention_handler.total_batch_size,
                 )
 
             else:
@@ -281,7 +298,14 @@ class HookModel(AbstractContextManager):
         """
 
         for module_key in self.module_keys:
-            *module_atoms, hook_type = module_key.split(".")[:-1]
+
+            module_atoms = module_key.split(".")
+
+            if len(module_atoms) == 1:
+                continue
+
+            *module_atoms, hook_type = module_atoms
+
             module_path = ".".join(module_atoms)
 
             module: torch.nn.Module = util.fetch_attr(self.model, module_path)
@@ -308,3 +332,24 @@ class HookModel(AbstractContextManager):
         """Removes all handles added during __enter__."""
         for handle in self.handles:
             handle.remove()
+
+
+class InterventionHandler:
+
+    def __init__(self, graph: Graph, total_batch_size: int) -> None:
+
+        self.graph = graph
+        self.total_batch_size = total_batch_size
+        self.call_counter: Dict[str, int] = {}
+
+    def count(self, name: str):
+
+        if name not in self.call_counter:
+
+            self.call_counter[name] = 0
+
+        else:
+
+            self.call_counter[name] += 1
+
+        return self.call_counter[name]

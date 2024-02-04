@@ -70,18 +70,7 @@ class Runner(Tracer):
         if self.remote:
             self.run_server()
         else:
-            self.run_local()
-
-    def run_local(self):
-        """Runs the local_model using it's chosen method."""
-        # Run the model and store the output.
-        self.output = self.model(
-            self.model._generation if self.generation else self.model._forward,
-            self.batched_input,
-            self.graph,
-            *self.args,
-            **self.kwargs,
-        )
+            super().__exit__(exc_type, exc_val, exc_tb)
 
     def run_server(self):
         # Create the pydantic object for the request.
@@ -185,5 +174,4 @@ class Runner(Tracer):
     def non_blocking_request(self, request: pydantics.RequestModel):
         pass
 
-    def invoke(self, input, *args, **kwargs) -> Invoker:
-        return Invoker(self, input, *args, **kwargs)
+

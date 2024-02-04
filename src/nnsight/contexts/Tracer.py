@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from contextlib import AbstractContextManager
+
 from typing import TYPE_CHECKING, Any, List
 
 import torch
 
 from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
+from .Invoker import Invoker
 
 if TYPE_CHECKING:
-    from ..models.NNsightModel import NNsightModel
+    from ..models.NNsightModel import NNsight
 
 
-class Tracer(AbstractContextManager):
+class Tracer:
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the meta_model of a :class:`nnsight.models.NNsightModel.NNsightModel` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -30,7 +31,7 @@ class Tracer(AbstractContextManager):
 
     def __init__(
         self,
-        model: "NNsightModel",
+        model: "NNsight",
         *args,
         validate: bool = True,
         **kwargs,
@@ -46,7 +47,7 @@ class Tracer(AbstractContextManager):
 
         self.batch_size: int = 0
         self.batch_start: int = 0
-        self.generation_idx: int = 0
+
         self.batched_input: Any = None
 
         self.output = None
@@ -56,10 +57,19 @@ class Tracer(AbstractContextManager):
             if not isinstance(module, torch.nn.ModuleList):
                 module.tracer = self
 
-    @abstractmethod
     def __enter__(self) -> Tracer:
-        raise NotImplementedError()
+        return self
 
-    @abstractmethod
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        raise NotImplementedError()
+        if isinstance(exc_val, BaseException):
+            raise exc_val
+        self.output = self.model(
+            self.model._execute,
+            self.batched_input,
+            self.graph,
+            *self.args,
+            **self.kwargs,
+        )
+    
+    def invoke(self, input, *args, **kwargs) -> Invoker:
+        return Invoker(self, input, *args, **kwargs)

@@ -9,13 +9,13 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from .. import util
-from ..contexts.DirectInvoker import DirectInvoker
 from ..contexts.Runner import Runner
-from ..intervention import HookModel, intervene
+from ..intervention import HookModel, InterventionHandler, intervene
 from ..logger import logger
 from ..module import Module
 from ..patching import Patch, Patcher
 from ..tracing.Graph import Graph
+from ..contexts.Tracer import Tracer
 
 
 class NNsight:
@@ -75,7 +75,7 @@ class NNsight:
 
         self.meta_model = Module.wrap(self.meta_model)
 
-        for name, module in self.meta_model.named_modules():
+        for name, module in list(self.meta_model.named_modules()):
 
             if isinstance(module, (Module, torch.nn.ModuleList)):
                 continue
@@ -95,7 +95,6 @@ class NNsight:
         return repr(self.meta_model)
 
     def __getattr__(self, key: Any) -> Any:
-
         return getattr(self.meta_model, key)
 
     def __call__(
@@ -104,7 +103,7 @@ class NNsight:
         inputs: Any,
         graph: Graph,
         *args,
-        grad: bool = True,
+        grad: bool = False,
         **kwargs,
     ) -> Any:
 
@@ -119,18 +118,27 @@ class NNsight:
 
         _, total_batch_size = self._batch_inputs(inputs, None)
 
-        with torch.no_grad(mode=grad):
-            with HookModel(
-                self.local_model,
-                list(graph.argument_node_names.keys()),
-                input_hook=lambda activations, module_path: intervene(
-                    activations, module_path, graph, "input", total_batch_size
-                ),
-                output_hook=lambda activations, module_path: intervene(
-                    activations, module_path, graph, "output", total_batch_size
-                ),
-            ):
-                output = fn(inputs, *args, **kwargs)
+        intervention_handler = InterventionHandler(graph, total_batch_size)
+
+        if not grad:
+
+            torch.no_grad().__enter__()
+
+        with HookModel(
+            self.local_model,
+            list(graph.argument_node_names.keys()),
+            input_hook=lambda activations, module_path: intervene(
+                activations, module_path, "input", intervention_handler
+            ),
+            output_hook=lambda activations, module_path: intervene(
+                activations, module_path, "output", intervention_handler
+            ),
+        ):
+            output = fn(inputs, *args, **kwargs)
+
+        if not grad:
+
+            torch.no_grad().__exit__(None, None, None)
 
         logger.info(f"Completed `{self.model_key}`")
 
@@ -151,15 +159,27 @@ class NNsight:
         logger.info(f"Dispatched `{self.model_key}`")
 
     def forward(self, *args, **kwargs) -> Runner:
-
         return Runner(self, *args, **kwargs)
 
-    def invoke(self, *args, **kwargs):
+    def trace(self, inputs: Any, *args, invoke_args={}, **kwargs) -> NNsight:
 
-        return DirectInvoker(self, *args, **kwargs)
+        runner = Runner(self, *args, **kwargs).__enter__()
+
+        runner.invoke(inputs, **invoke_args).__enter__()
+
+        return self
+
+    def invoke(self, inputs: Any, *args, fwd_args={}, **kwargs) -> NNsight:
+
+        return self.trace(inputs, invoke_args=kwargs, **fwd_args)
+
+    def __enter__(self) -> NNsight:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.meta_model.tracer.__exit__(None, None, None)
 
     def _prepare_inputs(self, inputs: Any, **kwargs) -> Any:
-
         return inputs
 
     def _load_meta(self, model_key: str, *args, **kwargs) -> torch.nn.Module:
@@ -168,13 +188,11 @@ class NNsight:
 
         return AutoModel.from_config(self.config, trust_remote_code=True)
 
-    def _load_local(self, model_key:str, *args, **kwargs) -> torch.nn.Module:
+    def _load_local(self, model_key: str, *args, **kwargs) -> torch.nn.Module:
 
-        return AutoModel.from_pretrained(
-            model_key, *args, config=self.config, **kwargs
-        )
+        return AutoModel.from_pretrained(model_key, *args, config=self.config, **kwargs)
 
-    def _scan(self, prepared_inputs:Any, *args, **kwargs) -> None:
+    def _scan(self, prepared_inputs: Any, *args, **kwargs) -> None:
 
         device = torch.device("meta")
 
@@ -185,12 +203,12 @@ class NNsight:
         with accelerate.init_empty_weights(include_buffers=True):
             return self.meta_model(prepared_inputs, *args, **kwargs)
 
-    def _execute(self, prepared_inputs:Any, *args, **kwargs) -> Any:
+    def _execute(self, prepared_inputs: Any, *args, **kwargs) -> Any:
 
         device = next(self.local_model.parameters()).device
 
         prepared_inputs = util.apply(
-            prepared_inputs, lambda x: x.clone().to(device), torch.Tensor
+            prepared_inputs, lambda x: x.to(device), torch.Tensor
         )
 
         return self.local_model(
@@ -210,3 +228,7 @@ class NNsight:
             batched_inputs = [*batched_inputs, prepared_inputs]
 
         return batched_inputs, len(prepared_inputs)
+
+    def _example_input(self) -> Any:
+
+        raise NotImplementedError()

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 
 import torch
 
-from ..module import Module
 from ..tracing.Proxy import Proxy
-from .Tracer import Tracer
+
+if TYPE_CHECKING:
+
+    from .Tracer import Tracer
 
 
 class Invoker(AbstractContextManager):
@@ -27,7 +29,7 @@ class Invoker(AbstractContextManager):
 
     def __init__(
         self,
-        tracer: Tracer,
+        tracer: "Tracer",
         input: Any,
         *args,
         scan: bool = True,
@@ -51,8 +53,7 @@ class Invoker(AbstractContextManager):
         Returns:
             Invoker: Invoker.
         """
-        # Were in a new invocation so set generation_idx to 0,
-        self.tracer.generation_idx = 0
+
 
         self.input = self.tracer.model._prepare_inputs(
             self.input, *self.args, **self.kwargs
@@ -62,7 +63,7 @@ class Invoker(AbstractContextManager):
             self.tracer.model._scan(self.input, *self.tracer.args, **self.tracer.kwargs)
         else:
             for name, module in self.tracer.model.meta_model.named_modules():
-                if isinstance(module, Module):
+                if not isinstance(module, torch.nn.ModuleList):
                     module.clear()
 
         self.tracer.batch_start += self.tracer.batch_size
@@ -87,12 +88,12 @@ class Invoker(AbstractContextManager):
         Args:
             increment (int): How many generation_idx to increment at once. Defaults to 1.
         """
-        # .next() increases which generation idx the interventions happen.
-        self.tracer.generation_idx += increment
 
         for name, module in self.tracer.model.meta_model.named_modules():
-            if isinstance(module, Module):
-                module.clear()
+            if not isinstance(module, torch.nn.ModuleList):
+                module.clear_proxies()
+
+            module.next(increment)
 
     def save_all(self) -> Dict[str, Proxy]:
         """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]

@@ -22,4 +22,3 @@ The Runner object also has logic to perform the execution of the traced computat
 """
 
 from .Runner import Runner
-from .DirectInvoker import DirectInvoker

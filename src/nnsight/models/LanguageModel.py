@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Union, Optional
+from typing import Any, Dict, List, Optional, Union
 
+import accelerate
 import torch
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, PretrainedConfig, PreTrainedModel,
                           PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
+from .. import util
 from . import NNsight
 
 
@@ -118,11 +120,13 @@ class LanguageModel(NNsight):
 
             tokenized_inputs = self._tokenize(inputs["input_ids"], **kwargs)
 
-            new_inputs['input_ids'] = tokenized_inputs['input_ids']
+            new_inputs["input_ids"] = tokenized_inputs["input_ids"]
 
             if "attention_mask" in inputs:
                 for ai, attn_mask in enumerate(inputs["attention_mask"]):
-                    tokenized_inputs["attention_mask"][ai, -len(attn_mask) :] = attn_mask
+                    tokenized_inputs["attention_mask"][
+                        ai, -len(attn_mask) :
+                    ] = attn_mask
 
                 new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
 
@@ -173,4 +177,25 @@ class LanguageModel(NNsight):
     ) -> Any:
         return super()._generation(
             prepared_inputs, *args, max_new_tokens=max_new_tokens, **kwargs
+        )
+
+    def _scan(self, prepared_inputs: Any, *args, **kwargs) -> None:
+
+        device = torch.device("meta")
+
+        with accelerate.init_empty_weights(include_buffers=True):
+            return self.meta_model(*args, **prepared_inputs.copy().to(device), **kwargs)
+
+    def _execute(self, prepared_inputs: Any, *args, **kwargs) -> Any:
+
+        device = next(self.local_model.parameters()).device
+
+        prepared_inputs = util.apply(
+            prepared_inputs, lambda x: x.to(device), torch.Tensor
+        )
+
+        return self.local_model(
+            *args,
+            **prepared_inputs.copy().to(device),
+            **kwargs,
         )

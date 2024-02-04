@@ -54,7 +54,7 @@ class Module(torch.nn.Module):
 
         self.call_iter = 0
 
-        self.meta_output: List[torch.Tensor] = []
+        self.meta_outputs: List[torch.Tensor] = []
         self.meta_inputs: List[torch.Tensor] = []
 
         self._output: InterventionProxy = None
@@ -125,9 +125,9 @@ class Module(torch.nn.Module):
                 target="argument",
                 args=[
                     f"{self.module_path}.output",
-                    self.call_iter,
                     self.tracer.batch_size,
                     self.tracer.batch_start,
+                    self.call_iter
                 ],
             )
 
@@ -163,9 +163,9 @@ class Module(torch.nn.Module):
                 target="argument",
                 args=[
                     f"{self.module_path}.input",
-                    self.call_iter,
                     self.tracer.batch_size,
                     self.tracer.batch_start,
+                    self.call_iter
                 ],
             )
 
