@@ -42,7 +42,10 @@ class Module(torch.nn.Module):
     Proxies of it's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:
-        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsightModel on initialization of meta model.
+        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsight on initialization of meta model.
+        call_iter (int): Integer representing the current iteration of this module's inputs/outputs.
+        meta_outputs (List[torch.Tensor]): List of 'meta' tensors built from the outputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
+        meta_inputs (List[torch.Tensor]): List of 'meta' tensors built from the inputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
         input (nnsight.intervention.InterventionProxy): Proxy object representing the input of this module. Reset on pass through.
         tracer (nnsight.context.Tracer.Tracer): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.
@@ -74,7 +77,6 @@ class Module(torch.nn.Module):
         self.reset_proxies()
 
         self.call_iter = 0
-
 
     def clear(self) -> None:
 
@@ -130,13 +132,17 @@ class Module(torch.nn.Module):
         """
         if self._output is None:
             self._output = self.tracer.graph.add(
-                value=self.meta_outputs[self.call_iter] if len(self.meta_outputs) > 0 else None,
+                value=(
+                    self.meta_outputs[self.call_iter]
+                    if len(self.meta_outputs) > 0
+                    else None
+                ),
                 target="argument",
                 args=[
                     f"{self.module_path}.output",
                     self.tracer.batch_size,
                     self.tracer.batch_start,
-                    self.call_iter
+                    self.call_iter,
                 ],
             )
 
@@ -168,13 +174,17 @@ class Module(torch.nn.Module):
         """
         if self._input is None:
             self._input = self.tracer.graph.add(
-                value=self.meta_inputs[self.call_iter] if len(self.meta_inputs) > 0 else None,
+                value=(
+                    self.meta_inputs[self.call_iter]
+                    if len(self.meta_inputs) > 0
+                    else None
+                ),
                 target="argument",
                 args=[
                     f"{self.module_path}.input",
                     self.tracer.batch_size,
                     self.tracer.batch_start,
-                    self.call_iter
+                    self.call_iter,
                 ],
             )
 

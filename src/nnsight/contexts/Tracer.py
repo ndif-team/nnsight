@@ -21,9 +21,7 @@ class Tracer:
         kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
         batch_size (int): Batch size of the most recent input. Used by Module to create input/output proxies.
         batch_start (int): Batch start of the most recent input. Used by Module to create input/output proxies.
-        generation_idx (int): Current generation idx for multi-iteration generation. Used by Module to create input/output proxies.
         batched_input Any: Batched version of all inputs involved in this Tracer.
-        output (Any): Output of execution after __exit__
     """
 
     def __init__(
@@ -51,6 +49,7 @@ class Tracer:
         for name, module in self.model.meta_model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
                 module.tracer = self
+
         self.model.meta_model.tracer = self
 
     def __enter__(self) -> Tracer:
@@ -67,5 +66,5 @@ class Tracer:
             **self.kwargs,
         )
 
-    def invoke(self, input, *args, **kwargs) -> Invoker:
+    def invoke(self, input: Any, *args, **kwargs) -> Invoker:
         return Invoker(self, input, *args, **kwargs)

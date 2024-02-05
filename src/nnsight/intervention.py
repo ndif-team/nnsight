@@ -1,6 +1,6 @@
 """This module contains logic to interleave a computation graph (an intervention graph) with the computation graph of a model.
 
-The :class:`InterventionProxy <nnsight.intervention.InterventionProxy>` class extends the functionality of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
+The :class:`InterventionProxy <nnsight.intervention.InterventionProxy>` class extends the functionality of a base nnsight.tracing.Proxy.Proxy object and makes it easier for users to interact with.
 
 :func:`intervene() <nnsight.intervention.intervene>` is the entry hook into the models computation graph in order to interleave an intervention graph.
 
@@ -9,7 +9,6 @@ The :class:`HookModel <nnsight.intervention.HookModel>` provides a context manag
 
 from __future__ import annotations
 
-import inspect
 from contextlib import AbstractContextManager
 from typing import Any, Callable, Collection, Dict, List, Tuple, Union
 
@@ -40,18 +39,6 @@ class InterventionProxy(Proxy):
 
         This works and would output the inputs and outputs to the model.lm_head module.
         Had you not called .save(), calling .value would have been None.
-
-        Indexing by token of hidden states can easily done using ``.token[<idx>]`` or ``.t[<idx>]``
-
-        .. code-block:: python
-
-            with runner.invoke('The Eiffel Tower is in the city of') as invoker:
-                logits = model.lm_head.output.t[0].save()
-
-            print(logits.value)
-
-        This would save only the first token of the output for this module.
-        This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
 
         Calling ``.shape`` on an InterventionProxy returns the shape or collection of shapes for the tensors traced through this module.
 

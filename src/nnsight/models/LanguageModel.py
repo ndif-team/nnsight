@@ -47,6 +47,28 @@ class TokenIndexer:
 
 
 class LanguageModelProxy(InterventionProxy):
+    """
+
+    Indexing by token of hidden states can easily done using ``.token[<idx>]`` or ``.t[<idx>]``
+
+    .. code-block:: python
+
+        with runner.invoke('The Eiffel Tower is in the city of') as invoker:
+            logits = model.lm_head.output.t[0].save()
+
+        print(logits.value)
+
+    This would save only the first token of the output for this module.
+    This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
+
+    
+
+    Args:
+        InterventionProxy (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     @property
     def token(self) -> TokenIndexer:
         """Property used to do token based indexing on a proxy.

@@ -30,7 +30,7 @@ class Graph:
         module_proxy (Proxy): Proxy for given root meta module.
         argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
         generation_idx (int): Current generation index.
-        swap (Node): Attribute to store swap values from 'swp' nodes.
+        swap (Node): Attribute to store swap values from 'swap' nodes.
     """
 
     @staticmethod

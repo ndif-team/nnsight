@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Any, Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Dict
 
 import torch
 
+from ..intervention import InterventionProxy
 from ..tracing.Proxy import Proxy
 
 if TYPE_CHECKING:
@@ -44,7 +45,6 @@ class Invoker(AbstractContextManager):
     def __enter__(self) -> Invoker:
         """Enters a new invocation context with a given input.
 
-        Sets the generation_idx to 0.
         Calls the model's _prepare_inputs method using the input and other arguments.
         If scan is True, uses the model's _scan method to update and validate module inputs/outputs.
         Gets a batched version of the post processed input using the model's _batched_inputs method to update the Tracer's
@@ -83,14 +83,22 @@ class Invoker(AbstractContextManager):
         if isinstance(exc_val, BaseException):
             raise exc_val
 
-    def apply(self, target, *args, **kwargs):
+    def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
+        """Helper method to directly add a function to the intervention graph.
+
+        Args:
+            target (Callable): Function to apply
+
+        Returns:
+            InterventionProxy: Proxy of applying that function.
+        """
         return self.tracer.graph.add(target=target, args=args, kwargs=kwargs)
 
     def next(self, increment: int = 1) -> None:
-        """Designates subsequent interventions should be applied to the next generation for multi-iteration generation runs.
+        """Increments call_iter of all ``Module``s. Useful when doing iterative/generatie runs.
 
         Args:
-            increment (int): How many generation_idx to increment at once. Defaults to 1.
+            increment (int): How many call_iter to increment at once. Defaults to 1.
         """
 
         for name, module in self.tracer.model.meta_model.named_modules():
