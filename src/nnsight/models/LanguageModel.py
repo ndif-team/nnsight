@@ -264,10 +264,6 @@ class LanguageModel(GenerationMixin, NNsight):
 
         device = next(self.local_model.parameters()).device
 
-        prepared_inputs = util.apply(
-            prepared_inputs, lambda x: x.to(device), torch.Tensor
-        )
-
         return self.local_model(
             *args,
             **prepared_inputs.copy().to(device),
@@ -279,10 +275,6 @@ class LanguageModel(GenerationMixin, NNsight):
     ):
 
         device = next(self.local_model.parameters()).device
-
-        prepared_inputs = util.apply(
-            prepared_inputs, lambda x: x.to(device), torch.Tensor
-        )
 
         output = self.local_model.generate(
             *args,
