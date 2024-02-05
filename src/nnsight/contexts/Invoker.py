@@ -83,6 +83,11 @@ class Invoker(AbstractContextManager):
         if isinstance(exc_val, BaseException):
             raise exc_val
 
+        self.on_exit()
+
+    def on_exit(self):
+        pass
+
     def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
 

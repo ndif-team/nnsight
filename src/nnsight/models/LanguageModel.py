@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
@@ -10,7 +9,6 @@ from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
                           PreTrainedModel, PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
-from .. import util
 from ..intervention import InterventionProxy
 from . import NNsight
 from .mixins import GenerationMixin
@@ -61,7 +59,7 @@ class LanguageModelProxy(InterventionProxy):
     This would save only the first token of the output for this module.
     This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
 
-    
+
 
     Args:
         InterventionProxy (_type_): _description_
@@ -69,6 +67,7 @@ class LanguageModelProxy(InterventionProxy):
     Returns:
         _type_: _description_
     """
+
     @property
     def token(self) -> TokenIndexer:
         """Property used to do token based indexing on a proxy.

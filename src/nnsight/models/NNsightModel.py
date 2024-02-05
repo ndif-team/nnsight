@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from functools import wraps
 import gc
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
@@ -303,12 +304,11 @@ class NNsight:
             return output.value
 
         # We need the Runner to exit along with the Invoker so we combine the __exit__ methods and replace.
-        def combined_exit(self, *args):
+       
+        def on_exit():
+            runner.__exit__(None,None, None)
 
-            invoker.__exit__(*args)
-            runner.__exit__(*args)
-
-        invoker.__exit__ = combined_exit
+        setattr(invoker, 'on_exit', on_exit)
 
         return invoker
 
