@@ -54,8 +54,7 @@ class Invoker(AbstractContextManager):
             Invoker: Invoker.
         """
 
-
-        self.input = self.tracer.model._prepare_inputs(
+        self.input, batch_size = self.tracer.model._prepare_inputs(
             self.input, *self.args, **self.kwargs
         )
 
@@ -68,15 +67,15 @@ class Invoker(AbstractContextManager):
         else:
             for name, module in self.tracer.model.meta_model.named_modules():
                 if not isinstance(module, torch.nn.ModuleList):
-                    module.clear_proxies()
-            self.tracer.model.meta_model.clear_proxies()
+                    module.reset()
+            self.tracer.model.meta_model.reset()
 
         self.tracer.batch_start += self.tracer.batch_size
+        self.tracer.batch_size = batch_size
 
-        (
-            self.tracer.batched_input,
-            self.tracer.batch_size,
-        ) = self.tracer.model._batch_inputs(self.input, self.tracer.batched_input)
+        self.tracer.batched_input = self.tracer.model._batch_inputs(
+            self.input, self.tracer.batched_input
+        )
 
         return self
 
@@ -96,9 +95,8 @@ class Invoker(AbstractContextManager):
 
         for name, module in self.tracer.model.meta_model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
-                module.clear_proxies()
+                module.reset_proxies()
                 module.next(increment)
-                
-        self.tracer.model.meta_model.clear_proxies()
-        self.tracer.model.meta_model.next()
 
+        self.tracer.model.meta_model.reset_proxies()
+        self.tracer.model.meta_model.next()

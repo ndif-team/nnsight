@@ -2,7 +2,7 @@
 
 The primary two classes involved here are :class:`Tracer <nnsight.contexts.Tracer.Tracer>` and :class:`Invoker <nnsight.contexts.Invoker.Invoker>`.
 
-The :class:`Tracer <nnsight.contexts.Tracer.Tracer>` class creates a :class:`Graph <nnsight.tracing.Graph.Graph>` around the meta_model of an :class:`NNsightModel <nnsight.models.NNsightModel.NNsightModel>`. The graph tracks and manages the operations performed on the inputs and outputs of said model.
+The :class:`Tracer <nnsight.contexts.Tracer.Tracer>` class creates a :class:`Graph <nnsight.tracing.Graph.Graph>` around the meta_model of an :class:`NNsight <nnsight.models.NNsightModel.NNsight>`. The graph tracks and manages the operations performed on the inputs and outputs of said model.
 Modules in the meta_model expose their ``.output`` and ``.input`` attributes which when accessed, add to the computation graph of the tracer.
 To do this, they need to know about the current Tracer object, so each Module's ``.tracer`` object is set to be the current Tracer.
 

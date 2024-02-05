@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+import inspect
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, PretrainedConfig, PreTrainedModel,
-                          PreTrainedTokenizer)
+from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
+                          AutoTokenizer, BatchEncoding, PretrainedConfig,
+                          PreTrainedModel, PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
 from .. import util
@@ -78,7 +79,7 @@ class LanguageModelProxy(InterventionProxy):
 
 
 class LanguageModel(GenerationMixin, NNsight):
-    """LanguageModels are nnsight wrappers around transformer auto models.
+    """LanguageModels are NNsight wrappers around transformer auto language models.
 
     Inputs can be in the form of:
         Prompt: (str)
@@ -95,7 +96,7 @@ class LanguageModel(GenerationMixin, NNsight):
     Attributes:
         config (PretrainedConfig): Huggingface config file loaded from repository or checkpoint.
         tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
-        automodel (type): AutoModel type from transformer auto models.
+        automodel (Type): AutoModel type from transformer auto models.
         meta_model (PreTrainedModel): Meta version of underlying auto model.
         local_model (PreTrainedModel): Local version of underlying auto model.
 
@@ -104,7 +105,11 @@ class LanguageModel(GenerationMixin, NNsight):
     proxy_class = LanguageModelProxy
 
     def __init__(
-        self, *args, tokenizer=None, automodel=AutoModelForCausalLM, **kwargs
+        self,
+        *args,
+        tokenizer=None,
+        automodel: Type[AutoModel] = AutoModelForCausalLM,
+        **kwargs,
     ) -> None:
         self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = tokenizer
@@ -179,7 +184,7 @@ class LanguageModel(GenerationMixin, NNsight):
         ],
         labels: Any = None,
         **kwargs,
-    ) -> BatchEncoding:
+    ) -> Tuple[BatchEncoding:, int]:
         if isinstance(inputs, dict):
 
             new_inputs = dict()
@@ -201,7 +206,7 @@ class LanguageModel(GenerationMixin, NNsight):
 
                 new_inputs["labels"] = labels["input_ids"]
 
-            return BatchEncoding(new_inputs)
+            return BatchEncoding(new_inputs), len(new_inputs["input_ids"])
 
         inputs = self._tokenize(inputs, **kwargs)
 
@@ -210,11 +215,11 @@ class LanguageModel(GenerationMixin, NNsight):
 
             inputs["labels"] = labels["input_ids"]
 
-        return inputs
+        return inputs, len(inputs["input_ids"])
 
     def _batch_inputs(
         self, prepared_inputs: BatchEncoding, batched_inputs: Optional[Dict]
-    ) -> torch.Tensor:
+    ) -> Dict[str, Any]:
         if batched_inputs is None:
             batched_inputs = {"input_ids": []}
 
@@ -231,12 +236,7 @@ class LanguageModel(GenerationMixin, NNsight):
         if "attention_mask" in prepared_inputs:
             batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
 
-        return batched_inputs, len(prepared_inputs["input_ids"])
-
-    def _example_input(self) -> Dict[str, torch.Tensor]:
-        return BatchEncoding(
-            {"input_ids": torch.tensor([[0]]), "labels": torch.tensor([[0]])}
-        )
+        return batched_inputs
 
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
@@ -262,12 +262,18 @@ class LanguageModel(GenerationMixin, NNsight):
             prepared_inputs, lambda x: x.to(device), torch.Tensor
         )
 
-        return self.local_model.generate(
+        output = self.local_model.generate(
             *args,
             **prepared_inputs.copy().to(device),
             max_new_tokens=max_new_tokens,
             **kwargs,
         )
+
+        if self.meta_model._output != None:
+
+            self.meta_model._output.node.value = output
+
+        return output
 
     def _scan_forward(self, prepared_inputs: Any, *args, **kwargs):
 

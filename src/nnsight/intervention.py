@@ -112,7 +112,7 @@ class InterventionProxy(Proxy):
         self._grad = None
 
     @property
-    def shape(self) -> Union[torch.Size, Collection[torch.Size]]:
+    def shape(self) -> torch.Size:
         """Property to retrieve the shape of the traced proxy value.
 
         Returns:
@@ -200,7 +200,31 @@ def intervene(
     key: str,
     intervention_handler: InterventionHandler,
 ):
+    """Entry to intervention graph. This should be hooked to all modules involved in the intervention graph.
 
+    Forms the current module_path key in the form of <module path>.<output/input>
+    Checks the graphs argument_node_names attribute for this key.
+    If exists, value is a list of node names to iterate through.
+    Node args for argument type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
+    Checks and updates the counter for the given argument node. If counter is not ready yet continue.
+    Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
+    only batch indexed tensors relevant to this intervention node. Sets the value of a node
+    using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
+    subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
+    tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
+    to the output from downstream intervention nodes in the graph.
+
+    Args:
+        activations (Any): Either the inputs or outputs of a torch module.
+        module_path (str): Module path of the current relevant module relative to the root model.
+        key (str): Key denoting either "input" or "output" of module.
+        intervention_handler (InterventionHandler): Handler object that stores the intervention graph and keeps track of module call count.
+
+    Returns:
+        Any: The activations, potentially modified by the intervention graph.
+    """
+
+    # Key to module activation argument nodes has format: <module path>.<output/input>
     module_path = f"{module_path}.{key}"
 
     if module_path in intervention_handler.graph.argument_node_names:
@@ -208,16 +232,24 @@ def intervene(
             module_path
         ]
 
+        # Multiple argument nodes can have same module_path if there are multiple invocations.
         for argument_node_name in argument_node_names:
 
             node = intervention_handler.graph.nodes[argument_node_name]
 
+            # Args for argument nodes are (module_path, batch_size, batch_start, call_iter).
             _, batch_size, batch_start, call_iter = node.args
 
+            # Updates the count of argument node calls.
+            # If count matches call_iter, time to inject value into node.
             if call_iter != intervention_handler.count(argument_node_name):
 
                 continue
 
+            # Narrow tensor values in activations only to relevant batch idxs.
+            # Only narrow if batch_size != total batch size ( no need to narrow when its the entire batch )
+            # and if the first dim == total_batch_size ( otherwise must not be a batched tensor ).
+            # Checks to see if anything was narrowed. If not, no need to concat later.
             narrowed = False
 
             def narrow(acts: torch.Tensor):
@@ -239,10 +271,14 @@ def intervene(
                 torch.Tensor,
             )
 
+            # Value injection.
             node.set_value(value)
 
+            # Check if through the previous value injection, there was a 'swap' intervention.
+            # This would mean we want to replace activations for this batch with some other ones.
             value = intervention_handler.graph.get_swap(value)
 
+            # If we narrowed any data, we need to concat it with data before and after it.
             if narrowed:
 
                 activations = concat(
@@ -252,7 +288,7 @@ def intervene(
                     batch_size,
                     intervention_handler.total_batch_size,
                 )
-
+            # Otherwise just return the whole value as the activations.
             else:
 
                 activations = value
@@ -330,6 +366,9 @@ class HookModel(AbstractContextManager):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Removes all handles added during __enter__."""
+        if isinstance(exc_val, Exception):
+            raise exc_val
+
         for handle in self.handles:
             handle.remove()
 

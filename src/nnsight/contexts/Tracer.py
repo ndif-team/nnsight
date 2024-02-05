@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from abc import abstractmethod
-
 from typing import TYPE_CHECKING, Any, List
 
 import torch
 
-from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
 from .Invoker import Invoker
 
@@ -15,10 +12,10 @@ if TYPE_CHECKING:
 
 
 class Tracer:
-    """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the meta_model of a :class:`nnsight.models.NNsightModel.NNsightModel` which tracks and manages the operations performed on the inputs and outputs of said model.
+    """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the meta_model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
-        model (nnsight.models.NNsightModel.NNsightModel): nnsight Model object that ths context manager traces and executes.
+        model (nnsight.models.NNsightModel.NNsight): nnsight Model object that ths context manager traces and executes.
         graph (nnsight.tracing.Graph.Graph): Graph which operations performed on the input and output of Modules are added and later executed.
         args (List[Any]): Positional arguments to be passed to function that executes the model.
         kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
@@ -50,14 +47,11 @@ class Tracer:
 
         self.batched_input: Any = None
 
-        self.output = None
-
         # Modules need to know about the current Tracer to create the correct proxies.
         for name, module in self.model.meta_model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
                 module.tracer = self
         self.model.meta_model.tracer = self
-        
 
     def __enter__(self) -> Tracer:
         return self
@@ -65,13 +59,13 @@ class Tracer:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
-        self.output = self.model(
+        output = self.model(
             self.model._execute,
             self.batched_input,
             self.graph,
             *self.args,
             **self.kwargs,
         )
-    
+
     def invoke(self, input, *args, **kwargs) -> Invoker:
         return Invoker(self, input, *args, **kwargs)

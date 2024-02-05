@@ -64,23 +64,32 @@ class Module(torch.nn.Module):
 
         self.tracer: Tracer = None
 
-    def clear_proxies(self):
+    def reset_proxies(self) -> None:
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
 
-    def clear(self):
+    def reset(self) -> None:
 
-        self.clear_proxies()
+        self.reset_proxies()
+
+        self.call_iter = 0
+
+
+    def clear(self) -> None:
+
+        self.reset()
 
         self.meta_outputs = []
         self.meta_inputs = []
 
-    def next(self, iteration: int = 1):
+    def next(self, iteration: int = 1) -> Module:
 
         self.call_iter += iteration
 
-        self.clear_proxies()
+        self.reset_proxies()
+
+        return self
 
     def __call__(self, *args: List[Any], **kwds: Dict[str, Any]) -> Union[Any, Proxy]:
         """Override __call__ to check for Proxy arguments.
@@ -121,7 +130,7 @@ class Module(torch.nn.Module):
         """
         if self._output is None:
             self._output = self.tracer.graph.add(
-                value=self.meta_outputs[self.call_iter],
+                value=self.meta_outputs[self.call_iter] if len(self.meta_outputs) > 0 else None,
                 target="argument",
                 args=[
                     f"{self.module_path}.output",
@@ -159,7 +168,7 @@ class Module(torch.nn.Module):
         """
         if self._input is None:
             self._input = self.tracer.graph.add(
-                value=self.meta_inputs[self.call_iter],
+                value=self.meta_inputs[self.call_iter] if len(self.meta_inputs) > 0 else None,
                 target="argument",
                 args=[
                     f"{self.module_path}.input",
@@ -210,7 +219,7 @@ class Module(torch.nn.Module):
 
         def hook(module: Module, input: Any, input_kwargs: Dict, output: Any):
 
-            module.clear_proxies()
+            module.reset()
 
             input = (input, input_kwargs)
 
