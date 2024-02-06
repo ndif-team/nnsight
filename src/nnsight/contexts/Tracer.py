@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, List, Tuple
 
 import torch
 
@@ -27,18 +27,19 @@ class Tracer:
     def __init__(
         self,
         model: "NNsight",
-        *args,
         validate: bool = True,
         **kwargs,
     ) -> None:
+
         self.model = model
 
-        self.args = args
         self.kwargs = kwargs
 
         self.graph = Graph(
             self.model.meta_model, proxy_class=model.proxy_class, validate=validate
         )
+
+        self.invoker: Invoker = None
 
         self.batch_size: int = 0
         self.batch_start: int = 0
@@ -52,19 +53,32 @@ class Tracer:
 
         self.model.meta_model.tracer = self
 
+    def __getattr__(self, key: Any) -> Any:
+        """Wrapper of meta_model's attributes to access Module's inputs and outputs.
+
+        Returns:
+            Any: Attribute.
+        """
+        return getattr(self.model.meta_model, key)
+
     def __enter__(self) -> Tracer:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
+
         output = self.model(
             self.model._execute,
-            self.batched_input,
             self.graph,
-            *self.args,
+            *self.batched_input,
             **self.kwargs,
         )
 
-    def invoke(self, input: Any, *args, **kwargs) -> Invoker:
-        return Invoker(self, input, *args, **kwargs)
+    def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
+
+        if self.invoker is not None:
+
+            raise Exception("Can't create an invoker context with one already open!")
+
+        return Invoker(self, *inputs, **kwargs)

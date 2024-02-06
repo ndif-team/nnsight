@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
 
 import torch
 
 from ..intervention import InterventionProxy
-from ..tracing.Proxy import Proxy
 
 if TYPE_CHECKING:
 
@@ -31,15 +30,13 @@ class Invoker(AbstractContextManager):
     def __init__(
         self,
         tracer: "Tracer",
-        input: Any,
-        *args,
+        *inputs: Tuple[Any],
         scan: bool = True,
         **kwargs,
     ) -> None:
         self.tracer = tracer
-        self.input = input
+        self.inputs = inputs
         self.scan = scan
-        self.args = args
         self.kwargs = kwargs
 
     def __enter__(self) -> Invoker:
@@ -54,8 +51,10 @@ class Invoker(AbstractContextManager):
             Invoker: Invoker.
         """
 
-        self.input, batch_size = self.tracer.model._prepare_inputs(
-            self.input, *self.args, **self.kwargs
+        self.tracer.invoker = self
+
+        self.inputs, batch_size = self.tracer.model._prepare_inputs(
+            *self.inputs, **self.kwargs
         )
 
         if self.scan:
@@ -63,7 +62,7 @@ class Invoker(AbstractContextManager):
                 if not isinstance(module, torch.nn.ModuleList):
                     module.clear()
             self.tracer.model.meta_model.clear()
-            self.tracer.model._scan(self.input, *self.tracer.args, **self.tracer.kwargs)
+            self.tracer.model._scan(*self.inputs, **self.tracer.kwargs)
         else:
             for name, module in self.tracer.model.meta_model.named_modules():
                 if not isinstance(module, torch.nn.ModuleList):
@@ -74,7 +73,7 @@ class Invoker(AbstractContextManager):
         self.tracer.batch_size = batch_size
 
         self.tracer.batched_input = self.tracer.model._batch_inputs(
-            self.input, self.tracer.batched_input
+            self.tracer.batched_input, *self.inputs, 
         )
 
         return self
@@ -83,10 +82,7 @@ class Invoker(AbstractContextManager):
         if isinstance(exc_val, BaseException):
             raise exc_val
 
-        self.on_exit()
-
-    def on_exit(self):
-        pass
+        self.tracer.invoker = None
 
     def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
@@ -100,7 +96,7 @@ class Invoker(AbstractContextManager):
         return self.tracer.graph.add(target=target, args=args, kwargs=kwargs)
 
     def next(self, increment: int = 1) -> None:
-        """Increments call_iter of all ``Module``s. Useful when doing iterative/generatie runs.
+        """Increments call_iter of all ``Module``s. Useful when doing iterative/generative runs.
 
         Args:
             increment (int): How many call_iter to increment at once. Defaults to 1.

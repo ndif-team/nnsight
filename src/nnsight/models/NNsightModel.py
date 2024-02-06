@@ -143,9 +143,8 @@ class NNsight:
     def __call__(
         self,
         fn: Callable,
-        inputs: Any,
         graph: Graph,
-        *args,
+        *inputs: List[Any],
         **kwargs,
     ) -> Any:
         """Runs some function with some inputs and some graph with the appropriate contexts for this model.
@@ -162,8 +161,8 @@ class NNsight:
 
         Args:
             fn (Callable): Function or method to run.
-            inputs (Any): Inputs to give to function.
             graph (Graph): Intervention graph to interleave with model's computation graph.
+            inputs (List[Any]): Inputs to give to function.
 
         Returns:
             Any: Output of model.
@@ -176,7 +175,7 @@ class NNsight:
 
         graph.compile(self.local_model)
 
-        inputs, total_batch_size = self._prepare_inputs(inputs)
+        inputs, total_batch_size = self._prepare_inputs(*inputs)
 
         intervention_handler = InterventionHandler(graph, total_batch_size)
 
@@ -190,7 +189,7 @@ class NNsight:
                 activations, module_path, "output", intervention_handler
             ),
         ):
-            output = fn(inputs, *args, **kwargs)
+            output = fn(*inputs, **kwargs)
 
         logger.info(f"Completed `{self.model_key}`")
 
@@ -211,181 +210,32 @@ class NNsight:
 
         logger.info(f"Dispatched `{self.model_key}`")
 
-    def trace(self, *args, **kwargs) -> Runner:
-        """Returns a Runner context for this model's ``._execute()`` method.
+    def trace(
+        self, *inputs:Tuple[Any], trace: bool = True, invoker_args: Dict[str, Any] = None, **kwargs
+    ) -> Union[Runner, Any]:
 
-        Runner contexts are used to trace and interleave operations on the model's computation graph.
+        runner = Runner(self, **kwargs)
 
-        Arguments passed to ``.trace()`` are passed downstream to the model specific ``._execute()`` method.
+        if len(inputs) > 0:
 
-        Runners are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
+            invoker_args = invoker_args or {}
 
-        Returns:
-            Runner: Runner.
+            if not trace:
 
-        Examples:
+                with runner:
+                    with runner.invoke(*inputs, **invoker_args):
 
-            A simple entering of a runner context on a language model, and running a prompt with no interventions:
+                        output = self.meta_model.output.save()
 
-            .. code-block:: python
+                return output.value
 
-                with model.trace() as tracer:
-                    with tracer.invoke('The Eiffel Tower is in the city of') as invoker:
-                        output = model.output.save()
-
-                print(output.value)
-
-            See the Runner docs for more information.
-
-        """
-        return Runner(self, *args, **kwargs)
-
-    def invoke(
-        self,
-        inputs: Any,
-        *args,
-        trace: bool = True,
-        fwd_args: Dict[str, Any] = {},
-        **kwargs,
-    ) -> Union[Invoker, Any]:
-        """Creates a Runner context for this model's ``._execute()`` method and creates an Invoker context off of it for the given input and returns it.
-
-        Keyword arguments usually passed to ``.trace()`` (and therefore downstream to ``._execute()``) can be given as a dictionary with the fwd_args keyword argument.
-
-        This enables the option to directly invoke and trace the model, while providing access to the created Invoker object.
-
-        With `trace=False`, does not trace and runs without a context manager. Directly runs and returns the output of the model.
-
-        Args:
-            inputs (Any): Inputs.
-            trace (bool): If to not trace and run without a context manager. Directly runs and returns the output of the model.
-            fwd_args (Dict[str, Any]): Dictionary as keyword arguments to pass to Runner.
-
-        Returns:
-            Invoker: Invoker.
-
-        Examples:
-
-            A simple entering of a forward context on a language model, and running a prompt with no interventions:
-
-            .. code-block:: python
-
-                with model.invoke('The Eiffel Tower is in the city of') as invoker:
-                    output = model.output.save()
-
-                print(output.value)
-
-            With `trace=False`:
-
-            .. code-block python
-
-                output = model.invoke('The Eiffel Tower is in the city of', trace=False)
-
-                print(output)
-
-            See the Runner and Invoker docs for more information.
-
-        """
-
-        # Create and enter runner context.
-        runner = Runner(self, validate=trace, **fwd_args).__enter__()
-
-        # Create invoker context to return.
-        invoker = runner.invoke(inputs, *args, scan=trace, **kwargs)
+            runner.invoke(*inputs, **invoker_args).__enter__()
 
         if not trace:
 
-            with invoker:
+            raise ValueError("Can't execute on no inputs!")
 
-                output = self.meta_model.output.save()
-
-            runner.__exit__(None, None, None)
-
-            return output.value
-
-        # We need the Runner to exit along with the Invoker so we combine the __exit__ methods and replace.
-       
-        def on_exit():
-            runner.__exit__(None,None, None)
-
-        setattr(invoker, 'on_exit', on_exit)
-
-        return invoker
-
-    def forward(
-        self,
-        inputs: Any,
-        *args,
-        trace: bool = True,
-        invoke_args: Dict[str, Any] = {},
-        **kwargs,
-    ) -> Union[NNsight, Any]:
-        """Creates a Runner context for this model's ``._execute()`` method and creates an Invoker context off of it for the given input and returns not the Invoker, but the NNsight model.
-
-        Keyword arguments usually passed to the Invoker (via ``.invoke()``) (and therefore downstream to ``.prepare_inputs()``) can be given as a dictionary with the invoker_args keyword argument.
-
-        This enables the option to directly invoke and trace the model, while providing access to the given NNsight model.
-
-        With `trace=False`, does not trace and runs without a context manager. Directly runs and returns the output of the model.
-
-        Args:
-            inputs (Any): Inputs.
-            trace (bool): If to not trace and run without a context manager. Directly runs and returns the output of the model.
-            invoker_args (Dict[str, Any]): Dictionary as keyword arguments to pass to Invoker.
-
-        Returns:
-            NNsight: NNsight model.
-
-        Examples:
-
-            A simple entering of a forward context on a language model, and running a prompt with no interventions:
-
-            .. code-block:: python
-
-                with NNsight(model).forward('The Eiffel Tower is in the city of') as model:
-                    output = model.output.save()
-
-            With `trace=False`:
-
-            .. code-block python
-
-                output = NNsight(model).forward('The Eiffel Tower is in the city of', trace=False)
-
-                print(output)
-
-            See the Runner and Invoker docs for more information.
-
-        """
-
-        invoker_or_output = self.invoke(
-            inputs, fwd_args=kwargs, trace=trace, **invoke_args
-        )
-
-        if isinstance(invoker_or_output, Invoker):
-            invoker_or_output.__enter__()
-        else:
-            return invoker_or_output
-
-        return self
-
-    def __enter__(self) -> NNsight:
-        """Used with ``.forward()``.
-        No need to do anything as both the Runner and Invoker contexts are already entered.
-
-        Returns:
-            NNsight: NNsight model.
-        """
-
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Used with ``.forward()``.
-        We can access the current Tracer object from the meta_model and exit it from there.
-        """
-        if isinstance(exc_val, BaseException):
-            raise exc_val
-
-        self.meta_model.tracer.__exit__(None, None, None)
+        return runner
 
     ### NNsight VIRTUAL METHODS BELOW #####################################
 
@@ -418,13 +268,13 @@ class NNsight:
 
         return AutoModel.from_pretrained(model_key, *args, config=self.config, **kwargs)
 
-    def _scan(self, prepared_inputs: Any, *args, **kwargs) -> None:
+    def _scan(self, *prepared_inputs: Tuple[Any], **kwargs) -> None:
         """Virtual method to run the meta_model with some input in order to compute the shapes of tensors during execution of the input.
 
         Default implementation util.applies moving all tensors to the 'meta' device and passes the value into meta_model.
 
         Args:
-            prepared_inputs (Any): Prepared inputs.
+            prepared_inputs (Tuple[Any]): Prepared inputs.
         """
         device = torch.device("meta")
 
@@ -433,15 +283,15 @@ class NNsight:
         )
 
         with accelerate.init_empty_weights(include_buffers=True):
-            return self.meta_model(prepared_inputs, *args, **kwargs)
+            return self.meta_model(*prepared_inputs, **kwargs)
 
-    def _execute(self, prepared_inputs: Any, *args, **kwargs) -> Any:
-        """Virtual method to run the local_model with some input.
+    def _execute(self, *prepared_inputs: Tuple[Any], **kwargs) -> Any:
+        """Virtual method to run the local_model with some inputs.
 
         Default implementation util.applies moving all tensors to the device of the first parameter in local_model and passes the value into meta_model.
 
         Args:
-            prepared_inputs (Any): Prepared inputs.
+            prepared_inputs (Tuple[Any]): Prepared inputs.
         """
         device = next(self.local_model.parameters()).device
 
@@ -450,35 +300,36 @@ class NNsight:
         )
 
         return self.local_model(
-            prepared_inputs,
-            *args,
+            *prepared_inputs,
             **kwargs,
         )
 
-    def _prepare_inputs(self, inputs: Any, *args, **kwargs) -> Tuple[Any, int]:
+    def _prepare_inputs(self, *inputs: Tuple[Any], **kwargs) -> Tuple[Tuple[Any], int]:
         """Virtual method to prepare inputs before batching and execution and return batch size of prepared_inputs.
 
         Default implementation just returns inputs.
 
         Args:
-            inputs (Any): Inputs to prepare for batching and execution.
+            inputs (Tuple[Any]): Inputs to prepare for batching and execution.
             int: Batch size of prepared_inputs.
 
         Returns:
-            Any: Prepared inputs.
+            Tuple[Tuple[Any], int]: Prepared inputs, batch size of inputs.
         """
         return inputs, 1
 
     def _batch_inputs(
-        self, prepared_inputs: List[Any], batched_inputs: Optional[Any]
+        self,
+        batched_inputs: Optional[Any],
+        *prepared_inputs: Tuple[Any],
     ) -> Any:
         """Virtual method to batch together results from _prepare_inputs.
 
         Default implementation returns list of all prepared_inputs.
 
         Args:
-            prepared_inputs (List[Any]): Most recent result from _prepare_inputs.
             batched_inputs (Any): Current state of batched_inputs. Initially None.
+            prepared_inputs (Tuple[Any]): Most recent result from _prepare_inputs.
 
         Returns:
             Any: Batched inputs.

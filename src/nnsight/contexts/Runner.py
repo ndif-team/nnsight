@@ -47,18 +47,14 @@ class Runner(Tracer):
     def __init__(
         self,
         *args,
-        generation: bool = False,
         blocking: bool = True,
         remote: bool = False,
-        remote_include_output: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self.generation = generation
         self.remote = remote
         self.blocking = blocking
-        self.remote_include_output = remote_include_output
 
     def __enter__(self) -> Runner:
         return self

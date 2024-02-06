@@ -4,9 +4,16 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
-from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
-                          AutoTokenizer, BatchEncoding, PretrainedConfig,
-                          PreTrainedModel, PreTrainedTokenizer)
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    PretrainedConfig,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.models.auto import modeling_auto
 
 from ..intervention import InterventionProxy
@@ -227,7 +234,7 @@ class LanguageModel(GenerationMixin, NNsight):
 
                 new_inputs["labels"] = labels["input_ids"]
 
-            return BatchEncoding(new_inputs), len(new_inputs["input_ids"])
+            return (BatchEncoding(new_inputs), ), len(new_inputs["input_ids"])
 
         inputs = self._tokenize(inputs, **kwargs)
 
@@ -236,11 +243,14 @@ class LanguageModel(GenerationMixin, NNsight):
 
             inputs["labels"] = labels["input_ids"]
 
-        return inputs, len(inputs["input_ids"])
+        return (inputs,), len(inputs["input_ids"])
 
     def _batch_inputs(
-        self, prepared_inputs: BatchEncoding, batched_inputs: Optional[Dict]
-    ) -> Dict[str, Any]:
+        self,
+        batched_inputs: Optional[Dict[str, Any]],
+        prepared_inputs: BatchEncoding,
+    ) -> Tuple[Dict[str, Any]]:
+
         if batched_inputs is None:
             batched_inputs = {"input_ids": []}
 
@@ -250,6 +260,10 @@ class LanguageModel(GenerationMixin, NNsight):
             if "attention_mask" in prepared_inputs:
                 batched_inputs["attention_mask"] = []
 
+        else:
+
+            batched_inputs = batched_inputs[0]
+
         batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
 
         if "labels" in prepared_inputs:
@@ -257,7 +271,7 @@ class LanguageModel(GenerationMixin, NNsight):
         if "attention_mask" in prepared_inputs:
             batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
 
-        return batched_inputs
+        return (batched_inputs, )
 
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
