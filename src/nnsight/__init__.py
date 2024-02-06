@@ -10,8 +10,9 @@ with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
 from .logger import logger
-from .models.LanguageModel import LanguageModel
 from .models.NNsightModel import NNsight
+from .models.LanguageModel import LanguageModel
+
 from .module import Module
 from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper

@@ -82,3 +82,19 @@ class Tracer:
             raise Exception("Can't create an invoker context with one already open!")
 
         return Invoker(self, *inputs, **kwargs)
+    
+    def next(self, increment: int = 1) -> None:
+        """Increments call_iter of all ``Module``s. Useful when doing iterative/generative runs.
+
+        Args:
+            increment (int): How many call_iter to increment at once. Defaults to 1.
+        """
+
+        for name, module in self.model.meta_model.named_modules():
+            if not isinstance(module, torch.nn.ModuleList):
+                module.reset_proxies()
+                module.next(increment)
+
+        self.model.meta_model.reset_proxies()
+        self.model.meta_model.next()
+

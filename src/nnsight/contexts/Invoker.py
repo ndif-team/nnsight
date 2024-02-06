@@ -94,18 +94,3 @@ class Invoker(AbstractContextManager):
             InterventionProxy: Proxy of applying that function.
         """
         return self.tracer.graph.add(target=target, args=args, kwargs=kwargs)
-
-    def next(self, increment: int = 1) -> None:
-        """Increments call_iter of all ``Module``s. Useful when doing iterative/generative runs.
-
-        Args:
-            increment (int): How many call_iter to increment at once. Defaults to 1.
-        """
-
-        for name, module in self.tracer.model.meta_model.named_modules():
-            if not isinstance(module, torch.nn.ModuleList):
-                module.reset_proxies()
-                module.next(increment)
-
-        self.tracer.model.meta_model.reset_proxies()
-        self.tracer.model.meta_model.next()

@@ -19,10 +19,8 @@ def MSG_prompt():
 
 def _test_serialize(runner: Runner):
     request = RequestModel(
-        args=runner.args,
         kwargs=runner.kwargs,
         repo_id=runner.model.model_key,
-        generation=runner.generation,
         intervention_graph=runner.graph.nodes,
         batched_input=runner.batched_input,
     )
@@ -50,10 +48,10 @@ def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
 
 def test_save(gpt2: nnsight.LanguageModel):
-    with gpt2.trace() as tracer:
-        with tracer.invoke("Hello world") as invoker:
-            hs = gpt2.transformer.h[-1].output[0].save()
-            hs_input = gpt2.transformer.h[-1].input[0][0].save()
+    with gpt2.generate("Hello world") as tracer:
+     
+        hs = gpt2.transformer.h[-1].output[0].save()
+        hs_input = gpt2.transformer.h[-1].input[0][0].save()
 
     assert hs.value is not None
     assert isinstance(hs.value, torch.Tensor)
