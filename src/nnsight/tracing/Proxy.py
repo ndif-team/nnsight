@@ -25,13 +25,34 @@ class Proxy:
         return callable(*args, **kwargs)
 
     def __init__(self, node: "Node") -> None:
+
         self.node = node
 
-    def __getstate__(self):
-        return self.__dict__
+    @classmethod
+    def __new__(cls, self, node: "Node", *args, **kwargs):
 
-    def __setstate__(self, d: dict):
-        self.__dict__ = d
+        if node.done():
+
+            return node.value
+
+        return super().__new__(cls)
+        
+
+    def __str__(self) -> str:
+
+        if self.node.done():
+
+            return str(self.node.value)
+
+        return f"{type(self).__name__} ({self.node.name}): {self.node.proxy_value or ''}"
+
+    def __repr__(self) -> str:
+
+        if self.node.done():
+
+            return repr(self.node.value)
+
+        return str(self)
 
     def __call__(self, *args, **kwargs) -> Proxy:
         """
