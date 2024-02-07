@@ -4,13 +4,13 @@ import copy
 from functools import wraps
 import gc
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from torch._subclasses.fake_tensor import FakeTensorMode, FakeCopyMode
 
 import accelerate
 import torch
 from transformers import AutoConfig, AutoModel
 
 from .. import util
-from ..contexts.Invoker import Invoker
 from ..contexts.Runner import Runner
 from ..intervention import HookModel, InterventionHandler, InterventionProxy, intervene
 from ..logger import logger
@@ -60,7 +60,7 @@ class NNsight:
         self.dispatched = False
         self.custom_model = False
 
-        self.local_model: torch.nn.Module = None
+        self.model: torch.nn.Module = None
 
         # Handle passing in a pre-initialized model to wrap.
         # Therefore the NNsight model is "pre-dispatched".
@@ -68,59 +68,20 @@ class NNsight:
             self.model_key = model_key.__class__.__name__
             self.custom_model = True
             self.dispatched = True
-            self.local_model = model_key
+            self.model = model_key
 
         logger.info(f"Initializing `{self.model_key}`...")
 
-        # We want the meta_model parameters to be loaded to 'meta'.
-        with accelerate.init_empty_weights(include_buffers=True):
-
-            # If a pre-initialized model was passed in, we want to deepcopy a 'meta' version for the meta_model.
-            if self.custom_model:
-
-                # We want to wrap the deepcopy logic of Tensors and Parameters to be on the 'meta' device.
-                # So we don't double the memory of the model briefly by cloning the whole thing and then moving to 'meta'.
-                with Patcher() as patcher:
-
-                    patcher.add(
-                        Patch(
-                            torch.nn.parameter.Parameter,
-                            util.meta_deepcopy,
-                            "__deepcopy__",
-                        )
-                    )
-
-                    patcher.add(Patch(torch.Tensor, util.meta_deepcopy, "__deepcopy__"))
-
-                    self.meta_model: torch.nn.Module = copy.deepcopy(
-                        self.local_model
-                    ).to("meta")
-
-            # Otherwise use _load_meta.
-            else:
-                self.meta_model: Module = self._load_meta(
-                    self.model_key, *args, **kwargs
-                ).to("meta")
-
-        # Wrap root meta_model in nnsight's Module wrapper class.
-        self.meta_model = Module.wrap(self.meta_model)
-
-        # Wrap meta_model's submodules in nnsight's Module wrapper class.
-        for name, module in list(self.meta_model.named_modules()):
-
-            if isinstance(module, (Module, torch.nn.ModuleList)):
-                continue
-
-            module = Module.wrap(module)
-
-            # Set Module's module_path so they know their place in the Module tree.
-            module.module_path = name
-
-            setattr(self.meta_model, name, module)
+        if not self.custom_model:
+            self.model: Module = self._load_meta(self.model_key, *args, **kwargs).to(
+                "meta"
+            )
+        
+        self.wrap()
 
         if self.dispatch:
             # Dispatch local_model on initialization vs lazy dispatching.
-            self.dispatch_local_model()
+            self.dispatch_model()
 
         logger.info(f"Initialized `{self.model_key}`")
 
@@ -130,7 +91,7 @@ class NNsight:
         Returns:
             str: Representation.
         """
-        return repr(self.meta_model)
+        return repr(self.model)
 
     def __getattr__(self, key: Any) -> Any:
         """Wrapper of meta_model's attributes to access Module's inputs and outputs.
@@ -138,9 +99,9 @@ class NNsight:
         Returns:
             Any: Attribute.
         """
-        return getattr(self.meta_model, key)
+        return getattr(self.model, key)
 
-    def __call__(
+    def interleave(
         self,
         fn: Callable,
         graph: Graph,
@@ -169,18 +130,18 @@ class NNsight:
         """
 
         if not self.dispatched:
-            self.dispatch_local_model()
+            self.dispatch_model()
 
         logger.info(f"Running `{self.model_key}`...")
 
-        graph.compile(self.local_model)
+        graph.compile(self.model)
 
         inputs, total_batch_size = self._prepare_inputs(*inputs)
 
         intervention_handler = InterventionHandler(graph, total_batch_size)
 
         with HookModel(
-            self.local_model,
+            self.model,
             list(graph.argument_node_names.keys()),
             input_hook=lambda activations, module_path: intervene(
                 activations, module_path, "input", intervention_handler
@@ -197,21 +158,41 @@ class NNsight:
         torch.cuda.empty_cache()
 
         return output
+    
+    def wrap(self):
 
-    def dispatch_local_model(self, *args, **kwargs) -> None:
+        self.model = Module.wrap(self.model)
+
+        for name, module in list(self.model.named_modules()):
+
+            if isinstance(module, (Module, torch.nn.ModuleList)):
+                continue
+
+            module = Module.wrap(module)
+
+            # Set Module's module_path so they know their place in the Module tree.
+            module.module_path = name
+
+            setattr(self.model, name, module)
+
+    def dispatch_model(self, *args, **kwargs) -> None:
         """Dispatched local_model using _load_local."""
         logger.info(f"Dispatching `{self.model_key}`...")
+        
+        self.model = self._load(self.model_key, *self.args, *args, **kwargs, **self.kwargs)
 
-        self.local_model = self._load_local(
-            self.model_key, *self.args, *args, **kwargs, **self.kwargs
-        )
+        self.wrap()
 
         self.dispatched = True
 
         logger.info(f"Dispatched `{self.model_key}`")
 
     def trace(
-        self, *inputs:Tuple[Any], trace: bool = True, invoker_args: Dict[str, Any] = None, **kwargs
+        self,
+        *inputs: Tuple[Any],
+        trace: bool = True,
+        invoker_args: Dict[str, Any] = None,
+        **kwargs,
     ) -> Union[Runner, Any]:
 
         runner = Runner(self, **kwargs)
@@ -225,7 +206,7 @@ class NNsight:
                 with runner:
                     with runner.invoke(*inputs, **invoker_args):
 
-                        output = self.meta_model.output.save()
+                        output = self.model.output.save()
 
                 return output.value
 
@@ -250,11 +231,11 @@ class NNsight:
         Returns:
             torch.nn.Module: Meta model.
         """
-        self.config = AutoConfig.from_pretrained(model_key, *args, **kwargs)
+        config = AutoConfig.from_pretrained(model_key, *args, **kwargs)
 
-        return AutoModel.from_config(self.config, trust_remote_code=True)
+        return AutoModel.from_config(config, trust_remote_code=True)
 
-    def _load_local(self, model_key: str, *args, **kwargs) -> torch.nn.Module:
+    def _load(self, model_key: str, *args, **kwargs) -> torch.nn.Module:
         """Virtual method to load the local_model from scratch.
 
         Default implementation loads a model from AutoModel.from_pretrained using self.config.
@@ -266,24 +247,7 @@ class NNsight:
             torch.nn.Module: Local model.
         """
 
-        return AutoModel.from_pretrained(model_key, *args, config=self.config, **kwargs)
-
-    def _scan(self, *prepared_inputs: Tuple[Any], **kwargs) -> None:
-        """Virtual method to run the meta_model with some input in order to compute the shapes of tensors during execution of the input.
-
-        Default implementation util.applies moving all tensors to the 'meta' device and passes the value into meta_model.
-
-        Args:
-            prepared_inputs (Tuple[Any]): Prepared inputs.
-        """
-        device = torch.device("meta")
-
-        prepared_inputs = util.apply(
-            prepared_inputs, lambda x: x.clone().to(device), torch.Tensor
-        )
-
-        with accelerate.init_empty_weights(include_buffers=True):
-            return self.meta_model(*prepared_inputs, **kwargs)
+        return accelerate.load_checkpoint_and_dispatch(self.model, model_key, **kwargs)
 
     def _execute(self, *prepared_inputs: Tuple[Any], **kwargs) -> Any:
         """Virtual method to run the local_model with some inputs.
@@ -293,13 +257,13 @@ class NNsight:
         Args:
             prepared_inputs (Tuple[Any]): Prepared inputs.
         """
-        device = next(self.local_model.parameters()).device
+        device = next(self.model.parameters()).device
 
         prepared_inputs = util.apply(
             prepared_inputs, lambda x: x.to(device), torch.Tensor
         )
 
-        return self.local_model(
+        return self.model(
             *prepared_inputs,
             **kwargs,
         )

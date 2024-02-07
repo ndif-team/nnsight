@@ -54,9 +54,6 @@ class Node:
         values = util.apply(values, lambda x: x.proxy_value, Node)
         # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
-        # Move tensors to 'meta'
-        values = util.apply(values, lambda x: x.to("meta"), torch.Tensor)
-
         return values
 
     def __init__(

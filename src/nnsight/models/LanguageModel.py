@@ -125,8 +125,7 @@ class LanguageModel(GenerationMixin, NNsight):
         config (PretrainedConfig): Huggingface config file loaded from repository or checkpoint.
         tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
         automodel (Type): AutoModel type from transformer auto models.
-        meta_model (PreTrainedModel): Meta version of underlying auto model.
-        local_model (PreTrainedModel): Local version of underlying auto model.
+        model (PreTrainedModel): Meta version of underlying auto model.
 
     """
 
@@ -141,8 +140,7 @@ class LanguageModel(GenerationMixin, NNsight):
     ) -> None:
         self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = tokenizer
-        self.meta_model: PreTrainedModel = None
-        self.local_model: PreTrainedModel = None
+        self.model: PreTrainedModel = None
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
@@ -151,21 +149,21 @@ class LanguageModel(GenerationMixin, NNsight):
 
         super().__init__(*args, **kwargs)
 
-    def _load_meta(self, repoid_or_path: str, *args, **kwargs) -> PreTrainedModel:
-        self.config = AutoConfig.from_pretrained(repoid_or_path, *args, **kwargs)
+    def _load_meta(self, model_key: str, *args, **kwargs) -> PreTrainedModel:
+        self.config = AutoConfig.from_pretrained(model_key, *args, **kwargs)
 
         if self.tokenizer is None:
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repoid_or_path, config=self.config, padding_side="left"
+                model_key, config=self.config, padding_side="left"
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         return self.automodel.from_config(self.config, trust_remote_code=True)
-
-    def _load_local(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
+    
+    def _load(self, model_key, *args, **kwargs) -> PreTrainedModel:
         return self.automodel.from_pretrained(
-            repoid_or_path, *args, config=self.config, **kwargs
+            model_key, *args, config=self.config, **kwargs
         )
 
     def _tokenize(
@@ -275,11 +273,11 @@ class LanguageModel(GenerationMixin, NNsight):
 
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
-        device = next(self.local_model.parameters()).device
+        device = next(self.model.parameters()).device
 
-        return self.local_model(
+        return self.model(
             *args,
-            **prepared_inputs.copy().to(device),
+            **prepared_inputs.to(device),
             **kwargs,
         )
 
@@ -287,36 +285,18 @@ class LanguageModel(GenerationMixin, NNsight):
         self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
     ):
 
-        device = next(self.local_model.parameters()).device
+        device = next(self.model.parameters()).device
 
-        output = self.local_model.generate(
+        output = self.model.generate(
             *args,
-            **prepared_inputs.copy().to(device),
+            **prepared_inputs.to(device),
             max_new_tokens=max_new_tokens,
             **kwargs,
         )
 
-        if self.meta_model._output != None:
+        if self.model._output != None:
 
-            self.meta_model._output.node.value = output
+            self.model._output.node.value = output
 
         return output
 
-    def _scan_forward(self, prepared_inputs: Any, *args, **kwargs):
-
-        device = torch.device("meta")
-
-        with accelerate.init_empty_weights(include_buffers=True):
-            return self.meta_model(*args, **prepared_inputs.copy().to(device), **kwargs)
-
-    def _scan_generate(self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs):
-
-        device = torch.device("meta")
-
-        with accelerate.init_empty_weights(include_buffers=True):
-            return self.meta_model.generate(
-                *args,
-                **prepared_inputs.copy().to(device),
-                max_new_tokens=max_new_tokens,
-                **kwargs,
-            )

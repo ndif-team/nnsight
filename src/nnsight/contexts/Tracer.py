@@ -36,7 +36,7 @@ class Tracer:
         self.kwargs = kwargs
 
         self.graph = Graph(
-            self.model.meta_model, proxy_class=model.proxy_class, validate=validate
+            self.model.model, proxy_class=model.proxy_class, validate=validate
         )
 
         self.invoker: Invoker = None
@@ -47,11 +47,11 @@ class Tracer:
         self.batched_input: Any = None
 
         # Modules need to know about the current Tracer to create the correct proxies.
-        for name, module in self.model.meta_model.named_modules():
+        for name, module in self.model.model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
                 module.tracer = self
 
-        self.model.meta_model.tracer = self
+        self.model.model.tracer = self
 
     def __getattr__(self, key: Any) -> Any:
         """Wrapper of meta_model's attributes to access Module's inputs and outputs.
@@ -59,7 +59,7 @@ class Tracer:
         Returns:
             Any: Attribute.
         """
-        return getattr(self.model.meta_model, key)
+        return getattr(self.model.model, key)
 
     def __enter__(self) -> Tracer:
         return self
@@ -68,7 +68,7 @@ class Tracer:
         if isinstance(exc_val, BaseException):
             raise exc_val
 
-        output = self.model(
+        output = self.model.interleave(
             self.model._execute,
             self.graph,
             *self.batched_input,
@@ -90,11 +90,6 @@ class Tracer:
             increment (int): How many call_iter to increment at once. Defaults to 1.
         """
 
-        for name, module in self.model.meta_model.named_modules():
-            if not isinstance(module, torch.nn.ModuleList):
-                module.reset_proxies()
-                module.next(increment)
-
-        self.model.meta_model.reset_proxies()
-        self.model.meta_model.next()
+        self.model.model.reset_proxies()
+        self.model.model.next()
 

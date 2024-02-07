@@ -29,6 +29,7 @@ import warnings
 from typing import Any, Dict, List, Union
 
 import torch
+from torch._guards import detect_fake_mode
 
 from . import util
 from .contexts.Tracer import Tracer
@@ -57,8 +58,8 @@ class Module(torch.nn.Module):
 
         self.call_iter = 0
 
-        self.meta_outputs: List[torch.Tensor] = []
-        self.meta_inputs: List[torch.Tensor] = []
+        self.fake_outputs: List[torch.Tensor] = []
+        self.fake_inputs: List[torch.Tensor] = []
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
@@ -67,29 +68,49 @@ class Module(torch.nn.Module):
 
         self.tracer: Tracer = None
 
-    def reset_proxies(self) -> None:
+    def reset_proxies(self, propagate: bool = True) -> None:
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
 
-    def reset(self) -> None:
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.reset_proxies(propagate=False)
 
-        self.reset_proxies()
+    def reset(self, propagate: bool = True) -> None:
+
+        self.reset_proxies(propagate=False)
 
         self.call_iter = 0
 
-    def clear(self) -> None:
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.reset(propagate=False)
 
-        self.reset()
+    def clear(self, propagate: bool = True) -> None:
 
-        self.meta_outputs = []
-        self.meta_inputs = []
+        self.reset(propagate=False)
 
-    def next(self, iteration: int = 1) -> Module:
+        self.fake_outputs = []
+        self.fake_inputs = []
+
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.clear(propagate=False)
+
+    def next(self, iteration: int = 1, propagate: bool = True) -> Module:
 
         self.call_iter += iteration
 
-        self.reset_proxies()
+        self.reset_proxies(propagate=False)
+
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.next(propagate=False)
 
         return self
 
@@ -130,11 +151,12 @@ class Module(torch.nn.Module):
         Returns:
             Proxy: Output proxy.
         """
+
         if self._output is None:
             self._output = self.tracer.graph.add(
                 value=(
-                    self.meta_outputs[self.call_iter]
-                    if len(self.meta_outputs) > 0
+                    self.fake_outputs[self.call_iter]
+                    if len(self.fake_outputs) > 0
                     else None
                 ),
                 target="argument",
@@ -175,8 +197,8 @@ class Module(torch.nn.Module):
         if self._input is None:
             self._input = self.tracer.graph.add(
                 value=(
-                    self.meta_inputs[self.call_iter]
-                    if len(self.meta_inputs) > 0
+                    self.fake_inputs[self.call_iter]
+                    if len(self.fake_inputs) > 0
                     else None
                 ),
                 target="argument",
@@ -210,8 +232,8 @@ class Module(torch.nn.Module):
         if self._graph is None:
             self._graph = Graph.trace(
                 self,
-                *self.meta_inputs[self.call_iter][0],
-                **self.meta_inputs[self.call_iter][1],
+                *self.fake_inputs[self.call_iter][0],
+                **self.fake_inputs[self.call_iter][1],
             )
 
         return self._graph
@@ -229,28 +251,14 @@ class Module(torch.nn.Module):
 
         def hook(module: Module, input: Any, input_kwargs: Dict, output: Any):
 
-            module.reset()
+            if detect_fake_mode(input):
 
-            input = (input, input_kwargs)
+                module.reset()
 
-            module.meta_outputs.append(
-                util.apply(
-                    output,
-                    lambda x: torch.empty_like(
-                        x, dtype=x.dtype, device="meta", requires_grad=x.requires_grad
-                    ).clone(),
-                    torch.Tensor,
-                )
-            )
-            module.meta_inputs.append(
-                util.apply(
-                    input,
-                    lambda x: torch.empty_like(
-                        x, dtype=x.dtype, device="meta", requires_grad=x.requires_grad
-                    ).clone(),
-                    torch.Tensor,
-                )
-            )
+                input = (input, input_kwargs)
+
+                module.fake_outputs.append(output)
+                module.fake_inputs.append(input)
 
         original_output = getattr(module, "output", None)
         original_input = getattr(module, "input", None)

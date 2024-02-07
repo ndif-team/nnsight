@@ -211,10 +211,15 @@ class Graph:
             _args = args if args is not None else []
             _kwargs = kwargs if kwargs is not None else {}
 
-            value = target(
-                *Node.prepare_proxy_values(_args),
-                **Node.prepare_proxy_values(_kwargs),
-            )
+            try:
+
+                value = target(
+                    *Node.prepare_proxy_values(_args),
+                    **Node.prepare_proxy_values(_kwargs),
+                )
+
+            except RuntimeError:
+                value = None
 
         target_name = target if isinstance(target, str) else target.__name__
 

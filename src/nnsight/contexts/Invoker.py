@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
 
 import torch
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from ..intervention import InterventionProxy
 
@@ -58,22 +61,25 @@ class Invoker(AbstractContextManager):
         )
 
         if self.scan:
-            for name, module in self.tracer.model.meta_model.named_modules():
-                if not isinstance(module, torch.nn.ModuleList):
-                    module.clear()
-            self.tracer.model.meta_model.clear()
-            self.tracer.model._scan(*self.inputs, **self.tracer.kwargs)
+            self.tracer.model.model.clear()
+
+            with FakeTensorMode(
+                allow_non_fake_inputs=True,
+                shape_env=ShapeEnv(assume_static_by_default=True),
+            ) as fake_mode:
+                with FakeCopyMode(fake_mode):
+                    self.tracer.model._execute(
+                        *copy.deepcopy(self.inputs), **copy.deepcopy(self.tracer.kwargs)
+                    )
         else:
-            for name, module in self.tracer.model.meta_model.named_modules():
-                if not isinstance(module, torch.nn.ModuleList):
-                    module.reset()
-            self.tracer.model.meta_model.reset()
+            self.tracer.model.model.reset()
 
         self.tracer.batch_start += self.tracer.batch_size
         self.tracer.batch_size = batch_size
 
         self.tracer.batched_input = self.tracer.model._batch_inputs(
-            self.tracer.batched_input, *self.inputs, 
+            self.tracer.batched_input,
+            *self.inputs,
         )
 
         return self
