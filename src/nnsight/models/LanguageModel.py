@@ -140,7 +140,7 @@ class LanguageModel(GenerationMixin, NNsight):
     ) -> None:
         self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = tokenizer
-        self.model: PreTrainedModel = None
+        self._model: PreTrainedModel = None
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
@@ -273,9 +273,9 @@ class LanguageModel(GenerationMixin, NNsight):
 
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
-        device = next(self.model.parameters()).device
+        device = next(self._model.parameters()).device
 
-        return self.model(
+        return self._model(
             *args,
             **prepared_inputs.to(device),
             **kwargs,
@@ -285,18 +285,18 @@ class LanguageModel(GenerationMixin, NNsight):
         self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
     ):
 
-        device = next(self.model.parameters()).device
+        device = next(self._model.parameters()).device
 
-        output = self.model.generate(
+        output = self._model.generate(
             *args,
             **prepared_inputs.to(device),
             max_new_tokens=max_new_tokens,
             **kwargs,
         )
 
-        if self.model._output != None:
+        if self._model._output != None:
 
-            self.model._output.node.value = output
+            self._model._output.node.value = output
 
         return output
 

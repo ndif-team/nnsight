@@ -61,7 +61,7 @@ class Invoker(AbstractContextManager):
         )
 
         if self.scan:
-            self.tracer.model.model.clear()
+            self.tracer.model._model.clear()
 
             with FakeTensorMode(
                 allow_non_fake_inputs=True,
@@ -72,7 +72,7 @@ class Invoker(AbstractContextManager):
                         *copy.deepcopy(self.inputs), **copy.deepcopy(self.tracer.kwargs)
                     )
         else:
-            self.tracer.model.model.reset()
+            self.tracer.model._model.reset()
 
         self.tracer.batch_start += self.tracer.batch_size
         self.tracer.batch_size = batch_size

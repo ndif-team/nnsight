@@ -60,7 +60,7 @@ class NNsight:
         self.dispatched = False
         self.custom_model = False
 
-        self.model: torch.nn.Module = None
+        self._model: torch.nn.Module = None
 
         # Handle passing in a pre-initialized model to wrap.
         # Therefore the NNsight model is "pre-dispatched".
@@ -68,14 +68,15 @@ class NNsight:
             self.model_key = model_key.__class__.__name__
             self.custom_model = True
             self.dispatched = True
-            self.model = model_key
+            self._model = model_key
 
         logger.info(f"Initializing `{self.model_key}`...")
 
         if not self.custom_model:
-            self.model: Module = self._load_meta(self.model_key, *args, **kwargs).to(
-                "meta"
-            )
+            with accelerate.init_empty_weights(include_buffers=True):
+                self._model: Module = self._load_meta(self.model_key, *args, **kwargs).to(
+                    "meta"
+                )
         
         self.wrap()
 
@@ -91,7 +92,7 @@ class NNsight:
         Returns:
             str: Representation.
         """
-        return repr(self.model)
+        return repr(self._model)
 
     def __getattr__(self, key: Any) -> Any:
         """Wrapper of meta_model's attributes to access Module's inputs and outputs.
@@ -99,7 +100,7 @@ class NNsight:
         Returns:
             Any: Attribute.
         """
-        return getattr(self.model, key)
+        return getattr(self._model, key)
 
     def interleave(
         self,
@@ -134,14 +135,14 @@ class NNsight:
 
         logger.info(f"Running `{self.model_key}`...")
 
-        graph.compile(self.model)
+        graph.compile(self._model)
 
         inputs, total_batch_size = self._prepare_inputs(*inputs)
 
         intervention_handler = InterventionHandler(graph, total_batch_size)
 
         with HookModel(
-            self.model,
+            self._model,
             list(graph.argument_node_names.keys()),
             input_hook=lambda activations, module_path: intervene(
                 activations, module_path, "input", intervention_handler
@@ -161,9 +162,9 @@ class NNsight:
     
     def wrap(self):
 
-        self.model = Module.wrap(self.model)
+        self._model = Module.wrap(self._model)
 
-        for name, module in list(self.model.named_modules()):
+        for name, module in list(self._model.named_modules()):
 
             if isinstance(module, (Module, torch.nn.ModuleList)):
                 continue
@@ -173,13 +174,13 @@ class NNsight:
             # Set Module's module_path so they know their place in the Module tree.
             module.module_path = name
 
-            setattr(self.model, name, module)
+            setattr(self._model, name, module)
 
     def dispatch_model(self, *args, **kwargs) -> None:
         """Dispatched local_model using _load_local."""
         logger.info(f"Dispatching `{self.model_key}`...")
         
-        self.model = self._load(self.model_key, *self.args, *args, **kwargs, **self.kwargs)
+        self._model = self._load(self.model_key, *self.args, *args, **kwargs, **self.kwargs)
 
         self.wrap()
 
@@ -206,7 +207,7 @@ class NNsight:
                 with runner:
                     with runner.invoke(*inputs, **invoker_args):
 
-                        output = self.model.output.save()
+                        output = self._model.output.save()
 
                 return output.value
 
@@ -247,7 +248,7 @@ class NNsight:
             torch.nn.Module: Local model.
         """
 
-        return accelerate.load_checkpoint_and_dispatch(self.model, model_key, **kwargs)
+        return accelerate.load_checkpoint_and_dispatch(self._model, model_key, **kwargs)
 
     def _execute(self, *prepared_inputs: Tuple[Any], **kwargs) -> Any:
         """Virtual method to run the local_model with some inputs.
@@ -257,13 +258,13 @@ class NNsight:
         Args:
             prepared_inputs (Tuple[Any]): Prepared inputs.
         """
-        device = next(self.model.parameters()).device
+        device = next(self._model.parameters()).device
 
         prepared_inputs = util.apply(
             prepared_inputs, lambda x: x.to(device), torch.Tensor
         )
 
-        return self.model(
+        return self._model(
             *prepared_inputs,
             **kwargs,
         )
