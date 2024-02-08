@@ -19,49 +19,87 @@ from nnsight.util import WrapperModule
 from ..patching import Patch, Patcher
 from .LanguageModel import LanguageModel
 
+from torch._guards import detect_fake_mode
 
 class Mamba(LanguageModel):
-    def _load_meta(
-        self, repoid_or_path, *args, device=None, **kwargs
-    ) -> PreTrainedModel:
+
+    def _load(self, repo_id: str, device='meta', **kwargs) -> PreTrainedModel:
+
+        config = MambaConfig(**load_config_hf(repo_id))
+
         if self.tokenizer is None:
+
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repoid_or_path, padding_side="left"
+                repo_id, config=config, padding_side="left"
             )
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        config_data = load_config_hf(repoid_or_path)
-        self.config = MambaConfig(**config_data)
-        return MambaLMHeadModel(self.config, device="meta", dtype=None, **kwargs)
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    def _load_local(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        model = MambaLMHeadModel(self.config, **kwargs)
-        model.load_state_dict(load_state_dict_hf(repoid_or_path, **kwargs))
+        if self._model is None:
+
+            return MambaLMHeadModel(config, device="meta", dtype=None, **kwargs)
+
+        model = MambaLMHeadModel(config, device=device, **kwargs)
+        model.load_state_dict(load_state_dict_hf(repo_id, device=device, **kwargs))
+
         return model
-
+    
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
-        device = next(self.local_model.parameters()).device
+        device = next(self._model.parameters()).device
 
-        return self.local_model(
+        patcher = None
+
+        with Patcher() as patcher:
+
+            if detect_fake_mode(prepared_inputs):
+
+                def blah(hs, *args, residual=None, **kwargs):
+                    return hs, residual
+
+                def blah1(hs, *args, **kwargs):
+                    return hs
+
+                def blah2(hs, *args, **kwargs):
+                    return hs
+
+                def blah3(conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus):
+                    return (
+                        conv1d_out,
+                        torch.zeros((*conv1d_out.shape, A.shape[1] * 2), device="meta"),
+                        conv1d_out,
+                    )
+
+                
+                patcher.add(Patch(mamba_ssm.modules.mamba_simple, blah, "rms_norm_fn"))
+                patcher.add(
+                    Patch(mamba_ssm.models.mixer_seq_simple, blah1, "rms_norm_fn")
+                )
+                patcher.add(Patch(causal_conv1d_cuda, blah2, "causal_conv1d_fwd"))
+                patcher.add(Patch(selective_scan_cuda, blah3, "fwd"))
+
+
+            return self._model(
+                prepared_inputs["input_ids"].to(device),
+                *args,
+                **kwargs,
+            )
+
+    def _execute_generate(
+        self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
+    ):
+
+        device = next(self._model.parameters()).device
+
+        output = self._model.generate(
             prepared_inputs["input_ids"].to(device),
             *args,
+            max_new_tokens=max_new_tokens,
             **kwargs,
         )
 
-    def _execute_generate(self, prepared_inputs: Any, *args, max_length=1, **kwargs):
+        if self._model._output != None:
 
-        device = next(self.local_model.parameters()).device
-
-        output = self.local_model.generate(
-            prepared_inputs["input_ids"].to(device),
-            *args,
-            max_length=max_length,
-            **kwargs,
-        )
-
-        if self.meta_model._output != None:
-
-            self.meta_model._output.node.value = output
+            self._model._output.node.value = output
 
         return output
 
@@ -96,42 +134,6 @@ class Mamba(LanguageModel):
                 patcher.add(Patch(selective_scan_cuda, blah3, "fwd"))
 
                 self.meta_model(prepared_inputs.copy()["input_ids"].to(device))
-
-    def _scan_generate(self, prepared_inputs: Any, *args, max_length=1, **kwargs):
-
-        device = torch.device("meta")
-
-        with accelerate.init_empty_weights(include_buffers=True):
-
-            def blah(hs, *args, residual=None, **kwargs):
-                return hs, residual
-
-            def blah1(hs, *args, **kwargs):
-                return hs
-
-            def blah2(hs, *args, **kwargs):
-                return hs
-
-            def blah3(conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus):
-                return (
-                    conv1d_out,
-                    torch.zeros((*conv1d_out.shape, A.shape[1] * 2), device="meta"),
-                    conv1d_out,
-                )
-
-            with Patcher() as patcher:
-                patcher.add(Patch(mamba_ssm.modules.mamba_simple, blah, "rms_norm_fn"))
-                patcher.add(
-                    Patch(mamba_ssm.models.mixer_seq_simple, blah1, "rms_norm_fn")
-                )
-                patcher.add(Patch(causal_conv1d_cuda, blah2, "causal_conv1d_fwd"))
-                patcher.add(Patch(selective_scan_cuda, blah3, "fwd"))
-
-                self.meta_model.generate(
-                    prepared_inputs.copy()["input_ids"].to(device),
-                    max_length=max_length,
-                )
-
 
 class SSM(torch.nn.Module):
     class DiscA(torch.nn.Module):
@@ -337,4 +339,5 @@ class MambaInterp(Mamba):
 
         patcher.__enter__()
 
+        super().__init__(*args, **kwargs)
         super().__init__(*args, **kwargs)
