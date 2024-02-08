@@ -151,14 +151,18 @@ class Module(torch.nn.Module):
         Returns:
             Proxy: Output proxy.
         """
-
         if self._output is None:
+
+            if len(self.fake_outputs) == 0:
+                fake_output = None
+            elif self.call_iter >= len(self.fake_outputs):
+                # TODO warning?
+                fake_output = self.fake_outputs[-1]
+            else:
+                fake_output = self.fake_outputs[self.call_iter]
+
             self._output = self.tracer.graph.add(
-                value=(
-                    self.fake_outputs[self.call_iter]
-                    if len(self.fake_outputs) > 0
-                    else None
-                ),
+                value=fake_output,
                 target="argument",
                 args=[
                     f"{self.module_path}.output",
@@ -195,12 +199,17 @@ class Module(torch.nn.Module):
             Proxy: Input proxy.
         """
         if self._input is None:
+
+            if len(self.fake_inputs) == 0:
+                fake_input = None
+            elif self.call_iter >= len(self.fake_inputs):
+                # TODO warning?
+                fake_input = self.fake_inputs[-1]
+            else:
+                fake_input = self.fake_inputs[self.call_iter]
+
             self._input = self.tracer.graph.add(
-                value=(
-                    self.fake_inputs[self.call_iter]
-                    if len(self.fake_inputs) > 0
-                    else None
-                ),
+                value=fake_input,
                 target="argument",
                 args=[
                     f"{self.module_path}.input",
