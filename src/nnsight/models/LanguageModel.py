@@ -156,7 +156,7 @@ class LanguageModel(GenerationMixin, NNsight):
             config = AutoConfig.from_pretrained(repo_id, *args, **kwargs)
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, config=self.config, padding_side="left"
+                repo_id, config=config, padding_side="left"
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
