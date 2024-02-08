@@ -4,8 +4,9 @@ from typing import Any, Dict, List, Tuple, Union
 
 import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
-from transformers import BatchEncoding, PreTrainedTokenizer
+from transformers import BatchEncoding
 
+from ..module import Module
 from .LanguageModel import LanguageModel
 
 
@@ -44,17 +45,9 @@ class UnifiedTransformer(LanguageModel):
             )
 
         self.tokenizer = hooked_model.tokenizer
-        self.meta_model: HookedTransformer = None
-        self.local_model: HookedTransformer = None
+        self._model: Union[Module, HookedTransformer] = None
 
         super().__init__(hooked_model, tokenizer=self.tokenizer, *args, **kwargs)
-
-        self.config: HookedTransformerConfig = self.local_model.cfg
-        self.local_model.device = device
-
-    def update_meta(self):
-        super().__init__(self.local_model, tokenizer=self.tokenizer)
-        self.config: HookedTransformerConfig = self.local_model.cfg
 
     def _prepare_inputs(
         self,
@@ -86,17 +79,19 @@ class UnifiedTransformer(LanguageModel):
 
                 new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
 
-            return BatchEncoding(new_inputs), len(new_inputs["input"])
+            return (BatchEncoding(new_inputs),), len(new_inputs["input"])
 
         inputs = self._tokenize(inputs, **kwargs)
 
         if "input_ids" in inputs:
             inputs["input"] = inputs.pop("input_ids")
 
-        return inputs, len(new_inputs["input"])
+        return (inputs,), len(inputs["input"])
 
     def _batch_inputs(
-        self, prepared_inputs: BatchEncoding, batched_inputs: Dict
+        self,
+        batched_inputs: Dict,
+        prepared_inputs: BatchEncoding,
     ) -> torch.Tensor:
         if batched_inputs is None:
             batched_inputs = {"input": []}
@@ -109,7 +104,15 @@ class UnifiedTransformer(LanguageModel):
         if "attention_mask" in prepared_inputs:
             batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
 
-        return batched_inputs
+        return (batched_inputs,)
+
+    def _execute_forward(self, prepared_inputs, *args, **kwargs) -> Any:
+
+        # HookedTransformer uses attention_mask in forward but not in generate.
+        if "attention_mask" in prepared_inputs:
+            prepared_inputs.pop("attention_mask")
+
+        return super()._execute_forward(prepared_inputs, *args, **kwargs)
 
     def _execute_generate(self, prepared_inputs, *args, **kwargs) -> Any:
 
@@ -118,11 +121,3 @@ class UnifiedTransformer(LanguageModel):
             prepared_inputs.pop("attention_mask")
 
         return super()._execute_generate(prepared_inputs, *args, **kwargs)
-
-    def _scan_generate(self, prepared_inputs, *args, **kwargs) -> Any:
-
-        # HookedTransformer uses attention_mask in forward but not in generate.
-        if "attention_mask" in prepared_inputs:
-            prepared_inputs.pop("attention_mask")
-
-        return super()._scan_generate(prepared_inputs, *args, **kwargs)
