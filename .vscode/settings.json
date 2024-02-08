@@ -1,0 +1,5 @@
+{
+    "restructuredtext.syntaxHighlighting.disabled": true,
+    "restructuredtext.preview.docutils.disabled": true,
+    "esbonio.sphinx.confDir": ""
+}
