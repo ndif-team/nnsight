@@ -4,22 +4,15 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    PretrainedConfig,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
+                          AutoTokenizer, BatchEncoding, PretrainedConfig,
+                          PreTrainedModel, PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
 from ..intervention import InterventionProxy
+from ..module import Module
 from . import NNsight
 from .mixins import GenerationMixin
-from ..module import Module
 
 
 class TokenIndexer:
@@ -149,11 +142,11 @@ class LanguageModel(GenerationMixin, NNsight):
 
         super().__init__(*args, **kwargs)
 
-    def _load(self, repo_id: str, *args, **kwargs) -> PreTrainedModel:
+    def _load(self, repo_id: str, **kwargs) -> PreTrainedModel:
+
+        config = AutoConfig.from_pretrained(repo_id, **kwargs)
 
         if self.tokenizer is None:
-
-            config = AutoConfig.from_pretrained(repo_id, *args, **kwargs)
 
             self.tokenizer = AutoTokenizer.from_pretrained(
                 repo_id, config=config, padding_side="left"
@@ -162,11 +155,9 @@ class LanguageModel(GenerationMixin, NNsight):
 
         if self._model is None:
 
-            config = AutoConfig.from_pretrained(repo_id, *args, **kwargs)
+            return self.automodel.from_config(config, trust_remote_code=True)
 
-            return AutoModel.from_config(config, trust_remote_code=True)
-
-        return accelerate.load_checkpoint_and_dispatch(self._model, repo_id, **kwargs)
+        return self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
     def _tokenize(
         self,
