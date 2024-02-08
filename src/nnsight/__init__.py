@@ -1,3 +1,4 @@
+from functools import wraps
 import os
 
 import yaml
@@ -38,5 +39,23 @@ def _bool(self):
 
 
 DEFAULT_PATCHER.add(Patch(FakeTensor, _bool, "__bool__"))
+
+
+def fake_tensor_new_wrapper(fn):
+    
+    @wraps(fn)
+    def inner(cls, fake_mode, elem, device, constant=None):
+        
+        if isinstance(elem, FakeTensor):
+
+            return elem
+        
+        else:
+
+            return fn(cls, fake_mode, elem, device, constant=constant)
+        
+    return inner
+
+DEFAULT_PATCHER.add(Patch(FakeTensor, fake_tensor_new_wrapper(FakeTensor.__new__), "__new__"))
 
 DEFAULT_PATCHER.__enter__()
