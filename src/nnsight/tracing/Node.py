@@ -54,9 +54,6 @@ class Node:
         values = util.apply(values, lambda x: x.proxy_value, Node)
         # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
-        # Move tensors to 'meta'
-        values = util.apply(values, lambda x: x.to("meta"), torch.Tensor)
-
         return values
 
     def __init__(
@@ -129,28 +126,6 @@ class Node:
             self.remaining_listeners = 1
 
             self.execute()
-
-    @property
-    def proxy_device(self) -> torch.device:
-        """Lazy creation of _proxy_device attribute.
-
-        Returns:
-            torch.Device: _description_
-        """
-        if self._proxy_device is None:
-            device = None
-
-            def _device(value):
-                nonlocal device
-                device = value.device
-
-            util.apply(self.proxy_value, _device, torch.Tensor)
-            # TODO
-            # util.apply(self.proxy_value, _device, torch.nn.Module)
-
-            self._proxy_device = device
-
-        return self._proxy_device
 
     def compile(self) -> None:
         """Resets this Nodes remaining_listeners and remaining_dependencies and sets its value to None."""
@@ -232,7 +207,7 @@ class Node:
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
             return
-        elif self.target == "swp":
+        elif self.target == "swap":
             if self.graph.swap is not None:
                 self.graph.swap.set_value(False)
 

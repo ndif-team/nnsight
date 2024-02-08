@@ -19,10 +19,8 @@ def MSG_prompt():
 
 def _test_serialize(runner: Runner):
     request = RequestModel(
-        args=runner.args,
         kwargs=runner.kwargs,
-        repo_id=runner.model.repoid_path_clsname,
-        generation=runner.generation,
+        repo_id=runner.model.model_key,
         intervention_graph=runner.graph.nodes,
         batched_input=runner.batched_input,
     )
@@ -40,9 +38,9 @@ def _test_serialize(runner: Runner):
 def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
-            pass
+            output = gpt2.output.save()
 
-    output = gpt2.tokenizer.decode(generator.output[0])
+    output = gpt2.tokenizer.decode(output.value[0])
 
     assert output == "Madison Square Garden is located in the city of New York City"
 
@@ -50,10 +48,10 @@ def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
 
 def test_save(gpt2: nnsight.LanguageModel):
-    with gpt2.generate(max_new_tokens=1) as generator:
-        with generator.invoke("Hello world") as invoker:
-            hs = gpt2.transformer.h[-1].output[0].save()
-            hs_input = gpt2.transformer.h[-1].input[0][0].save()
+    with gpt2.generate("Hello world") as tracer:
+     
+        hs = gpt2.transformer.h[-1].output[0].save()
+        hs_input = gpt2.transformer.h[-1].input[0][0].save()
 
     assert hs.value is not None
     assert isinstance(hs.value, torch.Tensor)
@@ -63,29 +61,31 @@ def test_save(gpt2: nnsight.LanguageModel):
     assert isinstance(hs_input.value, torch.Tensor)
     assert hs_input.value.ndim == 3
 
-    _test_serialize(generator)
+    _test_serialize(tracer)
 
 
 def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate(max_new_tokens=1) as generator:
-        with generator.invoke(MSG_prompt) as invoker:
+    with gpt2.generate() as tracer:
+        with tracer.invoke(MSG_prompt) as invoker:
             pre = gpt2.transformer.h[-1].output[0].clone().save()
 
             gpt2.transformer.h[-1].output[0][:] = 0
 
             post = gpt2.transformer.h[-1].output[0].save()
 
-    output = gpt2.tokenizer.decode(generator.output[0])
+            output = gpt2.output.save()
 
+    output = gpt2.tokenizer.decode(output.value[0])
+    
     assert not (pre.value == 0).all().item()
     assert (post.value == 0).all().item()
     assert output != "Madison Square Garden is located in the city of New"
 
-    _test_serialize(generator)
+    _test_serialize(tracer)
 
 
 def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate(max_new_tokens=1) as generator:
+    with gpt2.generate() as generator:
         with generator.invoke(MSG_prompt) as invoker:
             pre = gpt2.transformer.wte.output.clone().save()
 
@@ -93,7 +93,9 @@ def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
             post = gpt2.transformer.wte.output.save()
 
-    output = gpt2.tokenizer.decode(generator.output[0])
+            output = gpt2.output.save()
+
+    output = gpt2.tokenizer.decode(output.value[0])
 
     assert not (pre.value == 0).all().item()
     assert (post.value == 0).all().item()
@@ -124,8 +126,10 @@ def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
             gpt2.transformer.wte.output = embeddings
 
-    output1 = gpt2.tokenizer.decode(generator.output[0])
-    output2 = gpt2.tokenizer.decode(generator.output[1])
+        output = gpt2.output.save()
+
+    output1 = gpt2.tokenizer.decode(output.value[0])
+    output2 = gpt2.tokenizer.decode(output.value[1])
 
     assert output1 == "Madison Square Garden is located in the city of New York City"
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
@@ -138,13 +142,17 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         with generator.invoke(MSG_prompt) as invoker:
             embeddings = gpt2.transformer.wte.output.save()
 
-    output1 = gpt2.tokenizer.decode(generator.output[0])
+            output = gpt2.output.save()
+
+    output1 = gpt2.tokenizer.decode(output.value[0])
 
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
             gpt2.transformer.wte.output = embeddings.value
 
-    output2 = gpt2.tokenizer.decode(generator.output[0])
+            output = gpt2.output.save()
+
+    output2 = gpt2.tokenizer.decode(output.value[0])
 
     assert output1 == "Madison Square Garden is located in the city of New York City"
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
@@ -153,8 +161,8 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
 
 def test_retain_grad(gpt2: nnsight.LanguageModel):
-    with gpt2.forward(inference=False) as runner:
-        with runner.invoke("Hello World") as invoker:
+    with gpt2.trace() as tracer:
+        with tracer.invoke("Hello World") as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
             hidden_states.retain_grad()
 
@@ -162,14 +170,14 @@ def test_retain_grad(gpt2: nnsight.LanguageModel):
 
             logits.sum().backward()
 
-    _test_serialize(runner)
+    _test_serialize(tracer)
 
     assert hidden_states.value.grad is not None
 
 
 def test_grad(gpt2: nnsight.LanguageModel):
-    with gpt2.forward(inference=False) as runner:
-        with runner.invoke("Hello World") as invoker:
+    with gpt2.trace() as tracer:
+        with tracer.invoke("Hello World") as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
             hidden_states_grad = hidden_states.grad.save()
             hidden_states_grad[:] = 0
@@ -182,10 +190,10 @@ def test_grad(gpt2: nnsight.LanguageModel):
 
     assert (hidden_states_grad.value == 0).all().item()
 
-    _test_serialize(runner)
+    _test_serialize(tracer)
 
-    with gpt2.forward(inference=False) as runner:
-        with runner.invoke("Hello World") as invoker:
+    with gpt2.trace() as tracer:
+        with tracer.invoke("Hello World") as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
             grad = hidden_states.grad.clone()
             grad[:] = 0
@@ -198,4 +206,4 @@ def test_grad(gpt2: nnsight.LanguageModel):
     hidden_states.value
     assert (hidden_states_grad.value == 0).all().item()
 
-    _test_serialize(runner)
+    _test_serialize(tracer)

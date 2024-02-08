@@ -29,6 +29,7 @@ import warnings
 from typing import Any, Dict, List, Union
 
 import torch
+from torch._guards import detect_fake_mode
 
 from . import util
 from .contexts.Tracer import Tracer
@@ -42,17 +43,23 @@ class Module(torch.nn.Module):
     Proxies of it's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:
-        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsightModel on initialization of meta model.
+        module_path (str): String representing the attribute path of this module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsight on initialization of meta model.
+        call_iter (int): Integer representing the current iteration of this module's inputs/outputs.
+        meta_outputs (List[torch.Tensor]): List of 'meta' tensors built from the outputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
+        meta_inputs (List[torch.Tensor]): List of 'meta' tensors built from the inputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this module. Reset on pass through.
         input (nnsight.intervention.InterventionProxy): Proxy object representing the input of this module. Reset on pass through.
         tracer (nnsight.context.Tracer.Tracer): Object which adds this module's output and input proxies to an intervention graph. Must be set on Module objects manually.
     """
 
     def __init__(self) -> None:
-        self.module_path: str = None
 
-        self.meta_output = None
-        self.meta_input = None
+        self.module_path: str = ""
+
+        self.call_iter = 0
+
+        self.fake_outputs: List[torch.Tensor] = []
+        self.fake_inputs: List[torch.Tensor] = []
 
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
@@ -61,15 +68,53 @@ class Module(torch.nn.Module):
 
         self.tracer: Tracer = None
 
-    def clear(self):
+    def reset_proxies(self, propagate: bool = True) -> None:
+
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
-        self._backward_output: InterventionProxy = None
-        self._backward_input: InterventionProxy = None
 
-    def __call__(
-        self, *args: List[Any], **kwds: Dict[str, Any]
-    ) -> Union[Any, Proxy]:
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.reset_proxies(propagate=False)
+
+    def reset(self, propagate: bool = True) -> None:
+
+        self.reset_proxies(propagate=False)
+
+        self.call_iter = 0
+
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.reset(propagate=False)
+
+    def clear(self, propagate: bool = True) -> None:
+
+        self.reset(propagate=False)
+
+        self.fake_outputs = []
+        self.fake_inputs = []
+
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.clear(propagate=False)
+
+    def next(self, iteration: int = 1, propagate: bool = False) -> Module:
+
+        self.call_iter += iteration
+
+        self.reset_proxies(propagate=False)
+
+        if propagate:
+            for module in self.modules():
+                if isinstance(module, Module):
+                    module.next(propagate=False)
+
+        return self
+
+    def __call__(self, *args: List[Any], **kwds: Dict[str, Any]) -> Union[Any, Proxy]:
         """Override __call__ to check for Proxy arguments.
         If there are any, we should return an Proxy denoting we want to call the given module with arguments.
 
@@ -82,12 +127,11 @@ class Module(torch.nn.Module):
         """
         proxy: Proxy = None
 
-        def get_proxy(_proxy:Proxy):
+        def get_proxy(_proxy: Proxy):
 
             nonlocal proxy
 
             proxy = _proxy
-
 
         util.apply(list(args) + list(kwds.values()), get_proxy, Proxy)
 
@@ -108,13 +152,23 @@ class Module(torch.nn.Module):
             Proxy: Output proxy.
         """
         if self._output is None:
+
+            if len(self.fake_outputs) == 0:
+                fake_output = None
+            elif self.call_iter >= len(self.fake_outputs):
+                # TODO warning?
+                fake_output = self.fake_outputs[-1]
+            else:
+                fake_output = self.fake_outputs[self.call_iter]
+
             self._output = self.tracer.graph.add(
-                value=self.meta_output,
+                value=fake_output,
                 target="argument",
                 args=[
-                    f"{self.module_path}.output.{self.tracer.generation_idx}",
+                    f"{self.module_path}.output",
                     self.tracer.batch_size,
                     self.tracer.batch_start,
+                    self.call_iter,
                 ],
             )
 
@@ -130,7 +184,7 @@ class Module(torch.nn.Module):
         """
 
         self.output.node.graph.add(
-            target="swp", args=[self.output.node, value], value=True
+            target="swap", args=[self.output.node, value], value=True
         )
 
         self._output = None
@@ -145,13 +199,23 @@ class Module(torch.nn.Module):
             Proxy: Input proxy.
         """
         if self._input is None:
+
+            if len(self.fake_inputs) == 0:
+                fake_input = None
+            elif self.call_iter >= len(self.fake_inputs):
+                # TODO warning?
+                fake_input = self.fake_inputs[-1]
+            else:
+                fake_input = self.fake_inputs[self.call_iter]
+
             self._input = self.tracer.graph.add(
-                value=self.meta_input,
+                value=fake_input,
                 target="argument",
                 args=[
-                    f"{self.module_path}.input.{self.tracer.generation_idx}",
+                    f"{self.module_path}.input",
                     self.tracer.batch_size,
                     self.tracer.batch_start,
+                    self.call_iter,
                 ],
             )
 
@@ -167,7 +231,7 @@ class Module(torch.nn.Module):
         """
 
         self.input.node.graph.add(
-            target="swp", args=[self.input.node, value], value=True
+            target="swap", args=[self.input.node, value], value=True
         )
 
         self._input = None
@@ -177,8 +241,8 @@ class Module(torch.nn.Module):
         if self._graph is None:
             self._graph = Graph.trace(
                 self,
-                *self.meta_input[0],
-                **self.meta_input[1],
+                *self.fake_inputs[self.call_iter][0],
+                **self.fake_inputs[self.call_iter][1],
             )
 
         return self._graph
@@ -195,18 +259,15 @@ class Module(torch.nn.Module):
         """
 
         def hook(module: Module, input: Any, input_kwargs: Dict, output: Any):
-            module.clear()
 
-            input = (input, input_kwargs)
+            if detect_fake_mode(input):
 
-            module.meta_output = util.apply(output, lambda x : torch.empty_like(x, dtype=x.dtype, device='meta', requires_grad=x.requires_grad).clone(), torch.Tensor)
-            module.meta_input = util.apply(input, lambda x : torch.empty_like(x, dtype=x.dtype, device='meta', requires_grad=x.requires_grad).clone(), torch.Tensor)
+                module.reset_proxies()
 
-        for name, _module in module.named_children():
-            setattr(module, name, Module.wrap(_module))
+                input = (input, input_kwargs)
 
-        if isinstance(module, (Module, torch.nn.ModuleList)):
-            return module
+                module.fake_outputs.append(output)
+                module.fake_inputs.append(input)
 
         original_output = getattr(module, "output", None)
         original_input = getattr(module, "input", None)

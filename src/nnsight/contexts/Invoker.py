@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import copy
 from contextlib import AbstractContextManager
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
 
 import torch
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-from ..module import Module
-from ..tracing.Proxy import Proxy
-from .Tracer import Tracer
+from ..intervention import InterventionProxy
+
+if TYPE_CHECKING:
+
+    from .Tracer import Tracer
 
 
 class Invoker(AbstractContextManager):
@@ -27,22 +32,19 @@ class Invoker(AbstractContextManager):
 
     def __init__(
         self,
-        tracer: Tracer,
-        input: Any,
-        *args,
+        tracer: "Tracer",
+        *inputs: Tuple[Any],
         scan: bool = True,
         **kwargs,
     ) -> None:
         self.tracer = tracer
-        self.input = input
+        self.inputs = inputs
         self.scan = scan
-        self.args = args
         self.kwargs = kwargs
 
     def __enter__(self) -> Invoker:
         """Enters a new invocation context with a given input.
 
-        Sets the generation_idx to 0.
         Calls the model's _prepare_inputs method using the input and other arguments.
         If scan is True, uses the model's _scan method to update and validate module inputs/outputs.
         Gets a batched version of the post processed input using the model's _batched_inputs method to update the Tracer's
@@ -51,26 +53,34 @@ class Invoker(AbstractContextManager):
         Returns:
             Invoker: Invoker.
         """
-        # Were in a new invocation so set generation_idx to 0,
-        self.tracer.generation_idx = 0
 
-        self.input = self.tracer.model._prepare_inputs(
-            self.input, *self.args, **self.kwargs
+        self.tracer.invoker = self
+
+        self.inputs, batch_size = self.tracer.model._prepare_inputs(
+            *self.inputs, **self.kwargs
         )
 
         if self.scan:
-            self.tracer.model._scan(self.input, *self.tracer.args, **self.tracer.kwargs)
+            self.tracer.model._model.clear()
+
+            with FakeTensorMode(
+                allow_non_fake_inputs=True,
+                shape_env=ShapeEnv(assume_static_by_default=True),
+            ) as fake_mode:
+                with FakeCopyMode(fake_mode):
+                    self.tracer.model._execute(
+                        *copy.deepcopy(self.inputs), **copy.deepcopy(self.tracer.kwargs)
+                    )
         else:
-            for name, module in self.tracer.model.meta_model.named_modules():
-                if isinstance(module, Module):
-                    module.clear()
+            self.tracer.model._model.reset()
 
         self.tracer.batch_start += self.tracer.batch_size
+        self.tracer.batch_size = batch_size
 
-        (
+        self.tracer.batched_input = self.tracer.model._batch_inputs(
             self.tracer.batched_input,
-            self.tracer.batch_size,
-        ) = self.tracer.model._batch_inputs(self.input, self.tracer.batched_input)
+            *self.inputs,
+        )
 
         return self
 
@@ -78,31 +88,15 @@ class Invoker(AbstractContextManager):
         if isinstance(exc_val, BaseException):
             raise exc_val
 
-    def apply(self, target, *args, **kwargs):
-        return self.tracer.graph.add(target=target, args=args, kwargs=kwargs)
+        self.tracer.invoker = None
 
-    def next(self, increment: int = 1) -> None:
-        """Designates subsequent interventions should be applied to the next generation for multi-iteration generation runs.
+    def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
+        """Helper method to directly add a function to the intervention graph.
 
         Args:
-            increment (int): How many generation_idx to increment at once. Defaults to 1.
-        """
-        # .next() increases which generation idx the interventions happen.
-        self.tracer.generation_idx += increment
-
-        for name, module in self.tracer.model.meta_model.named_modules():
-            if isinstance(module, Module):
-                module.clear()
-
-    def save_all(self) -> Dict[str, Proxy]:
-        """Saves the output of all modules and returns a dictionary of [module_path -> save proxy]
+            target (Callable): Function to apply
 
         Returns:
-            Dict[str, Proxy]: Dictionary of all modules saved, keyed by their module_path.
+            InterventionProxy: Proxy of applying that function.
         """
-        result = {}
-
-        for name, module in self.tracer.model.meta_model.named_modules():
-            result[module.module_path] = module.output.save()
-
-        return result
+        return self.tracer.graph.add(target=target, args=args, kwargs=kwargs)

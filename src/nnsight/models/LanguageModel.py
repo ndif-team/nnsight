@@ -1,18 +1,107 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
+import accelerate
 import torch
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          BatchEncoding, PretrainedConfig, PreTrainedModel,
-                          PreTrainedTokenizer)
+from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
+                          AutoTokenizer, BatchEncoding, PretrainedConfig,
+                          PreTrainedModel, PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
-from .NNsightModel import NNsightModel
+from ..intervention import InterventionProxy
+from ..module import Module
+from . import NNsight
+from .mixins import GenerationMixin
 
 
-class LanguageModel(NNsightModel):
-    """LanguageModels are nnsight wrappers around transformer auto models.
+class TokenIndexer:
+    """Helper class to directly access token indices of hidden states.
+    Directly indexes the second dimension of tensors.
+    Makes positive indices negative as tokens are padded on the left.
+
+    Args:
+        proxy (InterventionProxy): Proxy to aid in token indexing.
+    """
+
+    def __init__(self, proxy: InterventionProxy) -> None:
+        self.proxy = proxy
+
+    def convert_idx(self, idx: int):
+        if idx >= 0:
+            n_tokens = self.proxy.node.proxy_value.shape[1]
+            idx = -(n_tokens - idx)
+
+        return idx
+
+    def __getitem__(self, key: int) -> LanguageModelProxy:
+        key = self.convert_idx(key)
+
+        return self.proxy[:, key]
+
+    def __setitem__(self, key: int, value: Union[LanguageModelProxy, Any]) -> None:
+        key = self.convert_idx(key)
+
+        self.proxy[:, key] = value
+
+
+class LanguageModelProxy(InterventionProxy):
+    """
+
+    Indexing by token of hidden states can easily done using ``.token[<idx>]`` or ``.t[<idx>]``
+
+    .. code-block:: python
+
+        with runner.invoke('The Eiffel Tower is in the city of') as invoker:
+            logits = model.lm_head.output.t[0].save()
+
+        print(logits.value)
+
+    This would save only the first token of the output for this module.
+    This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
+
+
+
+    Args:
+        InterventionProxy (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
+
+    @property
+    def token(self) -> TokenIndexer:
+        """Property used to do token based indexing on a proxy.
+        Directly indexes the second dimension of tensors.
+        Makes positive indices negative as tokens are padded on the left.
+
+        Example:
+
+            .. code-block:: python
+
+                model.transformer.h[0].mlp.output.token[0]
+
+            Is equivalent to:
+
+            .. code-block:: python
+
+                model.transformer.h[0].mlp.output.token[:,-3]
+
+            For a proxy tensor with 3 tokens.
+
+        Returns:
+            TokenIndexer: Object to do token based indexing.
+        """
+        return TokenIndexer(self)
+
+    @property
+    def t(self) -> TokenIndexer:
+        """Property as alias for InterventionProxy.token"""
+        return self.token
+
+
+class LanguageModel(GenerationMixin, NNsight):
+    """LanguageModels are NNsight wrappers around transformers language models.
 
     Inputs can be in the form of:
         Prompt: (str)
@@ -29,19 +118,22 @@ class LanguageModel(NNsightModel):
     Attributes:
         config (PretrainedConfig): Huggingface config file loaded from repository or checkpoint.
         tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
-        automodel (type): AutoModel type from transformer auto models.
-        meta_model (PreTrainedModel): Meta version of underlying auto model.
-        local_model (PreTrainedModel): Local version of underlying auto model.
+        automodel (Type): AutoModel type from transformer auto models.
+        model (PreTrainedModel): Meta version of underlying auto model.
 
     """
 
+    proxy_class = LanguageModelProxy
+
     def __init__(
-        self, *args, tokenizer=None, automodel=AutoModelForCausalLM, **kwargs
+        self,
+        *args,
+        tokenizer: Optional[PreTrainedTokenizer] = None,
+        automodel: Type[AutoModel] = AutoModelForCausalLM,
+        **kwargs,
     ) -> None:
-        self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = tokenizer
-        self.meta_model: PreTrainedModel = None
-        self.local_model: PreTrainedModel = None
+        self._model: Union[PreTrainedModel, Module] = None
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
@@ -50,22 +142,22 @@ class LanguageModel(NNsightModel):
 
         super().__init__(*args, **kwargs)
 
-    def _load_meta(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        self.config = AutoConfig.from_pretrained(repoid_or_path, *args, **kwargs)
+    def _load(self, repo_id: str, **kwargs) -> PreTrainedModel:
+
+        config = AutoConfig.from_pretrained(repo_id, **kwargs)
 
         if self.tokenizer is None:
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repoid_or_path, config=self.config, padding_side="left"
+                repo_id, config=config, padding_side="left"
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        return self.automodel.from_config(self.config, trust_remote_code=True)
+        if self._model is None:
 
-    def _load_local(self, repoid_or_path, *args, **kwargs) -> PreTrainedModel:
-        return self.automodel.from_pretrained(
-            repoid_or_path, *args, config=self.config, **kwargs
-        )
+            return self.automodel.from_config(config, trust_remote_code=True)
+
+        return self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
     def _tokenize(
         self,
@@ -111,18 +203,20 @@ class LanguageModel(NNsightModel):
         ],
         labels: Any = None,
         **kwargs,
-    ) -> BatchEncoding:
+    ) -> Tuple[BatchEncoding:, int]:
         if isinstance(inputs, dict):
 
             new_inputs = dict()
 
             tokenized_inputs = self._tokenize(inputs["input_ids"], **kwargs)
 
-            new_inputs['input_ids'] = tokenized_inputs['input_ids']
+            new_inputs["input_ids"] = tokenized_inputs["input_ids"]
 
             if "attention_mask" in inputs:
                 for ai, attn_mask in enumerate(inputs["attention_mask"]):
-                    tokenized_inputs["attention_mask"][ai, -len(attn_mask) :] = attn_mask
+                    tokenized_inputs["attention_mask"][
+                        ai, -len(attn_mask) :
+                    ] = attn_mask
 
                 new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
 
@@ -131,7 +225,7 @@ class LanguageModel(NNsightModel):
 
                 new_inputs["labels"] = labels["input_ids"]
 
-            return BatchEncoding(new_inputs)
+            return (BatchEncoding(new_inputs),), len(new_inputs["input_ids"])
 
         inputs = self._tokenize(inputs, **kwargs)
 
@@ -140,11 +234,14 @@ class LanguageModel(NNsightModel):
 
             inputs["labels"] = labels["input_ids"]
 
-        return inputs
+        return (inputs,), len(inputs["input_ids"])
 
     def _batch_inputs(
-        self, prepared_inputs: BatchEncoding, batched_inputs: Dict
-    ) -> torch.Tensor:
+        self,
+        batched_inputs: Optional[Dict[str, Any]],
+        prepared_inputs: BatchEncoding,
+    ) -> Tuple[Dict[str, Any]]:
+
         if batched_inputs is None:
             batched_inputs = {"input_ids": []}
 
@@ -154,6 +251,10 @@ class LanguageModel(NNsightModel):
             if "attention_mask" in prepared_inputs:
                 batched_inputs["attention_mask"] = []
 
+        else:
+
+            batched_inputs = batched_inputs[0]
+
         batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
 
         if "labels" in prepared_inputs:
@@ -161,16 +262,33 @@ class LanguageModel(NNsightModel):
         if "attention_mask" in prepared_inputs:
             batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
 
-        return batched_inputs, len(prepared_inputs["input_ids"])
+        return (batched_inputs,)
 
-    def _example_input(self) -> Dict[str, torch.Tensor]:
-        return BatchEncoding(
-            {"input_ids": torch.tensor([[0]]), "labels": torch.tensor([[0]])}
+    def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
+
+        device = next(self._model.parameters()).device
+
+        return self._model(
+            *args,
+            **prepared_inputs.to(device),
+            **kwargs,
         )
 
-    def _generation(
-        self, prepared_inputs, *args, max_new_tokens: int = 1, **kwargs
-    ) -> Any:
-        return super()._generation(
-            prepared_inputs, *args, max_new_tokens=max_new_tokens, **kwargs
+    def _execute_generate(
+        self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
+    ):
+
+        device = next(self._model.parameters()).device
+
+        output = self._model.generate(
+            *args,
+            **prepared_inputs.to(device),
+            max_new_tokens=max_new_tokens,
+            **kwargs,
         )
+
+        if self._model._output != None:
+
+            self._model._output.node.value = output
+
+        return output

@@ -46,6 +46,8 @@ def fetch_attr(object: object, target: str) -> Any:
     Returns:
         Any: Fetched attribute.
     """
+    if target == '':
+        return object
     target_atoms = target.split(".")
     for i, atom in enumerate(target_atoms):
         object = getattr(object, atom)
@@ -78,61 +80,16 @@ def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
     return object
 
 
-def cross_entropy_loss(
-    logits: torch.Tensor,
-    target_ids: torch.Tensor,
-    shift: bool = False,
-    avg_batch: bool = True,
-    avg_token: bool = True,
-) -> torch.Tensor:
-    """Helper function for cross entropy loss.
-
-    Args:
-        logits (torch.Tensor): Logits tensor of shape (batch size, n tokens, n features) or (n tokens, n features).
-        target_ids (torch.Tensor): Target ids tensor of shape (batch size, n tokens) or (n tokens).
-        shift (bool, optional): If to ignore the last token of logits and first token of target ids. Defaults to False.
-        avg_batch (bool, optional): If to average the loss across batch. Defaults to True.
-        avg_token (bool, optional): If to average the loss across tokens. Defaults to True.
-
-    Returns:
-        torch.Tensor: Loss.
-    """
-    logits = logits.cpu()
-    target_ids = target_ids.cpu()
-
-    if logits.ndim == 2:
-        logits = logits.unsqueeze(0)
-
-    if target_ids.ndim == 1:
-        target_ids = target_ids.unsqueeze(0)
-
-    assert logits.ndim == 3
-    assert target_ids.ndim == 2
-    assert logits.size(0) == target_ids.size(0)
-    assert logits.size(1) == target_ids.size(1)
-
-    if shift:
-        logits = logits[:, :-1]
-        target_ids = target_ids[:, 1:]
-
-    target_ids = target_ids.long()
-
-    batch_losses = []
-
-    for batch_idx in range(len(logits)):
-        batch_loss = torch.nn.functional.cross_entropy(
-            logits[batch_idx],
-            target_ids[batch_idx],
-            reduction="mean" if avg_token else "none",
+def meta_deepcopy(self: torch.nn.parameter.Parameter, memo):
+    if id(self) in memo:
+        return memo[id(self)]
+    else:
+        result = type(self)(
+            torch.empty_like(self.data, dtype=self.data.dtype, device="meta"),
+            self.requires_grad,
         )
-        batch_losses.append(batch_loss)
-
-    batch_losses = torch.stack(batch_losses)
-
-    if avg_batch:
-        batch_losses = batch_losses.mean(dim=0)
-
-    return batch_losses
+        memo[id(self)] = result
+        return result
 
 
 class WrapperModule(torch.nn.Module):
@@ -145,17 +102,3 @@ class WrapperModule(torch.nn.Module):
             args = args[0]
 
         return args
-
-
-def timed(func, lggr):
-    """This decorator prints the execution time for the decorated function."""
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start = time.time()
-        result = func(*args, **kwargs)
-        end = time.time()
-        lggr.debug(f"Method `{func.__qualname__}` ran in {round(end - start, 6)}s")
-        return result
-
-    return wrapper

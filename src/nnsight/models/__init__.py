@@ -1,4 +1,4 @@
-"""This module contains the main Model classes which enable the tracing and interleaving functionality of nnsight. 
+"""This module contains the main NNsight model classes which enable the tracing and interleaving functionality of nnsight. 
 
 Models allow users to load and wrap torch modules. Here we load gpt2 from HuggingFace using its repo id:
 
@@ -50,29 +50,15 @@ Printing out the wrapped module returns its structure:
     (lm_head): Linear(in_features=768, out_features=50257, bias=False)
     )
 
-The primary methods of interacting and running the model are ``.generate(...)`` and ``.forward(...)``. Both return context manager objects which, when entered, track operations performed on the inputs and outputs of modules.
+The primary methods of interacting and running the model  ``.forward(...)``, ``.invoke(...)``, and ``.trace(...)``. All return context manager objects which, when entered, track operations performed on the inputs and outputs of modules.
 
-The :func:`generate <nnsight.models.NNsightModel.NNsightModel.generate>` context is meant for multi-iteration runs. Arguments passed to generate determine the generation behavior — in this case to generate three tokens.
-Within a generation context, invoker sub-contexts are entered using ``generator.invoke``. This is where an input (or batch of inputs) to the model is accepted, and batched with other invocations. It's in these contexts where operations on inputs and outputs of modules are tracked and prepared for execution.
 
-In this example, we run two prompts on the language model in order to generate three tokens. We also perform a ``.save()`` operation on the output of the lm_head module (the logit outputs) in order to save these activations and access them after generation is over:
 
-.. code-block:: python
-
-    with model.generate(max_new_tokens=3) as generator:
-        with generator.invoke("The Eiffel Tower is in the city of") as invoker:
-            logits1 = model.lm_head.output.save()
-        with generator.invoke("The Empire State Building is in the city of") as invoker:
-            logits2 = model.lm_head.output.save()
-
-    print(logits1.value)
-    print(logits2.value)
-
-The :func:`forward <nnsight.models.NNsightModel.NNsightModel.forward>` context is meant for direct input to the underlying model (or module).
+The :func:`forward <nnsight.models.NNsightModel.NNsightModel.forward>` context is has the most explicit control of all levels of nnsight tracing and interleaving, creating a parent context where sub, input specific, contexts are spawned from.
 
 .. code-block:: python
 
-    with model.forward(inference=True) as runner:
+    with model.forward() as runner:
         with runner.invoke("The Eiffel Tower is in the city of") as invoker:
             logits = model.lm_head.output.save()
 
@@ -81,3 +67,5 @@ The :func:`forward <nnsight.models.NNsightModel.NNsightModel.forward>` context i
 See :mod:`nnsight.contexts` for more.
 
 """
+
+from .NNsightModel import NNsight
