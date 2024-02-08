@@ -253,7 +253,7 @@ class Module(torch.nn.Module):
 
             if detect_fake_mode(input):
 
-                module.reset()
+                module.reset_proxies()
 
                 input = (input, input_kwargs)
 
