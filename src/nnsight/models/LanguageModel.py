@@ -19,6 +19,7 @@ from transformers.models.auto import modeling_auto
 from ..intervention import InterventionProxy
 from . import NNsight
 from .mixins import GenerationMixin
+from ..module import Module
 
 
 class TokenIndexer:
@@ -107,7 +108,7 @@ class LanguageModelProxy(InterventionProxy):
 
 
 class LanguageModel(GenerationMixin, NNsight):
-    """LanguageModels are NNsight wrappers around transformer auto language models.
+    """LanguageModels are NNsight wrappers around transformers language models.
 
     Inputs can be in the form of:
         Prompt: (str)
@@ -134,13 +135,12 @@ class LanguageModel(GenerationMixin, NNsight):
     def __init__(
         self,
         *args,
-        tokenizer=None,
+        tokenizer: Optional[PreTrainedTokenizer] = None,
         automodel: Type[AutoModel] = AutoModelForCausalLM,
         **kwargs,
     ) -> None:
-        self.config: PretrainedConfig = None
         self.tokenizer: PreTrainedTokenizer = tokenizer
-        self._model: PreTrainedModel = None
+        self._model: Union[PreTrainedModel, Module] = None
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
@@ -149,22 +149,24 @@ class LanguageModel(GenerationMixin, NNsight):
 
         super().__init__(*args, **kwargs)
 
-    def _load_meta(self, model_key: str, *args, **kwargs) -> PreTrainedModel:
-        self.config = AutoConfig.from_pretrained(model_key, *args, **kwargs)
+    def _load(self, repo_id: str, *args, **kwargs) -> PreTrainedModel:
 
         if self.tokenizer is None:
 
+            config = AutoConfig.from_pretrained(repo_id, *args, **kwargs)
+
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_key, config=self.config, padding_side="left"
+                repo_id, config=self.config, padding_side="left"
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        return self.automodel.from_config(self.config, trust_remote_code=True)
-    
-    def _load(self, model_key, *args, **kwargs) -> PreTrainedModel:
-        return self.automodel.from_pretrained(
-            model_key, *args, config=self.config, **kwargs
-        )
+        if self._model is None:
+
+            config = AutoConfig.from_pretrained(repo_id, *args, **kwargs)
+
+            return AutoModel.from_config(config, trust_remote_code=True)
+
+        return accelerate.load_checkpoint_and_dispatch(self._model, repo_id, **kwargs)
 
     def _tokenize(
         self,
@@ -232,7 +234,7 @@ class LanguageModel(GenerationMixin, NNsight):
 
                 new_inputs["labels"] = labels["input_ids"]
 
-            return (BatchEncoding(new_inputs), ), len(new_inputs["input_ids"])
+            return (BatchEncoding(new_inputs),), len(new_inputs["input_ids"])
 
         inputs = self._tokenize(inputs, **kwargs)
 
@@ -269,7 +271,7 @@ class LanguageModel(GenerationMixin, NNsight):
         if "attention_mask" in prepared_inputs:
             batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
 
-        return (batched_inputs, )
+        return (batched_inputs,)
 
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
@@ -299,4 +301,3 @@ class LanguageModel(GenerationMixin, NNsight):
             self._model._output.node.value = output
 
         return output
-

@@ -101,7 +101,7 @@ class Module(torch.nn.Module):
                 if isinstance(module, Module):
                     module.clear(propagate=False)
 
-    def next(self, iteration: int = 1, propagate: bool = True) -> Module:
+    def next(self, iteration: int = 1, propagate: bool = False) -> Module:
 
         self.call_iter += iteration
 

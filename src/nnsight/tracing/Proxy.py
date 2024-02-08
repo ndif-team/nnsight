@@ -26,17 +26,7 @@ class Proxy:
 
     def __init__(self, node: "Node") -> None:
 
-        self.node = node
-
-    @classmethod
-    def __new__(cls, self, node: "Node", *args, **kwargs):
-
-        if node.done():
-
-            return node.value
-
-        return super().__new__(cls)
-        
+        self.node = node        
 
     def __str__(self) -> str:
 

@@ -283,7 +283,7 @@ def intervene(
     return activations
 
 
-class HookModel(AbstractContextManager):
+class HookHandler(AbstractContextManager):
     """Context manager that applies input and/or output hooks to modules in a model.
 
     Registers provided hooks on __enter__ and removes them on __exit__.
@@ -313,7 +313,7 @@ class HookModel(AbstractContextManager):
 
         self.handles: List[RemovableHandle] = []
 
-    def __enter__(self) -> HookModel:
+    def __enter__(self) -> HookHandler:
         """Registers input and output hooks to modules if they are defined.
 
         Returns:

@@ -82,7 +82,7 @@ class Tracer:
             raise Exception("Can't create an invoker context with one already open!")
 
         return Invoker(self, *inputs, **kwargs)
-    
+
     def next(self, increment: int = 1) -> None:
         """Increments call_iter of all ``Module``s. Useful when doing iterative/generative runs.
 
@@ -90,6 +90,4 @@ class Tracer:
             increment (int): How many call_iter to increment at once. Defaults to 1.
         """
 
-        self.model._model.reset_proxies()
-        self.model._model.next()
-
+        self.model._model.next(increment=increment, propagate=True)

@@ -33,85 +33,6 @@ class Graph:
         swap (Node): Attribute to store swap values from 'swap' nodes.
     """
 
-    @staticmethod
-    def trace(
-        module: torch.nn.Module, *args: List[Any], **kwargs: Dict[str, Any]
-    ) -> Graph:
-        """Given a module and some default (should be meta tensors) arguments, create a graph from the module's
-        forward method.
-
-        Args:
-            module (torch.nn.Module): _description_
-            args (List[Any]): desc
-            kwargs (Dict[str, Any]): desc
-
-        Returns:
-            Graph: _description_
-        """
-
-        # Create a graph with the module as the root module
-        graph = Graph(module)
-
-        # Get 'unbound' version of forward method so we can pass in proxy of module instead of self
-        forward = module.__class__.forward
-
-        # Want list not tuple
-        args = list(args)
-
-        # Inspect forward signature to collect all parameters
-        signature = inspect.signature(forward)
-
-        trace_args = []
-        trace_kwargs = {}
-
-        def get_argument_value(param: inspect.Parameter, idx: int):
-            """Gets the correct argument to pass to forward method.
-
-
-            Args:
-                param (_type_): _description_
-                idx (_type_): _description_
-
-            Returns:
-                _type_: _description_
-            """
-
-            # If idx in range of provided args, create a proxy for that arg instead of default.
-            if idx < len(args):
-                trace_args.append(
-                    graph.add(value=args[idx], target="argument", args=[param.name])
-                )
-            # If param name in provided kwargs, create a proxy for that arg instead of default.
-            elif param.name in kwargs and type(kwargs[param.name]) != type(
-                param.default
-            ):
-                trace_kwargs[param.name] = graph.add(
-                    value=kwargs[param.name],
-                    target="argument",
-                    args=[param.name],
-                )
-            else:
-                # Otherwise just return default
-                trace_kwargs[param.name] = param.default
-
-        # Create the appropriate proxies/values for the forward method in order to trace.
-        arguments = [
-            get_argument_value(param, i)
-            for i, param in enumerate(list(signature.parameters.values())[1:])
-        ]
-
-        # Some methods cannot be caught because they aren't torch functions or dont play nice with __torch_function__.
-        # So the patcher replaces the methods with something to catch proxies and return proxies.
-        with Patcher() as patcher:
-            patcher.add(Patch(torch, proxy_wrapper(torch.full), "full"))
-            patcher.add(Patch(torch, proxy_wrapper(torch.finfo), "finfo"))
-            patcher.add(Patch(torch, proxy_wrapper(torch.arange), "arange"))
-
-            # Run forward with root module proxy and arguments
-            output = forward(graph.module_proxy, *trace_args, **trace_kwargs)
-
-        return graph
-
     def __init__(
         self,
         module: torch.nn.Module,
@@ -229,8 +150,6 @@ class Graph:
         if name is None:
             name = f"{target_name}_{self.name_idx[target_name]}"
 
-        self.name_idx[target_name] += 1
-
         stack = inspect.stack()
         proxy_frame = stack[2]
 
@@ -244,70 +163,27 @@ class Graph:
             meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
         )
 
-        # (for when you want to apply things to proxies after model execution?)
-        if not node.done():
+        if node.done():
 
-            self.nodes[name] = node
+            return node.value
 
-            if target_name == "argument":
-                module_path = args[0]
+        self.name_idx[target_name] += 1
 
-                if module_path not in self.argument_node_names:
-                    self.argument_node_names[module_path] = []
+        self.nodes[name] = node
 
-                self.argument_node_names[module_path].append(name)
+        if target_name == "argument":
+            module_path = args[0]
 
-        return self.proxy(node)
+            if module_path not in self.argument_node_names:
+                self.argument_node_names[module_path] = []
 
-    def proxy(self, node: Node) -> Proxy:
-        """Returns proxy of node with specified proxy_class.
+            self.argument_node_names[module_path].append(name)
 
-        Args:
-            node (Node): Node.
-
-        Returns:
-            Proxy: Proxy.
-        """
         return self.proxy_class(node)
 
     def eliminate_dead_code(self):
         # TODO
         pass
-
-    def wrap(self, module: torch.nn.Module) -> torch.nn.Module:
-        """Replaces the forward method of the given module with an execution of the module's graph.
-
-        Args:
-            module (torch.nn.Module): Module to replace the forward method of.
-
-        Returns:
-            torch.nn.Module: The module, post-replacement.
-        """
-
-        def forward(*args, **kwargs):
-            # Compile the graph with the given module as the root module.
-            self.compile(module)
-
-            # Gets list of all argument nodes for this graph.
-            argument_nodes_list = list(self.argument_node_names.values())
-
-            # Sets the result of the argument nodes for args.
-            for i, arg in enumerate(args):
-                self.nodes[argument_nodes_list[i][0]].set_value(arg)
-
-            # And then for kwargs.
-            for key in kwargs:
-                if key in self.argument_node_names:
-                    self.nodes[self.argument_node_names[key][0]].set_value(arg)
-
-            self.output_proxy
-
-            return return_value
-
-        # Replace forward method with custom graph execution method.
-        module.forward = forward
-
-        return module
 
     def vis(self, filename: str = "graph", format: str = "png"):
         import graphviz

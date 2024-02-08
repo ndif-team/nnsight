@@ -19,7 +19,6 @@ from .tracing.Proxy import proxy_wrapper
 
 logger.disabled = not CONFIG.APP.LOGGING
 
-
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
 
@@ -33,9 +32,11 @@ for key, value in getmembers(einops.einops, isfunction):
 
 from torch._subclasses.fake_tensor import FakeTensor
 
+
 def _bool(self):
     return True
 
-DEFAULT_PATCHER.add(Patch(FakeTensor, _bool, '__bool__'))
+
+DEFAULT_PATCHER.add(Patch(FakeTensor, _bool, "__bool__"))
 
 DEFAULT_PATCHER.__enter__()
