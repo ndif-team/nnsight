@@ -253,8 +253,8 @@ class NNsight:
 
         logger.info(f"Completed `{self._model_key}`")
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        # gc.collect()
+        # torch.cuda.empty_cache()
 
         return output
 
