@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 import torch
 
 from ..tracing.Graph import Graph
 from .Invoker import Invoker
-
+from ..intervention import InterventionProxy    
 if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
 
@@ -76,6 +76,14 @@ class Tracer:
         )
 
     def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
+        """_summary_
+
+        Raises:
+            Exception: _description_
+
+        Returns:
+            Invoker: _description_
+        """
 
         if self.invoker is not None:
 
@@ -91,3 +99,15 @@ class Tracer:
         """
 
         self.model._model.next(increment=increment, propagate=True)
+
+    def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
+        """Helper method to directly add a function to the intervention graph.
+
+        Args:
+            target (Callable): Function to apply
+
+        Returns:
+            InterventionProxy: Proxy of applying that function.
+        """
+        return self.graph.add(target=target, args=args, kwargs=kwargs)
+

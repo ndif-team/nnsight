@@ -54,7 +54,7 @@ class Mamba(LanguageModel):
             if detect_fake_mode(prepared_inputs):
 
                 def blah(hs, *args, residual=None, **kwargs):
-                    return hs, residual
+                    return hs, residual or torch.rand_like(hs)
 
                 def blah1(hs, *args, **kwargs):
                     return hs
