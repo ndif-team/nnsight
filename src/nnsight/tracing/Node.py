@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
 import torch
@@ -76,7 +77,7 @@ class Node:
             meta = dict()
 
         self.name = name
-        self.graph = graph
+        self.graph = weakref.proxy(graph)
         self.proxy_value = value
         self.target = target
         self.args: List = util.apply(args, lambda x: x.node, Proxy)

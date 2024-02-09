@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 import torch
 
+from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
 from .Invoker import Invoker
-from ..intervention import InterventionProxy    
+
 if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
 
@@ -49,7 +51,7 @@ class Tracer:
         # Modules need to know about the current Tracer to create the correct proxies.
         for name, module in self.model._model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
-                module.tracer = self
+                module.tracer = weakref.proxy(self)
 
         self.model._model.tracer = self
 
@@ -110,4 +112,3 @@ class Tracer:
             InterventionProxy: Proxy of applying that function.
         """
         return self.graph.add(target=target, args=args, kwargs=kwargs)
-
