@@ -20,13 +20,11 @@ class Invoker(AbstractContextManager):
 
     Attributes:
         tracer (nnsight.contexts.Tracer.Tracer): Tracer object to enter input and manage context.
-        input (Any): Initially entered input, then post-processed input from model's _prepare_inputs method.
-        scan (bool): If to use a 'meta' version of the  post-processed input to run through the model using it's _scan method,
-            in order to update the potential sizes/dtypes of all module's inputs/outputs as well as validate things work correctly.
+        inputs (Tuple[Any]): Initially entered inputs, then post-processed inputs from model's ._prepare_inputs(...) method.
+        scan (bool): If to execute the model using `FakeTensor` in order to update the potential sizes/dtypes of all module's inputs/outputs as well as validate things work correctly.
             Scanning is not free computation wise so you may want to turn this to false when running in a loop.
             When making interventions, you made get shape errors if scan is false as it validates operations based on shapes so
             for looped calls where shapes are consistent, you may want to have scan=True for the first loop. Defaults to True.
-        args (List[Any]): Positional arguments passed to the model's _prepare_inputs method.
         kwargs (Dict[str,Any]): Keyword arguments passed to the model's _prepare_inputs method.
     """
 
@@ -89,14 +87,3 @@ class Invoker(AbstractContextManager):
             raise exc_val
 
         self.tracer.invoker = None
-
-    def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
-        """Helper method to directly add a function to the intervention graph.
-
-        Args:
-            target (Callable): Function to apply
-
-        Returns:
-            InterventionProxy: Proxy of applying that function.
-        """
-        return self.tracer.graph.add(target=target, args=args, kwargs=kwargs)

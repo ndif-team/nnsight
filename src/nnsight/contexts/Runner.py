@@ -14,32 +14,9 @@ from .Tracer import Tracer
 
 
 class Runner(Tracer):
-    """The Runner object manages the intervention tracing for a given model's _generation method or _run_local method.
-
-    Examples:
-
-        Below example shows accessing the input and output of a gpt2 module, saving them during execution, and printing the resulting values after execution:
-
-        .. code-block:: python
-
-            with model.generate() as generator:
-                with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-                    hidden_states = model.lm_head.input.save()
-                    logits = model.lm_head.output.save()
-
-            print(hidden_states.value)
-            print(logits.value)
-
-        Below example shows accessing the output of a gpt2 module and setting the values to zero:
-
-        .. code-block:: python
-
-            with model.forward() as runner:
-                with runner.invoke('The Eiffel Tower is in the city of') as invoker:
-                    model.transformer.h[0].output[0] = 0
+    """The Runner object manages the intervention tracing for a given model's _execute method locally or remotely.
 
     Attributes:
-        generation (bool): If to use the _generation method of the model. Otherwise the _run_local method
         remote (bool): If to use the remote NDIF server for execution of model and computation graph. (Assuming it's running/working)
         blocking (bool): If when using the server option, to hang until job completion or return information you can use to retrieve the job result.
     """
@@ -71,13 +48,10 @@ class Runner(Tracer):
     def run_server(self):
         # Create the pydantic object for the request.
         request = pydantics.RequestModel(
-            args=self.args,
             kwargs=self.kwargs,
-            repo_id=self.model.repoid_path_clsname,
+            repo_id=self.model.model_key,
             batched_input=self.batched_input,
-            intervention_graph=self.graph.nodes,
-            generation=self.generation,
-            include_output=self.remote_include_output,
+            intervention_graph=self.graph.nodes
         )
 
         if self.blocking:

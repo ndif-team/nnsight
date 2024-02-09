@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Tuple
+import weakref
+from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 import torch
 
+from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
 from .Invoker import Invoker
 
@@ -49,7 +51,7 @@ class Tracer:
         # Modules need to know about the current Tracer to create the correct proxies.
         for name, module in self.model._model.named_modules():
             if not isinstance(module, torch.nn.ModuleList):
-                module.tracer = self
+                module.tracer = weakref.proxy(self)
 
         self.model._model.tracer = self
 
@@ -76,6 +78,14 @@ class Tracer:
         )
 
     def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
+        """_summary_
+
+        Raises:
+            Exception: _description_
+
+        Returns:
+            Invoker: _description_
+        """
 
         if self.invoker is not None:
 
@@ -91,3 +101,14 @@ class Tracer:
         """
 
         self.model._model.next(increment=increment, propagate=True)
+
+    def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
+        """Helper method to directly add a function to the intervention graph.
+
+        Args:
+            target (Callable): Function to apply
+
+        Returns:
+            InterventionProxy: Proxy of applying that function.
+        """
+        return self.graph.add(target=target, args=args, kwargs=kwargs)

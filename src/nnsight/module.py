@@ -64,8 +64,6 @@ class Module(torch.nn.Module):
         self._output: InterventionProxy = None
         self._input: InterventionProxy = None
 
-        self._graph: Graph = None
-
         self.tracer: Tracer = None
 
     def reset_proxies(self, propagate: bool = True) -> None:
@@ -235,17 +233,6 @@ class Module(torch.nn.Module):
         )
 
         self._input = None
-
-    @property
-    def graph(self) -> Graph:
-        if self._graph is None:
-            self._graph = Graph.trace(
-                self,
-                *self.fake_inputs[self.call_iter][0],
-                **self.fake_inputs[self.call_iter][1],
-            )
-
-        return self._graph
 
     @staticmethod
     def wrap(module: torch.nn.Module) -> Module:

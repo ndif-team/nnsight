@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-import accelerate
 import torch
 from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
-                          AutoTokenizer, BatchEncoding, PretrainedConfig,
-                          PreTrainedModel, PreTrainedTokenizer)
+                          AutoTokenizer, BatchEncoding, PreTrainedModel,
+                          PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
 from ..intervention import InterventionProxy
