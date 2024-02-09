@@ -340,4 +340,3 @@ class MambaInterp(Mamba):
         patcher.__enter__()
 
         super().__init__(*args, **kwargs)
-        super().__init__(*args, **kwargs)

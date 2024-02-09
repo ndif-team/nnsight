@@ -50,7 +50,7 @@ Printing out the wrapped module returns its structure:
     (lm_head): Linear(in_features=768, out_features=50257, bias=False)
     )
 
-The primary methods of interacting and running the model  ``.forward(...)``, ``.invoke(...)``, and ``.trace(...)``. All return context manager objects which, when entered, track operations performed on the inputs and outputs of modules.
+The primary method of interacting and running the model  ``.forward(...)``, ``.invoke(...)``, and ``.trace(...)``. All return context manager objects which, when entered, track operations performed on the inputs and outputs of modules.
 
 
 
