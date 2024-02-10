@@ -19,7 +19,6 @@ templates_path = ["_templates"]
 exclude_patterns = []
 fixed_sidebar = True
 
-
 # HTML Output Options
 
 # See https://sphinx-themes.org/ for more
@@ -55,11 +54,13 @@ html_theme_options = {
         },
     ],
     "show_prev_next": False,
+
+    # "pygment_light_style": "monokai",
 }
 
 html_context = {"default_mode": "auto", "ndif_url": "https://ndif.dev/ping"}
 
 html_css_files = [
+    # "css/tutorials.css",
     "css/custom.css",
-    "css/tutorials.css",
 ]

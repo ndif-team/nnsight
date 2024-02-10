@@ -1,0 +1,28 @@
+/* Custom Styles for List Group Items */
+.list-group-item {
+    background-color: transparent; /* Make the button background transparent */
+    border: none; /* Remove border */
+    color: #000; /* Set text color */
+  }
+  
+  .list-group-item:hover {
+    background-color: #f8f9fa; /* Light grey hover effect, adjust as needed */
+  }
+  
+  .list-group-item.active {
+    background-color: #fff; /* White background for active state */
+    color: #000; /* Text color for active state */
+    border: 1px; /* Ensure no border for active state */
+  }
+  
+  /* Ensuring the active state overrides Bootstrap default */
+  .list-group-item.active:focus, .list-group-item.active:hover {
+    background-color: #fff; /* White background for active + focus/hover states */
+    color: #000; /* Text color for active + focus/hover states */
+  }
+  
+  /* Optional: if you want to remove the rounded corners to be completely flush */
+  .list-group-item {
+    border-radius: 0; /* Remove rounded corners */
+  }
+  
