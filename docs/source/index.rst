@@ -15,13 +15,7 @@ nnsight
   About <about>
 
 .. raw:: html
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-
-  <!-- and it's easy to individually load additional languages -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/go.min.js"></script>
-
-  <script>hljs.highlightAll();</script>
+  
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <link rel="stylesheet" href="_static/css/front.css">
 
@@ -29,10 +23,10 @@ nnsight
   
   <body class="w-100">
 
-    <section class="hero my-5">
+    <section class="my-5" id="hero">
       <div class="container col-xxl-8 px-4 py-5">
         <div class="row flex-lg-row-reverse d-flex justify-content-between g-5 py-5">
-          <div class="col-10 col-sm-8 col-lg-6">
+          <div class="col-10 col-sm-8 col-lg-7">
             <img src="_static/images/nnsight_logo.svg" class="d-block mx-lg-auto img-fluid" alt="Bootstrap Themes" width="800" loading="lazy">
           </div>
           <div class="col-lg-5">

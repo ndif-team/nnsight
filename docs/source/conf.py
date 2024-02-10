@@ -64,3 +64,7 @@ html_css_files = [
     # "css/tutorials.css",
     "css/custom.css",
 ]
+
+html_js_files = [
+    'js/custom.js',
+]
