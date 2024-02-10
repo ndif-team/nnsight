@@ -20,10 +20,12 @@ nnsight
   <link rel="stylesheet" href="_static/css/front.css">
 
 .. raw:: html
-  
-  <body class="w-100">
 
-    <section class="my-5" id="hero">
+  <body class="w-100" id="front-background">
+
+    <div class="fixed-top-full-width" id="hero">
+
+    <section class="my-5">
       <div class="container col-xxl-8 px-4 py-5">
         <div class="row flex-lg-row-reverse d-flex justify-content-between g-5 py-5">
           <div class="col-10 col-sm-8 col-lg-7">
@@ -42,7 +44,7 @@ nnsight
       </div>
     </section>
 
-    <div class="row pt-4 pb-5">
+    <div class="row pt-4 pb-5 my-8 gradient-transparent-to-white">
       <div class="col-4 bg-body-tertiary">
         <div class="list-group d-grid gap-2" id="list-tab" role="tablist">
           <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab" aria-controls="list-home">
