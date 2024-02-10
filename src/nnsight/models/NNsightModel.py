@@ -9,10 +9,10 @@ from transformers import AutoConfig, AutoModel
 
 from .. import util
 from ..contexts.Runner import Runner
+from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
                             InterventionProxy, intervene)
 from ..logger import logger
-from ..module import Module
 from ..tracing.Graph import Graph
 
 
@@ -29,7 +29,7 @@ class NNsight:
         kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
         dispatched (bool): If the _model has been loaded yet with real parameters yet.
         custom_model (bool): If the value passed to repoid_path_model was a custom model.
-        _model (Module): Underlying torch module wrapped in our Module.
+        _model (torch.nn.Module): Underlying torch module.
     """
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
@@ -43,41 +43,41 @@ class NNsight:
     ) -> None:
         super().__init__()
 
-        self.model_key = model_key
+        self._model_key = model_key
 
-        self.args = args
-        self.kwargs = kwargs
+        self._args = args
+        self._kwargs = kwargs
 
-        self.dispatched = False
-        self.custom_model = False
+        self._dispatched = False
+        self._custom_model = False
 
-        self._model: Module = None
+        self._model: torch.nn.Module = None
 
-        logger.info(f"Initializing `{self.model_key}`...")
+        logger.info(f"Initializing `{self._model_key}`...")
 
         # Handle passing in a pre-initialized model to wrap.
         # Therefore the NNsight model is "pre-dispatched".
         if isinstance(model_key, torch.nn.Module):
-            self.model_key = model_key.__class__.__name__
-            self.custom_model = True
-            self.dispatched = True
+            self._model_key = model_key.__class__.__name__
+            self._custom_model = True
+            self._dispatched = True
             self._model = model_key
 
         # Otherwise load from _load(...).
-        if not self.custom_model:
+        if not self._custom_model:
             # accelerate.init_empty_weights makes all parameters loaded on the 'meta' device.
             # Also do .to('meta') because why not.
             with accelerate.init_empty_weights(include_buffers=True):
-                self._model = self._load(self.model_key, *args, **kwargs).to("meta")
+                self._model = self._load(self._model_key, *args, **kwargs).to("meta")
 
-        # Call .wrap() to wrap ._model and all sub-modules in our Module class.
-        self.wrap()
-
-        if dispatch and not self.dispatched:
+        if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
 
-        logger.info(f"Initialized `{self.model_key}`")
+        else:
+            self._envoy = Envoy(self._model)
+
+        logger.info(f"Initialized `{self._model_key}`")
 
     def trace(
         self,
@@ -185,7 +185,7 @@ class NNsight:
                 with runner:
                     with runner.invoke(*inputs, **invoker_args):
 
-                        output = self._model.output.save()
+                        output = self._envoy.output.save()
 
                 return output.value
 
@@ -214,7 +214,7 @@ class NNsight:
 
         Runs ._prepare_inputs(...) one last time to get total_batch_size.
 
-        Handles adding and removing hooks on Modules via HookHandler and tracking number of times a Module has been called via InterventionHandler.
+        Handles adding and removing hooks on modules via HookHandler and tracking number of times a module has been called via InterventionHandler.
 
         After execution, garbage collects and clears cuda memory.
 
@@ -228,10 +228,10 @@ class NNsight:
         """
 
         # Loads and dispatched ._model if not already done so.
-        if not self.dispatched:
+        if not self._dispatched:
             self.dispatch_model()
 
-        logger.info(f"Running `{self.model_key}`...")
+        logger.info(f"Running `{self._model_key}`...")
 
         intervention_graph.compile(self._model)
 
@@ -251,47 +251,27 @@ class NNsight:
         ):
             output = fn(*inputs, **kwargs)
 
-        logger.info(f"Completed `{self.model_key}`")
+        logger.info(f"Completed `{self._model_key}`")
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        # gc.collect()
+        # torch.cuda.empty_cache()
 
         return output
-
-    def wrap(self) -> None:
-        """Wraps ._model and all sub-modules in our Module class. Also sets .module_path on each Module relative to root module."""
-
-        # Wrap root module.
-        if not isinstance(self._model, Module):
-            Module.wrap(self._model)
-
-        # Wrap sub-modules.
-        for name, module in list(self._model.named_modules()):
-
-            # Don't wrap already wrapped Modules or ModuleLists.
-            if isinstance(module, (Module, torch.nn.ModuleList)):
-                continue
-
-            module = Module.wrap(module)
-
-            # Set Module's module_path so they know their place in the Module tree.
-            module.module_path = name
 
     def dispatch_model(self, *args, **kwargs) -> None:
         """Dispatched ._model to have real paramters  using .load(...)."""
 
-        logger.info(f"Dispatching `{self.model_key}`...")
+        logger.info(f"Dispatching `{self._model_key}`...")
 
         self._model = self._load(
-            self.model_key, *self.args, *args, **kwargs, **self.kwargs
+            self._model_key, *self._args, *args, **kwargs, **self._kwargs
         )
 
-        # Need to re-wrap ._model.
-        self.wrap()
+        self._envoy = Envoy(self._model)
 
-        self.dispatched = True
+        self._dispatched = True
 
-        logger.info(f"Dispatched `{self.model_key}`")
+        logger.info(f"Dispatched `{self._model_key}`")
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
@@ -302,12 +282,12 @@ class NNsight:
         return repr(self._model)
 
     def __getattr__(self, key: Any) -> Any:
-        """Wrapper of ._model's attributes to access Module's inputs and outputs.
+        """Wrapper of ._envoy's attributes to access module's inputs and outputs.
 
         Returns:
             Any: Attribute.
         """
-        return getattr(self._model, key)
+        return getattr(self._envoy, key)
 
     ### NNsight VIRTUAL METHODS BELOW #####################################
 

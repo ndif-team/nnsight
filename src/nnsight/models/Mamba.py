@@ -85,47 +85,34 @@ class Mamba(LanguageModel):
             )
 
     def _execute_generate(
-        self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
+        self, prepared_inputs: Any, *args, max_length=1, **kwargs
     ):
 
         device = next(self._model.parameters()).device
 
-        output = self._model.generate(
-            prepared_inputs["input_ids"].to(device),
-            *args,
-            max_new_tokens=max_new_tokens,
-            **kwargs,
-        )
+        patcher = None
 
-        if self._model._output != None:
+        with Patcher() as patcher:
 
-            self._model._output.node.value = output
+            if detect_fake_mode(prepared_inputs):
 
-        return output
+                def blah(hs, *args, residual=None, **kwargs):
+                    return hs, residual or torch.rand_like(hs)
 
-    def _scan_forward(self, prepared_inputs: Any, *args, **kwargs):
+                def blah1(hs, *args, **kwargs):
+                    return hs
 
-        device = torch.device("meta")
+                def blah2(hs, *args, **kwargs):
+                    return hs
 
-        with accelerate.init_empty_weights(include_buffers=True):
+                def blah3(conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus):
+                    return (
+                        conv1d_out,
+                        torch.zeros((*conv1d_out.shape, A.shape[1] * 2), device="meta"),
+                        conv1d_out,
+                    )
 
-            def blah(hs, *args, residual=None, **kwargs):
-                return hs, residual
-
-            def blah1(hs, *args, **kwargs):
-                return hs
-
-            def blah2(hs, *args, **kwargs):
-                return hs
-
-            def blah3(conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus):
-                return (
-                    conv1d_out,
-                    torch.zeros((*conv1d_out.shape, A.shape[1] * 2), device="meta"),
-                    conv1d_out,
-                )
-
-            with Patcher() as patcher:
+                
                 patcher.add(Patch(mamba_ssm.modules.mamba_simple, blah, "rms_norm_fn"))
                 patcher.add(
                     Patch(mamba_ssm.models.mixer_seq_simple, blah1, "rms_norm_fn")
@@ -133,7 +120,18 @@ class Mamba(LanguageModel):
                 patcher.add(Patch(causal_conv1d_cuda, blah2, "causal_conv1d_fwd"))
                 patcher.add(Patch(selective_scan_cuda, blah3, "fwd"))
 
-                self.meta_model(prepared_inputs.copy()["input_ids"].to(device))
+            output = self._model.generate(
+                prepared_inputs["input_ids"].to(device),
+                *args,
+                max_length=max_length,
+                **kwargs,
+            )
+
+        if self._envoy._output != None:
+
+            self._envoy._output.node.value = output
+
+        return output
 
 class SSM(torch.nn.Module):
     class DiscA(torch.nn.Module):
@@ -339,5 +337,4 @@ class MambaInterp(Mamba):
 
         patcher.__enter__()
 
-        super().__init__(*args, **kwargs)
         super().__init__(*args, **kwargs)

@@ -14,7 +14,6 @@ from .logger import logger
 from .models.NNsightModel import NNsight
 from .models.LanguageModel import LanguageModel
 
-from .module import Module
 from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper
 

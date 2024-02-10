@@ -48,10 +48,10 @@ class Runner(Tracer):
     def run_server(self):
         # Create the pydantic object for the request.
         request = pydantics.RequestModel(
-            kwargs=self.kwargs,
-            repo_id=self.model.model_key,
-            batched_input=self.batched_input,
-            intervention_graph=self.graph.nodes
+            kwargs=self._kwargs,
+            repo_id=self._model._model_key,
+            batched_input=self._batched_input,
+            intervention_graph=self._graph.nodes
         )
 
         if self.blocking:
@@ -102,7 +102,7 @@ class Runner(Tracer):
 
             # Set save data.
             for name, value in result.saves.items():
-                self.graph.nodes[name].value = value
+                self._graph.nodes[name].value = value
 
             # Set output data.
             self.output = result.output
