@@ -174,8 +174,17 @@ class Envoy:
         """
 
         return self._sub_envoys[key]
+    
+    def __len__(self) -> int:
+        """Wrapper method for underlying ModuleList len.
 
-    def __getattr__(self, key: str) -> Any:
+        Returns:
+            int: Length.
+        """
+
+        return len(self._module)
+
+    def __getattr__(self, key: str) -> Union[Envoy, Any]:
         """Wrapper method for underlying module's attributes.
 
         Args:
