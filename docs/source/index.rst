@@ -19,11 +19,26 @@ nnsight
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <link rel="stylesheet" href="_static/css/front.css">
 
+  <script>
+      // Select the element with the class 'some-class'
+    var element = document.querySelector('.bd-container');
+
+    var newElement = document.createElement('div');
+    newElement.id = 'canvas';
+  
+
+    newElement.style.position = 'fixed';
+    newElement.style.zIndex = '-1';
+    newElement.style.height = '70vh';
+    newElement.style.width = '100vw';
+    newElement.style.top = '30vh';
+
+    element.appendChild(newElement);
+
+  </script>
+
+
 .. raw:: html
-
-  <body class="w-100" id="front-background">
-
-    <div class="fixed-top-full-width" id="hero">
 
     <section class="my-5">
       <div class="container col-xxl-8 px-4 py-5">
@@ -142,4 +157,3 @@ nnsight
       </div>
     </section>
 
-  </body>

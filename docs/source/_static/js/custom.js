@@ -28,7 +28,7 @@ require(['three'], function(THREE) {
     require(['VANTA'], function() {
         if (VANTA.NET) {
             VANTA.NET({
-                el: "#front-background",
+                el: "#canvas",
                 mouseControls: false,
                 touchControls: false,
                 gyroControls: false,
@@ -39,7 +39,7 @@ require(['three'], function(THREE) {
                 maxDistance: 25.00,
                 spacing: 20.00,
                 points: 5.00,
-                backgroundColor: 0xffffff
+                backgroundColor: 0xffffff,
             })
         }
     });
