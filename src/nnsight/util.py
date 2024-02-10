@@ -48,9 +48,16 @@ def fetch_attr(object: object, target: str) -> Any:
     """
     if target == '':
         return object
+    
     target_atoms = target.split(".")
-    for i, atom in enumerate(target_atoms):
+
+    for atom in target_atoms:
+
+        if not atom:
+            continue
+
         object = getattr(object, atom)
+
     return object
 
 

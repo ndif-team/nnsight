@@ -43,7 +43,7 @@ Here is how it looks:
     print('The model predicts', runner.output)
     print('The internal state was', hidden_state.value)
 
-The library is easy to use. Any HuggingFace model can be loaded into a ``LanguageModel`` object, as you can wee on line 2.  Notice we are loading a 70-billion parameter model, which is ordinarily pretty difficult to load on a regular workstation since it would take 140-280 gigabytes of GPU RAM just to store the parameters. 
+The library is easy to use. Any HuggingFace model can be loaded into a ``LanguageModel`` object, as you can see on line 2.  Notice we are loading a 70-billion parameter model, which is ordinarily pretty difficult to load on a regular workstation since it would take 140-280 gigabytes of GPU RAM just to store the parameters. 
 
 The trick that lets us work with this huge model is on line 3.  We set the flag ``remote=True`` to indicate that we want to actually run the network on the remote service.  By default the remote service will be NDIF.  If we want to just run a smaller model quickly, we could leave it as ``remote=False``.
 
@@ -51,7 +51,7 @@ Then when we invoke the model on line 4, we do not just call it as a function. I
 
 You can see what simple direct access looks like on lines 5-6.  On line 5, we grab a hidden state at layer 10, and on layer 6, we change the output of an MLP module inside the transformer at layer 11.
 
-When you run this ``with``-block code on lines 5 and 6 on your local workstation, it actually creates a computation graph storing all the calculations you want to do.  When the outermost ``with`` block is completed, all the defined caculations are sent to the remote server and executed there.  Then when it's all done, the results can be accessed on your local workstation as shown on line 7 and 8.
+When you run this ``with``-block code on lines 5 and 6 on your local workstation, it actually creates a computation graph storing all the calculations you want to do.  When the outermost ``with`` block is completed, all the defined calculations are sent to the remote server and executed there.  Then when it's all done, the results can be accessed on your local workstation as shown on line 7 and 8.
 
 What happens behind the scenes?
 -------------------------------
@@ -65,7 +65,7 @@ An example of one such intervention graph can be seen below:
 
 Basic access to model internals can give you a lot of insight about what is going on inside a large model as it runs.  For example, you can use the `logit lens <https://www.lesswrong.com/posts/AcKRB8wDpdaN6v6ru/interpreting-gpt-the-logit-lens>`_ to read internal hidden states as text.  And use can use `causal tracing <https://rome.baulab.info/>`_ or `path patching <https://arxiv.org/abs/2304.05969>`_ or `other circuit discovery methods <https://arxiv.org/abs/2310.10348>`_ to locate the layers and components within the network that play a decisive role in making a decision.
 
-And with nnsight, you can use thes methods on large models like Llama-2-70b.
+And with nnsight, you can use these methods on large models like Llama-2-70b.
 
 The nnsight library also provies full access to gradients and optimizations methods, out of order module applications, cross prompt interventions and many more features.
 

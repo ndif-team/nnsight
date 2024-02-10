@@ -19,10 +19,10 @@ def MSG_prompt():
 
 def _test_serialize(runner: Runner):
     request = RequestModel(
-        kwargs=runner.kwargs,
-        repo_id=runner.model.model_key,
-        intervention_graph=runner.graph.nodes,
-        batched_input=runner.batched_input,
+        kwargs=runner._kwargs,
+        repo_id=runner._model._model_key,
+        intervention_graph=runner._graph.nodes,
+        batched_input=runner._batched_input,
     )
 
     request_json = request.model_dump(
@@ -34,7 +34,7 @@ def _test_serialize(runner: Runner):
 
     assert isinstance(request2.intervention_graph, Graph)
 
-
+@torch.no_grad()
 def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
@@ -46,7 +46,7 @@ def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     _test_serialize(generator)
 
-
+@torch.no_grad()
 def test_save(gpt2: nnsight.LanguageModel):
     with gpt2.generate("Hello world") as tracer:
      
@@ -63,7 +63,7 @@ def test_save(gpt2: nnsight.LanguageModel):
 
     _test_serialize(tracer)
 
-
+@torch.no_grad()
 def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate() as tracer:
         with tracer.invoke(MSG_prompt) as invoker:
@@ -83,7 +83,7 @@ def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     _test_serialize(tracer)
 
-
+@torch.no_grad()
 def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate() as generator:
         with generator.invoke(MSG_prompt) as invoker:
@@ -103,7 +103,7 @@ def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     _test_serialize(generator)
 
-
+@torch.no_grad()
 def test_adhoc_module(gpt2: nnsight.LanguageModel):
     with gpt2.generate() as generator:
         with generator.invoke("The Eiffel Tower is in the city of") as invoker:
@@ -117,7 +117,7 @@ def test_adhoc_module(gpt2: nnsight.LanguageModel):
 
     _test_serialize(generator)
 
-
+@torch.no_grad()
 def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
@@ -136,7 +136,7 @@ def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     _test_serialize(generator)
 
-
+@torch.no_grad()
 def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:

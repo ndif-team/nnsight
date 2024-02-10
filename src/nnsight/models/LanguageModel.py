@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-import accelerate
 import torch
-from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
-                          AutoTokenizer, BatchEncoding, PretrainedConfig,
-                          PreTrainedModel, PreTrainedTokenizer)
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.models.auto import modeling_auto
 
 from ..intervention import InterventionProxy
-from ..module import Module
 from . import NNsight
 from .mixins import GenerationMixin
 
@@ -59,8 +63,6 @@ class LanguageModelProxy(InterventionProxy):
 
     This would save only the first token of the output for this module.
     This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
-
-
 
     Args:
         InterventionProxy (_type_): _description_
@@ -133,7 +135,7 @@ class LanguageModel(GenerationMixin, NNsight):
         **kwargs,
     ) -> None:
         self.tokenizer: PreTrainedTokenizer = tokenizer
-        self._model: Union[PreTrainedModel, Module] = None
+        self._model: PreTrainedModel = None
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
@@ -287,8 +289,8 @@ class LanguageModel(GenerationMixin, NNsight):
             **kwargs,
         )
 
-        if self._model._output != None:
+        if self._envoy._output != None:
 
-            self._model._output.node.value = output
+            self._envoy._output.node.value = output
 
         return output

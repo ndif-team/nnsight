@@ -6,7 +6,6 @@ import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 from transformers import BatchEncoding
 
-from ..module import Module
 from .LanguageModel import LanguageModel
 
 
@@ -45,7 +44,7 @@ class UnifiedTransformer(LanguageModel):
             )
 
         self.tokenizer = hooked_model.tokenizer
-        self._model: Union[Module, HookedTransformer] = None
+        self._model: HookedTransformer = None
 
         super().__init__(hooked_model, tokenizer=self.tokenizer, *args, **kwargs)
 
