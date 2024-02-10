@@ -9,7 +9,7 @@
 }
 
 .list-group-item:hover {
-  background-color: #f8f9fa;
+  background-color: #fff;
   /* Light grey hover effect, adjust as needed */
 }
 
@@ -18,8 +18,13 @@
   /* White background for active state */
   color: #000;
   /* Text color for active state */
-  border: 1px;
+  border: none;
   /* Ensure no border for active state */
+}
+
+.tab-background {
+  background-color: #f8f9fa;
+  /* Light grey background color */
 }
 
 /* Ensuring the active state overrides Bootstrap default */
@@ -37,6 +42,10 @@
   /* Remove rounded corners */
 }
 
+.tab-content {
+  height: 100% !important;
+}
+
 #canvas {
   position: fixed;
   z-index: -1;
@@ -45,13 +54,36 @@
   top: 0;
 }
 
+.gist-file {
+  margin-bottom: 0 !important;
+}
+
 
 .gradient-transparent-to-white {
-  background: linear-gradient(
-    to bottom, 
-    rgba(255, 255, 255, 0) 0%, 
-    rgba(255, 255, 255, 1) 20%, 
-    rgba(255, 255, 255, 1) 80%, 
-    rgba(255, 255, 255, 0) 100%
-  ) !important;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(255, 255, 255, 1) 20%,
+      rgba(255, 255, 255, 1) 80%,
+      rgba(255, 255, 255, 0) 100%) !important;
 }
+
+.blocker-container {
+  height: 40vh;
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(255, 255, 255, 1) 20%,
+      rgba(255, 255, 255, 1) 80%,
+      rgba(255, 255, 255, 0) 100%) !important;
+}
+
+.end-container {
+  background: linear-gradient(to bottom,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(255, 255, 255, 1) 20%,);
+
+      background-color: white;
+}
+
+
+
+
