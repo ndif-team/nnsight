@@ -99,12 +99,17 @@ class InterventionProxy(Proxy):
         self._grad = None
 
     @property
-    def shape(self) -> torch.Size:
-        """Property to retrieve the shape of the traced proxy value.
+    def shape(self) -> Collection[torch.Size]:
+        """Property to retrieve the shape of the traced proxy value or real value.
 
         Returns:
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
+
+        if self.node.done():
+
+            return util.apply(self.node.value, lambda x: x.shape, torch.Tensor)
+
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
     @property
