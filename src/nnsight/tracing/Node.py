@@ -55,6 +55,11 @@ class Node:
         values = util.apply(values, lambda x: x.proxy_value, Node)
         # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
+
+        device = torch._GLOBAL_DEVICE_CONTEXT.device if torch._GLOBAL_DEVICE_CONTEXT is not None else 'cpu'
+
+        values = util.apply(values, lambda x : x.to(device), torch.Tensor)
+
         return values
 
     def __init__(

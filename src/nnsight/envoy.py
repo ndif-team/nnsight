@@ -205,8 +205,15 @@ class Envoy:
 
         module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
 
-        return module_proxy.forward(*args, **kwargs)
+        torch.set_default_device(next(self._module.parameters()).device)
 
+        proxy = module_proxy.forward(*args, **kwargs)
+
+        torch.set_default_device('cpu')
+
+        return proxy
+    
+    torch.set_default_device
     @property
     def output(self) -> InterventionProxy:
         """
