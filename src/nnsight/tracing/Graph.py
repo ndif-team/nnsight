@@ -138,12 +138,16 @@ class Graph:
                 shape_env=ShapeEnv(assume_static_by_default=True),
             ) as fake_mode:
 
-                value = target(
-                    *Node.prepare_proxy_values(_args),
-                    **Node.prepare_proxy_values(_kwargs),
-                )
+                try:
 
+                    value = target(
+                        *Node.prepare_proxy_values(_args),
+                        **Node.prepare_proxy_values(_kwargs),
+                    )
 
+                except RuntimeError:
+
+                    value = None
 
         target_name = target if isinstance(target, str) else target.__name__
 

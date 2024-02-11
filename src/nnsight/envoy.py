@@ -209,7 +209,9 @@ class Envoy:
 
         proxy = module_proxy.forward(*args, **kwargs)
 
-        torch.set_default_device('cpu')
+        torch._GLOBAL_DEVICE_CONTEXT.__exit__(None, None, None)
+
+        torch._GLOBAL_DEVICE_CONTEXT = None
 
         return proxy
     
