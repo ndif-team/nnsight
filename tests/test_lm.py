@@ -9,7 +9,7 @@ from nnsight.tracing.Graph import Graph
 
 @pytest.fixture(scope="module")
 def gpt2(device: str):
-    return nnsight.LanguageModel("gpt2", device_map=device, dispatch=True)
+    return nnsight.LanguageModel("openai-community/gpt2", device_map=device, dispatch=True)
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def _test_serialize(runner: Runner):
 def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
-            output = gpt2.output.save()
+            output = gpt2.generator.output.save()
 
     output = gpt2.tokenizer.decode(output.value[0])
 
@@ -73,7 +73,7 @@ def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
             post = gpt2.transformer.h[-1].output[0].save()
 
-            output = gpt2.output.save()
+            output = gpt2.generator.output.save()
 
     output = gpt2.tokenizer.decode(output.value[0])
     
@@ -93,7 +93,7 @@ def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
             post = gpt2.transformer.wte.output.save()
 
-            output = gpt2.output.save()
+            output = gpt2.generator.output.save()
 
     output = gpt2.tokenizer.decode(output.value[0])
 
@@ -123,13 +123,15 @@ def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         with generator.invoke(MSG_prompt) as invoker:
             embeddings = gpt2.transformer.wte.output
 
+            output1 = gpt2.generator.output.save()
+
         with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
             gpt2.transformer.wte.output = embeddings
 
-        output = gpt2.output.save()
+            output2 = gpt2.generator.output.save()
 
-    output1 = gpt2.tokenizer.decode(output.value[0])
-    output2 = gpt2.tokenizer.decode(output.value[1])
+    output1 = gpt2.tokenizer.decode(output1.value[0])
+    output2 = gpt2.tokenizer.decode(output2.value[0])
 
     assert output1 == "Madison Square Garden is located in the city of New York City"
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
@@ -142,7 +144,7 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         with generator.invoke(MSG_prompt) as invoker:
             embeddings = gpt2.transformer.wte.output.save()
 
-            output = gpt2.output.save()
+            output = gpt2.generator.output.save()
 
     output1 = gpt2.tokenizer.decode(output.value[0])
 
@@ -150,7 +152,7 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
             gpt2.transformer.wte.output = embeddings.value
 
-            output = gpt2.output.save()
+            output = gpt2.generator.output.save()
 
     output2 = gpt2.tokenizer.decode(output.value[0])
 
