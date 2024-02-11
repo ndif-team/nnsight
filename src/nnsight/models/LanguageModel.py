@@ -3,20 +3,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
+                          AutoTokenizer, BatchEncoding, PreTrainedModel,
+                          PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 
 from ..intervention import InterventionProxy
 from . import NNsight
 from .mixins import GenerationMixin
+from ..util import WrapperModule
 
 
 class TokenIndexer:
@@ -157,9 +152,17 @@ class LanguageModel(GenerationMixin, NNsight):
 
         if self._model is None:
 
-            return self.automodel.from_config(config, trust_remote_code=True)
+            model = self.automodel.from_config(config, trust_remote_code=True)
 
-        return self.automodel.from_pretrained(repo_id, config=config, **kwargs)
+            setattr(model, 'generator', WrapperModule())
+
+            return model
+        
+        model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
+
+        setattr(model, 'generator', WrapperModule())
+
+        return model
 
     def _tokenize(
         self,
@@ -289,8 +292,6 @@ class LanguageModel(GenerationMixin, NNsight):
             **kwargs,
         )
 
-        if self._envoy._output != None:
-
-            self._envoy._output.node.value = output
+        self._model.generator(output)
 
         return output
