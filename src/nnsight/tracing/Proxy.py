@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import operator
 from typing import TYPE_CHECKING, Any, Callable, Union
-from typing_extensions import Self
+
 import torch
+from typing_extensions import Self
 
 from .. import util
 
@@ -26,7 +27,9 @@ class Proxy:
 
     def __init__(self, node: "Node") -> None:
 
-        self.node = node
+        self.__dict__["node"] = node
+
+        self.node: "Node"
 
     def __str__(self) -> str:
 
@@ -48,28 +51,17 @@ class Proxy:
 
     def __call__(self, *args, **kwargs) -> Self:
         """
-        Calling a Proxy object normally just creates a Proxy.proxy_call operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
+        Calling a Proxy object just creates a Proxy.proxy_call operation.
 
         Returns:
             Proxy: New call proxy.
         """
-        # If calling a method (not a sub-module) on the main module of this graph,
-        # we want to trace into that method.
-        if self.node.args[0] is self.node.graph.module_proxy.node and not isinstance(
-            self.node.proxy_value, torch.nn.Module
-        ):
-            value = self.node.proxy_value.__func__(
-                self.node.graph.module_proxy, *args, **kwargs
-            )
 
-            return value
-        # Otherwise we just want to add a node saying we wish to call this module.
-        else:
-            return self.node.graph.add(
-                target=Proxy.proxy_call,
-                args=[self.node] + list(args),
-                kwargs=kwargs,
-            )
+        return self.node.graph.add(
+            target=Proxy.proxy_call,
+            args=[self.node] + list(args),
+            kwargs=kwargs,
+        )
 
     def __getitem__(self, key: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
@@ -84,9 +76,17 @@ class Proxy:
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Self:
+
         return self.node.graph.add(
             target=util.fetch_attr,
             args=[self.node, key],
+        )
+
+    def __setattr__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
+
+        return self.node.graph.add(
+            target=setattr,
+            args=[self.node, key, value],
         )
 
     def __len__(self) -> Self:
