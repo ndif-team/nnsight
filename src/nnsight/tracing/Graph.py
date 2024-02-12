@@ -40,6 +40,8 @@ class Graph:
         proxy_class: Type[Proxy] = Proxy,
         validate: bool = True,
     ) -> None:
+        
+        self.tracing = True
 
         self.proxy_class = proxy_class
         self.validate = validate
@@ -54,6 +56,7 @@ class Graph:
         self.module_proxy = self.add(
             value=module, target="argument", args=["nnsight_root_module"]
         )
+        
 
     def get_swap(self, value):
         if self.swap is not None:
@@ -170,7 +173,7 @@ class Graph:
             meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
         )
 
-        if node.done():
+        if not self.tracing:
 
             return node.value
 

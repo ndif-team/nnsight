@@ -31,11 +31,24 @@ class Proxy:
 
         self.node: "Node"
 
+    @property
+    def value(self) -> Any:
+        """Property to return the value of this proxy's node.
+
+        Returns:
+            Any: The stored value of the proxy, populated during execution of the model.
+        """
+
+        if not self.node.done():
+            raise ValueError("Accessing Proxy value before it's been set.")
+
+        return self.node.value
+
     def __str__(self) -> str:
 
-        if self.node.done():
+        if not self.node.graph.tracing:
 
-            return str(self.node.value)
+            return str(self.value)
 
         return (
             f"{type(self).__name__} ({self.node.name}): {self.node.proxy_value or ''}"
@@ -43,9 +56,9 @@ class Proxy:
 
     def __repr__(self) -> str:
 
-        if self.node.done():
+        if not self.node.graph.tracing:
 
-            return repr(self.node.value)
+            return repr(self.value)
 
         return str(self)
 
