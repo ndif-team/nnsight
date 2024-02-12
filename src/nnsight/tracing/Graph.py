@@ -4,11 +4,12 @@ import inspect
 from typing import Any, Callable, Dict, List, Type, Union
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
-from ..patching import Patch, Patcher
 from .Node import Node
-from .Proxy import Proxy, proxy_wrapper
+from .Proxy import Proxy
 
 
 class Graph:
@@ -132,15 +133,21 @@ class Graph:
             _args = args if args is not None else []
             _kwargs = kwargs if kwargs is not None else {}
 
-            try:
+            with FakeTensorMode(
+                allow_non_fake_inputs=True,
+                shape_env=ShapeEnv(assume_static_by_default=True),
+            ) as fake_mode:
 
-                value = target(
-                    *Node.prepare_proxy_values(_args),
-                    **Node.prepare_proxy_values(_kwargs),
-                )
+                try:
 
-            except RuntimeError:
-                value = None
+                    value = target(
+                        *Node.prepare_proxy_values(_args),
+                        **Node.prepare_proxy_values(_kwargs),
+                    )
+
+                except RuntimeError:
+
+                    value = None
 
         target_name = target if isinstance(target, str) else target.__name__
 
