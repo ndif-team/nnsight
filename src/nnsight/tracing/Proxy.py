@@ -101,6 +101,13 @@ class Proxy:
         )
 
     def __setattr__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
+
+        if key == "__dict__":
+
+            super().__setattr__(key, value)
+
+            return
+
         return self.node.graph.add(
             target=setattr,
             args=[self.node, key, value],
