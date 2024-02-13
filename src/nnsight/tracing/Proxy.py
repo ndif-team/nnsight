@@ -21,6 +21,12 @@ class Proxy:
         node (Node): This proxy's node.
     """
 
+    def __getstate__(self):
+        return self.__dict__
+
+    def __setstate__(self, d: dict):
+        self.__dict__ = d
+
     @staticmethod
     def proxy_call(callable: Callable, *args, **kwargs) -> Self:
         return callable(*args, **kwargs)

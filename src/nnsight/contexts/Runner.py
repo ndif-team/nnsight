@@ -104,8 +104,6 @@ class Runner(Tracer):
             for name, value in result.saves.items():
                 self._graph.nodes[name].value = value
 
-            # Set output data.
-            self.output = result.output
 
             return True
         # Or if there was some error.
