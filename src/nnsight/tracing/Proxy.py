@@ -89,14 +89,12 @@ class Proxy:
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Self:
-
         return self.node.graph.add(
             target=util.fetch_attr,
             args=[self.node, key],
         )
 
     def __setattr__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
-
         return self.node.graph.add(
             target=setattr,
             args=[self.node, key, value],

@@ -14,6 +14,7 @@ from typing import Any, Callable, Collection, Dict, List, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
+from typing_extensions import Self
 
 from . import util
 from .tracing.Graph import Graph
@@ -81,6 +82,7 @@ class InterventionProxy(Proxy):
             Proxy: Grad proxy.
         """
         if self._grad is None:
+
             self.__dict__["_grad"] = self.node.graph.add(
                 value=self.node.proxy_value, target="grad", args=[self.node]
             )
@@ -95,10 +97,18 @@ class InterventionProxy(Proxy):
         Args:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
-
         self.node.graph.add(target="swap", args=[self.grad.node, value], value=True)
 
         self.__dict__["_grad"] = None
+
+    def __setattr__(
+        self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
+    ) -> None:
+
+        if key == "grad":
+            getattr(self.__class__, key).fset(self, value)
+
+        return super().__setattr__(key, value)
 
     @property
     def shape(self) -> Collection[torch.Size]:
