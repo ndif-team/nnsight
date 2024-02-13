@@ -63,6 +63,8 @@ class Tracer:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
+        
+        self._graph.tracing = False
 
         output = self._model.interleave(
             self._model._execute,

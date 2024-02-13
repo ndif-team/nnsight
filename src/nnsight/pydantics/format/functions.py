@@ -63,6 +63,7 @@ FUNCTIONS_WHITELIST.update(
         "argument": "argument",
         "swap": "swap",
         "grad": "grad",
+        get_function_name(setattr): setattr,
         get_function_name(util.fetch_attr): util.fetch_attr,
         get_function_name(Proxy.proxy_call): Proxy.proxy_call,
     }

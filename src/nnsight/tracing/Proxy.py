@@ -4,6 +4,7 @@ import operator
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 import torch
+from typing_extensions import Self
 
 from .. import util
 
@@ -21,169 +22,183 @@ class Proxy:
     """
 
     @staticmethod
-    def proxy_call(callable: Callable, *args, **kwargs) -> None:
+    def proxy_call(callable: Callable, *args, **kwargs) -> Self:
         return callable(*args, **kwargs)
 
     def __init__(self, node: "Node") -> None:
 
-        self.node = node        
+        self.__dict__["node"] = node
+
+        self.node: "Node"
+
+    @property
+    def value(self) -> Any:
+        """Property to return the value of this proxy's node.
+
+        Returns:
+            Any: The stored value of the proxy, populated during execution of the model.
+        """
+
+        if not self.node.done():
+            raise ValueError("Accessing Proxy value before it's been set.")
+
+        return self.node.value
 
     def __str__(self) -> str:
 
-        if self.node.done():
+        if not self.node.graph.tracing:
 
-            return str(self.node.value)
+            return str(self.value)
 
-        return f"{type(self).__name__} ({self.node.name}): {self.node.proxy_value or ''}"
+        return (
+            f"{type(self).__name__} ({self.node.name}): {self.node.proxy_value or ''}"
+        )
 
     def __repr__(self) -> str:
 
-        if self.node.done():
+        if not self.node.graph.tracing:
 
-            return repr(self.node.value)
+            return repr(self.value)
 
         return str(self)
 
-    def __call__(self, *args, **kwargs) -> Proxy:
+    def __call__(self, *args, **kwargs) -> Self:
         """
-        Calling a Proxy object normally just creates a Proxy.proxy_call operation. However if this call is a method on the root module proxy, it's assumed that one wishes to trace into the method and therefore trace all operations inside it.
+        Calling a Proxy object just creates a Proxy.proxy_call operation.
 
         Returns:
             Proxy: New call proxy.
         """
-        # If calling a method (not a sub-module) on the main module of this graph,
-        # we want to trace into that method.
-        if self.node.args[0] is self.node.graph.module_proxy.node and not isinstance(
-            self.node.proxy_value, torch.nn.Module
-        ):
-            value = self.node.proxy_value.__func__(
-                self.node.graph.module_proxy, *args, **kwargs
-            )
 
-            return value
-        # Otherwise we just want to add a node saying we wish to call this module.
-        else:
-            return self.node.graph.add(
-                target=Proxy.proxy_call,
-                args=[self.node] + list(args),
-                kwargs=kwargs,
-            )
+        return self.node.graph.add(
+            target=Proxy.proxy_call,
+            args=[self.node] + list(args),
+            kwargs=kwargs,
+        )
 
-    def __getitem__(self, key: Union[Proxy, Any]) -> Proxy:
+    def __getitem__(self, key: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.getitem,
             args=[self.node, key],
         )
 
-    def __setitem__(self, key: Union[Proxy, Any], value: Union[Proxy, Any]) -> None:
+    def __setitem__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
         self.node.graph.add(
             target=operator.setitem,
             args=[self.node, key, value],
         )
 
-    def __getattr__(self, key: Union[Proxy, Any]) -> Proxy:
+    def __getattr__(self, key: Union[Proxy, Any]) -> Self:
+
         return self.node.graph.add(
             target=util.fetch_attr,
             args=[self.node, key],
         )
 
-    def __len__(self) -> Proxy:
+    def __setattr__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
+
+        return self.node.graph.add(
+            target=setattr,
+            args=[self.node, key, value],
+        )
+
+    def __len__(self) -> Self:
         return self.node.graph.add(
             target=len,
             args=[self.node],
         )
 
-    def __abs__(self) -> Proxy:
+    def __abs__(self) -> Self:
         return self.node.graph.add(
             target=operator.abs,
             args=[self.node],
         )
 
-    def __invert__(self) -> Proxy:
+    def __invert__(self) -> Self:
         return self.node.graph.add(
             target=operator.invert,
             args=[self.node],
         )
 
-    def __add__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __add__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.add,
             args=[self.node, other],
         )
 
-    def __radd__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __radd__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.add,
             args=[other, self.node],
         )
 
-    def __sub__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __sub__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.sub,
             args=[self.node, other],
         )
 
-    def __rsub__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __rsub__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.sub,
             args=[other, self.node],
         )
 
-    def __pow__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __pow__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.pow,
             args=[self.node, other],
         )
 
-    def __rpow__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __rpow__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.pow,
             args=[other, self.node],
         )
 
-    def __mul__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __mul__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.mul,
             args=[self.node, other],
         )
 
-    def __rmul__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __rmul__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.mul,
             args=[other, self.node],
         )
 
-    def __mod__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __mod__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.mod,
             args=[self.node, other],
         )
 
-    def __rmod__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __rmod__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.mod,
             args=[other, self.node],
         )
 
-    def __matmul__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __matmul__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.matmul,
             args=[self.node, other],
         )
 
-    def __rmatmul__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __rmatmul__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.matmul,
             args=[other, self.node],
         )
 
-    def __truediv__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __truediv__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.truediv,
             args=[self.node, other],
         )
 
-    def __rtruediv__(self, other: Union[Proxy, Any]) -> Proxy:
+    def __rtruediv__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.graph.add(
             target=operator.truediv,
             args=[other, self.node],
@@ -199,7 +214,7 @@ class Proxy:
         return self.node.proxy_value.__instancecheck__(__instance)
 
     @classmethod
-    def __torch_function__(cls, orig_method, types, args=None, kwargs=None) -> Proxy:
+    def __torch_function__(cls, orig_method, types, args=None, kwargs=None) -> Self:
         if args is None:
             args = list()
         if kwargs is None:
