@@ -174,7 +174,7 @@ class Envoy:
         """
 
         return self._sub_envoys[key]
-    
+
     def __len__(self) -> int:
         """Wrapper method for underlying ModuleList len.
 
@@ -205,8 +205,17 @@ class Envoy:
 
         module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
 
-        return module_proxy.forward(*args, **kwargs)
+        torch.set_default_device(next(self._module.parameters()).device)
 
+        proxy = module_proxy.forward(*args, **kwargs)
+
+        torch._GLOBAL_DEVICE_CONTEXT.__exit__(None, None, None)
+
+        torch._GLOBAL_DEVICE_CONTEXT = None
+
+        return proxy
+    
+    torch.set_default_device
     @property
     def output(self) -> InterventionProxy:
         """
@@ -217,6 +226,12 @@ class Envoy:
             InterventionProxy: Output proxy.
         """
         if self._output is None:
+
+            if isinstance(self._module, torch.nn.ModuleList):
+
+                self._output = [envoy.output for envoy in self._sub_envoys]
+
+                return self._output
 
             if len(self._fake_outputs) == 0:
                 fake_output = None
@@ -264,6 +279,12 @@ class Envoy:
             InterventionProxy: Input proxy.
         """
         if self._input is None:
+
+            if isinstance(self._module, torch.nn.ModuleList):
+
+                self._input = [envoy.input for envoy in self._sub_envoys]
+
+                return self._input
 
             if len(self._fake_inputs) == 0:
                 fake_input = None

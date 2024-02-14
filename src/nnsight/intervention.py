@@ -49,7 +49,9 @@ class InterventionProxy(Proxy):
     def __init__(self, node: Node) -> None:
         super().__init__(node)
 
-        self._grad: InterventionProxy = None
+        self.__dict__["_grad"] = None
+
+        self._grad: InterventionProxy
 
     def save(self) -> InterventionProxy:
         """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
@@ -79,7 +81,7 @@ class InterventionProxy(Proxy):
             Proxy: Grad proxy.
         """
         if self._grad is None:
-            self._grad = self.node.graph.add(
+            self.__dict__["_grad"] = self.node.graph.add(
                 value=self.node.proxy_value, target="grad", args=[self.node]
             )
 
@@ -96,29 +98,21 @@ class InterventionProxy(Proxy):
 
         self.node.graph.add(target="swap", args=[self.grad.node, value], value=True)
 
-        self._grad = None
+        self.__dict__["_grad"] = None
 
     @property
-    def shape(self) -> torch.Size:
-        """Property to retrieve the shape of the traced proxy value.
+    def shape(self) -> Collection[torch.Size]:
+        """Property to retrieve the shape of the traced proxy value or real value.
 
         Returns:
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
+
+        if not self.node.graph.tracing:
+
+            return util.apply(self.value, lambda x: x.shape, torch.Tensor)
+
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
-
-    @property
-    def value(self) -> Any:
-        """Property to return the value of this proxy's node.
-
-        Returns:
-            Any: The stored value of the proxy, populated during execution of the model.
-        """
-
-        if not self.node.done():
-            raise ValueError("Accessing Proxy value before it's been set.")
-
-        return self.node.value
 
 
 def concat(
