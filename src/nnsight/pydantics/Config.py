@@ -17,7 +17,7 @@ class ConfigModel(BaseModel):
     API: ApiConfigModel
     APP: AppConfigModel
 
-    def set_apikey(self, apikey: str):
+    def set_default_api_key(self, apikey: str):
 
         self.API.APIKEY = apikey
 
