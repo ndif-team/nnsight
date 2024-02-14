@@ -15,6 +15,27 @@ nnsight
   About <about>
 
 .. raw:: html
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <!-- and it's easy to individually load additional languages -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+
+  <script>hljs.highlightAll();</script>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', (event) => {
+      document.querySelectorAll('code.language-python').forEach(el => {
+        el.innerText = "def forward(self, x):";
+      });
+      document.querySelectorAll('img.transparent').forEach(el => {
+        el.style.background = 'transparent';
+      });
+    });
+  </script>
+
+.. raw:: html
   
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <link rel="stylesheet" href="_static/css/front.css">
@@ -30,13 +51,12 @@ nnsight
 
     var newElement = document.createElement('div');
     newElement.id = 'canvas';
-  
 
     newElement.style.position = 'fixed';
     newElement.style.zIndex = '-1';
-    newElement.style.height = '70vh';
+    newElement.style.height = '100vh';
     newElement.style.width = '100vw';
-    newElement.style.top = '30vh';
+    newElement.style.top = '0';
 
     element.appendChild(newElement);
 
@@ -45,24 +65,35 @@ nnsight
 
 .. raw:: html
 
-    <section class="my-5">
-      <div class="container col-xxl-8 px-4 py-5">
-        <div class="row flex-lg-row-reverse d-flex justify-content-between g-5 py-5">
-          <div class="col-10 col-sm-8 col-lg-7 mt-2">
-            <img src="_static/images/nnsight_logo.svg" class="d-block mx-lg-auto img-fluid" alt="Bootstrap Themes" width="800" loading="lazy">
-          </div>
-          <div class="col-lg-5">
-            .. <h1 class="display-5 fw-bold text-body-emphasis lh-1 mb-3">Interpretable Neural Networks</h1>
-            <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+    <section class="hero">
+      <div class="container px-4" style="margin-top: 20%;">
+        <div class="row d-flex justify-content-between g-5" style="min-height: 100vh;">
+          <div class="col-5">
+            <h1 class="display-5 fw-bold text-body-emphasis lh-1 mb-3 text">Interpretable Neural Networks</h1>
+            <p class="lead text" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
             <div class="d-grid gap-2 d-md-flex justify-content-md-start">
-              <button type="button" class="btn btn-primary btn-md px-2">Get Started</button>
+              <button type="button" class="btn btn-primary primary btn-md px-2">Get Started</button>
               <button type="button" class="btn btn-outline-secondary btn-md px-2">Docs</button>
               <button type="button" class="btn btn-outline-secondary btn-md px-2">Tutorials</button>
             </div>
           </div>
+          <div class="col-7 mt-2">
+            <img src="_static/images/nnsight_logo.svg" class="d-block mx-lg-auto img-fluid transparent" alt="Bootstrap Themes" width="800" loading="lazy">
+          </div>
         </div>
       </div>
     </section>
+
+
+    
+    <div class="px-4 text-center">
+      <div class="col-lg-10 mx-auto">
+        <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, diffusers, and any Torch model. Full access to gradients and optimizations methods, out of order module applications, cross prompt interventions, and many more features.</p>
+        <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
+          <pre class="my-0 surface"><code>pip install nnsight</code></pre><button type="button" class="btn btn-outline-secondary btn-md px-4">Get Started</button>
+        </div>
+      </div>
+    </div>
 
     <section class="container py-5">
       <div class="row justify-content-center">
@@ -70,7 +101,7 @@ nnsight
           <div class="list-group rounded-3 tab-background py-3 px-3" id="list-tab" role="tablist">
             <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab" aria-controls="list-home-list">
               Outputs
-              <span class="d-block small opacity-50">Simple model output</span>
+              <span class="d-block small opacity-50">Simple model calls</span>
             </a>
             <a class="list-group-item list-group-item-action rounded-3 py-3 " id="list-profile-list" data-bs-toggle="list" href="#list-profile" role="tab" aria-controls="list-profile-list">
               Tracing
@@ -83,83 +114,18 @@ nnsight
           </div>
         </div>
 
-        <div class="col-6 align-items-stretch">
+        <div class="col-8 align-items-stretch">
           <div class="tab-content" id="nav-tabContent">
             <div class="tab-pane fade show active" id="list-home" role="tabpanel" aria-labelledby="list-home-list">
-              <script src="https://gist.github.com/cadentj/94b68b5e27a92ea6c2882b3488dc21d8.js"></script>
+              <pre class="surface"><code class="language-python"></code></pre>
             </div>
             <div class="tab-pane fade" id="list-profile" role="tabpanel" aria-labelledby="list-profile-list">
-              <script src="https://gist.github.com/cadentj/94b68b5e27a92ea6c2882b3488dc21d8.js"></script>
+              <pre class="surface"><code class="language-python"></code></pre>
             </div>
             <div class="tab-pane fade" id="list-messages" role="tabpanel" aria-labelledby="list-messages-list">
-              <script src="https://gist.github.com/cadentj/94b68b5e27a92ea6c2882b3488dc21d8.js"></script>
+              <pre class="surface"><code class="language-python"></code></pre>
             </div>
           </div>
         </div>
       </div>
     </section>
-  
-
-    <div class="px-4 py-5 my-5 text-center">
-      <div class="col-lg-10 mx-auto">
-        <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, diffusers, and any Torch model. Full access to gradients and optimizations methods, out of order module applications, cross prompt interventions, and many more features.</p>
-        <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
-          <pre class="my-0"><code id="foo">$ pip install nnsight</code><button class="btn" data-clipboard-target="#foo"><i class="bi bi-clipboard" onclick></button></i></pre><button type="button" class="btn btn-outline-secondary btn-md px-4">Get Started</button>
-        </div>
-      </div>
-    </div>
-
-    
-    <section class="custom-section py-5 end-container">
-
-      <div class="container py-5">
-        <div class="row">
-          <div class="col-md-8">
-            <!-- Content for the left side -->
-            <h2>Access and intervene on any PyTorch model</h2>
-            <p>Wrap custom models with NNsight and gain full access to internals.</p>
-            <a href="#">Read the tutorial →</a>
-          </div>
-        </div>
-        <div class="row mt-5">
-          <div class="col-md-6 px-3">
-            <h4>Declare a simple Torch model</h4>
-            <p>Let's start by creating a simple Torch model and tracing activations.</p>
-            <!-- Content for the right side -->
-            <script src="https://gist.github.com/cadentj/bca1c4366e7e14143ecf27990a0bfa45.js"></script>
-          </div>
-          <div class="col-md-6 px-3">
-            <h4>Trace and Save Activations</h4>
-            <p>Call <code>.save()</code> on activations.</p>
-            <!-- Content for the right side -->
-            <script src="https://gist.github.com/cadentj/62630994cd8c0110f9ed6a587d9605e0.js"></script>
-          </div>
-        </div>
-      </div>
-
-      <div class="container py-5">
-        <div class="row">
-          <div class="col-md-8">
-            <!-- Content for the left side -->
-            <h2>From one to one trillion parameters</h2>
-            <p>Built in classes enable NNsight functionality on HuggingFace models.</p>
-            <a href="#">Get started →</a>
-          </div>
-        </div>
-        <div class="row mt-5">
-          <div class="col-md-6">
-            <h4>Using CSS variables</h4>
-            <p>Bootstrap 5 is evolving with each release to better utilize CSS variables for global theme styles...</p>
-            <!-- Content for the right side -->
-            <script src="https://gist.github.com/cadentj/94b68b5e27a92ea6c2882b3488dc21d8.js"></script>
-          </div>
-          <div class="col-md-6">
-            <h4>Using CSS variables</h4>
-            <p>Bootstrap 5 is evolving with each release to better utilize CSS variables for global theme styles...</p>
-            <!-- Content for the right side -->
-            <script src="https://gist.github.com/cadentj/94b68b5e27a92ea6c2882b3488dc21d8.js"></script>
-          </div>
-        </div>
-      </div>
-    </section>
-

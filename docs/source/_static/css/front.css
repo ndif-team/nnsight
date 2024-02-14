@@ -4,35 +4,36 @@
   /* Make the button background transparent */
   border: none;
   /* Remove border */
-  color: #000;
+  color: var(--pst-color-on-surface);
   /* Set text color */
 }
 
 .list-group-item:hover {
-  background-color: #fff;
+  background-color: var(--pst-color-on-surface);
   /* Light grey hover effect, adjust as needed */
 }
 
 .list-group-item.active {
-  background-color: #fff;
+  background-color: var(--pst-color-on-surface);
   /* White background for active state */
-  color: #000;
+  color: var(--pst-color-on-surface);
   /* Text color for active state */
   border: none;
   /* Ensure no border for active state */
 }
 
 .tab-background {
-  background-color: #f8f9fa;
-  /* Light grey background color */
+  background-color : var(--pst-color-surface) !important;
+  color : var(--pst-color-on-surface) !important;
+  border-color: var(--pst-color-surface) !important;
 }
 
 /* Ensuring the active state overrides Bootstrap default */
 .list-group-item.active:focus,
 .list-group-item.active:hover {
-  background-color: #fff;
+  background-color: #343331;
   /* White background for active + focus/hover states */
-  color: #000;
+  color: var(--pst-color-on-surface);
   /* Text color for active + focus/hover states */
 }
 
@@ -44,47 +45,6 @@
 
 .tab-content {
   height: 100% !important;
-}
-
-#canvas {
-  position: fixed;
-  z-index: -1;
-  height: 70vw;
-  width: 100vw;
-  top: 0;
-}
-
-.gist-file {
-  margin-bottom: 0 !important;
-}
-
-.cover {
-  height: 100vh !important;
-}
-
-.gradient-transparent-to-white {
-  background: linear-gradient(to bottom,
-      rgba(255, 255, 255, 0) 0%,
-      rgba(255, 255, 255, 1) 20%,
-      rgba(255, 255, 255, 1) 80%,
-      rgba(255, 255, 255, 0) 100%) !important;
-}
-
-.blocker-container {
-  height: 40vh;
-  background: linear-gradient(to bottom,
-      rgba(255, 255, 255, 0) 0%,
-      rgba(255, 255, 255, 1) 20%,
-      rgba(255, 255, 255, 1) 80%,
-      rgba(255, 255, 255, 0) 100%) !important;
-}
-
-.end-container {
-  background: linear-gradient(to bottom,
-      rgba(255, 255, 255, 0) 0%,
-      rgba(255, 255, 255, 1) 20%,);
-
-      background-color: white;
 }
 
 

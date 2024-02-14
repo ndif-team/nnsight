@@ -27,35 +27,21 @@ require(['three'], function(THREE) {
 
     require(['VANTA'], function() {
         if (VANTA.DOTS) {
-            // VANTA.NET({
-            //     el: "#canvas",
-            //     mouseControls: false,
-            //     touchControls: false,
-            //     gyroControls: false,
-            //     minHeight: 200.00,
-            //     minWidth: 200.00,
-            //     scale: 1.00,
-            //     scaleMobile: 1.00,
-            //     maxDistance: 25.00,
-            //     spacing: 20.00,
-            //     points: 5.00,
-            //     backgroundColor: 0xffffff,
-            //     color: 0xd3d3d3,
-            // })
             VANTA.DOTS({
                 el: "#canvas",
-                mouseControls: true,
-                touchControls: true,
+                mouseControls: false,
+                touchControls: false,
                 gyroControls: false,
                 minHeight: 200.00,
                 minWidth: 200.00,
                 scale: 1.00,
                 scaleMobile: 1.00,
                 color: 0xb3a094,
-                color2: 0xa7a3a3,
-                backgroundColor: 0xffffff,
-                size: 2.50,
-                spacing: 38.00,
+                color2: 0xffffff,
+                backgroundColor: 0x100F0F,
+                size: 0.50,
+                // spacing: 68.00,
+                spacing: 10.00,
                 showLines: false
             })
         }

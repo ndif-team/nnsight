@@ -1,3 +1,39 @@
 .bd-main .bd-content .bd-article-container {
     max-width: 80%;  /* default is 60em */
 }
+
+.hero {
+    height: 60vh !important;
+}
+
+.primary {
+    background-color : var(--pst-color-primary) !important;
+    border-color : var(--pst-color-primary) !important;
+    color: var(--pst-color-background) !important;
+}
+
+.secondary {
+    border-color : var(--pst-color-surface) !important;
+}
+
+.text {
+    color : var(--pst-color-on-surface) !important;
+}
+
+.surface {
+    background-color : var(--pst-color-surface) !important;
+    color : var(--pst-color-on-surface) !important;
+    border-color: var(--pst-color-surface) !important;
+}
+
+html[data-theme="dark"] {
+    --pst-color-secondary: #b676b2;
+    --pst-color-primary: #4ca4d2;
+    --pst-color-primary-highlight: #b676b2;
+    --pst-color-background: #100F0F;
+    --pst-color-on-background: #1C1B1A;
+    --pst-color-surface: #282726;
+    --pst-color-on-surface: #CECDC3;
+}
+
+

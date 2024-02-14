@@ -29,11 +29,16 @@ html_static_path = ["_static"]
 
 html_favicon = "_static/images/icon.ico"
 html_show_sourcelink = False
+
+html_context = {
+   "default_mode": "dark",
+   "ndif_url": "https://ndif.dev/ping"
+}
+
+
 html_theme_options = {
-    # "logo": {"text": "nnsight"},
     "show_nav_level": 2,
     "navbar_end": ["navbar-icon-links", "ndif_status"],
-    # "navbar_end": ["navbar-icon-links"],
     "navbar_align": "left",
     "icon_links": [
         {
@@ -54,17 +59,19 @@ html_theme_options = {
         },
     ],
     "show_prev_next": False,
-
-    # "pygment_light_style": "monokai",
+    "default_mode": "dark",
 }
 
-html_context = {"default_mode": "auto", "ndif_url": "https://ndif.dev/ping"}
+pygments_style = "github-dark"
 
 html_css_files = [
     # "css/tutorials.css",
     "css/custom.css",
+    "front.css",
+    "css/hljs.css",
 ]
 
 html_js_files = [
     'js/custom.js',
+    'js/code.js'
 ]
