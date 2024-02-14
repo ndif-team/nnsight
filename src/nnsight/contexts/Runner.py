@@ -40,6 +40,9 @@ class Runner(Tracer):
         """On exit, run and generate using the model whether locally or on the server."""
         if isinstance(exc_val, BaseException):
             raise exc_val
+
+        self._graph.tracing = False
+
         if self.remote:
             self.run_server()
         else:
@@ -51,7 +54,7 @@ class Runner(Tracer):
             kwargs=self._kwargs,
             repo_id=self._model._model_key,
             batched_input=self._batched_input,
-            intervention_graph=self._graph.nodes
+            intervention_graph=self._graph.nodes,
         )
 
         if self.blocking:
@@ -95,7 +98,9 @@ class Runner(Tracer):
             result_bytes.seek(0)
 
             # Decode bytes with pickle and then into pydantic object.
-            result = pydantics.ResultModel(**torch.load(result_bytes, map_location='cpu'))
+            result = pydantics.ResultModel(
+                **torch.load(result_bytes, map_location="cpu")
+            )
 
             # Close bytes
             result_bytes.close()
@@ -103,7 +108,6 @@ class Runner(Tracer):
             # Set save data.
             for name, value in result.saves.items():
                 self._graph.nodes[name].value = value
-
 
             return True
         # Or if there was some error.
@@ -141,5 +145,3 @@ class Runner(Tracer):
 
     def non_blocking_request(self, request: pydantics.RequestModel):
         pass
-
-
