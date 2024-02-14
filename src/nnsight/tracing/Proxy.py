@@ -21,6 +21,12 @@ class Proxy:
         node (Node): This proxy's node.
     """
 
+    def __getstate__(self):
+        return self.__dict__
+
+    def __setstate__(self, d: dict):
+        self.__dict__ = d
+
     @staticmethod
     def proxy_call(callable: Callable, *args, **kwargs) -> Self:
         return callable(*args, **kwargs)
@@ -89,13 +95,18 @@ class Proxy:
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Self:
-
         return self.node.graph.add(
             target=util.fetch_attr,
             args=[self.node, key],
         )
 
     def __setattr__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
+
+        if key == "__dict__":
+
+            super().__setattr__(key, value)
+
+            return
 
         return self.node.graph.add(
             target=setattr,

@@ -20,7 +20,7 @@ Here is a simple example where we run the nnsight API locally on gpt2 and save t
 ```python
 from nnsight import LanguageModel
 
-model = LanguageModel('gpt2', device_map='cuda')
+model = LanguageModel('openai-community/gpt2', device_map='auto')
 
 with model.trace('The Eiffel Tower is in the city of'):
 
@@ -31,19 +31,19 @@ with model.trace('The Eiffel Tower is in the city of'):
 
 Lets go over this piece by piece.
 
-We import the `LanguageModel` object from the `nnsight` module and create a gpt2 model using the huggingface repo ID for gpt2, `'gpt2'`. This accepts arguments to create the model including `device_map` to specify which device to run on.
+We import the `LanguageModel` object from the `nnsight` module and create a gpt2 model using the huggingface repo ID for gpt2, `'openai-community/gpt2'`. This accepts arguments to create the model including `device_map` to specify which device to run on.
 
 ```python
 from nnsight import LanguageModel
 
-model = LanguageModel('gpt2',device_map='cuda')
+model = LanguageModel('openai-community/gpt2',device_map='auto')
 ```
 
 Then, we create a tracing context block by calling `.tracing(...)` on the model object. This denotes we want to run the model with our prompt.
 
 
 ```python
-with model.tracer('The Eiffel Tower is in the city of') as generator:
+with model.tracer('The Eiffel Tower is in the city of') as tracer:
 ```
 
 Now calling `.trace(...)` does not actually initialize or run the model. Only after the tracing` block is exited, is the actual model loaded and ran. All operations in the block are "proxies" which essentially creates a graph of operations we wish to carry out later.
@@ -128,7 +128,7 @@ Most basic operations and torch operations work on proxies and are added to the 
 from nnsight import LanguageModel
 import torch 
 
-model = LanguageModel('gpt2', device_map='cuda')
+model = LanguageModel('openai-community/gpt2', device_map='cuda')
 
 with model.trace('The Eiffel Tower is in the city of'):
 
@@ -177,9 +177,9 @@ We often not only want to see whats happening during computation, but intervene 
 from nnsight import LanguageModel
 import torch 
 
-model = LanguageModel('gpt2', device_map='cuda')
+model = LanguageModel('openai-community/gpt2', device_map='cuda')
 
-with model.trace('The Eiffel Tower is in the city of') as generator:
+with model.trace('The Eiffel Tower is in the city of') as tracer:
 
   hidden_states_pre = model.transformer.h[-1].mlp.output.clone().save()
 
@@ -218,26 +218,26 @@ tensor([[[ 0.0674, -0.1741, -0.1771,  ..., -0.9811,  0.1972, -1.0645],
 ---
 ###### Multiple Token Generation
 
-When generating more than one token, use `.generate(...) ` and `generator.next()` to denote following interventions should be applied to the subsequent generations.
+When generating more than one token, use `.generate(...) ` and `.next()`  on the module you want to get the next value of to denote following interventions should be applied to the subsequent generations.
 
 Here we again generate using gpt2, but generate three tokens and save the hidden states of the last layer for each one:
 
 ```python
 from nnsight import LanguageModel
 
-model = LanguageModel('gpt2', device_map='cuda')
+model = LanguageModel('openai-community/gpt2', device_map='cuda')
 
-with model.generate('The Eiffel Tower is in the city of', max_new_tokens=3) as generator:
+with model.generate('The Eiffel Tower is in the city of', max_new_tokens=3) as tracer:
  
   hidden_states1 = model.transformer.h[-1].output[0].save()
 
   invoker.next()
 
-  hidden_states2 = model.transformer.h[-1].output[0].save()
+  hidden_states2 = model.transformer.h[-1].next().output[0].save()
 
   invoker.next()
 
-  hidden_states3 = model.transformer.h[-1].output[0].save()
+  hidden_states3 = model.transformer.h[-1].next().output[0].save()
 
 ```
 ---
@@ -247,29 +247,29 @@ with model.generate('The Eiffel Tower is in the city of', max_new_tokens=3) as g
 
 Intervention operations work cross prompt! Use two invocations within the same generation block and operations can work between them.
 
-You can do this by not passing a prompt into `.trace`/`generate`, but by calling `.invoke(...)` on the created tracer object.
+You can do this by not passing a prompt into `.trace`/`.generate`, but by calling `.invoke(...)` on the created tracer object.
 
 In this case, we grab the token embeddings coming from the first prompt, `"Madison square garden is located in the city of New"` and replace the embeddings of the second prompt with them.
 
 ```python
 from nnsight import LanguageModel
 
-model = LanguageModel('gpt2', device_map='cuda')
+model = LanguageModel('openai-community/gpt2', device_map='cuda')
 
-with model.generate(max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as tracer:
     
-    with generator.invoke("Madison square garden is located in the city of New"):
+    with tracer.invoke("Madison square garden is located in the city of New"):
 
         embeddings = model.transformer.wte.output
 
-    with generator.invoke("_ _ _ _ _ _ _ _ _ _"):
+    with tracer.invoke("_ _ _ _ _ _ _ _ _ _"):
 
         model.transformer.wte.output = embeddings
 
-    output = model.output.save()
+        output = model.generator.output.save()
 
-print(model.tokenizer.decode(generator[0]))
-print(model.tokenizer.decode(generator[1]))
+print(model.tokenizer.decode(output[0]))
+print(model.tokenizer.decode(output[1]))
 ```
 
 This results in:
@@ -284,17 +284,17 @@ We also could have entered a pre-saved embedding tensor as shown here:
 ```python
 from nnsight import LanguageModel
 
-model = LanguageModel('gpt2', device_map='cuda')
+model = LanguageModel('openai-community/gpt2', device_map='cuda')
 
-with model.generate(max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as tracer:
     
-    with generator.invoke("Madison square garden is located in the city of New") as invoker:
+    with tracer.invoke("Madison square garden is located in the city of New") as invoker:
 
         embeddings = model.transformer.wte.output.save()
 
-with model.generate(max_new_tokens=3) as generator:
+with model.generate(max_new_tokens=3) as tracer:
 
-    with generator.invoke("_ _ _ _ _ _ _ _ _ _") as invoker:
+    with tracer.invoke("_ _ _ _ _ _ _ _ _ _") as invoker:
 
         model.transformer.wte.output = embeddings.value
 
@@ -309,7 +309,7 @@ Another thing we can do is apply modules in the model's module tree at any point
 from nnsight import LanguageModel
 import torch
 
-model = LanguageModel("gpt2", device_map='cuda')
+model = LanguageModel("openai-community/gpt2", device_map='cuda')
 
 with model.generate('The Eiffel Tower is in the city of') as generator:
 
@@ -349,23 +349,6 @@ tensor([[ 198,   12,  417, 8765,  318,  257,  262, 3504, 7372, 6342]],
 ```
 
 ---
-
-###### Running Remotely
-
-
-Running the nnsight API remotely on LLaMA 65b and saving the hidden states of the last layer:
-
-```python
-from nnsight import LanguageModel
-
-model = LanguageModel('decapoda-research/llama-65b-hf')
-
-with model.trace('The Eiffel Tower is in the city of', remote=True) as generator:
-
-  hidden_states = model.model.layers[-1].output[0].save()
-
-print(hidden_states)
-```
 
 More examples can be found at [nnsight.net](www.nnsight.net)
 
