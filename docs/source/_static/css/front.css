@@ -58,6 +58,9 @@
   margin-bottom: 0 !important;
 }
 
+.cover {
+  height: 100vh !important;
+}
 
 .gradient-transparent-to-white {
   background: linear-gradient(to bottom,

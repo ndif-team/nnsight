@@ -18,8 +18,8 @@ nnsight
   
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <link rel="stylesheet" href="_static/css/front.css">
-
   <script src="dist/clipboard.min.js"></script>
+  
   <script>
     new ClipboardJS('.btn');
   </script>
@@ -52,7 +52,7 @@ nnsight
             <img src="_static/images/nnsight_logo.svg" class="d-block mx-lg-auto img-fluid" alt="Bootstrap Themes" width="800" loading="lazy">
           </div>
           <div class="col-lg-5">
-            <h1 class="display-5 fw-bold text-body-emphasis lh-1 mb-3">Transparent Science on Black Box AI</h1>
+            .. <h1 class="display-5 fw-bold text-body-emphasis lh-1 mb-3">Interpretable Neural Networks</h1>
             <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
             <div class="d-grid gap-2 d-md-flex justify-content-md-start">
               <button type="button" class="btn btn-primary btn-md px-2">Get Started</button>
@@ -98,9 +98,8 @@ nnsight
         </div>
       </div>
     </section>
-    
-
   
+
     <div class="px-4 py-5 my-5 text-center">
       <div class="col-lg-10 mx-auto">
         <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, diffusers, and any Torch model. Full access to gradients and optimizations methods, out of order module applications, cross prompt interventions, and many more features.</p>
@@ -117,14 +116,14 @@ nnsight
         <div class="row">
           <div class="col-md-8">
             <!-- Content for the left side -->
-            <h2>Build and extend in real-time with CSS variables</h2>
-            <p>Bootstrap 5 is evolving with each release to better utilize CSS variables for global theme styles...</p>
-            <a href="#">Learn more about CSS variables</a>
+            <h2>Access and intervene on any PyTorch model</h2>
+            <p>Wrap custom models with NNsight and gain full access to internals.</p>
+            <a href="#">Read the tutorial →</a>
           </div>
         </div>
         <div class="row mt-5">
           <div class="col-md-6 px-3">
-            <h4>Declare a Simple Torch model</h4>
+            <h4>Declare a simple Torch model</h4>
             <p>Let's start by creating a simple Torch model and tracing activations.</p>
             <!-- Content for the right side -->
             <script src="https://gist.github.com/cadentj/bca1c4366e7e14143ecf27990a0bfa45.js"></script>
@@ -142,9 +141,9 @@ nnsight
         <div class="row">
           <div class="col-md-8">
             <!-- Content for the left side -->
-            <h2>Build and extend in real-time with CSS variables</h2>
-            <p>Bootstrap 5 is evolving with each release to better utilize CSS variables for global theme styles...</p>
-            <a href="#">Learn more about CSS variables</a>
+            <h2>From one to one trillion parameters</h2>
+            <p>Built in classes enable NNsight functionality on HuggingFace models.</p>
+            <a href="#">Get started →</a>
           </div>
         </div>
         <div class="row mt-5">
