@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import pickle
 import torch
 import requests
 import socketio
@@ -9,7 +8,6 @@ from tqdm import tqdm
 
 from .. import CONFIG, pydantics
 from ..logger import logger
-from .Invoker import Invoker
 from .Tracer import Tracer
 
 
@@ -134,8 +132,16 @@ class Runner(Tracer):
             response = requests.post(
                 f"https://{CONFIG.API.HOST}/request",
                 json=request.model_dump(exclude=["id", "received"]),
+                headers={'ndif-api-key' : CONFIG.API.APIKEY}
             )
-            response = pydantics.ResponseModel(**response.json())
+
+            if response.status_code == 200:
+
+                response = pydantics.ResponseModel(**response.json())
+
+            else:
+
+                raise Exception(response.reason)
 
             print(response)
 
