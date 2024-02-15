@@ -8,11 +8,11 @@ Getting Started
 Installation
 ------------
 
-To get started with nnsight, install it with ``pip``. 
+To get started with NNsight, install it with ``pip``. 
 
 .. code-block:: console
 
-   pip install nnsight
+   pip install NNsight
 
 
 First Steps
@@ -30,13 +30,13 @@ First Steps
       :link: features
       :link-type: doc
 
-      Check out the basic features provided by :bdg-primary:`nnsight`.
+      Check out the basic features provided by :bdg-primary:`NNsight`.
 
    .. grid-item-card:: Tutorials
       :link: tutorials
       :link-type: doc
 
-      See implementations of :bdg-primary:`nnsight` through common interpretability techniques.
+      See implementations of :bdg-primary:`NNsight` through common interpretability techniques.
 
 
 

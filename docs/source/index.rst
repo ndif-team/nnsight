@@ -67,14 +67,14 @@ nnsight
             <div class="row g-5">
                 <div class="col-md-6">
                     <h1 class="display-5 fw-bold lh-1 mb-3 text">Interpretable Neural Networks</h1>
-                    <p class="lead text" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+                    <p class="lead text" id="myElement">NNsight (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of models.</p>
                     <div class="d-grid gap-2 d-md-flex">
-                        <button type="button" class="btn btn-primary primary btn-md px-4">Get Started</button>
-                        <button type="button" class="btn btn-outline-secondary btn-md px-4">Docs</button>
-                        <button type="button" class="btn btn-outline-secondary btn-md px-4">Tutorials</button>
+                        <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Get Started</a>
+                        <a href="documentation" role="button" class="btn btn-outline-secondary secondary btn-md px-4">Docs</a>
+                        <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
                     </div>
                 </div>
-                <div class="col-md-6 mt-2">
+                <div class="col-md-6 mt-2 d-none d-md-block">
                     <img src="_static/images/nnsight_logo.svg" class="img-fluid transparent" alt="Bootstrap Themes" loading="lazy">
                 </div>
             </div>
@@ -86,7 +86,7 @@ nnsight
         <div class="col-lg-10 mx-auto">
           <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, train optimizations methods, perform out of order module applications, cross prompt interventions, and so much more.</p>
           <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
-            <pre class="my-0 surface"><code>pip install nnsight</code></pre><button type="button" class="btn btn-outline-secondary btn-md px-4">Get Started</button>
+            <pre class="my-0 surface"><code>pip install nnsight</code></pre><a type="button" href="start" role="button" class="btn btn-outline-secondary secondary btn-md px-4 center-text">Get Started</a>
           </div>
         </div>
       </div>
@@ -99,7 +99,7 @@ nnsight
                     <h2 class="mb-0">Features</h2>
                 </div>
                 <div class="col text-end">
-                    <a href="https://example.com" style="text-decoration:none">See More →</a>
+                    <a href="features" style="text-decoration:none">See More →</a>
                 </div>
             </div>
             <div class="row g-3">

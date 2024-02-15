@@ -75,7 +75,7 @@ Tutorials
    :shadow: none 
 
    **Click for more information**
-   :raw-html:`<br />` & scroll for more
+   :raw-html:`<br />` 
 
 .. grid:: 2 2 3 4
    :class-container: tutorial-card-section

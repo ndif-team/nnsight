@@ -61,3 +61,11 @@ pre {
 .hover-border:hover {
   border: 1px solid #fff; /* Adjust color to match the design */
 }
+
+
+.center-text {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
