@@ -18,7 +18,7 @@ To get started with nnsight, install it with ``pip``.
 First Steps
 -----------
 
-.. grid:: 2
+.. grid:: 2 2 3 3
    :gutter: 2
 
    .. grid-item-card:: Walkthrough

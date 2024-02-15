@@ -35,7 +35,7 @@ nnsight
 .. raw:: html
   
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-  <link rel="stylesheet" href="_static/css/front.css">
+
   <script src="dist/clipboard.min.js"></script>
   
   <script>
@@ -84,7 +84,7 @@ nnsight
     <section class="d-flex align-items-center" style="height: 50vh;">
       <div class="px-4 text-center">
         <div class="col-lg-10 mx-auto">
-          <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, diffusers, and any Torch model. Full access to gradients and optimizations methods, out of order module applications, cross prompt interventions, and many more features.</p>
+          <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, train optimizations methods, perform out of order module applications, cross prompt interventions, and so much more.</p>
           <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
             <pre class="my-0 surface"><code>pip install nnsight</code></pre><button type="button" class="btn btn-outline-secondary btn-md px-4">Get Started</button>
           </div>
@@ -92,14 +92,14 @@ nnsight
       </div>
     </section>
 
-    <section class="d-flex align-items-center" style="height: 70vh;">
+    <section class="d-flex align-items-center" style="height: 60vh;">
         <div class="container">
-            <div class="row align-items-end pb-3 mb-5">
+            <div class="row align-items-end pb-3 border-bottom mb-5">
                 <div class="col">
                     <h2 class="mb-0">Features</h2>
                 </div>
                 <div class="col text-end">
-                    <a href="https://example.com">See More →</a>
+                    <a href="https://example.com" style="text-decoration:none">See More →</a>
                 </div>
             </div>
             <div class="row g-3">
@@ -107,7 +107,7 @@ nnsight
                     <div class="list-group rounded-3 tab-background p-3" id="list-tab" role="tablist">
                         <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab">
                             Outputs
-                            <span class="d-block small opacity-50">Simple model calls</span>
+                            <span class="d-block small opacity-50">Simple model call</span>
                         </a>
                         <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-profile-list" data-bs-toggle="list" href="#list-profile" role="tab">
                             Tracing
@@ -115,20 +115,20 @@ nnsight
                         </a>
                         <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-messages-list" data-bs-toggle="list" href="#list-messages" role="tab">
                             Generation
-                            <span class="d-block small opacity-50">Generae new tokens</span>
+                            <span class="d-block small opacity-50">Generate new tokens</span>
                         </a>
                     </div>
                 </div>
                 <div class="col-md-8">
                     <div class="tab-content" id="nav-tabContent">
                         <div class="tab-pane fill-height fade show active" id="list-home" role="tabpanel" aria-labelledby="list-home-list">
-                            <pre class="surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                            <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
                         </div>
                         <div class="tab-pane fill-height fade" id="list-profile" role="tabpanel" aria-labelledby="list-profile-list">
-                            <pre class="surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                            <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
                         </div>
                         <div class="tab-pane fill-height fade" id="list-messages" role="tabpanel" aria-labelledby="list-messages-list">
-                            <pre class="surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                            <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
                         </div>
                     </div>
                 </div>

@@ -67,8 +67,8 @@ pygments_style = "github-dark"
 html_css_files = [
     # "css/tutorials.css",
     "css/custom.css",
-    "front.css",
-    "css/hljs.css",
+    "css/front.css",
+    "css/hljs.css"
 ]
 
 html_js_files = [

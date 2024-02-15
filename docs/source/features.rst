@@ -11,12 +11,20 @@ Features
    });
    </script>
 
-.. grid:: 2 2 3 3
+   <style>
+      .toctree-wrapper {
+         display: none !important;
+      }
+   </style>
+
+.. grid:: 2
    :gutter: 3
 
    .. grid-item-card:: 
       :link: notebooks/features/getting.ipynb
-      :class-card: card
+      :class-card: code-surface
+      :class-body: code-surface
+
 
       .. raw:: html
 
@@ -30,7 +38,9 @@ Features
 
    .. grid-item-card::
       :link: notebooks/features/setting.ipynb
-      :class-card: card
+      :class-card: code-surface
+      :class-body: code-surface
+
 
       .. raw:: html
 
@@ -44,6 +54,9 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/operations.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
 
       .. raw:: html
 
@@ -57,6 +70,9 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/modules.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
 
       .. raw:: html
 
@@ -70,6 +86,9 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/cross_prompt.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
 
       .. raw:: html
 
@@ -83,6 +102,9 @@ Features
    
    .. grid-item-card:: 
       :link: notebooks/features/multiple_token.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
 
       .. raw:: html
 
@@ -96,6 +118,9 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/gradients.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
 
       .. raw:: html
 
@@ -109,6 +134,9 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/remote_execution.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
    
       .. raw:: html
 
@@ -122,6 +150,8 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/token_indexing.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
 
       .. raw:: html
 
@@ -137,7 +167,6 @@ Features
 
 .. toctree::
    :maxdepth: 1
-   :hidden:
    
    notebooks/features/getting.ipynb
    notebooks/features/setting.ipynb

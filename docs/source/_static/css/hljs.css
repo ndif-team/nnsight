@@ -1,15 +1,3 @@
-html[data-theme="dark"] {
-    --pst-color-secondary: #b676b2;
-    --pst-color-primary: #4ca4d2;
-    --pst-color-primary-highlight: #b676b2;
-    --pst-color-background: #100F0F;
-    --pst-color-on-background: #1C1B1A;
-    --pst-color-surface: #282726;
-    --pst-color-on-surface: #CECDC3;
-}
-
-
-
 .hljs {
     display: block !important;
     overflow-x: auto !important;

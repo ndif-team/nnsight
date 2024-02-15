@@ -24,13 +24,21 @@
 }
 
 .tab-background {
-  background-color : var(--pst-color-surface) !important;
+  background-color : var(--pst-color-on-background) !important;
   color : var(--pst-color-on-surface) !important;
-  border-color: var(--pst-color-surface) !important;
+  border-color: var(--pst-color-on-background) !important;
+  border: 2px !important;
 }
 
 .tab-content {
   height: 100% !important;
+} 
+
+
+.code-surface {
+  background-color : var(--pst-color-surface) !important;
+  color : var(--pst-color-on-surface) !important;
+  border-color: var(--pst-color-surface) !important;
 }
 
 
@@ -43,4 +51,13 @@
 
 pre {
   margin: 0 !important;
+}
+
+
+.hover-border {
+  transition: border 0.3s ease-in-out;
+}
+
+.hover-border:hover {
+  border: 1px solid #fff; /* Adjust color to match the design */
 }
