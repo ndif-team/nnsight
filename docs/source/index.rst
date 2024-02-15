@@ -26,9 +26,6 @@ nnsight
 
   <script>
     document.addEventListener('DOMContentLoaded', (event) => {
-      document.querySelectorAll('code.language-python').forEach(el => {
-        el.innerText = "def forward(self, x):";
-      });
       document.querySelectorAll('img.transparent').forEach(el => {
         el.style.background = 'transparent';
       });
@@ -65,67 +62,78 @@ nnsight
 
 .. raw:: html
 
-    <section class="hero">
-      <div class="container px-4" style="margin-top: 20%;">
-        <div class="row d-flex justify-content-between g-5" style="min-height: 100vh;">
-          <div class="col-5">
-            <h1 class="display-5 fw-bold text-body-emphasis lh-1 mb-3 text">Interpretable Neural Networks</h1>
-            <p class="lead text" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
-            <div class="d-grid gap-2 d-md-flex justify-content-md-start">
-              <button type="button" class="btn btn-primary primary btn-md px-2">Get Started</button>
-              <button type="button" class="btn btn-outline-secondary btn-md px-2">Docs</button>
-              <button type="button" class="btn btn-outline-secondary btn-md px-2">Tutorials</button>
+    <section class="d-flex align-items-center" style="height: 85vh;">
+        <div class="container">
+            <div class="row g-5">
+                <div class="col-md-6">
+                    <h1 class="display-5 fw-bold lh-1 mb-3 text">Interpretable Neural Networks</h1>
+                    <p class="lead text" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+                    <div class="d-grid gap-2 d-md-flex">
+                        <button type="button" class="btn btn-primary primary btn-md px-4">Get Started</button>
+                        <button type="button" class="btn btn-outline-secondary btn-md px-4">Docs</button>
+                        <button type="button" class="btn btn-outline-secondary btn-md px-4">Tutorials</button>
+                    </div>
+                </div>
+                <div class="col-md-6 mt-2">
+                    <img src="_static/images/nnsight_logo.svg" class="img-fluid transparent" alt="Bootstrap Themes" loading="lazy">
+                </div>
             </div>
-          </div>
-          <div class="col-7 mt-2">
-            <img src="_static/images/nnsight_logo.svg" class="d-block mx-lg-auto img-fluid transparent" alt="Bootstrap Themes" width="800" loading="lazy">
+        </div>
+    </section>
+
+    <section class="d-flex align-items-center" style="height: 50vh;">
+      <div class="px-4 text-center">
+        <div class="col-lg-10 mx-auto">
+          <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, diffusers, and any Torch model. Full access to gradients and optimizations methods, out of order module applications, cross prompt interventions, and many more features.</p>
+          <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
+            <pre class="my-0 surface"><code>pip install nnsight</code></pre><button type="button" class="btn btn-outline-secondary btn-md px-4">Get Started</button>
           </div>
         </div>
       </div>
     </section>
 
-
-    
-    <div class="px-4 text-center">
-      <div class="col-lg-10 mx-auto">
-        <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, diffusers, and any Torch model. Full access to gradients and optimizations methods, out of order module applications, cross prompt interventions, and many more features.</p>
-        <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
-          <pre class="my-0 surface"><code>pip install nnsight</code></pre><button type="button" class="btn btn-outline-secondary btn-md px-4">Get Started</button>
-        </div>
-      </div>
-    </div>
-
-    <section class="container py-5">
-      <div class="row justify-content-center">
-        <div class="col-3 align-items-center justify-content-end">
-          <div class="list-group rounded-3 tab-background py-3 px-3" id="list-tab" role="tablist">
-            <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab" aria-controls="list-home-list">
-              Outputs
-              <span class="d-block small opacity-50">Simple model calls</span>
-            </a>
-            <a class="list-group-item list-group-item-action rounded-3 py-3 " id="list-profile-list" data-bs-toggle="list" href="#list-profile" role="tab" aria-controls="list-profile-list">
-              Tracing
-              <span class="d-block small opacity-50">Operate on the forward</span>
-            </a>
-            <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-messages-list" data-bs-toggle="list" href="#list-messages" role="tab" aria-controls="list-messages-list">
-              Generation
-              <span class="d-block small opacity-50">Generate new tokens</span>
-            </a>
-          </div>
-        </div>
-
-        <div class="col-8 align-items-stretch">
-          <div class="tab-content" id="nav-tabContent">
-            <div class="tab-pane fade show active" id="list-home" role="tabpanel" aria-labelledby="list-home-list">
-              <pre class="surface"><code class="language-python"></code></pre>
+    <section class="d-flex align-items-center" style="height: 70vh;">
+        <div class="container">
+            <div class="row align-items-end pb-3 mb-5">
+                <div class="col">
+                    <h2 class="mb-0">Features</h2>
+                </div>
+                <div class="col text-end">
+                    <a href="https://example.com">See More →</a>
+                </div>
             </div>
-            <div class="tab-pane fade" id="list-profile" role="tabpanel" aria-labelledby="list-profile-list">
-              <pre class="surface"><code class="language-python"></code></pre>
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <div class="list-group rounded-3 tab-background p-3" id="list-tab" role="tablist">
+                        <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab">
+                            Outputs
+                            <span class="d-block small opacity-50">Simple model calls</span>
+                        </a>
+                        <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-profile-list" data-bs-toggle="list" href="#list-profile" role="tab">
+                            Tracing
+                            <span class="d-block small opacity-50">Operate on the forward</span>
+                        </a>
+                        <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-messages-list" data-bs-toggle="list" href="#list-messages" role="tab">
+                            Generation
+                            <span class="d-block small opacity-50">Generae new tokens</span>
+                        </a>
+                    </div>
+                </div>
+                <div class="col-md-8">
+                    <div class="tab-content" id="nav-tabContent">
+                        <div class="tab-pane fill-height fade show active" id="list-home" role="tabpanel" aria-labelledby="list-home-list">
+                            <pre class="surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                        </div>
+                        <div class="tab-pane fill-height fade" id="list-profile" role="tabpanel" aria-labelledby="list-profile-list">
+                            <pre class="surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                        </div>
+                        <div class="tab-pane fill-height fade" id="list-messages" role="tabpanel" aria-labelledby="list-messages-list">
+                            <pre class="surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                        </div>
+                    </div>
+                </div>
             </div>
-            <div class="tab-pane fade" id="list-messages" role="tabpanel" aria-labelledby="list-messages-list">
-              <pre class="surface"><code class="language-python"></code></pre>
-            </div>
-          </div>
         </div>
-      </div>
     </section>
+
+    <section style="height: 20vh;"/>

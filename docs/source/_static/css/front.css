@@ -9,12 +9,13 @@
 }
 
 .list-group-item:hover {
-  background-color: var(--pst-color-on-surface);
+  background-color: var(--pst-color-on-background);
+  color: var(--pst-color-on-surface);
   /* Light grey hover effect, adjust as needed */
 }
 
 .list-group-item.active {
-  background-color: var(--pst-color-on-surface);
+  background-color: var(--pst-color-surface);
   /* White background for active state */
   color: var(--pst-color-on-surface);
   /* Text color for active state */
@@ -28,25 +29,18 @@
   border-color: var(--pst-color-surface) !important;
 }
 
-/* Ensuring the active state overrides Bootstrap default */
-.list-group-item.active:focus,
-.list-group-item.active:hover {
-  background-color: #343331;
-  /* White background for active + focus/hover states */
-  color: var(--pst-color-on-surface);
-  /* Text color for active + focus/hover states */
-}
-
-/* Optional: if you want to remove the rounded corners to be completely flush */
-.list-group-item {
-  border-radius: 0;
-  /* Remove rounded corners */
-}
-
 .tab-content {
   height: 100% !important;
 }
 
 
 
+/* Custom Styles for Code Styles */
 
+.fill-height {
+  height: 100% !important;
+}
+
+pre {
+  margin: 0 !important;
+}
