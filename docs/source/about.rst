@@ -18,6 +18,8 @@ An API for transparent science on black-box AI.
 
 .. figure:: _static/images/remote_execution.png
 
+.. card:: 
+
     An overview of the NNsight/NDIF pipeline. Researchers write simple Python code to run along with the neural network locally or remotely. Unlike commercial inference, the experiment code can read or write any of the internal states of the neural networks being studied. This code creates a computation graph that can be sent to the remote service and interleaved with the execution of the neural network.
 
 How do I use NNsight?
@@ -60,6 +62,8 @@ When using NNsight, it is helpful to understand that the operations are not exec
 An example of one such intervention graph can be seen below:
 
 .. figure:: _static/images/intrgraph.png
+
+.. card:: 
 
     An example of an intervention graph. Operations in research code create nodes in the graph which depend on module inputs and outputs as well as other nodes. Then, this intervention graph is interleaved with the normal computation graph of the chosen model, and requested inputs and outputs are injected into the intervention graph for execution. 
 

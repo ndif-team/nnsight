@@ -10,6 +10,7 @@ html[data-theme="dark"] {
     --pst-color-text-muted: #CECDC3;
     --pst-color-heading-color: #CECDC3;
     --pst-color-border: #1C1B1A;
+    --pst-color-panel-background: #1C1B1A;
 }
 
 .bd-main .bd-content .bd-article-container {
