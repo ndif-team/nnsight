@@ -25,10 +25,10 @@
             .then((response) => {
                 if (response.status == 200) {
                     Array.from(document.getElementsByClassName("status-container")).forEach((elm) => {
-                        elm.style.backgroundColor = "#23C552";
+                        elm.style.backgroundColor = "#66800b";
                         Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
                             text.textContent = "All Systems Are Operational";
-                            text.style.color = "#FFFFFF";
+                            text.style.color = "#CECDC3";
                         });
                     });
                     console.log('Ping success');
@@ -110,7 +110,7 @@
                         elm.style.backgroundColor = "#F84F31";
                         Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
                             text.textContent = "NDIF Is Unavailable";
-                            text.style.color = "#FFFFFF";
+                            text.style.color = "#CECDC3";
                         });
                     });
                     console.log('Ping error');
@@ -121,7 +121,7 @@
                     elm.style.backgroundColor = "#F84F31";
                     Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
                         text.textContent = "NDIF Is Unavailable";
-                        text.style.color = "#FFFFFF";
+                        text.style.color = "#CECDC3";
                     });
                 });
                 console.error('Ping fetch failed:', pingError);

@@ -2,63 +2,6 @@
    :format: html
 
 .. raw:: html
-   
-   <script>
-
-      const info = {
-         "tutorial-card-0": {
-            "title": "Walkthrough",
-            "text": "Learn how to use the central components of the library.",
-         },
-         "tutorial-card-1": {
-            "title": "Activation Patching",
-            "text": "Using causal interventions to identify which activations in a model matter for producing some output.",
-         },
-         "tutorial-card-2": {
-            "title": "Attribution Patching",
-            "text": "Using gradients to take a linear approximation of activation patching.",
-         },
-         "tutorial-card-3": {
-            "title": "Logit Lens",
-            "text": "Decoding activations into vocabulary space.",
-         },
-         "tutorial-card-4": {
-            "title": "Future Lens",
-            "text": "Anticipating subsequent tokens from a single hidden state.",
-         },
-         "tutorial-card-5": {
-            "title": "Function Vectors",
-            "text": "How do language models represent functions?",
-         },
-         "tutorial-card-6": {
-            "title": "Dictionary Learning",
-            "text": "Finding highly interpretable features in langauge models.",
-         },
-      }
-
-      window.onload = function() {
-         var tutorialCards = document.getElementsByClassName('tutorials-cards');
-         for (var i = 0; i < tutorialCards.length; i++) {
-            // Assign a unique ID to each card
-            tutorialCards[i].id = 'tutorial-card-' + i;
-
-            // Add a click event listener to each card
-            tutorialCards[i].addEventListener('click', function() {
-               var title = info[this.id]['title'];
-               var newText = info[this.id]['text'];
-               changeText(title, newText);
-            });
-         }
-
-         function changeText(title, newText) {
-            Array.from(document.getElementsByClassName("page-info")).forEach((elm) => {
-                  Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
-                     text.innerHTML = '<b>' + title + '</b>' + '<br>' + newText;
-                  });
-            });
-         }
-      }
-   </script>
 
    <style>
       .toctree-wrapper {
@@ -73,7 +16,7 @@
 Tutorials
 =========
 
-.. grid:: 2 2 2 2
+.. grid:: 1 1 2 2
    :class-container: tutorial-card-section
    :gutter: 3
 
@@ -97,7 +40,6 @@ Tutorials
       :class-card: code-surface
       :class-body: code-surface
 
-
       .. raw:: html
 
          <div class="d-flex align-items-center">
@@ -112,7 +54,6 @@ Tutorials
       :link: notebooks/tutorials/attribution_patching.ipynb
       :class-card: code-surface
       :class-body: code-surface
-
 
       .. raw:: html
 
@@ -129,7 +70,6 @@ Tutorials
       :class-card: code-surface
       :class-body: code-surface
 
-
       .. raw:: html
 
          <div class="d-flex align-items-center">
@@ -144,7 +84,6 @@ Tutorials
       :link: notebooks/tutorials/future_lens.ipynb
       :class-card: code-surface
       :class-body: code-surface
-
 
       .. raw:: html
 
@@ -161,7 +100,6 @@ Tutorials
       :class-card: code-surface
       :class-body: code-surface
 
-
       .. raw:: html
 
          <div class="d-flex align-items-center">
@@ -176,7 +114,6 @@ Tutorials
       :link: notebooks/tutorials/sae.ipynb
       :class-card: code-surface
       :class-body: code-surface
-
 
       .. raw:: html
 
