@@ -64,84 +64,130 @@
       .toctree-wrapper {
          display: none !important;
       }
+      h5 {
+         margin-top: 0 !important;
+      }
    </style>
 
 
 Tutorials
 =========
 
-.. card::
-   :class-body: page-info 
-   :shadow: none 
-
-   **Click for more information**
-   :raw-html:`<br />` 
-
-.. grid:: 2 2 3 4
+.. grid:: 2 2 2 2
    :class-container: tutorial-card-section
+   :gutter: 3
 
-   .. grid-item::
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/walkthrough.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
 
-      .. card::
-         :img-top: _static/images/tutorials/walkthrough.png
-         :class-card: sd-text-black sd-border-0 tutorials-cards
-         :class-body: sd-font-weight-bold
+      .. raw:: html
 
-         `Walkthrough <notebooks/tutorials/walkthrough.ipynb>`_
-   
-   .. grid-item::
+         <div class="d-flex align-items-center">
+            <img src="../_static/images/tutorials/walkthrough.png" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div>
+               <h5 class="code-surface card-title">Walkthrough</h5>
+               <p class="code-surface card-text">Learn the basics</p>
+            </div>
+         </div>
 
-      .. card::
-         :img-top: _static/images/tutorials/activation_patching.png
-         :class-card: sd-text-black sd-border-0 tutorials-cards
-         :class-body: sd-font-weight-bold
-         
-         `Activation Patching <notebooks/tutorials/ioi_patching.ipynb>`_
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/ioi_patching.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
 
-   .. grid-item::
 
-      .. card::
-         :img-top: _static/images/tutorials/attribution_patching.png
-         :class-card: sd-text-black sd-border-0 tutorials-cards
-         :class-body: sd-font-weight-bold
+      .. raw:: html
 
-         `Attribution Patching <notebooks/tutorials/attribution_patching.ipynb>`_
-   
-   .. grid-item::
+         <div class="d-flex align-items-center">
+            <img src="../_static/images/tutorials/activation_patching.png" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div>
+               <h5 class="code-surface card-title">Activation Patching</h5>
+               <p class="code-surface card-text">Causal intervention</p>
+            </div>
+         </div>
 
-      .. card::
-         :img-top: _static/images/tutorials/logit_lens.png
-         :class-card: sd-text-black sd-border-0 tutorials-cards
-         :class-body: sd-font-weight-bold
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/attribution_patching.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
 
-         `Logit Lens <notebooks/tutorials/logit_lens.ipynb>`_
 
-   .. grid-item::
+      .. raw:: html
 
-      .. card::
-         :img-top: _static/images/tutorials/future_lens.png
-         :class-card: sd-text-black sd-border-0 tutorials-cards
-         :class-body: sd-font-weight-bold
+         <div class="d-flex align-items-center">
+            <img src="../_static/images/tutorials/attribution_patching.png" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div>
+               <h5 class="code-surface card-title">Attribution Patching</h5>
+               <p class="code-surface card-text">Approximate patching</p>
+            </div>
+         </div>
 
-         `Future Lens <notebooks/tutorials/future_lens.ipynb>`_
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/logit_lens.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
 
-   .. grid-item::
 
-      .. card::
-         :img-top: _static/images/tutorials/function_vectors.png
-         :class-card: sd-text-black sd-border-0 tutorials-cards
-         :class-body: sd-font-weight-bold
+      .. raw:: html
 
-         `Function Vectors <notebooks/tutorials/function_vectors.ipynb>`_
+         <div class="d-flex align-items-center">
+            <img src="../_static/images/tutorials/logit_lens.png" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div>
+               <h5 class="code-surface card-title">Logit Lens</h5>
+               <p class="code-surface card-text">Decode activations</p>
+            </div>
+         </div>
 
-   .. grid-item::
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/future_lens.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
 
-      .. card::
-         :img-top: _static/images/tutorials/dictionary_learning.png
-         :class-card: sd-text-black sd-border-0 tutorials-cards
-         :class-body: sd-font-weight-bold
 
-         `Dictionary Learning <notebooks/tutorials/sae.ipynb>`_
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <img src="../_static/images/tutorials/future_lens.png" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div>
+               <h5 class="code-surface card-title">Future Lens</h5>
+               <p class="code-surface card-text">Probe future tokens</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/function_vectors.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <img src="../_static/images/tutorials/function_vectors.png" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div>
+               <h5 class="code-surface card-title">Function Vectors</h5>
+               <p class="code-surface card-text">Lambdas</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/sae.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <img src="../_static/images/tutorials/dictionary_learning.png" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div>
+               <h5 class="code-surface card-title">Dictionary Learning</h5>
+               <p class="code-surface card-text">Sparse autoencoders</p>
+            </div>
+         </div>
+
 
 
 .. toctree::

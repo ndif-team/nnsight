@@ -24,6 +24,22 @@
     color: var(--pst-color-on-surface) !important;
 }
 
+.custom-card {
+    background-color : var(--pst-color-on-background) !important;
+    border-color : #878580 !important;
+    color: #878580 !important;
+}
+
+
+.custom-card:hover,
+.custom-card:hover h5,
+.custom-card:hover p {
+    border-color: var(--pst-color-on-surface) !important;
+    color: var(--pst-color-on-surface) !important;
+}
+
+
+
 .text {
     color : var(--pst-color-on-surface) !important;
 }
