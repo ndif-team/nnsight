@@ -18,6 +18,8 @@ An API for transparent science on black-box AI.
 
 .. figure:: _static/images/remote_execution.png
 
+
+.. card::
     An overview of the nnsight/NDIF pipeline. Researchers write simple Python code to run along with the neural network locally or remotely. Unlike commercial inference, the experiment code can read or write any of the internal states of the neural networks being studied.  This code creates a computation graph that can be sent to the remote service and interleaved with the execution of the neural network.
 
 How do I use NNsight?
@@ -61,6 +63,8 @@ An example of one such intervention graph can be seen below:
 
 .. figure:: _static/images/intrgraph.png
 
+.. card::
+    
     An example of an intervention graph. Operations in research code create nodes in the graph which depend on module inputs and outputs as well as other nodes. Then, this intervention graph is interleaved with the normal computation graph of the chosen model, and requested inputs and outputs are injected into the intervention graph for execution. 
 
 Basic access to model internals can give you a lot of insight about what is going on inside a large model as it runs.  For example, you can use the `logit lens <https://www.lesswrong.com/posts/AcKRB8wDpdaN6v6ru/interpreting-gpt-the-logit-lens>`_ to read internal hidden states as text.  And use can use `causal tracing <https://rome.baulab.info/>`_ or `path patching <https://arxiv.org/abs/2304.05969>`_ or `other circuit discovery methods <https://arxiv.org/abs/2310.10348>`_ to locate the layers and components within the network that play a decisive role in making a decision.

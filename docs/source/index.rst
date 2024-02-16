@@ -69,9 +69,10 @@ nnsight
                     <h1 class="display-5 fw-bold lh-1 mb-3 text">Interpretable Neural Networks</h1>
                     <p class="lead text" id="myElement">NNsight (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of models.</p>
                     <div class="d-grid gap-2 d-md-flex">
-                        <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Get Started</a>
+                        <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Start</a>
                         <a href="documentation" role="button" class="btn btn-outline-secondary secondary btn-md px-4">Docs</a>
                         <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
+                        <a href="about" role="button" class="btn btn-outline-secondary btn-md secondary px-4">About</a>
                     </div>
                 </div>
                 <div class="col-md-6 mt-2 d-none d-md-block">
