@@ -85,9 +85,6 @@ nnsight
       <div class="px-4 text-center">
         <div class="col-lg-10 mx-auto">
           <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, train optimizations methods, perform out of order module applications, cross prompt interventions, and so much more.</p>
-          <div class="d-grid gap-2 d-sm-flex justify-content-sm-center">
-            <pre class="my-0 surface"><code>pip install nnsight</code></pre><a type="button" href="start" role="button" class="btn btn-outline-secondary secondary btn-md px-4 center-text">Get Started</a>
-          </div>
         </div>
       </div>
     </section>
@@ -109,26 +106,26 @@ nnsight
                             <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
                         </div>
                         <div class="tab-pane fill-height fade" id="list-profile" role="tabpanel" aria-labelledby="list-profile-list">
-                            <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                            <pre class="code-surface fill-height"><code class="language-python fill-height trace"></code></pre>
                         </div>
                         <div class="tab-pane fill-height fade" id="list-messages" role="tabpanel" aria-labelledby="list-messages-list">
-                            <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                            <pre class="code-surface fill-height"><code class="language-python fill-height generate"></code></pre>
                         </div>
                     </div>
                 </div>
                 <div class="col-md-4 order-md-first">
                     <div class="list-group rounded-3 tab-background p-3" id="list-tab" role="tablist">
                         <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab">
-                            A Simple Model Output
-                            <span class="d-block d-none d-md-block small opacity-50">Simple model call</span>
+                            Wrap any PyTorch model
+                            <span class="d-block d-none d-md-block small opacity-50">NNsight class object</span>
                         </a>
                         <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-profile-list" data-bs-toggle="list" href="#list-profile" role="tab">
-                            Trace Activations and Gradients
-                            <span class="d-block d-none d-md-block small opacity-50">Operate on the forward</span>
+                            Access any hidden state
+                            <span class="d-block d-none d-md-block small opacity-50">Expose Module inputs and outputs </span>
                         </a>
                         <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-messages-list" data-bs-toggle="list" href="#list-messages" role="tab">
-                            Edit at Every Generation
-                            <span class="d-block d-none d-md-block small opacity-50">Generate new tokens</span>
+                            Develop complex interventions
+                            <span class="d-block d-none d-md-block small opacity-50">Edit module outputs and measure effect</span>
                         </a>
                     </div>
                 </div>
