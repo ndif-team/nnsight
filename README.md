@@ -11,7 +11,7 @@ The `nnsight`  package enables interpreting and manipulating the internals of de
 
 Install this package through pip by running:
 
-`pip install nnsight`
+`pip install nnsight==0.2.2.dev0`
 
 #### Examples
 
