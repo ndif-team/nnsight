@@ -22,7 +22,7 @@ print(hidden_state_output)
 print(hidden_state_input)
 print(output)`;
 
-var generate = `with model.trace() as tracer:
+var multi = `with model.trace() as tracer:
   
 with tracer.invoke('The Eiffel Tower is in the city of'):
 
