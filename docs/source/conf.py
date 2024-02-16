@@ -65,7 +65,6 @@ html_theme_options = {
 pygments_style = "github-dark"
 
 html_css_files = [
-    # "css/tutorials.css",
     "css/custom.css",
     "css/front.css",
     "css/hljs.css"

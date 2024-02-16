@@ -103,23 +103,7 @@ nnsight
                 </div>
             </div>
             <div class="row g-3">
-                <div class="col-md-4">
-                    <div class="list-group rounded-3 tab-background p-3" id="list-tab" role="tablist">
-                        <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab">
-                            Outputs
-                            <span class="d-block small opacity-50">Simple model call</span>
-                        </a>
-                        <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-profile-list" data-bs-toggle="list" href="#list-profile" role="tab">
-                            Tracing
-                            <span class="d-block small opacity-50">Operate on the forward</span>
-                        </a>
-                        <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-messages-list" data-bs-toggle="list" href="#list-messages" role="tab">
-                            Generation
-                            <span class="d-block small opacity-50">Generate new tokens</span>
-                        </a>
-                    </div>
-                </div>
-                <div class="col-md-8">
+                <div class="col-md-8 order-md-last">
                     <div class="tab-content" id="nav-tabContent">
                         <div class="tab-pane fill-height fade show active" id="list-home" role="tabpanel" aria-labelledby="list-home-list">
                             <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
@@ -132,6 +116,23 @@ nnsight
                         </div>
                     </div>
                 </div>
+                <div class="col-md-4 order-md-first">
+                    <div class="list-group rounded-3 tab-background p-3" id="list-tab" role="tablist">
+                        <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab">
+                            Outputs
+                            <span class="d-block d-none d-md-block small opacity-50">Simple model call</span>
+                        </a>
+                        <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-profile-list" data-bs-toggle="list" href="#list-profile" role="tab">
+                            Tracing
+                            <span class="d-block d-none d-md-block small opacity-50">Operate on the forward</span>
+                        </a>
+                        <a class="list-group-item list-group-item-action rounded-3 py-3" id="list-messages-list" data-bs-toggle="list" href="#list-messages" role="tab">
+                            Generation
+                            <span class="d-block d-none d-md-block small opacity-50">Generate new tokens</span>
+                        </a>
+                    </div>
+                </div>
+                
             </div>
         </div>
     </section>
