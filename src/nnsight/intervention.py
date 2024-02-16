@@ -101,6 +101,17 @@ class InterventionProxy(Proxy):
 
         self.__dict__["_grad"] = None
 
+    def backward(self, **kwargs):
+
+        proxy = self.node.graph.add(
+            target=util.fetch_attr,
+            args=[self.node, "backward"],
+        )
+
+        self.node.graph.add(
+            value=None, target=Proxy.proxy_call, args=[proxy.node], kwargs=kwargs
+        )
+
     def __setattr__(
         self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
     ) -> None:
