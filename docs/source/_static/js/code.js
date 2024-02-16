@@ -24,7 +24,7 @@ print(output)`;
 
 var multi = `with model.trace() as tracer:
   
-with tracer.invoke('The Eiffel Tower is in the city of'):
+  with tracer.invoke('The Eiffel Tower is in the city of'):
 
     model.transformer.h[-1].mlp.output[0][:] = 0
 
