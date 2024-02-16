@@ -82,7 +82,7 @@ nnsight
         </div>
     </section>
 
-    <section class="d-flex align-items-center" style="height: 50vh;">
+    <section class="d-flex align-items-center middle-stuff mid-section">
       <div class="px-4 text-center">
         <div class="col-lg-10 mx-auto">
           <p class="lead mb-4">Direct access to model internals, from one to one trillion parameters. Intervene on activations or gradients in transformers, train optimizations methods, perform out of order module applications, cross prompt interventions, and so much more.</p>
@@ -101,20 +101,7 @@ nnsight
                 </div>
             </div>
             <div class="row g-3">
-                <div class="col-md-8 order-md-last">
-                    <div class="tab-content" id="nav-tabContent">
-                        <div class="tab-pane fill-height fade show active" id="list-home" role="tabpanel" aria-labelledby="list-home-list">
-                            <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
-                        </div>
-                        <div class="tab-pane fill-height fade" id="list-profile" role="tabpanel" aria-labelledby="list-profile-list">
-                            <pre class="code-surface fill-height"><code class="language-python fill-height trace"></code></pre>
-                        </div>
-                        <div class="tab-pane fill-height fade" id="list-messages" role="tabpanel" aria-labelledby="list-messages-list">
-                            <pre class="code-surface fill-height"><code class="language-python fill-height generate"></code></pre>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-md-4 order-md-first">
+                <div class="col-md-4">
                     <div class="list-group rounded-3 tab-background p-3" id="list-tab" role="tablist">
                         <a class="list-group-item list-group-item-action rounded-3 py-3 active" id="list-home-list" data-bs-toggle="list" href="#list-home" role="tab">
                             Wrap any PyTorch model
@@ -128,6 +115,19 @@ nnsight
                             Develop complex interventions
                             <span class="d-block d-none d-md-block small opacity-50">Edit module outputs and measure effect</span>
                         </a>
+                    </div>
+                </div>
+                <div class="col-md-8">
+                    <div class="tab-content static-on-small" id="nav-tabContent">
+                        <div class="tab-pane fill-height fade show active" id="list-home" role="tabpanel" aria-labelledby="list-home-list">
+                            <pre class="code-surface fill-height"><code class="language-python fill-height simple"></code></pre>
+                        </div>
+                        <div class="tab-pane fill-height fade" id="list-profile" role="tabpanel" aria-labelledby="list-profile-list">
+                            <pre class="code-surface fill-height"><code class="language-python fill-height trace"></code></pre>
+                        </div>
+                        <div class="tab-pane fill-height fade" id="list-messages" role="tabpanel" aria-labelledby="list-messages-list">
+                            <pre class="code-surface fill-height"><code class="language-python fill-height multi"></code></pre>
+                        </div>
                     </div>
                 </div>
                 

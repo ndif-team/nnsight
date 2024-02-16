@@ -22,10 +22,17 @@ print(hidden_state_output)
 print(hidden_state_input)
 print(output)`;
 
-var generate = `with model.generate() as tracer:
+var generate = `with model.trace() as tracer:
   
-with tracer.invoke(input2):
-  l2_input = model.layer2.input
+with tracer.invoke('The Eiffel Tower is in the city of'):
+
+    model.transformer.h[-1].mlp.output[0][:] = 0
+
+    intervention = model.lm_head.output.argmax(dim=-1).save()
+
+  with tracer.invoke('The Eiffel Tower is in the city of'):
+
+    original = model.lm_head.output.argmax(dim=-1).save()
 
 print(output)`;
 
@@ -36,7 +43,7 @@ document.addEventListener('DOMContentLoaded', (event) => {
     document.querySelectorAll('code.language-python.trace').forEach(el => {
         el.textContent = trace;
     });
-    document.querySelectorAll('code.language-python.generate').forEach(el => {
-        el.textContent = generate;
+    document.querySelectorAll('code.language-python.multi').forEach(el => {
+        el.textContent = multi;
     });
 });

@@ -60,9 +60,10 @@ html_theme_options = {
     ],
     "show_prev_next": False,
     "default_mode": "dark",
+    "pygment_dark_style": "monokai"
 }
 
-pygments_style = "github-dark"
+pygments_style = "rrt"
 
 html_css_files = [
     "css/custom.css",

@@ -34,6 +34,25 @@
   height: 100% !important;
 } 
 
+@media (max-width: 767px) { /* Targets screens smaller than the md breakpoint */
+  .mid-section {
+    height: 50vh !important;
+  }
+  .static-on-small { 
+    height: 35vh !important;
+  }
+}
+
+
+
+.mid-section {
+  height: 20vh;
+}
+
+.middle-stuff {
+  margin-bottom: 15vh;
+}
+
 
 .code-surface {
   background-color : var(--pst-color-surface) !important;
