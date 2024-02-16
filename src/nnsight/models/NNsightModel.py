@@ -84,6 +84,7 @@ class NNsight:
         *inputs: Tuple[Any],
         trace: bool = True,
         invoker_args: Dict[str, Any] = None,
+        scan: bool = True,
         **kwargs: Dict[str, Any],
     ) -> Union[Runner, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
@@ -177,6 +178,8 @@ class NNsight:
         if len(inputs) > 0:
 
             invoker_args = invoker_args or {}
+
+            invoker_args["scan"] = scan
 
             # If trace is False, we'll enter the Tracer context immediately and enter an Invoker context with the provided inputs as well.
             # We'll also save the output of the model and return its value directly.
