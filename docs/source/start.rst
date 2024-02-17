@@ -12,7 +12,7 @@ To get started with NNsight, install it with ``pip``.
 
 .. code-block:: console
 
-   pip install nnsight==0.2.2.dev0
+   pip install git+https://github.com/JadenFiotto-Kaufman/nnsight.git@dev
 
 
 First Steps
