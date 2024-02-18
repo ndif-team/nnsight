@@ -20,34 +20,34 @@ Printing out the wrapped module returns its structure:
 .. code-block:: text
 
     GPT2LMHeadModel(
-    (transformer): GPT2Model(
+      (transformer): GPT2Model(
         (wte): Embedding(50257, 768)
         (wpe): Embedding(1024, 768)
         (drop): Dropout(p=0.1, inplace=False)
         (h): ModuleList(
-        (0-11): 12 x GPT2Block(
+          (0-11): 12 x GPT2Block(
             (ln_1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
             (attn): GPT2AttentionAltered(
-            (c_attn): Conv1D()
-            (c_proj): Conv1D()
-            (attn_dropout): Dropout(p=0.1, inplace=False)
-            (resid_dropout): Dropout(p=0.1, inplace=False)
-            (query): WrapperModule()
-            (key): WrapperModule()
-            (value): WrapperModule()
+              (c_attn): Conv1D()
+              (c_proj): Conv1D()
+              (attn_dropout): Dropout(p=0.1, inplace=False)
+              (resid_dropout): Dropout(p=0.1, inplace=False)
+              (query): WrapperModule()
+              (key): WrapperModule()
+              (value): WrapperModule()
             )
             (ln_2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
             (mlp): GPT2MLP(
-            (c_fc): Conv1D()
-            (c_proj): Conv1D()
-            (act): NewGELUActivation()
-            (dropout): Dropout(p=0.1, inplace=False)
+              (c_fc): Conv1D()
+              (c_proj): Conv1D()
+              (act): NewGELUActivation()
+              (dropout): Dropout(p=0.1, inplace=False)
             )
-        )
+          )
         )
         (ln_f): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
-    )
-    (lm_head): Linear(in_features=768, out_features=50257, bias=False)
+      )
+      (lm_head): Linear(in_features=768, out_features=50257, bias=False)
     )
 
 The primary method of interacting and running the model  ``.forward(...)``, ``.invoke(...)``, and ``.trace(...)``. All return context manager objects which, when entered, track operations performed on the inputs and outputs of modules.
