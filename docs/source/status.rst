@@ -4,6 +4,13 @@
 .. raw:: html
 
     <link rel="stylesheet" href="../_static/css/status.css">
+
+    <style>
+        .accordion-header {
+            margin: 0 !important;
+        }
+    </style>
+    
     <script>
 
         function autoFormatJsonString(jsonString) {

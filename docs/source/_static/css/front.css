@@ -1,26 +1,19 @@
 /* Custom Styles for List Group Items */
 .list-group-item {
   background-color: transparent;
-  /* Make the button background transparent */
   border: none;
-  /* Remove border */
   color: var(--pst-color-on-surface);
-  /* Set text color */
 }
 
 .list-group-item:hover {
   background-color: var(--pst-color-on-background);
   color: var(--pst-color-on-surface);
-  /* Light grey hover effect, adjust as needed */
 }
 
 .list-group-item.active {
   background-color: var(--pst-color-surface);
-  /* White background for active state */
   color: var(--pst-color-on-surface);
-  /* Text color for active state */
   border: none;
-  /* Ensure no border for active state */
 }
 
 .tab-background {
@@ -34,7 +27,11 @@
   height: 100% !important;
 } 
 
-@media (max-width: 767px) { /* Targets screens smaller than the md breakpoint */
+
+
+/* Custom Styles for middle of the screen blurb */
+
+@media (max-width: 767px) {
   .mid-section {
     height: 50vh !important;
   }
@@ -42,8 +39,6 @@
     height: 35vh !important;
   }
 }
-
-
 
 .mid-section {
   height: 20vh;
@@ -54,15 +49,13 @@
 }
 
 
+
+/* Custom Styles for Code Widget */
 .code-surface {
   background-color : var(--pst-color-surface) !important;
   color : var(--pst-color-on-surface) !important;
   border-color: var(--pst-color-surface) !important;
 }
-
-
-
-/* Custom Styles for Code Styles */
 
 .fill-height {
   height: 100% !important;
@@ -70,21 +63,4 @@
 
 pre {
   margin: 0 !important;
-}
-
-
-.hover-border {
-  transition: border 0.3s ease-in-out;
-}
-
-.hover-border:hover {
-  border: 1px solid #fff; /* Adjust color to match the design */
-}
-
-
-.center-text {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  text-align: center;
 }

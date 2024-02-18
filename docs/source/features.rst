@@ -1,5 +1,5 @@
 Features
-==========
+=========
 
 .. raw:: html
 
@@ -22,8 +22,8 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/getting.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
 
       .. raw:: html
@@ -31,7 +31,7 @@ Features
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-solid fa-wrench fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Getting</h5>
                <p class="card-text">Accessing values</p>
@@ -40,8 +40,8 @@ Features
 
    .. grid-item-card::
       :link: notebooks/features/setting.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
 
       .. raw:: html
@@ -49,7 +49,7 @@ Features
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-solid fa-code-pull-request fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Setting</h5>
                <p class="card-text">Intervening on values</p>
@@ -58,8 +58,8 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/operations.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
 
       .. raw:: html
@@ -67,7 +67,7 @@ Features
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-solid fa-glasses fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Operations</h5>
                <p class="card-text">Editing values</p>
@@ -76,8 +76,8 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/modules.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
 
       .. raw:: html
@@ -85,7 +85,7 @@ Features
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-solid fa-cubes fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Modules</h5>
                <p class="card-text">Applying modules</p>
@@ -94,8 +94,8 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/cross_prompt.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
 
       .. raw:: html
@@ -112,8 +112,8 @@ Features
    
    .. grid-item-card:: 
       :link: notebooks/features/multiple_token.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
 
       .. raw:: html
@@ -121,7 +121,7 @@ Features
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-solid fa-gears fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Generation</h5>
                <p class="card-text">Multiple tokens</p>
@@ -130,8 +130,8 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/gradients.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
 
       .. raw:: html
@@ -139,7 +139,7 @@ Features
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-solid fa-backward fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Working With Gradients</h5>
                <p class="card-text">Intervene on gradients</p>
@@ -148,8 +148,8 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/remote_execution.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
    
       .. raw:: html
@@ -157,7 +157,7 @@ Features
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-solid fa-satellite-dish fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Remote Execution</h5>
                <p class="card-text">Transparent deep learning</p>
@@ -166,15 +166,15 @@ Features
 
    .. grid-item-card:: 
       :link: notebooks/features/token_indexing.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
                <i class="fa-regular fa-object-ungroup fa-2x"></i>
-            </div> <!-- Replace fa-icon-name with the correct icon class -->
+            </div> 
             <div>
                <h5 class="card-title">Multi-Token Indexing</h5>
                <p class="card-text">Easy token indexing</p>

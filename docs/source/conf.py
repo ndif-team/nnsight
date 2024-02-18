@@ -65,3 +65,8 @@ html_theme_options = {
     "pygment_dark_style": "monokai",
     "pygment_light_style": "monokai"
 }
+
+html_js_files = [
+    'js/custom.js',
+    'js/code.js'
+]

@@ -6,9 +6,3 @@
 <link href="{{ pathto('_static/css/front.css', 1) }}?v={{ version_identifier }}" rel="stylesheet" type="text/css" />
 <link href="{{ pathto('_static/css/hljs.css', 1) }}?v={{ version_identifier }}" rel="stylesheet" type="text/css" />
 {% endblock %}
-
-{% block extrascript %}
-{{ super() }}
-<script src="{{ pathto('_static/js/custom.js', 1) }}?v={{ version_identifier }}"></script>
-<script src="{{ pathto('_static/js/code.js', 1) }}?v={{ version_identifier }}"></script>
-{% endblock %}

@@ -130,7 +130,6 @@ nnsight
 
         element.appendChild(newElement);
         } else {
-        // If .bd-container doesn't exist, you may want to handle this situation accordingly
-        console.log(".bd-container element does not exist.");
+            console.log(".bd-container element does not exist.");
         }
     </script>
