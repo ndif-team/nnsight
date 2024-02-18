@@ -62,7 +62,7 @@ class Envoy:
 
                 # If the module already has a sub-module named 'input' or 'output',
                 # mount the proxy access to 'nns_input' or 'nns_output instead.
-                if hasattr(self, name):
+                if hasattr(Envoy, name):
 
                     self._handle_overloaded_mount(envoy, name)
 
