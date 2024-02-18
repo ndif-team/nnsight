@@ -1,3 +1,5 @@
+import time
+
 # Configuration file for the Sphinx documentation builder.
 
 # Project Information
@@ -32,7 +34,8 @@ html_show_sourcelink = False
 
 html_context = {
    "default_mode": "dark",
-   "ndif_url": "https://ndif.dev/ping"
+   "ndif_url": "https://ndif.dev/ping",
+   "version_identifier": str(int(time.time())),
 }
 
 
@@ -59,16 +62,6 @@ html_theme_options = {
         },
     ],
     "show_prev_next": False,
-    "pygment_dark_style": "monokai"
+    "pygment_dark_style": "monokai",
+    "pygment_light_style": "monokai"
 }
-
-html_css_files = [
-    "css/custom.css",
-    "css/front.css",
-    "css/hljs.css"
-]
-
-html_js_files = [
-    'js/custom.js',
-    'js/code.js'
-]

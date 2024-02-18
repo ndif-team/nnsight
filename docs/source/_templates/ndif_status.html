@@ -1,5 +1,4 @@
 <script>
-    
     fetch("{{ndif_url}}")
         .then((response) => {
             if (response.status == 200) {
@@ -33,11 +32,4 @@
                 statusIcon.classList.replace('fa-circle-check', 'fa-circle-xmark');
             }
         })
-</script>
-
-<script>
-    
-    console.log("{{default_mode}}")
-
-    
 </script>
