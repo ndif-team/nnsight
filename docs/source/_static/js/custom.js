@@ -96,3 +96,16 @@ document.addEventListener('DOMContentLoaded', (event) => {
     });
   });
 });
+
+document.addEventListener("DOMContentLoaded", function() {
+  fetch("https://ndif.dev/ping")
+    .then(response => response.json())
+    .then(data => {
+      const statusElement = document.querySelector(".ndif");
+      const status = (data === "pong") ? "Available" : "Unavailable";
+      if (statusElement) {
+        statusElement.setAttribute('data-bs-original-title', `Status: ${status}`);
+      }
+    })
+    .catch(error => console.error('Error fetching NDIF status:', error));
+});

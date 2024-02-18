@@ -50,5 +50,33 @@ document.addEventListener('DOMContentLoaded', (event) => {
         el.style.visibility = "hidden";
         el.style.display = "none";
     });
+    document.querySelectorAll('div.output_area.stderr').forEach(el => {
+      el.style.visibility = "hidden";
+      el.style.display = "none";
+    });
+    document.querySelectorAll('div.output_area').forEach(el => {
+      el.style.marginBottom = "1em";
+    });
+    document.querySelectorAll('div.input_area').forEach(el => {
+      el.style.border = "0px";
+      el.style.marginTop = "0.5em";
+      el.style.marginBottom = "0.5em";
+    });
+    document.querySelectorAll('summary').forEach(el => {
+      el.style.marginTop = "1em";
+      el.style.marginBottom = "1em";
+      document.querySelectorAll('p').forEach(p => {
+          const span = document.createElement('span');
+
+          // Copy the innerHTML from the <p> to the <span>
+          span.innerHTML = p.innerHTML;
+
+          // Optional: Copy styles from the <p> to the <span>
+          span.style.cssText = p.style.cssText;
+
+          // Replace the <p> with the <span> in the DOM
+          p.parentNode.replaceChild(span, p);
+        });
+  });
 });
 

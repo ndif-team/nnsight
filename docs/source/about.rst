@@ -1,3 +1,19 @@
+.. raw:: html
+
+    <style>
+        .accordion-header {
+            margin: 0 !important;
+        }
+
+    </style>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            document.querySelectorAll('figure.align-default').forEach(el => {
+                el.style.marginBottom = "0px";
+            });
+        });
+    </script>
 
 About NNsight
 =============

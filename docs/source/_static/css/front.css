@@ -27,24 +27,11 @@
   height: 100% !important;
 } 
 
-
-
-/* Custom Styles for middle of the screen blurb */
-
-@media (max-width: 767px) {
-  .mid-section {
-    height: 50vh !important;
-  }
-  .static-on-small { 
-    height: 35vh !important;
-  }
-}
+/* Middle section blurb */
 
 .mid-section {
+  margin-top: 5vh;
   height: 20vh;
-}
-
-.middle-stuff {
   margin-bottom: 15vh;
 }
 

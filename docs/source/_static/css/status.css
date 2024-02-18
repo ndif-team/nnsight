@@ -1,0 +1,10 @@
+.custom-accordion-header {
+    background-color: #007bff; /* Bootstrap's primary color for demonstration */
+    color: white; /* Text color */
+  }
+  
+  .custom-accordion-body {
+    background-color: #f8f9fa; /* A light gray background */
+    color: #212529; /* Bootstrap default text color */
+  }
+  

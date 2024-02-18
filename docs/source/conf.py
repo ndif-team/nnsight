@@ -42,7 +42,7 @@ html_context = {
 
 html_theme_options = {
     "show_nav_level": 2,
-    "navbar_end": ["navbar-icon-links", "ndif_status", "theme-switcher"],
+    "navbar_end": ["theme-switcher","navbar-icon-links", "ndif_status"],
     "navbar_align": "left",
     "icon_links": [
         {
@@ -56,7 +56,7 @@ html_theme_options = {
             "icon": "fa-brands fa-discord",
         },
         {
-            "name": "Status",
+            "name": "Status: Unknown",
             "url": "/status",
             "icon": "fa-solid fa-circle-check",
             "attributes": {"class": "ndif"},

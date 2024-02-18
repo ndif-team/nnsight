@@ -78,7 +78,7 @@ nnsight
         </div>
     </section>
 
-    <section class="d-flex align-items-center middle-stuff mid-section">
+    <section class="d-flex align-items-center mid-section d-none d-md-block">
       <div class="px-4 text-center">
         <div class="col-lg-10 mx-auto">
           <p class="lead mb-4">Direct access to model internals, from one to one hundred billion parameters. Intervene on activations or gradients in transformers, train optimizations methods, perform out of order module applications, cross prompt interventions, and so much more.</p>
@@ -86,7 +86,7 @@ nnsight
       </div>
     </section>
 
-    <section class="d-flex align-items-center" style="height: 60vh;">
+    <section class="d-flex align-items-center d-none d-md-block" style="height: 60vh;">
         <div class="container">
             <div class="row align-items-end pb-3 border-bottom mb-5">
                 <div class="col">
@@ -131,7 +131,7 @@ nnsight
         </div>
     </section>
 
-    <section style="height: 20vh;"/>
+    <section class="d-none d-md-block"  style="height: 20vh;"/>
 
 
 .. raw:: html
