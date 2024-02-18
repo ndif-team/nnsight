@@ -197,7 +197,7 @@ Status
 .. card::
     :shadow: none
     
-    Models currently hosted on the remote service are listed below. Access requires a free API key; to obtain a key, join the `NDIF Discord <https://discord.gg/6uFJmCSwW7>`_.
+    The library can be used to run local models without a key. Running experiments on remote models requires a free server API key. To obtain a key, join the `NDIF Discord <https://discord.gg/6uFJmCSwW7>`_ and say hello on the #introductions channel.
 
 .. raw:: html
 
