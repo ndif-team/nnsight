@@ -1,5 +1,5 @@
 .status-body {
-    color: "white";
+    color: var(--pst-color-surface);
 }
 
 .accordion-header {

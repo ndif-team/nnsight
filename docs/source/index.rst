@@ -32,33 +32,6 @@ nnsight
     });
   </script>
 
-.. raw:: html
-  
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-
-  <script src="dist/clipboard.min.js"></script>
-  
-  <script>
-    new ClipboardJS('.btn');
-  </script>
-
-  <script>
-      // Select the element with the class 'some-class'
-    var element = document.querySelector('.bd-container');
-
-    var newElement = document.createElement('div');
-    newElement.id = 'canvas';
-
-    newElement.style.position = 'fixed';
-    newElement.style.zIndex = '-1';
-    newElement.style.height = '100vh';
-    newElement.style.width = '100vw';
-    newElement.style.top = '0';
-
-    element.appendChild(newElement);
-
-  </script>
-
 
 .. raw:: html
 
@@ -136,3 +109,28 @@ nnsight
     </section>
 
     <section style="height: 20vh;"/>
+
+
+.. raw:: html
+    
+    <script>
+
+        var element = document.querySelector('.bd-container');
+
+        if (element) {
+        // If .bd-container exists, proceed to create the new element
+        var newElement = document.createElement('div');
+        newElement.id = 'canvas';
+
+        newElement.style.position = 'fixed';
+        newElement.style.zIndex = '-1';
+        newElement.style.height = '100vh';
+        newElement.style.width = '100vw';
+        newElement.style.top = '0';
+
+        element.appendChild(newElement);
+        } else {
+        // If .bd-container doesn't exist, you may want to handle this situation accordingly
+        console.log(".bd-container element does not exist.");
+        }
+    </script>

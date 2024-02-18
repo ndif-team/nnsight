@@ -24,7 +24,7 @@
         fetch("https://ndif.dev/ping")
             .then((response) => {
                 if (response.status == 200) {
-                    Array.from(document.getElementsByClassName("status-container")).forEach((elm) => {
+                    Array.from(document.getElementsByClassName("sd-card-body")).forEach((elm) => {
                         elm.style.backgroundColor = "#66800b";
                         Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
                             text.textContent = "All Systems Are Operational";
@@ -106,7 +106,7 @@
                             console.log('Stats error');
                         });
                 } else {
-                    Array.from(document.getElementsByClassName("status-container")).forEach((elm) => {
+                    Array.from(document.getElementsByClassName("sd-card-body")).forEach((elm) => {
                         elm.style.backgroundColor = "#F84F31";
                         Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
                             text.textContent = "NDIF Is Unavailable";
@@ -117,7 +117,7 @@
                 }
             })
             .catch((pingError) => {
-                Array.from(document.getElementsByClassName("status-container")).forEach((elm) => {
+                Array.from(document.getElementsByClassName("sd-card-body")).forEach((elm) => {
                     elm.style.backgroundColor = "#F84F31";
                     Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
                         text.textContent = "NDIF Is Unavailable";
