@@ -111,4 +111,5 @@ document.addEventListener("DOMContentLoaded", function() {
 
     const data = document.querySelector("p.copyright");
     data.innerHTML = "(c) 2024 <a href='https://ndif.us/'>NDIF</a>"
+
 });

@@ -4,7 +4,6 @@
         .accordion-header {
             margin: 0 !important;
         }
-
     </style>
 
     <script>
@@ -32,7 +31,7 @@ An API for transparent science on black-box AI.
     it lets you run experiments on huge open models easily, with full transparent access.
     The nnsight library is also terrific for studying smaller local models.
 
-.. figure:: _static/images/remote_execution.png
+.. figure:: _static/images/interleaved.png
 
 
 .. card::
@@ -78,7 +77,7 @@ When using nnsight, it is helpful to understand that the operations are not exec
 
 An example of one such intervention graph can be seen below:
 
-.. figure:: _static/images/intrgraph.png
+.. figure:: _static/images/execution.png
 
 .. card::
     
