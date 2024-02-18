@@ -4,7 +4,7 @@ import time
 
 # Project Information
 project = "nnsight"
-copyright = "2023, NDIF"
+copyright = "2024 NDIF"
 author = "Jaden Fiotto-Kaufman"
 
 

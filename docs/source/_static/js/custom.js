@@ -108,4 +108,7 @@ document.addEventListener("DOMContentLoaded", function() {
       }
     })
     .catch(error => console.error('Error fetching NDIF status:', error));
+
+    const data = document.querySelector("p.copyright");
+    data.innerHTML = "(c) 2024 <a href='https://ndif.us/'>NDIF</a>"
 });
