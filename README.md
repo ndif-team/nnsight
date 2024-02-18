@@ -39,11 +39,11 @@ from nnsight import LanguageModel
 model = LanguageModel('openai-community/gpt2',device_map='auto')
 ```
 
-Then, we create a tracing context block by calling `.tracing(...)` on the model object. This denotes we want to run the model with our prompt.
+Then, we create a tracing context block by calling `.trace(...)` on the model object. This denotes we want to run the model with our prompt.
 
 
 ```python
-with model.tracer('The Eiffel Tower is in the city of') as tracer:
+with model.trace('The Eiffel Tower is in the city of') as tracer:
 ```
 
 Now calling `.trace(...)` does not actually initialize or run the model. Only after the tracing` block is exited, is the actual model loaded and ran. All operations in the block are "proxies" which essentially creates a graph of operations we wish to carry out later.
