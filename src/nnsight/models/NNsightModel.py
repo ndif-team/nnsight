@@ -262,7 +262,7 @@ class NNsight:
         return output
 
     def dispatch_model(self, *args, **kwargs) -> None:
-        """Dispatched ._model to have real paramters  using .load(...)."""
+        """Dispatch ._model to have real parameters  using .load(...)."""
 
         logger.info(f"Dispatching `{self._model_key}`...")
 

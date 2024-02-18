@@ -357,11 +357,12 @@ class HookHandler(AbstractContextManager):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Removes all handles added during __enter__."""
-        if isinstance(exc_val, Exception):
-            raise exc_val
 
         for handle in self.handles:
             handle.remove()
+
+        if isinstance(exc_val, Exception):
+            raise exc_val
 
 
 class InterventionHandler:
