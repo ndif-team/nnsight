@@ -32,6 +32,29 @@ nnsight
     });
   </script>
 
+.. raw:: html
+
+    <script type="text/javascript">
+    document.addEventListener('DOMContentLoaded', function() {
+        var observer = new MutationObserver(function(mutations) {
+            updateCSSLink();
+        });
+        observer.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
+        
+        function updateCSSLink() {
+            const dark = document.documentElement.dataset.theme == 'dark';
+            var link = document.querySelector('link[rel="stylesheet"][href*="hljs"]');
+            if(link) {
+                link.href = dark ? '../_static/css/hljs-dark.css?v=0.2' : '../_static/css/hljs-light.css?v=0.2';
+            }
+        }
+        
+        // Initial check in case the theme is already set before the observer is added
+        updateCSSLink();
+    });
+    </script>
+    <link rel="stylesheet" href="../_static/css/hljs-dark.css?v=0.2">
+
 
 .. raw:: html
 

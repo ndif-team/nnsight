@@ -28,6 +28,7 @@ html_theme = "pydata_sphinx_theme"
 html_title = "nnsight"
 html_logo = "_static/images/nnsight_logo.svg"
 html_static_path = ["_static"]
+html_show_sphinx = False
 
 html_favicon = "_static/images/icon.ico"
 html_show_sourcelink = False
@@ -41,7 +42,7 @@ html_context = {
 
 html_theme_options = {
     "show_nav_level": 2,
-    "navbar_end": ["navbar-icon-links", "ndif_status"],
+    "navbar_end": ["navbar-icon-links", "ndif_status", "theme-switcher"],
     "navbar_align": "left",
     "icon_links": [
         {
@@ -63,7 +64,7 @@ html_theme_options = {
     ],
     "show_prev_next": False,
     "pygment_dark_style": "monokai",
-    "pygment_light_style": "monokai"
+    "pygment_light_style": "solarized-light"
 }
 
 html_js_files = [

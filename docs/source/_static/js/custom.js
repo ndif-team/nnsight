@@ -5,18 +5,28 @@ require.config({
   },
   shim: {
     'VANTA': {
-      deps: ['three'] // Removed the exports line
+      deps: ['three'] 
     }
   }
 });
 
+var vantaEffect;
 
-require(['three'], function (THREE) {
-  window.THREE = THREE; // Make THREE globally accessible
+function initVanta() {
+  require(['three'], function (THREE) {
+    window.THREE = THREE; // Make THREE globally accessible
 
-  require(['VANTA'], function () {
-    if (VANTA.DOTS) {
-      VANTA.DOTS({
+    require(['VANTA'], function () {
+      if (vantaEffect) {
+        vantaEffect.destroy();
+      }
+      
+      const darkMode = document.documentElement.dataset.theme === 'dark';
+      const color = darkMode ? 0xCECDC3 : 0x100F0F; // Example dark mode color
+      const color2 = darkMode ? 0xCECDC3 : 0x100F0F; // Adjust color2 for dark mode as needed
+      const backgroundColor = darkMode ? 0x100F0F : 0xFFFCF0; // Adjust background color for dark mode
+
+      vantaEffect = VANTA.DOTS({
         el: "#canvas",
         mouseControls: false,
         touchControls: false,
@@ -25,17 +35,32 @@ require(['three'], function (THREE) {
         minWidth: 200.00,
         scale: 1.00,
         scaleMobile: 1.00,
-        color: 0xb3a094,
-        color2: 0xffffff,
-        backgroundColor: 0x100F0F,
+        color: color,
+        color2: color2,
+        backgroundColor: backgroundColor,
         size: 0.50,
-        // spacing: 68.00,
         spacing: 10.00,
         showLines: false
-      })
+      });
+    });
+  });
+}
+
+// Initial call
+initVanta();
+
+// Setup a mutation observer to detect theme changes
+var observer = new MutationObserver(function(mutations) {
+  mutations.forEach(function(mutation) {
+    if (mutation.attributeName === "data-theme") {
+      initVanta(); // Reinitialize Vanta with the new theme settings
     }
   });
 });
+
+// Start observing the document element for attribute changes
+observer.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
+
 
 
 document.addEventListener('DOMContentLoaded', (event) => {

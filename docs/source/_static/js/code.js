@@ -46,4 +46,9 @@ document.addEventListener('DOMContentLoaded', (event) => {
     document.querySelectorAll('code.language-python.multi').forEach(el => {
         el.textContent = multi;
     });
+    document.querySelectorAll('div.output_area.stderr').forEach(el => {
+        el.style.visibility = "hidden";
+        el.style.display = "none";
+    });
 });
+
