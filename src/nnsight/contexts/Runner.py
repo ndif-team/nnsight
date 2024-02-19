@@ -110,7 +110,7 @@ class Runner(Tracer):
             return True
         # Or if there was some error.
         elif response.status == pydantics.ResponseModel.JobStatus.ERROR:
-            return True
+            raise Exception(str(response))
 
         return False
 
