@@ -59,10 +59,12 @@ class Node:
         device = (
             torch._GLOBAL_DEVICE_CONTEXT.device
             if torch._GLOBAL_DEVICE_CONTEXT is not None
-            else "cpu"
+            else None
         )
 
-        values = util.apply(values, lambda x: x.to(device), torch.Tensor)
+        if device is not None:
+
+            values = util.apply(values, lambda x: x.to(device), torch.Tensor)
 
         return values
 
