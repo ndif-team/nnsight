@@ -8,6 +8,7 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from .. import util
+from ..mappings import get_mapping
 from ..contexts.Runner import Runner
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
@@ -39,6 +40,7 @@ class NNsight:
         model_key: Union[str, torch.nn.Module],
         *args,
         dispatch: bool = False,
+        unified: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -49,6 +51,7 @@ class NNsight:
         self._kwargs = kwargs
 
         self._dispatched = False
+        self._unified = unified
         self._custom_model = False
 
         self._model: torch.nn.Module = None
@@ -75,7 +78,13 @@ class NNsight:
             self.dispatch_model()
 
         else:
-            self._envoy = Envoy(self._model)
+            if self._unified:
+                model_class = self._model.__class__.__name__
+                unified_map = get_mapping(model_class)
+                print(unified_map)
+                self._envoy = Envoy(self._model, name_map = unified_map)
+            else:
+                self._envoy = Envoy(self._model)
 
         logger.info(f"Initialized `{self._model_key}`")
 
