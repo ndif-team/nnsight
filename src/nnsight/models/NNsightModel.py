@@ -385,3 +385,11 @@ class NNsight:
             )
 
         return batched_inputs
+
+    def __repr__(self) -> str:
+        """Wrapper of ._model's representation as the NNsight model's representation.
+
+        Returns:
+            str: Representation.
+        """
+        return repr(self._envoy)
