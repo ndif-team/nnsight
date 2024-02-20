@@ -24,7 +24,7 @@ class Envoy:
         _tracer (nnsight.context.Tracer.Tracer): Object which adds this Envoy's module's output and input proxies to an intervention graph. Must be set on Envoys objects manually by the Tracer.
     """
 
-    def __init__(self, module: torch.nn.Module, module_path: str = ""):
+    def __init__(self, module: torch.nn.Module, name_map: dict = {}, module_path: str = ""):
 
         self._module_path = module_path
 
@@ -39,6 +39,9 @@ class Envoy:
         self._tracer: Tracer = None
 
         self._module = module
+        self._name_map = name_map
+        self._flipped_name_map = {v: k for k, v in name_map.items()}
+        
         self._sub_envoys: List[Envoy] = []
 
         # Register hook on underlying module to update the _fake_outputs and _fake_inputs on forward pass.
@@ -49,14 +52,14 @@ class Envoy:
         if isinstance(module, torch.nn.ModuleList):
             for i, module in enumerate(self._module):
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{i}")
+                envoy = Envoy(module, name_map = self._name_map, module_path=f"{self._module_path}.{i}")
 
                 self._sub_envoys.append(envoy)
 
         else:
             for name, module in self._module.named_children():
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
+                envoy = Envoy(module, name_map = self._name_map, module_path=f"{self._module_path}.{name}")
 
                 self._sub_envoys.append(envoy)
 
@@ -193,6 +196,76 @@ class Envoy:
 
         return str(self._module)
 
+    def __repr__(self) -> str:
+        """Wrapper method for underlying module's string representation.
+
+        Returns:
+            str: String.
+        """
+
+        if isinstance(self._module, torch.nn.ModuleList):
+
+            return self._repr_module_list()
+
+        extra_lines = []
+        extra_repr = self._module.extra_repr()
+        # empty string will be split into list ['']
+        if extra_repr:
+            extra_lines = extra_repr.split("\n")
+        child_lines = []
+        for attribute_name, attribute in self.__dict__.items():
+            attribute_name = self._name_map.get(attribute_name, attribute_name)
+            if isinstance(attribute, Envoy):
+
+                mod_str = repr(attribute)
+                mod_str = torch.nn.modules.module._addindent(mod_str, 2)
+                child_lines.append("(" + attribute_name + "): " + mod_str)
+        lines = extra_lines + child_lines
+
+        main_str = self._module._get_name() + "("
+        if lines:
+            # simple one-liner info, which most builtin Modules will use
+            if len(extra_lines) == 1 and not child_lines:
+                main_str += extra_lines[0]
+            else:
+                main_str += "\n  " + "\n  ".join(lines) + "\n"
+
+        main_str += ")"
+
+        return main_str
+
+    def _repr_module_list(self):
+
+        list_of_reprs = [repr(item) for item in self._sub_envoys]
+        if len(list_of_reprs) == 0:
+            return self._module._get_name() + "()"
+
+        start_end_indices = [[0, 0]]
+        repeated_blocks = [list_of_reprs[0]]
+        for i, r in enumerate(list_of_reprs[1:], 1):
+            if r == repeated_blocks[-1]:
+                start_end_indices[-1][1] += 1
+                continue
+
+            start_end_indices.append([i, i])
+            repeated_blocks.append(r)
+
+        lines = []
+        main_str = self._module._get_name() + "("
+        for (start_id, end_id), b in zip(start_end_indices, repeated_blocks):
+            local_repr = f"({start_id}): {b}"  # default repr
+
+            if start_id != end_id:
+                n = end_id - start_id + 1
+                local_repr = f"({start_id}-{end_id}): {n} x {b}"
+
+            local_repr = torch.nn.modules.module._addindent(local_repr, 2)
+            lines.append(local_repr)
+
+        main_str += "\n  " + "\n  ".join(lines) + "\n"
+        main_str += ")"
+        return main_str
+    
     def __iter__(self) -> Iterator[Envoy]:
         """Wrapper method for underlying ModuleList iterator.
 
@@ -232,7 +305,7 @@ class Envoy:
         Returns:
             Any: Attribute.
         """
-
+        key = self._flipped_name_map.get(key, key)
         return getattr(self._module, key)
 
     def __call__(self, *args: List[Any], **kwargs: Dict[str, Any]) -> InterventionProxy:
