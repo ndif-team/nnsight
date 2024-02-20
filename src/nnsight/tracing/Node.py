@@ -136,6 +136,17 @@ class Node:
 
             self.execute()
 
+    def is_graph_dereferenced(self):
+
+        try:
+
+            self.graph.add
+
+        except:
+            return True
+
+        return False
+
     def add(
         self,
         target: Union[Callable, str],
@@ -150,16 +161,7 @@ class Node:
             Proxy: Proxy
         """
 
-        dereferenced_graph = False
-
-        try:
-
-            self.graph.add
-
-        except:
-            dereferenced_graph = True
-
-        if dereferenced_graph:
+        if self.is_graph_dereferenced():
 
             return Proxy(
                 Node(

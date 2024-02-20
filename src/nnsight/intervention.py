@@ -118,11 +118,25 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
 
-        if not self.node.graph.tracing:
+        if self.node.is_graph_dereferenced():
 
             return util.apply(self.value, lambda x: x.shape, torch.Tensor)
 
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
+
+    @property
+    def device(self) -> Collection[torch.device]:
+        """Property to retrieve the device of the traced proxy value or real value.
+
+        Returns:
+            Union[torch.Size,Collection[torch.device]]: Proxy value shape or collection of shapes.
+        """
+
+        if self.node.is_graph_dereferenced():
+
+            return util.apply(self.value, lambda x: x.device, torch.Tensor)
+
+        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
 
 
 def concat(
