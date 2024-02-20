@@ -64,7 +64,7 @@ class InterventionProxy(Proxy):
         # Add a 'null' node with the save proxy as an argument to ensure the values are never deleted.
         # This is because 'null' nodes never actually get set and therefore there will always be a
         # dependency for the save proxy.
-        self.node.graph.add(
+        self.node.add(
             value=None,
             target="null",
             args=[self.node],
@@ -83,7 +83,7 @@ class InterventionProxy(Proxy):
         """
         if self._grad is None:
 
-            self.__dict__["_grad"] = self.node.graph.add(
+            self.__dict__["_grad"] = self.node.add(
                 value=self.node.proxy_value, target="grad", args=[self.node]
             )
 
@@ -97,7 +97,7 @@ class InterventionProxy(Proxy):
         Args:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
-        self.node.graph.add(target="swap", args=[self.grad.node, value], value=True)
+        self.node.add(target="swap", args=[self.grad.node, value], value=True)
 
         self.__dict__["_grad"] = None
 
