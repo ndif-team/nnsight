@@ -278,7 +278,12 @@ class NNsight:
             self._model_key, *self._args, *args, **kwargs, **self._kwargs
         )
 
-        self._envoy = Envoy(self._model)
+        if self._unified:
+            model_class = self._model.__class__.__name__
+            unified_map = get_mapping(model_class)
+            self._envoy = Envoy(self._model, name_map = unified_map)
+        else:
+            self._envoy = Envoy(self._model)
 
         self._dispatched = True
 
