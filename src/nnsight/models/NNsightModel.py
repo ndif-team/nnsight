@@ -9,6 +9,7 @@ from transformers import AutoConfig, AutoModel
 
 from .. import util
 from ..mappings import get_mapping
+from ..mappings import get_mapping
 from ..contexts.Runner import Runner
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
