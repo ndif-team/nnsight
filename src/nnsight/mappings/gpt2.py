@@ -1,5 +1,4 @@
 gpt2 = {
-    "transformer" : "model",
     "wte" : "embed",
     "wpe" : "pos_embed",
     "drop" : "dropout",
