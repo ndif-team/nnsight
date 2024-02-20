@@ -28,7 +28,6 @@ class Node:
         listeners (List[Node]): Nodes that depend on this node.
         dependencies (List[Node]): Nodes that this node depends on.
         value (Any): Actual value to be populated during execution.
-        _proxy_device (torch.device): desc
     """
 
     @staticmethod
@@ -88,7 +87,7 @@ class Node:
             meta = dict()
 
         self.name = name
-        self.graph: "Graph" = weakref.proxy(graph)
+        self.graph: "Graph" = graph
         self.proxy_value = value
         self.target = target
         self.args: List = util.apply(args, lambda x: x.node, Proxy)
@@ -128,16 +127,51 @@ class Node:
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
-        self._proxy_device: torch.device = None
-
         self.compile()
 
-        # (for when you want to apply things to proxies after model execution?)
+        # (for when you want to apply things to proxies after model execution)
         if self.fulfilled() and not isinstance(self.target, str):
             # So it doesn't get destroyed.
             self.remaining_listeners = 1
 
             self.execute()
+
+    def add(
+        self,
+        target: Union[Callable, str],
+        value: Any = inspect._empty,
+        args: List[Any] = None,
+        kwargs: Dict[str, Any] = None,
+        name: str = None,
+    ) -> Proxy:
+        """We use Node.add vs Graph.add in case the weakref to Graph is gone.
+        
+        Returns:
+            Proxy: Proxy
+        """
+
+        try:
+
+            self.graph.add
+
+        except:
+
+            return Proxy(
+                Node(
+                    name=None,
+                    graph=None,
+                    value=None,
+                    target=target,
+                    args=args,
+                    kwargs=kwargs,
+                )
+            ).value
+
+        else:
+
+            return self.graph.add(
+                target=target, value=value, args=args, kwargs=kwargs, name=name
+            )
 
     def compile(self) -> None:
         """Resets this Nodes remaining_listeners and remaining_dependencies and sets its value to None."""
