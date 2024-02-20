@@ -52,7 +52,7 @@ class Proxy:
 
     def __str__(self) -> str:
 
-        if not self.node.graph.tracing:
+        if self.node.is_graph_dereferenced():
 
             return str(self.value)
 
@@ -62,7 +62,7 @@ class Proxy:
 
     def __repr__(self) -> str:
 
-        if not self.node.graph.tracing:
+        if self.node.is_graph_dereferenced():
 
             return repr(self.value)
 
