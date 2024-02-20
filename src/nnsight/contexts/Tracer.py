@@ -64,14 +64,14 @@ class Tracer:
         if isinstance(exc_val, BaseException):
             raise exc_val
         
-        self._graph.tracing = False
-
         output = self._model.interleave(
             self._model._execute,
             self._graph,
             *self._batched_input,
             **self._kwargs,
         )
+
+        self._graph = None
 
     def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
         """Create an Invoker context dor a given input.

@@ -9,7 +9,9 @@ from nnsight.tracing.Graph import Graph
 
 @pytest.fixture(scope="module")
 def gpt2(device: str):
-    return nnsight.LanguageModel("openai-community/gpt2", device_map=device, dispatch=True)
+    return nnsight.LanguageModel(
+        "openai-community/gpt2", device_map=device, dispatch=True
+    )
 
 
 @pytest.fixture
@@ -34,24 +36,28 @@ def _test_serialize(runner: Runner):
 
     assert isinstance(request2.intervention_graph, Graph)
 
+
 @torch.no_grad()
 def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(max_new_tokens=3) as generator:
         with generator.invoke(MSG_prompt) as invoker:
             output = gpt2.generator.output.save()
 
+        _test_serialize(generator)
+
     output = gpt2.tokenizer.decode(output.value[0])
 
     assert output == "Madison Square Garden is located in the city of New York City"
 
-    _test_serialize(generator)
 
 @torch.no_grad()
 def test_save(gpt2: nnsight.LanguageModel):
     with gpt2.generate("Hello world") as tracer:
-     
+
         hs = gpt2.transformer.h[-1].output[0].save()
         hs_input = gpt2.transformer.h[-1].input[0][0].save()
+
+        _test_serialize(tracer)
 
     assert hs.value is not None
     assert isinstance(hs.value, torch.Tensor)
@@ -61,7 +67,6 @@ def test_save(gpt2: nnsight.LanguageModel):
     assert isinstance(hs_input.value, torch.Tensor)
     assert hs_input.value.ndim == 3
 
-    _test_serialize(tracer)
 
 @torch.no_grad()
 def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
@@ -75,13 +80,14 @@ def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
             output = gpt2.generator.output.save()
 
+        _test_serialize(tracer)
+
     output = gpt2.tokenizer.decode(output.value[0])
-    
+
     assert not (pre.value == 0).all().item()
     assert (post.value == 0).all().item()
     assert output != "Madison Square Garden is located in the city of New"
 
-    _test_serialize(tracer)
 
 @torch.no_grad()
 def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
@@ -95,13 +101,14 @@ def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
             output = gpt2.generator.output.save()
 
+        _test_serialize(generator)
+
     output = gpt2.tokenizer.decode(output.value[0])
 
     assert not (pre.value == 0).all().item()
     assert (post.value == 0).all().item()
     assert output != "Madison Square Garden is located in the city of New"
 
-    _test_serialize(generator)
 
 @torch.no_grad()
 def test_adhoc_module(gpt2: nnsight.LanguageModel):
@@ -111,11 +118,12 @@ def test_adhoc_module(gpt2: nnsight.LanguageModel):
             hidden_states = gpt2.lm_head(gpt2.transformer.ln_f(hidden_states))
             tokens = torch.softmax(hidden_states, dim=2).argmax(dim=2).save()
 
+        _test_serialize(generator)
+
     output = gpt2.tokenizer.decode(tokens.value[0])
 
     assert output == "\n-el Tower is a the middle centre Paris"
 
-    _test_serialize(generator)
 
 @torch.no_grad()
 def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
@@ -130,13 +138,14 @@ def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
             output2 = gpt2.generator.output.save()
 
+        _test_serialize(generator)
+
     output1 = gpt2.tokenizer.decode(output1.value[0])
     output2 = gpt2.tokenizer.decode(output2.value[0])
 
     assert output1 == "Madison Square Garden is located in the city of New York City"
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
-    _test_serialize(generator)
 
 @torch.no_grad()
 def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
@@ -154,12 +163,12 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
             output = gpt2.generator.output.save()
 
+        _test_serialize(generator)
+
     output2 = gpt2.tokenizer.decode(output.value[0])
 
     assert output1 == "Madison Square Garden is located in the city of New York City"
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
-
-    _test_serialize(generator)
 
 
 def test_retain_grad(gpt2: nnsight.LanguageModel):
@@ -172,7 +181,7 @@ def test_retain_grad(gpt2: nnsight.LanguageModel):
 
             logits.sum().backward()
 
-    _test_serialize(tracer)
+        _test_serialize(tracer)
 
     assert hidden_states.value.grad is not None
 
@@ -188,11 +197,11 @@ def test_grad(gpt2: nnsight.LanguageModel):
 
             logits.sum().backward()
 
+        _test_serialize(tracer)
+
     hidden_states.value
 
     assert (hidden_states_grad.value == 0).all().item()
-
-    _test_serialize(tracer)
 
     with gpt2.trace() as tracer:
         with tracer.invoke("Hello World") as invoker:
@@ -205,7 +214,7 @@ def test_grad(gpt2: nnsight.LanguageModel):
 
             logits.sum().backward()
 
+        _test_serialize(tracer)
+
     hidden_states.value
     assert (hidden_states_grad.value == 0).all().item()
-
-    _test_serialize(tracer)

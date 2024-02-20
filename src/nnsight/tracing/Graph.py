@@ -42,8 +42,6 @@ class Graph:
         validate: bool = True,
     ) -> None:
 
-        self.tracing = True
-
         self.proxy_class = proxy_class
         self.validate = validate
 
@@ -172,10 +170,6 @@ class Graph:
             kwargs=kwargs,
             meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
         )
-
-        if not self.tracing:
-
-            return node.value
 
         self.name_idx[target_name] += 1
 

@@ -145,16 +145,21 @@ class Node:
         name: str = None,
     ) -> Proxy:
         """We use Node.add vs Graph.add in case the weakref to Graph is gone.
-        
+
         Returns:
             Proxy: Proxy
         """
+
+        dereferenced_graph = False
 
         try:
 
             self.graph.add
 
         except:
+            dereferenced_graph = True
+
+        if dereferenced_graph:
 
             return Proxy(
                 Node(
@@ -167,11 +172,9 @@ class Node:
                 )
             ).value
 
-        else:
-
-            return self.graph.add(
-                target=target, value=value, args=args, kwargs=kwargs, name=name
-            )
+        return self.graph.add(
+            target=target, value=value, args=args, kwargs=kwargs, name=name
+        )
 
     def compile(self) -> None:
         """Resets this Nodes remaining_listeners and remaining_dependencies and sets its value to None."""
