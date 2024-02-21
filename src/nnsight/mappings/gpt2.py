@@ -4,7 +4,7 @@ gpt2 = {
     "wte" : "embed",
     "wpe" : "pos_embed",
     "drop" : "dropout",
-    "h" : "layer" ,
+    "h" : "layers" ,
     "ln_f" : "ln_final",
     "lm_head" : "unembed"
 }

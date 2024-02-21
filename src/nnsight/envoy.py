@@ -40,8 +40,7 @@ class Envoy:
 
         self._module = module
         self._name_map = name_map
-        self._flipped_name_map = {v: k for k, v in name_map.items()}
-        
+                
         self._sub_envoys: List[Envoy] = []
 
         # Register hook on underlying module to update the _fake_outputs and _fake_inputs on forward pass.
@@ -69,8 +68,13 @@ class Envoy:
 
                     self._handle_overloaded_mount(envoy, name)
 
-                else:
+                # Change the attribute to the name in the name_map if it exists.
+                elif name in self._name_map:
 
+                    setattr(self, self._name_map[name], envoy)
+                
+                else:
+                    
                     setattr(self, name, envoy)
 
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
@@ -334,7 +338,7 @@ class Envoy:
         Returns:
             Iterator[Envoy]: Iterator.
         """
-
+        
         return iter(self._sub_envoys)
 
     def __getitem__(self, key: int) -> Envoy:
@@ -346,7 +350,6 @@ class Envoy:
         Returns:
             Envoy: Envoy.
         """
-
         return self._sub_envoys[key]
 
     def __len__(self) -> int:
@@ -367,7 +370,6 @@ class Envoy:
         Returns:
             Any: Attribute.
         """
-        key = self._flipped_name_map.get(key, key)
         return getattr(self._module, key)
 
     def __call__(self, *args: List[Any], **kwargs: Dict[str, Any]) -> InterventionProxy:
