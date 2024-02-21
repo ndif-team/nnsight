@@ -6,6 +6,7 @@ import torch
 from transformers.models import gpt2
 
 from .. import util
+from ..patching import Patch, Patcher
 
 ### ATTRIBUTE MAP ###
 
@@ -94,3 +95,7 @@ class GPT2AttentionAltered(gpt2.modeling_gpt2.GPT2Attention):
             outputs += (attn_weights,)
 
         return outputs  # a, present, (attentions)
+
+GPT2Patcher = Patcher(
+    [Patch(gpt2.modeling_gpt2, GPT2AttentionAltered, "GPT2Attention")]
+)

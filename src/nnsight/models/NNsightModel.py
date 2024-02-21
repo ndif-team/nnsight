@@ -8,14 +8,13 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from .. import util
-from ..alterations import get_attr_map
+from ..alterations import get_attr_map, get_alteration
 from ..contexts.Runner import Runner
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
                             InterventionProxy, intervene)
 from ..logger import logger
 from ..tracing.Graph import Graph
-
 
 class NNsight:
     """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
@@ -54,6 +53,7 @@ class NNsight:
         self._custom_model = False
 
         self._model: torch.nn.Module = None
+        self._patcher = None
 
         logger.info(f"Initializing `{self._model_key}`...")
 
@@ -67,6 +67,10 @@ class NNsight:
 
         # Otherwise load from _load(...).
         if not self._custom_model:
+            # If unified, enter patcher before loading empty model weights
+            if unified:
+                self._patcher = get_alteration(self._model_key)
+                self._patcher.__enter__()
             # accelerate.init_empty_weights makes all parameters loaded on the 'meta' device.
             # Also do .to('meta') because why not.
             with accelerate.init_empty_weights(include_buffers=True):
@@ -77,10 +81,10 @@ class NNsight:
             self.dispatch_model()
 
         elif unified:
-            model_class = self._model.__class__.__name__
-            self._attr_map = get_attr_map(model_class)
+            # Alter model attribute names
+            self._attr_map = get_attr_map(self._model_key)
             self._envoy = Envoy(self._model, attr_map = self._attr_map)
-
+            
         else:
             self._envoy = Envoy(self._model)
 
