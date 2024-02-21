@@ -1,1 +1,0 @@
-from .mapping import get_mapping

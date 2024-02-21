@@ -24,7 +24,7 @@ class Envoy:
         _tracer (nnsight.context.Tracer.Tracer): Object which adds this Envoy's module's output and input proxies to an intervention graph. Must be set on Envoys objects manually by the Tracer.
     """
 
-    def __init__(self, module: torch.nn.Module, name_map: dict = {}, module_path: str = ""):
+    def __init__(self, module: torch.nn.Module, attr_map: dict = {}, module_path: str = ""):
 
         self._module_path = module_path
 
@@ -39,7 +39,7 @@ class Envoy:
         self._tracer: Tracer = None
 
         self._module = module
-        self._name_map = name_map
+        self._attr_map = attr_map
                 
         self._sub_envoys: List[Envoy] = []
 
@@ -51,14 +51,14 @@ class Envoy:
         if isinstance(module, torch.nn.ModuleList):
             for i, module in enumerate(self._module):
 
-                envoy = Envoy(module, name_map = self._name_map, module_path=f"{self._module_path}.{i}")
+                envoy = Envoy(module, attr_map = self._attr_map, module_path=f"{self._module_path}.{i}")
 
                 self._sub_envoys.append(envoy)
 
         else:
             for name, module in self._module.named_children():
 
-                envoy = Envoy(module, name_map = self._name_map, module_path=f"{self._module_path}.{name}")
+                envoy = Envoy(module, attr_map = self._attr_map, module_path=f"{self._module_path}.{name}")
 
                 self._sub_envoys.append(envoy)
 
@@ -68,10 +68,10 @@ class Envoy:
 
                     self._handle_overloaded_mount(envoy, name)
 
-                # Change the attribute to the name in the name_map if it exists.
-                elif name in self._name_map:
+                # Change the attribute to the name in the attr_map if it exists.
+                elif name in self._attr_map:
 
-                    setattr(self, self._name_map[name], envoy)
+                    setattr(self, self._attr_map[name], envoy)
                 
                 else:
                     
@@ -280,7 +280,7 @@ class Envoy:
             extra_lines = extra_repr.split("\n")
         child_lines = []
         for attribute_name, attribute in self.__dict__.items():
-            attribute_name = self._name_map.get(attribute_name, attribute_name)
+            attribute_name = self._attr_map.get(attribute_name, attribute_name)
             if isinstance(attribute, Envoy):
 
                 mod_str = repr(attribute)

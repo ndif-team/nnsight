@@ -8,7 +8,7 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from .. import util
-from ..mappings import get_mapping
+from ..alterations import get_attr_map
 from ..contexts.Runner import Runner
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
@@ -51,7 +51,6 @@ class NNsight:
         self._kwargs = kwargs
 
         self._dispatched = False
-        self._unified = unified
         self._custom_model = False
 
         self._model: torch.nn.Module = None
@@ -77,13 +76,13 @@ class NNsight:
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
 
+        elif unified:
+            model_class = self._model.__class__.__name__
+            self._attr_map = get_attr_map(model_class)
+            self._envoy = Envoy(self._model, attr_map = self._attr_map)
+
         else:
-            if self._unified:
-                model_class = self._model.__class__.__name__
-                unified_map = get_mapping(model_class)
-                self._envoy = Envoy(self._model, name_map = unified_map)
-            else:
-                self._envoy = Envoy(self._model)
+            self._envoy = Envoy(self._model)
 
         logger.info(f"Initialized `{self._model_key}`")
 
@@ -278,10 +277,8 @@ class NNsight:
             self._model_key, *self._args, *args, **kwargs, **self._kwargs
         )
 
-        if self._unified:
-            model_class = self._model.__class__.__name__
-            unified_map = get_mapping(model_class)
-            self._envoy = Envoy(self._model, name_map = unified_map)
+        if self._attr_map is not None:
+            self._envoy = Envoy(self._model, attr_map = self._attr_map)
         else:
             self._envoy = Envoy(self._model)
 
