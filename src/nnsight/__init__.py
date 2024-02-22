@@ -80,14 +80,10 @@ DEFAULT_PATCHER.add(
 def noop_wrapper(fn):
     @wraps(fn)
     def noop(input: torch.Tensor, *args, **kwargs):
-        if input.device.type == "meta":
-            return input
-
-        else:
-            return fn(input, *args, **kwargs)
+        return input
 
     return noop
 
-DEFAULT_PATCHER.add(Patch(torch.Tensor, noop_wrapper(torch.Tensor.tolist), "tolist"))
+DEFAULT_PATCHER.add(Patch(FakeTensor, noop_wrapper(FakeTensor.tolist), "tolist"))
 
 DEFAULT_PATCHER.__enter__()
