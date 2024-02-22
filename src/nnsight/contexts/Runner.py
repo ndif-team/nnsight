@@ -39,10 +39,10 @@ class Runner(Tracer):
         if isinstance(exc_val, BaseException):
             raise exc_val
 
-        self._graph.tracing = False
-
         if self.remote:
             self.run_server()
+
+            self._graph = None
         else:
             super().__exit__(exc_type, exc_val, exc_tb)
 
