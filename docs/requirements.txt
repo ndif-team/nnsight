@@ -1,6 +1,8 @@
 nnsight
 pydata_sphinx_theme
 sphinx
-sphinx_charts
 sphinx-copybutton
+sphinx-design
+nbsphinx
 plotly
+ipython

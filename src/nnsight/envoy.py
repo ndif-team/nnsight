@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 import torch
@@ -59,7 +60,45 @@ class Envoy:
 
                 self._sub_envoys.append(envoy)
 
-                setattr(self, name, envoy)
+                # If the module already has a sub-module named 'input' or 'output',
+                # mount the proxy access to 'nns_input' or 'nns_output instead.
+                if hasattr(Envoy, name):
+
+                    self._handle_overloaded_mount(envoy, name)
+
+                else:
+
+                    setattr(self, name, envoy)
+
+    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
+
+        warnings.warn(
+            f"Module of type `{type(self._module)}` has pre-defined a `{mount_point}` attribute. nnsight access for `{mount_point}` will be mounted at `.nns_{mount_point}` instead of `.{mount_point}` for this module only."
+        )
+
+        # If we already shifted a mount point dont create another new class.
+        if "Preserved" in self.__class__.__name__:
+
+            new_cls = self.__class__
+
+        else:
+
+            new_cls = type(
+                f"{Envoy.__name__}.Preserved",
+                (Envoy,),
+                {},
+            )
+
+        # Get the normal proxy mount point
+        mount = getattr(new_cls, mount_point)
+
+        # Move it to nns_<mount point>
+        setattr(new_cls, f"nns_{mount_point}", mount)
+        # Set the sub-module/envoy to the normal mount point on the CLASS itself not the instance.
+        setattr(new_cls, mount_point, envoy)
+
+        # Update the class on the instance
+        self.__class__ = new_cls
 
     def _set_tracer(self, tracer: Tracer, propagate=True):
         """Set tracer object on Envoy.
@@ -145,14 +184,76 @@ class Envoy:
 
         return self
 
-    def __str__(self) -> str:
+    def _repr_module_list(self):
+
+        list_of_reprs = [repr(item) for item in self._sub_envoys]
+        if len(list_of_reprs) == 0:
+            return self._module._get_name() + "()"
+
+        start_end_indices = [[0, 0]]
+        repeated_blocks = [list_of_reprs[0]]
+        for i, r in enumerate(list_of_reprs[1:], 1):
+            if r == repeated_blocks[-1]:
+                start_end_indices[-1][1] += 1
+                continue
+
+            start_end_indices.append([i, i])
+            repeated_blocks.append(r)
+
+        lines = []
+        main_str = self._module._get_name() + "("
+        for (start_id, end_id), b in zip(start_end_indices, repeated_blocks):
+            local_repr = f"({start_id}): {b}"  # default repr
+
+            if start_id != end_id:
+                n = end_id - start_id + 1
+                local_repr = f"({start_id}-{end_id}): {n} x {b}"
+
+            local_repr = torch.nn.modules.module._addindent(local_repr, 2)
+            lines.append(local_repr)
+
+        main_str += "\n  " + "\n  ".join(lines) + "\n"
+        main_str += ")"
+        return main_str
+
+    def __repr__(self) -> str:
         """Wrapper method for underlying module's string representation.
 
         Returns:
             str: String.
         """
 
-        return str(self._module)
+        if isinstance(self._module, torch.nn.ModuleList):
+
+            return self._repr_module_list()
+
+        extra_lines = []
+        extra_repr = self._module.extra_repr()
+        # empty string will be split into list ['']
+        if extra_repr:
+            extra_lines = extra_repr.split("\n")
+        child_lines = []
+        for attribute_name, attribute in self.__dict__.items():
+
+            if isinstance(attribute, Envoy):
+
+                mod_str = repr(attribute)
+                mod_str = torch.nn.modules.module._addindent(mod_str, 2)
+                child_lines.append("(" + attribute_name + "): " + mod_str)
+                
+        lines = extra_lines + child_lines
+
+        main_str = self._module._get_name() + "("
+        if lines:
+            # simple one-liner info, which most builtin Modules will use
+            if len(extra_lines) == 1 and not child_lines:
+                main_str += extra_lines[0]
+            else:
+                main_str += "\n  " + "\n  ".join(lines) + "\n"
+
+        main_str += ")"
+
+        return main_str
 
     def __iter__(self) -> Iterator[Envoy]:
         """Wrapper method for underlying ModuleList iterator.
@@ -214,8 +315,9 @@ class Envoy:
         torch._GLOBAL_DEVICE_CONTEXT = None
 
         return proxy
-    
+
     torch.set_default_device
+
     @property
     def output(self) -> InterventionProxy:
         """

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import weakref
 from typing import Any, Callable, Dict, List, Type, Union
 
 import torch
@@ -40,8 +41,6 @@ class Graph:
         proxy_class: Type[Proxy] = Proxy,
         validate: bool = True,
     ) -> None:
-        
-        self.tracing = True
 
         self.proxy_class = proxy_class
         self.validate = validate
@@ -56,7 +55,6 @@ class Graph:
         self.module_proxy = self.add(
             value=module, target="argument", args=["nnsight_root_module"]
         )
-        
 
     def get_swap(self, value):
         if self.swap is not None:
@@ -165,17 +163,13 @@ class Graph:
 
         node = Node(
             name=name,
-            graph=self,
+            graph=weakref.proxy(self),
             value=value,
             target=target,
             args=args,
             kwargs=kwargs,
             meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
         )
-
-        if not self.tracing:
-
-            return node.value
 
         self.name_idx[target_name] += 1
 

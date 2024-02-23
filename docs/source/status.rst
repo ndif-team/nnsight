@@ -3,7 +3,50 @@
 
 .. raw:: html
 
-    <link rel="stylesheet" href="../_static/css/status.css">
+    <style>
+        .accordion-header {
+            margin: 0 !important;
+        }
+        /* Custom accordion styles */
+        .custom-accordion-header {
+            background-color: var(--pst-color-surface); /* Default state background color */
+            color: var(--pst-color-text-base); /* Text color */
+            border-bottom: var(--pst-color-border); /* Border color */
+        }
+
+        .custom-accordion-header: {
+            background-color: var(--pst-color-surface); /* Default state background color */
+            color: var(--pst-color-text-base); /* Text color */
+            border-bottom: var(--pst-color-border); /* Border color */
+        }
+
+        .accordion {
+            --bs-accordion-btn-icon: none;
+            --bs-accordion-btn-active-icon: none;
+        }
+
+        .custom-accordion-header.collapsed {
+            background-color: var(--pst-color-on-background); /* Collapsed state background color */
+            color: var(--pst-color-text-base); /* Text color */
+        }
+
+        .custom-accordion-header:not(.collapsed) {
+            background-color: var(--pst-color-surface); /* Active/Expanded state background color */
+            color: var(--pst-color-text-base); /* Text color */
+        }
+
+        .custom-accordion-body {
+            background-color: var(--pst-color-on-background); /* Body background color */
+            border-color: var(--pst-color-border); /* Border color */
+            color: var(--pst-color-text-base); /* Text color */
+        }
+
+        .sd-card {
+            border-radius: 0 !important;
+        }
+    </style>
+
+    
     <script>
 
         function autoFormatJsonString(jsonString) {
@@ -24,13 +67,14 @@
         fetch("https://ndif.dev/ping")
             .then((response) => {
                 if (response.status == 200) {
-                    Array.from(document.getElementsByClassName("status-container")).forEach((elm) => {
-                        elm.style.backgroundColor = "#66800b";
-                        Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
-                            text.textContent = "All Systems Are Operational";
-                            text.style.color = "#CECDC3";
+                    document.querySelectorAll('div.sd-card-body.status-container').forEach(el => {
+                        el.style.backgroundColor = "#66800b";
+                        el.querySelectorAll('p.sd-card-text').forEach(el => {
+                            el.textContent = "All Systems Are Operational";
                         });
                     });
+
+
                     console.log('Ping success');
 
                     // Nested fetch to ndif.dev/stats
@@ -82,7 +126,17 @@
                                         prettyPrintedJson = prettyPrintedJson.replace(/"([^"]+)":/g, '"<b>$1</b>":');
                                         let huggingFaceLink = `<a href="http://huggingface.co/${key}" target="_blank">HuggingFace Model Repository ↗</a>`;
                                         
-                                        infoString += `<div class="accordion-item"> <h2 class="accordion-header" id="${headingId}"> <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}"> (${summaryItem.number_of_copies}x) ${key} </button> </h2> <div id="${collapseId}" class="accordion-collapse collapse" aria-labelledby="${headingId}" data-bs-parent="#accordionExample"> <div class="accordion-body">${huggingFaceLink}</i> <pre>${prettyPrintedJson}</pre></div> </div> </div>`;
+                                        infoString += `<div class="accordion-item">
+                                            <h2 class="accordion-header" id="${headingId}">
+                                                <button class="accordion-button custom-accordion-header collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#${collapseId}" aria-expanded="false" aria-controls="${collapseId}">
+                                                    (${summaryItem.number_of_copies}x) ${key}
+                                                </button>
+                                            </h2>
+                                            <div id="${collapseId}" class="accordion-collapse collapse" aria-labelledby="${headingId}" data-bs-parent="#accordionExample">
+                                                <div class="accordion-body custom-accordion-body">${huggingFaceLink}<pre>${prettyPrintedJson}</pre></div>
+                                            </div>
+                                        </div>`;
+
 
                                         index++;
                                     });
@@ -90,8 +144,6 @@
                                     var elm = document.getElementById("accordionHook");
 
                                     elm.innerHTML = infoString;
-                                    
-
                                     
 
                                     console.log('Stats success');
@@ -106,22 +158,20 @@
                             console.log('Stats error');
                         });
                 } else {
-                    Array.from(document.getElementsByClassName("status-container")).forEach((elm) => {
-                        elm.style.backgroundColor = "#F84F31";
-                        Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
-                            text.textContent = "NDIF Is Unavailable";
-                            text.style.color = "#CECDC3";
+                    document.querySelectorAll('div.sd-card-body.status-container').forEach(el => {
+                        el.style.backgroundColor = "#F84F31";
+                        el.querySelectorAll('p.sd-card-text').forEach(el => {
+                            el.textContent = "NDIF Is Unavailable";
                         });
                     });
                     console.log('Ping error');
                 }
             })
             .catch((pingError) => {
-                Array.from(document.getElementsByClassName("status-container")).forEach((elm) => {
-                    elm.style.backgroundColor = "#F84F31";
-                    Array.from(elm.getElementsByClassName('sd-card-text')).forEach((text) => {
-                        text.textContent = "NDIF Is Unavailable";
-                        text.style.color = "#CECDC3";
+                document.querySelectorAll('div.sd-card-body.status-container').forEach(el => {
+                    el.style.backgroundColor = "#F84F31";
+                    el.querySelectorAll('p.sd-card-text').forEach(el => {
+                        el.textContent = "NDIF Is Unavailable";
                     });
                 });
                 console.error('Ping fetch failed:', pingError);
@@ -139,9 +189,15 @@ Status
    :hidden:
 
 .. card::
-    :class-card: status-container
+    :class-body: status-container
+    :shadow: none
     
     All Systems Are Operational
+
+.. card::
+    :shadow: none
+    
+    The library can be used to run local models without a key. Running experiments on remote models requires a free server API key. To obtain a key, join the `NDIF Discord <https://discord.gg/6uFJmCSwW7>`_ and say hello on the #introductions channel.
 
 .. raw:: html
 

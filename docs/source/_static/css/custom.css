@@ -1,3 +1,5 @@
+/* Website light and dark theme colors */
+
 html[data-theme="dark"] {
     --pst-color-secondary: #ce5d97;
     --pst-color-primary: #4385be;
@@ -13,9 +15,28 @@ html[data-theme="dark"] {
     --pst-color-panel-background: #1C1B1A;
 }
 
+html[data-theme="light"] {
+    --pst-color-secondary: #ce5d97;
+    --pst-color-primary: #4385be;
+    --pst-color-primary-highlight: #ce5d97;
+    --pst-color-background: #FFFCF0;
+    --pst-color-on-background: #F2F0E5;
+    --pst-color-surface: #E6E4D9;
+    --pst-color-on-surface: #100F0F;
+    --pst-color-text-base: #100F0F;
+    --pst-color-text-muted: #100F0F;
+    --pst-color-heading-color: #100F0F;
+    --pst-color-border: #F2F0E5;
+    --pst-color-panel-background: #F2F0E5;
+}
+
+/* Editing the default width for pydata content */
+
 .bd-main .bd-content .bd-article-container {
     max-width: 80%;  /* default is 60em */
 }
+
+/* Front page buttons and hero */
 
 .hero {
     height: 60vh !important;
@@ -39,34 +60,21 @@ html[data-theme="dark"] {
     color: var(--pst-color-on-surface) !important;
 }
 
-.custom-card {
-    background-color : var(--pst-color-on-background) !important;
-    border-color : #878580 !important;
-    color: #878580 !important;
+
+/* Hide the theme version note at the bottom of the page */
+
+.theme-version {
+    visibility: hidden;
 }
-
-
-.custom-card:hover,
-.custom-card:hover h5,
-.custom-card:hover p {
-    border-color: var(--pst-color-on-surface) !important;
-    color: var(--pst-color-on-surface) !important;
-}
-
-
 
 .text {
     color : var(--pst-color-on-surface) !important;
 }
+
+/* Default surface style for cards */
 
 .surface {
     background-color : var(--pst-color-surface) !important;
     color : var(--pst-color-on-surface) !important;
     border-color: var(--pst-color-surface) !important;
 }
-
-pre {
-    border-color: var(--pst-color-surface) !important;
-}
-
-

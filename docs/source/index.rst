@@ -33,31 +33,27 @@ nnsight
   </script>
 
 .. raw:: html
-  
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 
-  <script src="dist/clipboard.min.js"></script>
-  
-  <script>
-    new ClipboardJS('.btn');
-  </script>
-
-  <script>
-      // Select the element with the class 'some-class'
-    var element = document.querySelector('.bd-container');
-
-    var newElement = document.createElement('div');
-    newElement.id = 'canvas';
-
-    newElement.style.position = 'fixed';
-    newElement.style.zIndex = '-1';
-    newElement.style.height = '100vh';
-    newElement.style.width = '100vw';
-    newElement.style.top = '0';
-
-    element.appendChild(newElement);
-
-  </script>
+    <script type="text/javascript">
+    document.addEventListener('DOMContentLoaded', function() {
+        var observer = new MutationObserver(function(mutations) {
+            updateCSSLink();
+        });
+        observer.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
+        
+        function updateCSSLink() {
+            const dark = document.documentElement.dataset.theme == 'dark';
+            var link = document.querySelector('link[rel="stylesheet"][href*="hljs"]');
+            if(link) {
+                link.href = dark ? '../_static/css/hljs-dark.css?v=0.2' : '../_static/css/hljs-light.css?v=0.2';
+            }
+        }
+        
+        // Initial check in case the theme is already set before the observer is added
+        updateCSSLink();
+    });
+    </script>
+    <link rel="stylesheet" href="../_static/css/hljs-dark.css?v=0.2">
 
 
 .. raw:: html
@@ -82,7 +78,7 @@ nnsight
         </div>
     </section>
 
-    <section class="d-flex align-items-center middle-stuff mid-section">
+    <section class="d-flex align-items-center mid-section d-none d-md-block">
       <div class="px-4 text-center">
         <div class="col-lg-10 mx-auto">
           <p class="lead mb-4">Direct access to model internals, from one to one hundred billion parameters. Intervene on activations or gradients in transformers, train optimizations methods, perform out of order module applications, cross prompt interventions, and so much more.</p>
@@ -90,7 +86,7 @@ nnsight
       </div>
     </section>
 
-    <section class="d-flex align-items-center" style="height: 60vh;">
+    <section class="d-flex align-items-center d-none d-md-block" style="height: 60vh;">
         <div class="container">
             <div class="row align-items-end pb-3 border-bottom mb-5">
                 <div class="col">
@@ -135,4 +131,28 @@ nnsight
         </div>
     </section>
 
-    <section style="height: 20vh;"/>
+    <section class="d-none d-md-block"  style="height: 20vh;"/>
+
+
+.. raw:: html
+    
+    <script>
+
+        var element = document.querySelector('.bd-container');
+
+        if (element) {
+        // If .bd-container exists, proceed to create the new element
+        var newElement = document.createElement('div');
+        newElement.id = 'canvas';
+
+        newElement.style.position = 'fixed';
+        newElement.style.zIndex = '-1';
+        newElement.style.height = '100vh';
+        newElement.style.width = '100vw';
+        newElement.style.top = '0';
+
+        element.appendChild(newElement);
+        } else {
+            console.log(".bd-container element does not exist.");
+        }
+    </script>

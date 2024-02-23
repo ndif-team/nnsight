@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -28,7 +27,6 @@ class Node:
         listeners (List[Node]): Nodes that depend on this node.
         dependencies (List[Node]): Nodes that this node depends on.
         value (Any): Actual value to be populated during execution.
-        _proxy_device (torch.device): desc
     """
 
     @staticmethod
@@ -59,10 +57,12 @@ class Node:
         device = (
             torch._GLOBAL_DEVICE_CONTEXT.device
             if torch._GLOBAL_DEVICE_CONTEXT is not None
-            else "cpu"
+            else None
         )
 
-        values = util.apply(values, lambda x: x.to(device), torch.Tensor)
+        if device is not None:
+
+            values = util.apply(values, lambda x: x.to(device), torch.Tensor)
 
         return values
 
@@ -86,12 +86,14 @@ class Node:
             meta = dict()
 
         self.name = name
-        self.graph: "Graph" = weakref.proxy(graph)
+        self.graph: "Graph" = graph
         self.proxy_value = value
         self.target = target
         self.args: List = util.apply(args, lambda x: x.node, Proxy)
         self.kwargs: Dict = util.apply(kwargs, lambda x: x.node, Proxy)
         self.meta = meta
+
+        self.proxy: Optional[Proxy] = None
 
         self.value: Any = inspect._empty
 
@@ -126,16 +128,61 @@ class Node:
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
-        self._proxy_device: torch.device = None
-
         self.compile()
 
-        # (for when you want to apply things to proxies after model execution?)
+        # (for when you want to apply things to proxies after model execution)
         if self.fulfilled() and not isinstance(self.target, str):
             # So it doesn't get destroyed.
             self.remaining_listeners = 1
 
             self.execute()
+
+    def is_graph_dereferenced(self) -> bool:
+        """Checks to see if the weakref to the Graph is deleted. If it is, we're no longer tracing.
+
+        Returns:
+            bool: Is Graph dereferenced.
+        """
+
+        try:
+
+            self.graph.add
+
+        except:
+            return True
+
+        return False
+
+    def add(
+        self,
+        target: Union[Callable, str],
+        value: Any = inspect._empty,
+        args: List[Any] = None,
+        kwargs: Dict[str, Any] = None,
+        name: str = None,
+    ) -> Proxy:
+        """We use Node.add vs Graph.add in case the weakref to Graph is gone.
+
+        Returns:
+            Proxy: Proxy
+        """
+
+        if self.is_graph_dereferenced():
+
+            return Proxy(
+                Node(
+                    name=None,
+                    graph=None,
+                    value=None,
+                    target=target,
+                    args=args,
+                    kwargs=kwargs,
+                )
+            ).value
+
+        return self.graph.add(
+            target=target, value=value, args=args, kwargs=kwargs, name=name
+        )
 
     def compile(self) -> None:
         """Resets this Nodes remaining_listeners and remaining_dependencies and sets its value to None."""
@@ -227,14 +274,30 @@ class Node:
 
         elif self.target == "grad":
 
-            def grad(value):
-                self.set_value(value)
-
-                value = self.graph.get_swap(value)
-
-                return value
-
             tensor: torch.Tensor = args[0]
+            backward_idx: int = args[1]
+
+            def grad(value):
+
+                nonlocal backward_idx
+
+                if backward_idx == 0:
+
+                    self.set_value(value)
+
+                    if not self.is_graph_dereferenced():
+
+                        value = self.graph.get_swap(value)
+
+                    backward_idx = -1
+
+                    return value
+
+                else:
+
+                    backward_idx -= 1
+
+                    return None
 
             tensor.register_hook(lambda value: grad(value))
 

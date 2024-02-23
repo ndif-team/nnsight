@@ -1,8 +1,10 @@
+import time
+
 # Configuration file for the Sphinx documentation builder.
 
 # Project Information
 project = "nnsight"
-copyright = "2023, NDIF"
+copyright = "2024 NDIF"
 author = "Jaden Fiotto-Kaufman"
 
 
@@ -26,19 +28,21 @@ html_theme = "pydata_sphinx_theme"
 html_title = "nnsight"
 html_logo = "_static/images/nnsight_logo.svg"
 html_static_path = ["_static"]
+html_show_sphinx = False
 
 html_favicon = "_static/images/icon.ico"
 html_show_sourcelink = False
 
 html_context = {
    "default_mode": "dark",
-   "ndif_url": "https://ndif.dev/ping"
+   "ndif_url": "https://ndif.dev/ping",
+   "version_identifier": str(int(time.time())),
 }
 
 
 html_theme_options = {
     "show_nav_level": 2,
-    "navbar_end": ["navbar-icon-links", "ndif_status"],
+    "navbar_end": ["theme-switcher","navbar-icon-links", "ndif_status"],
     "navbar_align": "left",
     "icon_links": [
         {
@@ -52,24 +56,16 @@ html_theme_options = {
             "icon": "fa-brands fa-discord",
         },
         {
-            "name": "Status",
+            "name": "Status: Unknown",
             "url": "/status",
             "icon": "fa-solid fa-circle-check",
             "attributes": {"class": "ndif"},
         },
     ],
     "show_prev_next": False,
-    "default_mode": "dark",
-    "pygment_dark_style": "monokai"
+    "pygment_dark_style": "monokai",
+    "pygment_light_style": "solarized-light"
 }
-
-pygments_style = "rrt"
-
-html_css_files = [
-    "css/custom.css",
-    "css/front.css",
-    "css/hljs.css"
-]
 
 html_js_files = [
     'js/custom.js',

@@ -64,7 +64,7 @@ class InterventionProxy(Proxy):
         # Add a 'null' node with the save proxy as an argument to ensure the values are never deleted.
         # This is because 'null' nodes never actually get set and therefore there will always be a
         # dependency for the save proxy.
-        self.node.graph.add(
+        self.node.add(
             value=None,
             target="null",
             args=[self.node],
@@ -83,8 +83,13 @@ class InterventionProxy(Proxy):
         """
         if self._grad is None:
 
-            self.__dict__["_grad"] = self.node.graph.add(
-                value=self.node.proxy_value, target="grad", args=[self.node]
+            # We track how many times backward is called via an attribute on the Graph
+            if not hasattr(self.node.graph, 'n_backward_calls'):
+
+                setattr(self.node.graph, 'n_backward_calls', 0)
+
+            self.__dict__["_grad"] = self.node.add(
+                value=self.node.proxy_value, target="grad", args=[self.node,self.node.graph.n_backward_calls]
             )
 
         return self._grad
@@ -97,9 +102,45 @@ class InterventionProxy(Proxy):
         Args:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
-        self.node.graph.add(target="swap", args=[self.grad.node, value], value=True)
+        self.node.add(target="swap", args=[self.grad.node, value], value=True)
 
-        self.__dict__["_grad"] = None
+    def __call__(self, *args, **kwargs) -> Self:
+
+
+        # We don't want to call backward on fake tensors
+        if (
+            self.node.target is util.fetch_attr
+            and isinstance(self.node.args[1], str)
+            and self.node.args[1] == "backward"
+        ):
+            # We track how many times backward is called via an attribute on the Graph
+            if not hasattr(self.node.graph, 'n_backward_calls'):
+
+                setattr(self.node.graph, 'n_backward_calls', 0)
+
+            # Clear all .grad proxies 
+            for node in self.node.graph.nodes.values():
+
+                try:
+
+                    if node.proxy._grad is not None:
+
+                        node.proxy.__dict__['_grad'] = None
+
+                except ReferenceError:
+                    pass
+
+            self.node.graph.n_backward_calls += 1
+
+            return self.node.add(
+                value=None,
+                target=Proxy.proxy_call,
+                args=[self.node] + list(args),
+                kwargs=kwargs,
+            )
+
+
+        return super().__call__(*args, **kwargs)
 
     def __setattr__(
         self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
@@ -118,11 +159,25 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
 
-        if not self.node.graph.tracing:
+        if self.node.is_graph_dereferenced():
 
             return util.apply(self.value, lambda x: x.shape, torch.Tensor)
 
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
+
+    @property
+    def device(self) -> Collection[torch.device]:
+        """Property to retrieve the device of the traced proxy value or real value.
+
+        Returns:
+            Union[torch.Size,Collection[torch.device]]: Proxy value shape or collection of shapes.
+        """
+
+        if self.node.is_graph_dereferenced():
+
+            return util.apply(self.value, lambda x: x.device, torch.Tensor)
+
+        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
 
 
 def concat(

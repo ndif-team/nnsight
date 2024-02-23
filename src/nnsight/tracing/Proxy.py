@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import inspect
 import operator
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 from typing_extensions import Self
@@ -36,6 +36,7 @@ class Proxy:
         self.__dict__["node"] = node
 
         self.node: "Node"
+        self.node.proxy = weakref.proxy(self)
 
     @property
     def value(self) -> Any:
@@ -52,7 +53,7 @@ class Proxy:
 
     def __str__(self) -> str:
 
-        if not self.node.graph.tracing:
+        if self.node.is_graph_dereferenced():
 
             return str(self.value)
 
@@ -62,7 +63,7 @@ class Proxy:
 
     def __repr__(self) -> str:
 
-        if not self.node.graph.tracing:
+        if self.node.is_graph_dereferenced():
 
             return repr(self.value)
 
@@ -76,38 +77,26 @@ class Proxy:
             Proxy: New call proxy.
         """
 
-        value = inspect._empty
-
-        # We don't want to call backward on fake tensors
-        if (
-            self.node.target is util.fetch_attr
-            and isinstance(self.node.args[1], str)
-            and self.node.args[1] == "backward"
-        ):
-
-            value = None
-
-        return self.node.graph.add(
-            value=value,
+        return self.node.add(
             target=Proxy.proxy_call,
             args=[self.node] + list(args),
             kwargs=kwargs,
         )
 
     def __getitem__(self, key: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.getitem,
             args=[self.node, key],
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
-        self.node.graph.add(
+        self.node.add(
             target=operator.setitem,
             args=[self.node, key, value],
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=util.fetch_attr,
             args=[self.node, key],
         )
@@ -120,109 +109,109 @@ class Proxy:
 
             return
 
-        return self.node.graph.add(
+        return self.node.add(
             target=setattr,
             args=[self.node, key, value],
         )
 
     def __len__(self) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=len,
             args=[self.node],
         )
 
     def __abs__(self) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.abs,
             args=[self.node],
         )
 
     def __invert__(self) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.invert,
             args=[self.node],
         )
 
     def __add__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.add,
             args=[self.node, other],
         )
 
     def __radd__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.add,
             args=[other, self.node],
         )
 
     def __sub__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.sub,
             args=[self.node, other],
         )
 
     def __rsub__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.sub,
             args=[other, self.node],
         )
 
     def __pow__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.pow,
             args=[self.node, other],
         )
 
     def __rpow__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.pow,
             args=[other, self.node],
         )
 
     def __mul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.mul,
             args=[self.node, other],
         )
 
     def __rmul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.mul,
             args=[other, self.node],
         )
 
     def __mod__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.mod,
             args=[self.node, other],
         )
 
     def __rmod__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.mod,
             args=[other, self.node],
         )
 
     def __matmul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.matmul,
             args=[self.node, other],
         )
 
     def __rmatmul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.matmul,
             args=[other, self.node],
         )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.truediv,
             args=[self.node, other],
         )
 
     def __rtruediv__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.graph.add(
+        return self.node.add(
             target=operator.truediv,
             args=[other, self.node],
         )
@@ -252,7 +241,7 @@ class Proxy:
 
         util.apply(args, get_proxy, Proxy)
 
-        return proxy.node.graph.add(
+        return proxy.node.add(
             target=orig_method,
             args=args,
             kwargs=kwargs,
@@ -288,7 +277,7 @@ def proxy_wrapper(fn) -> None:
         util.apply(list(args) + list(kwargs.values()), get_node, Proxy)
 
         if node is not None:
-            return node.graph.add(target=fn, args=args, kwargs=kwargs)
+            return node.add(target=fn, args=args, kwargs=kwargs)
 
         else:
             return fn(*args, **kwargs)
