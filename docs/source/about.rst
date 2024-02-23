@@ -1,3 +1,18 @@
+.. raw:: html
+
+    <style>
+        .accordion-header {
+            margin: 0 !important;
+        }
+    </style>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            document.querySelectorAll('figure.align-default').forEach(el => {
+                el.style.marginBottom = "0px";
+            });
+        });
+    </script>
 
 About NNsight
 =============
@@ -16,10 +31,11 @@ An API for transparent science on black-box AI.
     it lets you run experiments on huge open models easily, with full transparent access.
     The nnsight library is also terrific for studying smaller local models.
 
-.. figure:: _static/images/remote_execution.png
+.. figure:: _static/images/interleaved.png
 
 
 .. card::
+    
     An overview of the nnsight/NDIF pipeline. Researchers write simple Python code to run along with the neural network locally or remotely. Unlike commercial inference, the experiment code can read or write any of the internal states of the neural networks being studied.  This code creates a computation graph that can be sent to the remote service and interleaved with the execution of the neural network.
 
 How do I use NNsight?
@@ -61,7 +77,7 @@ When using nnsight, it is helpful to understand that the operations are not exec
 
 An example of one such intervention graph can be seen below:
 
-.. figure:: _static/images/intrgraph.png
+.. figure:: _static/images/execution.png
 
 .. card::
     
