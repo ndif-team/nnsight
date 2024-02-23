@@ -83,8 +83,13 @@ class InterventionProxy(Proxy):
         """
         if self._grad is None:
 
+            # We track how many times backward is called via an attribute on the Graph
+            if not hasattr(self.node.graph, 'n_backward_calls'):
+
+                setattr(self.node.graph, 'n_backward_calls', 0)
+
             self.__dict__["_grad"] = self.node.add(
-                value=self.node.proxy_value, target="grad", args=[self.node]
+                value=self.node.proxy_value, target="grad", args=[self.node,self.node.graph.n_backward_calls]
             )
 
         return self._grad
@@ -99,7 +104,43 @@ class InterventionProxy(Proxy):
         """
         self.node.add(target="swap", args=[self.grad.node, value], value=True)
 
-        self.__dict__["_grad"] = None
+    def __call__(self, *args, **kwargs) -> Self:
+
+
+        # We don't want to call backward on fake tensors
+        if (
+            self.node.target is util.fetch_attr
+            and isinstance(self.node.args[1], str)
+            and self.node.args[1] == "backward"
+        ):
+            # We track how many times backward is called via an attribute on the Graph
+            if not hasattr(self.node.graph, 'n_backward_calls'):
+
+                setattr(self.node.graph, 'n_backward_calls', 0)
+
+            # Clear all .grad proxies 
+            for node in self.node.graph.nodes.values():
+
+                try:
+
+                    if node.proxy._grad is not None:
+
+                        node.proxy.__dict__['_grad'] = None
+
+                except ReferenceError:
+                    pass
+
+            self.node.graph.n_backward_calls += 1
+
+            return self.node.add(
+                value=None,
+                target=Proxy.proxy_call,
+                args=[self.node] + list(args),
+                kwargs=kwargs,
+            )
+
+
+        return super().__call__(*args, **kwargs)
 
     def __setattr__(
         self, key: Union[InterventionProxy, Any], value: Union[Self, Any]

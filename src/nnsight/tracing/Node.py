@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -94,6 +93,8 @@ class Node:
         self.kwargs: Dict = util.apply(kwargs, lambda x: x.node, Proxy)
         self.meta = meta
 
+        self.proxy: Optional[Proxy] = None
+
         self.value: Any = inspect._empty
 
         self.listeners: List[Node] = list()
@@ -136,7 +137,12 @@ class Node:
 
             self.execute()
 
-    def is_graph_dereferenced(self):
+    def is_graph_dereferenced(self) -> bool:
+        """Checks to see if the weakref to the Graph is deleted. If it is, we're no longer tracing.
+
+        Returns:
+            bool: Is Graph dereferenced.
+        """
 
         try:
 
@@ -268,14 +274,30 @@ class Node:
 
         elif self.target == "grad":
 
-            def grad(value):
-                self.set_value(value)
-
-                value = self.graph.get_swap(value)
-
-                return value
-
             tensor: torch.Tensor = args[0]
+            backward_idx: int = args[1]
+
+            def grad(value):
+
+                nonlocal backward_idx
+
+                if backward_idx == 0:
+
+                    self.set_value(value)
+
+                    if not self.is_graph_dereferenced():
+
+                        value = self.graph.get_swap(value)
+
+                    backward_idx = -1
+
+                    return value
+
+                else:
+
+                    backward_idx -= 1
+
+                    return None
 
             tensor.register_hook(lambda value: grad(value))
 

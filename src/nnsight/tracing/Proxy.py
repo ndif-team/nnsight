@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import inspect
 import operator
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, Union
 
 from typing_extensions import Self
@@ -36,6 +36,7 @@ class Proxy:
         self.__dict__["node"] = node
 
         self.node: "Node"
+        self.node.proxy = weakref.proxy(self)
 
     @property
     def value(self) -> Any:
@@ -76,19 +77,7 @@ class Proxy:
             Proxy: New call proxy.
         """
 
-        value = inspect._empty
-
-        # We don't want to call backward on fake tensors
-        if (
-            self.node.target is util.fetch_attr
-            and isinstance(self.node.args[1], str)
-            and self.node.args[1] == "backward"
-        ):
-
-            value = None
-
         return self.node.add(
-            value=value,
             target=Proxy.proxy_call,
             args=[self.node] + list(args),
             kwargs=kwargs,
