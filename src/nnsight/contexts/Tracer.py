@@ -35,7 +35,7 @@ class Tracer:
 
         self._kwargs = kwargs
 
-        self._graph = Graph(
+        self._graph: Graph = Graph(
             self._model._envoy, proxy_class=model.proxy_class, validate=validate
         )
 
@@ -63,7 +63,7 @@ class Tracer:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
-        
+
         output = self._model.interleave(
             self._model._execute,
             self._graph,
@@ -71,6 +71,7 @@ class Tracer:
             **self._kwargs,
         )
 
+        self._graph.tracing = False
         self._graph = None
 
     def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:

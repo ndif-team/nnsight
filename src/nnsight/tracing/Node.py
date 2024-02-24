@@ -137,21 +137,19 @@ class Node:
 
             self.execute()
 
-    def is_graph_dereferenced(self) -> bool:
-        """Checks to see if the weakref to the Graph is deleted. If it is, we're no longer tracing.
+    def is_tracing(self) -> bool:
+        """Checks to see if the weakref to the Graph is alive and tracing or dead.
 
         Returns:
-            bool: Is Graph dereferenced.
+            bool: Is Graph tracing.
         """
 
         try:
 
-            self.graph.add
+            return self.graph.tracing
 
         except:
-            return True
-
-        return False
+            return False
 
     def add(
         self,
@@ -167,7 +165,7 @@ class Node:
             Proxy: Proxy
         """
 
-        if self.is_graph_dereferenced():
+        if not self.is_tracing():
 
             return Proxy(
                 Node(
@@ -285,7 +283,7 @@ class Node:
 
                     self.set_value(value)
 
-                    if not self.is_graph_dereferenced():
+                    if self.is_tracing():
 
                         value = self.graph.get_swap(value)
 

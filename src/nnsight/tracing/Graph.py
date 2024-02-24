@@ -26,6 +26,7 @@ class Graph:
     Attributes:
         validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
+        tracing (bool): If currently tracing operations
         nodes (Dict[str, Node]): Mapping of node name to node.
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
             Used so names are unique.
@@ -44,6 +45,8 @@ class Graph:
 
         self.proxy_class = proxy_class
         self.validate = validate
+
+        self.tracing = True
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
