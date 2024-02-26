@@ -216,11 +216,11 @@ class Proxy:
             args=[other, self.node],
         )
 
+    def __index__(self) -> Self:
+        return self.node.add(target=operator.index, args=[self.node])
+
     def __bool__(self) -> bool:
         return self.node.proxy_value.__bool__()
-
-    def __index__(self) -> int:
-        return self.node.proxy_value.__index__()
 
     def __instancecheck__(self, __instance: Any) -> bool:
         return self.node.proxy_value.__instancecheck__(__instance)
