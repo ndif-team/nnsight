@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
-import torch
+
 import requests
 import socketio
+import torch
 from tqdm import tqdm
 
 from .. import CONFIG, pydantics
@@ -42,6 +43,7 @@ class Runner(Tracer):
         if self.remote:
             self.run_server()
 
+            self._graph.tracing = False
             self._graph = None
         else:
             super().__exit__(exc_type, exc_val, exc_tb)
@@ -132,7 +134,7 @@ class Runner(Tracer):
             response = requests.post(
                 f"https://{CONFIG.API.HOST}/request",
                 json=request.model_dump(exclude=["id", "received"]),
-                headers={'ndif-api-key' : CONFIG.API.APIKEY}
+                headers={"ndif-api-key": CONFIG.API.APIKEY},
             )
 
             if response.status_code == 200:
