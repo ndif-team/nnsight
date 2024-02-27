@@ -3,4 +3,5 @@ dist/
 public/
 *.egg-info/
 .installed.cfg
+.vscode
 __pycache__/
