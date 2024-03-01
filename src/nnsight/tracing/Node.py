@@ -4,6 +4,7 @@ import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 
 from .. import util
 from ..logger import logger
@@ -59,6 +60,22 @@ class Node:
             if torch._GLOBAL_DEVICE_CONTEXT is not None
             else None
         )
+        
+        if device is None:
+            
+            # Arguments might be tensors created outside of scanning. Also the model might be a 'meta' pre-dispatched version of the model.
+            # That means the tensors as args and the model are different devices but we dont want to have to have the users move tensors to 'meta'
+            # So only when theres a FakeTensor with device meta, we move other tensors also to meta.
+            
+            def get_device(tensor:torch.Tensor):
+                
+                nonlocal device
+                
+                if device is None and isinstance(tensor, FakeTensor) and tensor.device.type == 'meta':
+                                        
+                    device = tensor.device.type
+            
+            util.apply(values, get_device, torch.Tensor)
 
         if device is not None:
 
