@@ -218,3 +218,26 @@ def test_grad(gpt2: nnsight.LanguageModel):
 
     hidden_states.value
     assert (hidden_states_grad.value == 0).all().item()
+
+
+def test_other_device_tensors(gpt2: nnsight.LanguageModel):
+    
+    device = next(gpt2.parameters())
+    
+    lin = torch.nn.Linear(768, 768).to(device)
+    bias = torch.randn(768).to(device)
+
+    def fun(x):
+        return torch.nn.ReLU()(lin(x) - bias)
+
+
+    with gpt2.trace("fish") as tracer:
+        x = gpt2.transformer.h[0].mlp.output
+        y = fun(x)
+        z = y.save()
+        
+        # TODO
+        #_test_serialize(tracer)
+    
+
+    z.value
