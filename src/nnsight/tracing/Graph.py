@@ -5,7 +5,7 @@ import weakref
 from typing import Any, Callable, Dict, List, Type, Union
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
@@ -141,17 +141,12 @@ class Graph:
                 allow_non_fake_inputs=True,
                 shape_env=ShapeEnv(assume_static_by_default=True),
             ) as fake_mode:
-
-                try:
-
+                with FakeCopyMode(fake_mode):
+                    
                     value = target(
                         *Node.prepare_proxy_values(_args),
                         **Node.prepare_proxy_values(_kwargs),
                     )
-
-                except RuntimeError:
-
-                    value = None
 
         target_name = target if isinstance(target, str) else target.__name__
 
