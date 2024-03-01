@@ -31,6 +31,7 @@ class Runner(Tracer):
 
         self.remote = remote
         self.blocking = blocking
+        self._accumulator = None
 
     def __enter__(self) -> Runner:
         return self

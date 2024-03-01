@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import weakref
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 from ..intervention import InterventionProxy
@@ -11,7 +12,7 @@ if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
 
 
-class Tracer:
+class Tracer(AbstractContextManager):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
