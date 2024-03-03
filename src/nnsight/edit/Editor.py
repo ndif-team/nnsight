@@ -23,11 +23,11 @@ class Edit:
         self.key = key
         self.replacement = replacement
 
-    def __str__ (self):
+    def __str__(self) -> str:
         return f"{self.parent}.{self.target} -> {self.key}"
     
     def __repr__(self) -> str:
-        return f"{self.parent}.{self.target} -> {self.key}"
+        return self.__str__()
 
 class Compiler: 
 
@@ -41,42 +41,40 @@ class Compiler:
     def compile_edits(self, obj):
         self.group_edit_branches()
 
-        print(self.edit_branches)
-
         for branch in self.edit_branches:
             targets = []
             wrapper_names = []
             wrapper_modules = []
 
-            for edit in self.edit_branches[branch]:
-                targets.append(edit.target)
-                wrapper_names.append(edit.key)
-                wrapper_modules.append(edit.replacement)
-                mod = fetch_attr(obj, edit.parent)
-                setattr(mod, edit.key, edit.replacement)
+            for branch, edits in self.edit_branches.items():
+                wrapper_dict = {edit.key: edit.replacement for edit in edits}
+                target_dict = {edit.target: edit.key for edit in edits}
 
-            wrapper_dict = dict(zip(wrapper_names, wrapper_modules))
-            target_dict = dict(zip(targets, wrapper_names))
+                for edit in edits:
+                    mod = fetch_attr(obj, edit.parent)
+                    setattr(mod, edit.key, edit.replacement)
 
             backend = self.get_backend(target_dict, wrapper_dict)    
-
             parent_module = fetch_attr(obj, branch)        
             edited_module = torch.compile(parent_module, backend=backend, dynamic=True)
             fetch_and_set(obj, branch, edited_module)
 
     def decompile_edits(self, obj):
-        for branch in self.edit_branches:
+        for branch, edits in self.edit_branches.items():
             fetch_and_set(obj, branch, fetch_attr(obj, branch)._orig_mod)
+
+            for edit in edits:
+                mod = fetch_attr(obj, edit.parent)
+                delattr(mod, edit.key)
+        
 
     def group_edit_branches(self):
         # Normalize attribute strings and group by their root branch
         branches = defaultdict(list)
         for edit in self.edits:
-            attr_path = edit.parent
             # Remove leading dot or split[0] is ""
-            normalized_attr = attr_path.lstrip('.')
-            parts = normalized_attr.split('.')
-            root = parts[0] if parts else ""
+            normalized_attr = edit.parent.lstrip('.')
+            root = normalized_attr.split('.')[0] if normalized_attr else ""
             branches[root].append(edit)
         
         self.edit_branches = branches
@@ -96,13 +94,13 @@ class Compiler:
             for node in gm.graph.nodes:    
                 arg_names = [arg.name for arg in node.args if hasattr(arg, "name")]
 
-                for target in target_dict.keys():
+                for target, replacement in target_dict.items():
                     if target in arg_names and target in unseen:
                         arg_index = arg_names.index(target)
                         
                         with gm.graph.inserting_after(node):
                             wrapper_args = (node.args[arg_index], )
-                            wrapper_node = gm.graph.call_module(target_dict[target], args=wrapper_args)
+                            wrapper_node = gm.graph.call_module(replacement, args=wrapper_args)
                             node = wrapper_node
 
                         unseen.remove(target)
@@ -112,8 +110,6 @@ class Compiler:
                     break
                     
             gm.recompile()
-
-            print(gm)
 
             return gm.forward
 
