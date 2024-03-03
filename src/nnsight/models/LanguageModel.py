@@ -166,7 +166,6 @@ class LanguageModel(GenerationMixin, NNsight):
 
         return model
 
-    # TODO: Allow Edit object to accept a str module path rather than just Envoys
     def load_edits(self, edits: Optional[List[Edit]] = None):
         if edits is not None:
             self.edits = edits

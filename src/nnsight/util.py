@@ -71,7 +71,7 @@ def fetch_and_set(obj, path, replacement_module):
         replacement_module (object): Replacement module to set.
 
     Returns:
-        None
+        Root object with the attribute replaced.
     """
     if path[0] == ".":
         path = path[1:]
@@ -84,6 +84,8 @@ def fetch_and_set(obj, path, replacement_module):
 
     # Replace the target module
     setattr(parent, parts[-1], replacement_module)
+
+    return parent
 
 
 def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
