@@ -10,11 +10,6 @@ from ..envoy import Envoy
 from ..util import fetch_and_set, fetch_attr
 
 
-# TODO: Add support for nested edits where one edit is on a child module of another edit.
-
-# Example edit
-# Edit(model._model.transformer.h.3.attn, query, WrapperModule())
-
 class Edit:
 
     def __init__(self, 
@@ -28,20 +23,11 @@ class Edit:
         self.key = key
         self.replacement = replacement
 
-        self.parent_module = None
-
-    def edit(self, obj) -> None:
-
-        # Set the parent_module and add the wrapper to its attributes
-        self.parent_module = fetch_attr(obj, self.parent)
-        setattr(self.parent_module, self.key, self.replacement)
-
-    # TODO: FIX THIS
-    def restore(self, obj) -> None:
-
-        fetch_and_set(obj, self.parent._module_path, self.parent._orig_mod)
-
-        delattr(self.parent._module, self.key)
+    def __str__ (self):
+        return f"{self.parent}.{self.target} -> {self.key}"
+    
+    def __repr__(self) -> str:
+        return f"{self.parent}.{self.target} -> {self.key}"
 
 class Compiler: 
 
@@ -53,55 +39,54 @@ class Compiler:
         self.edit_branches = None
 
     def compile_edits(self, obj):
-
         self.group_edit_branches()
 
+        print(self.edit_branches)
+
         for branch in self.edit_branches:
-            wrapper_names = [edit.key for edit in self.edit_branches[branch]]
-            wrapper_modules = [edit.replacement for edit in self.edit_branches[branch]]
+            targets = []
+            wrapper_names = []
+            wrapper_modules = []
+
+            for edit in self.edit_branches[branch]:
+                targets.append(edit.target)
+                wrapper_names.append(edit.key)
+                wrapper_modules.append(edit.replacement)
+                mod = fetch_attr(obj, edit.parent)
+                setattr(mod, edit.key, edit.replacement)
 
             wrapper_dict = dict(zip(wrapper_names, wrapper_modules))
+            target_dict = dict(zip(targets, wrapper_names))
 
-            backend = self.get_backend(self.target, wrapper_dict)
+            backend = self.get_backend(target_dict, wrapper_dict)    
 
-            parent_module = fetch_attr(obj, branch)
-            
+            parent_module = fetch_attr(obj, branch)        
             edited_module = torch.compile(parent_module, backend=backend, dynamic=True)
-
             fetch_and_set(obj, branch, edited_module)
 
-    def get_root_branch(self, attr_str):
-        # Remove leading dot or split[0] is ""
-        normalized_attr = attr_str.lstrip('.')
-        parts = normalized_attr.split('.')
-        root = parts[0] if parts else ""
-        return root, normalized_attr
+    def decompile_edits(self, obj):
+        for branch in self.edit_branches:
+            fetch_and_set(obj, branch, fetch_attr(obj, branch)._orig_mod)
 
     def group_edit_branches(self):
-        """
-        Find the top-level branches or attributes from a list of attribute strings, considering different branches.
-        
-        Parameters:
-        - attr_list: A list of strings, each representing an attribute path.
-        
-        Returns:
-        - A set of the top-level attribute strings from the list, considering different branches.
-        """
         # Normalize attribute strings and group by their root branch
         branches = defaultdict(list)
         for edit in self.edits:
             attr_path = edit.parent
-            root, normalized_attr = self.get_root_branch(attr_path)
+            # Remove leading dot or split[0] is ""
+            normalized_attr = attr_path.lstrip('.')
+            parts = normalized_attr.split('.')
+            root = parts[0] if parts else ""
             branches[root].append(edit)
         
         self.edit_branches = branches
 
     def get_backend(
         self, 
-        targets: List[str],
+        target_dict: dict[str, str],
         wrapper_dict: dict[str, torch.nn.Module]
     ):  
-        unseen = set(targets)
+        unseen = set(list(target_dict.keys()))
 
         def edited_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
 
@@ -109,25 +94,26 @@ class Compiler:
                 gm.add_submodule(wrapper_name, wrapper_dict[wrapper_name])
 
             for node in gm.graph.nodes:    
-                
                 arg_names = [arg.name for arg in node.args if hasattr(arg, "name")]
 
-                for target in targets:
-
+                for target in target_dict.keys():
                     if target in arg_names and target in unseen:
                         arg_index = arg_names.index(target)
-
+                        
                         with gm.graph.inserting_after(node):
                             wrapper_args = (node.args[arg_index], )
-                            wrapper_node = gm.graph.call_module(wrapper_name, args=wrapper_args)
+                            wrapper_node = gm.graph.call_module(target_dict[target], args=wrapper_args)
                             node = wrapper_node
 
                         unseen.remove(target)
+                        continue
 
                 if not unseen:
                     break
                     
             gm.recompile()
+
+            print(gm)
 
             return gm.forward
 
@@ -136,12 +122,10 @@ class Compiler:
 class Editor:
     def __init__(self, obj: object, edits: List[Edit]) -> None:
         self.obj = obj
-        self.edits = edits
+        self.compiler = Compiler(edits)
 
     def __enter__(self) -> Editor:
-        for edit in self.edits: 
-            edit.edit(self.obj)
+        self.compiler.compile_edits(self.obj)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        for edit in self.edits: 
-            edit.restore(self.obj) 
+        self.compiler.decompile_edits(self.obj)
