@@ -28,18 +28,18 @@ class Edit:
 
         setattr(self.parent._module, self.key, self.replacement)
 
-        backend = self.get_backend(self.key, self.replacement)
+        backend = self.get_backend(self.orig, self.key, self.replacement)
         edited_module = torch.compile(self.parent._module, backend=backend, dynamic=True)
 
         fetch_and_set(obj, self.parent._module_path, edited_module)
 
     def restore(self, obj) -> None:
 
-        self.parent._module = self.parent._module._orig_mod
+        fetch_and_set(obj, self.parent._module_path, self.parent._orig_mod)
 
         delattr(self.parent._module, self.key)
 
-    def get_backend(self, wrapper_name, wrapper_module):
+    def get_backend(self, orig, wrapper_name, wrapper_module):
 
         def edited_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
 
@@ -47,14 +47,17 @@ class Edit:
                 gm.add_submodule(wrapper_name, wrapper_module)
 
             for node in gm.graph.nodes:    
+                arg_names = [arg.name for arg in node.args if hasattr(arg, "name")]
+                if orig in arg_names:
+                    query_index = arg_names.index(orig)
 
-                if node.op == 'call_method' and node.name == "tensor":
-                    if node.args[0].name == "query":
-                        with gm.graph.inserting_after(node):
-                            wrapper_args = (node.args[0], )
-                            wrapper_kwargs = node.kwargs
-                            wrapper_node = gm.graph.call_module(wrapper_name, args=wrapper_args, kwargs=wrapper_kwargs)
-                            node = wrapper_node
+                    with gm.graph.inserting_after(node):
+                        wrapper_args = (node.args[query_index], )
+                        wrapper_kwargs = node.kwargs
+                        wrapper_node = gm.graph.call_module(wrapper_name, args=wrapper_args, kwargs=wrapper_kwargs)
+                        node = wrapper_node
+
+                    break
                     
             gm.recompile()
 
@@ -68,19 +71,24 @@ class Editor:
         self.edits = edits
 
     def __enter__(self) -> Editor:
-        self.compile_edits()
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.decompile_edits()
-    
-    def compile_edits(self):
-        
         for edit in self.edits: 
             edit.edit(self.obj)
 
-    def decompile_edits(self):
-
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         for edit in self.edits: 
             edit.restore(self.obj) 
+
+    def compile_edits(self):
+        pass
+
+    def is_sub_attribute(attr1, attr2):
+        attr_list1 = attr1.split('.')
+        attr_list2 = attr2.split('.')
+        
+        # Check if one list is a prefix of the other
+        is_sub1 = all(a == b for a, b in zip(attr_list1, attr_list2))
+        is_sub2 = all(a == b for a, b in zip(attr_list2, attr_list1))
+        
+        return is_sub1 or is_sub2
             
 

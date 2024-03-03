@@ -10,6 +10,7 @@ from transformers.models.auto import modeling_auto
 
 from ..intervention import InterventionProxy
 from . import NNsight
+from ..envoy import Envoy
 from .mixins import GenerationMixin
 from ..util import WrapperModule
 from ..edit import Edit, Editor
@@ -167,7 +168,6 @@ class LanguageModel(GenerationMixin, NNsight):
 
     # TODO: Allow Edit object to accept a str module path rather than just Envoys
     def load_edits(self, edits: Optional[List[Edit]] = None):
-            
         if edits is not None:
             self.edits = edits
 
@@ -179,11 +179,14 @@ class LanguageModel(GenerationMixin, NNsight):
             else: 
                 raise ValueError("Model has not been dispatched yet.")
 
+        self._envoy = Envoy(self._model)
+
     # Maybe raise an error if not there are no declared edits
     def clean_edits(self):
-
         if self.edits is not None:
             self.editor.__exit__(None, None, None)
+
+        self._envoy = Envoy(self._model)
 
     def _tokenize(
         self,
