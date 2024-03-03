@@ -60,6 +60,31 @@ def fetch_attr(object: object, target: str) -> Any:
 
     return object
 
+def fetch_and_set(obj, path, replacement_module):
+    """
+    Fetches an attribute from an object hierarchy given an attribute path,
+    and replaces it with a replacement module.
+
+    Args:
+        obj (object): Root object to fetch and set attribute from.
+        path (str): Attribute path as '.' separated string.
+        replacement_module (object): Replacement module to set.
+
+    Returns:
+        None
+    """
+    if path[0] == ".":
+        path = path[1:]
+
+    parts = path.split('.')
+    # Navigate to the parent of the target module
+    parent = obj
+    for part in parts[:-1]:  # Iterate until the second last component
+        parent = getattr(parent, part)
+
+    # Replace the target module
+    setattr(parent, parts[-1], replacement_module)
+
 
 def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
     """Wraps some object given some wrapper type.
