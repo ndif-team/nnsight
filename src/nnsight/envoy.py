@@ -114,6 +114,34 @@ class Envoy:
             for envoy in self._sub_envoys:
                 envoy._set_tracer(tracer, propagate=True)
 
+    def clear_hooks(self, propagate: bool = True) -> None:
+        """Clears hooks on all sub-modules.
+
+        Args:
+            propagate (bool, optional): If to propagate to all sub-modules. Defaults to True.
+        """
+
+        self._hook_handle.remove()
+
+        if propagate:
+            for envoy in self._sub_envoys:
+                envoy.clear_hooks(propagate=True)
+
+    def set_hooks(self, propagate: bool = True) -> None:
+        """Sets hooks on all sub-modules.
+
+        Args:
+            propagate (bool, optional): If to propagate to all sub-modules. Defaults to True.
+        """
+
+        self._hook_handle = self._module.register_forward_hook(
+            self._hook, with_kwargs=True
+        )
+
+        if propagate:
+            for envoy in self._sub_envoys:
+                envoy.set_hooks(propagate=True)
+
     def _reset_proxies(self, propagate: bool = True) -> None:
         """Sets proxies to None.
 
