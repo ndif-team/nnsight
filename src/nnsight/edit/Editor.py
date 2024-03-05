@@ -74,6 +74,7 @@ class Compiler:
         
         self.edit_branches = branches
 
+
     def get_backend(
         self, 
         target_dict: dict[str, str],
@@ -88,16 +89,15 @@ class Compiler:
                 gm.add_submodule(wrapper_name, wrapper_dict[wrapper_name])
 
             for node in gm.graph.nodes:    
-                arg_names = [arg.name for arg in node.args if hasattr(arg, "name")]
 
                 for target, replacement in target_dict.items():
-                    if target in arg_names and target in unseen:
-                        arg_index = arg_names.index(target)
-                        
+                    if target == node.name and target in unseen:
+
                         with gm.graph.inserting_before(node):
-                            wrapper_args = (node.args[arg_index], )
-                            wrapper_node = gm.graph.call_module(replacement, args=wrapper_args)
-                            node.update_arg(arg_index, wrapper_node)
+                            new = gm.graph.create_node(node.op, node.target, args=node.args, kwargs=node.kwargs)
+                            wrapper_node = gm.graph.call_module(replacement, args=(new,))
+                            node.replace_all_uses_with(wrapper_node)
+                            gm.graph.erase_node(node)
 
                         unseen.remove(target)
                         continue
