@@ -74,6 +74,10 @@ class Compiler:
         
         self.edit_branches = branches
 
+    def trim_graph(self):
+        # TODO: Use this
+        # torch._dynamo.decorators.skip(WrappedLayer.forward)
+
 
     def get_backend(
         self, 
