@@ -4,7 +4,7 @@ import re
 from rich.console import Console
 
 def print_gm(module):
-    module.clear_hooks()
+    module.clear_hooks(propagate=True)
     fake_inputs = module._fake_inputs[0][0][0]
 
     def custom_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
@@ -14,7 +14,7 @@ def print_gm(module):
             "call_module": "red",
             "placeholder": "yellow",
             "output": "purple",
-            "get_attr": "orange"
+            "get_attr": "dark_orange"
         }
 
         replacements = [
@@ -36,9 +36,8 @@ def print_gm(module):
         for line in filtered_lines:
             if "def forward" in line:
                 body_started = True
-                colored += line + "\n"
-                continue  
-            if body_started:
+                colored_line = line
+            elif body_started:
                 name, color = replacements[replacement_index]
                 # Replace name with colored name directly
                 colored_line = re.sub(rf'\b{name}\b', f"[{color}]{name}[/{color}]", line)

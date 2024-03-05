@@ -42,10 +42,6 @@ class Compiler:
         self.group_edit_branches()
 
         for branch in self.edit_branches:
-            targets = []
-            wrapper_names = []
-            wrapper_modules = []
-
             for branch, edits in self.edit_branches.items():
                 wrapper_dict = {edit.key: edit.replacement for edit in edits}
                 target_dict = {edit.target: edit.key for edit in edits}
@@ -66,7 +62,6 @@ class Compiler:
             for edit in edits:
                 mod = fetch_attr(obj, edit.parent)
                 delattr(mod, edit.key)
-        
 
     def group_edit_branches(self):
         # Normalize attribute strings and group by their root branch
@@ -88,6 +83,7 @@ class Compiler:
 
         def edited_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
 
+            # TODO: Do I need to check whether the wrapper is already in the graph?
             for wrapper_name in wrapper_dict.keys():
                 gm.add_submodule(wrapper_name, wrapper_dict[wrapper_name])
 
@@ -98,10 +94,10 @@ class Compiler:
                     if target in arg_names and target in unseen:
                         arg_index = arg_names.index(target)
                         
-                        with gm.graph.inserting_after(node):
+                        with gm.graph.inserting_before(node):
                             wrapper_args = (node.args[arg_index], )
                             wrapper_node = gm.graph.call_module(replacement, args=wrapper_args)
-                            node = wrapper_node
+                            node.update_arg(arg_index, wrapper_node)
 
                         unseen.remove(target)
                         continue
