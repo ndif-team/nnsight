@@ -14,7 +14,5 @@ On exiting the Tracer context, the Tracer object should use the information and 
 
 The :class:`Invoker <nnsight.contexts.Invoker.Invoker>` class is what actually accepts inputs to the model/graph, and it updates its parent Tracer object with the appropriate information about respective inputs. On entering the invoker context with some input, the invoker leverages the model to pre-process and prepare the input to the model. Using the prepared inputs, it updates its Tracer object with a batched version of the input, the size of the batched input, and the current generation index. It also runs a 'meta' version of the input through the model's meta_model. This updates the sizes/dtypes of all of the module's Envoys inputs and outputs based on the characteristics of the input.
 
-nnsight comes with an implementation of a Tracer, Runner,  which enables both local and remote execution.
+nnsight comes with an extension of a Tracer, RemoteTracer,  which enables both local and remote execution.
 """
-
-from .Runner import Runner

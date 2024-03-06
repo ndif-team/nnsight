@@ -4,15 +4,19 @@ import weakref
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
+from nnsight.pydantics import RequestModel
+
+from .. import pydantics
 from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
+from .backends import LocalMixin, RemoteMixin, Backend
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
 
 
-class Tracer(AbstractContextManager):
+class Tracer(AbstractContextManager, LocalMixin, RemoteMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -28,9 +32,12 @@ class Tracer(AbstractContextManager):
     def __init__(
         self,
         model: "NNsight",
+        backend: Backend,
         validate: bool = True,
         **kwargs,
     ) -> None:
+        
+        self._backend = backend
 
         self._model = model
 
@@ -64,13 +71,8 @@ class Tracer(AbstractContextManager):
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
-
-        output = self._model.interleave(
-            self._model._execute,
-            self._graph,
-            *self._batched_input,
-            **self._kwargs,
-        )
+            
+        self._backend(self)
 
         self._graph.tracing = False
         self._graph = None
@@ -110,3 +112,30 @@ class Tracer(AbstractContextManager):
             InterventionProxy: Proxy of applying that function.
         """
         return self._graph.add(target=target, args=args, kwargs=kwargs)
+
+    ##### BACKENDS ###############################
+    
+    def remote_backend_create_request(self) -> RequestModel:
+    
+        return pydantics.RequestModel(
+            kwargs=self._kwargs,
+            repo_id=self._model._model_key,
+            batched_input=self._batched_input,
+            intervention_graph=self._graph.nodes,
+        )
+        
+    def remote_backend_handle_result(self, result: pydantics.ResultModel) -> None:
+                
+        # Set save data.
+        for name, value in result.saves.items():
+            self._graph.nodes[name].value = value
+            
+    def local_backend_execute(self):
+        
+        self._model.interleave(
+            self._model._execute,
+            self._graph,
+            *self._batched_input,
+            **self._kwargs,
+        )
+

@@ -1,12 +1,11 @@
 from typing import Any
 
 from ... import NNsight
-from ...contexts import Runner
-
+from ...contexts.Tracer import Tracer
 
 class GenerationMixin(NNsight):
 
-    def generate(self, *args, **kwargs) -> Runner:
+    def generate(self, *args, **kwargs) -> Tracer:
 
         return self.trace(*args, generate=True, **kwargs)
 

@@ -2,7 +2,7 @@ import pytest
 import torch
 
 import nnsight
-from nnsight.contexts.Runner import Runner
+from nnsight.contexts.Tracer import Tracer
 from nnsight.pydantics import RequestModel
 from nnsight.tracing.Graph import Graph
 
@@ -19,14 +19,8 @@ def MSG_prompt():
     return "Madison Square Garden is located in the city of"
 
 
-def _test_serialize(runner: Runner):
-    request = RequestModel(
-        kwargs=runner._kwargs,
-        repo_id=runner._model._model_key,
-        intervention_graph=runner._graph.nodes,
-        batched_input=runner._batched_input,
-    )
-
+def _test_serialize(tracer: Tracer):
+    request = tracer.remote_backend_create_request()
     request_json = request.model_dump(
         mode="json", exclude=["session_id", "received", "id"]
     )

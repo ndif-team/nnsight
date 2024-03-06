@@ -8,7 +8,9 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from .. import util
-from ..contexts.Runner import Runner
+from ..contexts.accum.Accumulator import Accumulator
+from ..contexts.backends import Backend, LocalBackend, RemoteBackend
+from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
                             InterventionProxy, intervene)
@@ -52,6 +54,7 @@ class NNsight:
         self._custom_model = False
 
         self._model: torch.nn.Module = None
+        self._accumulator: Accumulator = None
 
         logger.info(f"Initializing `{self._model_key}`...")
 
@@ -84,9 +87,10 @@ class NNsight:
         *inputs: Tuple[Any],
         trace: bool = True,
         invoker_args: Dict[str, Any] = None,
+        backend: Union[Backend, str] = None,
         scan: bool = True,
         **kwargs: Dict[str, Any],
-    ) -> Union[Runner, Any]:
+    ) -> Union[Tracer, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
 
         In short, allows access to the future inputs and outputs of modules in order to trace what operations you would like to perform on them.
@@ -96,13 +100,13 @@ class NNsight:
             inputs (Tuple[Any])
             trace (bool, optional): If to open a tracing context. Otherwise immediately run the model and return the raw output. Defaults to True.
             invoker_args (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
-            kwargs (Dict[str, Any]): Keyword arguments passed to Runner/Tracer initialization, and then downstream to the model's ._execute(...) method.
+            kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
 
         Raises:
             ValueError: If trace is False and no inputs were provided (nothing to run with)
 
         Returns:
-            Union[Runner, Any]: Either the Runner used for tracing, or the raw output if trace is False.
+            Union[Tracer, Any]: Either the Tracer used for tracing, or the raw output if trace is False.
 
         Examples:
 
@@ -170,9 +174,17 @@ class NNsight:
 
             For a proxy tensor with 3 tokens.
         """
+        
+        if backend is None:
+            
+            backend = LocalBackend()
+            
+        elif isinstance(backend, str):
+            
+            backend = RemoteBackend(backend)
 
-        # Create Runner/Tracer object.
-        runner = Runner(self, **kwargs)
+        # Create Tracer object.
+        tracer = Tracer(self, backend, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -185,22 +197,28 @@ class NNsight:
             # We'll also save the output of the model and return its value directly.
             if not trace:
 
-                with runner:
-                    with runner.invoke(*inputs, **invoker_args):
+                with tracer:
+                    with tracer.invoke(*inputs, **invoker_args):
 
                         output = self._envoy.output.save()
 
                 return output.value
 
             # Otherwise open an invoker context with the give args.
-            runner.invoke(*inputs, **invoker_args).__enter__()
+            tracer.invoke(*inputs, **invoker_args).__enter__()
 
         # If trace is False, you had to have provided an input.
         if not trace:
 
             raise ValueError("Can't execute on no inputs!")
 
-        return runner
+        return tracer
+
+    # def accumulate(self) -> Accumulator:
+
+    #     self._accumulator = Accumulator(self)
+
+    #     return self._accumulator
 
     def interleave(
         self,
