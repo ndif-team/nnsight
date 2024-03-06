@@ -8,6 +8,7 @@ from torch._guards import detect_fake_mode
 
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProxy
+from .tracing import protocol
 
 
 class Envoy:
@@ -240,7 +241,7 @@ class Envoy:
                 mod_str = repr(attribute)
                 mod_str = torch.nn.modules.module._addindent(mod_str, 2)
                 child_lines.append("(" + attribute_name + "): " + mod_str)
-                
+
         lines = extra_lines + child_lines
 
         main_str = self._module._get_name() + "("
@@ -343,11 +344,14 @@ class Envoy:
             else:
                 fake_output = self._fake_outputs[self._call_iter]
 
-            self._output = self._tracer._graph.add(
-                value=fake_output,
-                target="argument",
+            module_path = f"{self._module_path}.output"
+
+            self._output = protocol.ArgumentProtocol.add(
+                self._tracer._graph,
+                module_path,
+                fake_output,
                 args=[
-                    f"{self._module_path}.output",
+                    module_path,
                     self._tracer._batch_size,
                     self._tracer._batch_start,
                     self._call_iter,
@@ -365,9 +369,7 @@ class Envoy:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
 
-        self._tracer._graph.add(
-            target="swap", args=[self.output.node, value], value=True
-        )
+        protocol.SwapProtocol.add(self.output.node, value)
 
         self._output = None
 
@@ -396,11 +398,14 @@ class Envoy:
             else:
                 fake_input = self._fake_inputs[self._call_iter]
 
-            self._input = self._tracer._graph.add(
-                value=fake_input,
-                target="argument",
+            module_path = f"{self._module_path}.input"
+
+            self._input = protocol.ArgumentProtocol.add(
+                self._tracer._graph,
+                module_path,
+                fake_input,
                 args=[
-                    f"{self._module_path}.input",
+                    module_path,
                     self._tracer._batch_size,
                     self._tracer._batch_start,
                     self._call_iter,
@@ -418,8 +423,6 @@ class Envoy:
             value (Union[InterventionProxy, Any]): Value to set input to.
         """
 
-        self._tracer._graph.add(
-            target="swap", args=[self.input.node, value], value=True
-        )
+        protocol.SwapProtocol.add(self.input.node, value)
 
         self._input = None

@@ -8,6 +8,7 @@ import torch
 from .. import util
 from ..logger import logger
 from .Proxy import Proxy
+from .protocol import PROTOCOLS
 
 if TYPE_CHECKING:
     from .Graph import Graph
@@ -252,59 +253,25 @@ class Node:
 
     def execute(self) -> None:
         """Actually executes this node.
-        If target is 'null' do nothing.
-        Prepares args and kwargs and passed them to target.
+        Lets protocol execute if taget is str.   
+        Else prepares args and kwargs and passed them to target.
         """
+        
+        if isinstance(self.target, str):
+            
+            #TODO error if not in protocols?
+            
+            PROTOCOLS[self.target].execute(self)
+            
+        else:
 
-        # Prepare arguments.
-        args, kwargs = self.prepare_inputs()
+            # Prepare arguments.
+            args, kwargs = self.prepare_inputs()
 
-        # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
-        if self.target == "null":
-            return
-        elif self.target == "swap":
-            if self.graph.swap is not None:
-                self.graph.swap.set_value(False)
+            # Call the target to get value.
+            output = self.target(*args, **kwargs)
 
-            self.graph.swap = self
-
-            return
-
-        elif self.target == "grad":
-
-            tensor: torch.Tensor = args[0]
-            backward_idx: int = args[1]
-
-            def grad(value):
-
-                nonlocal backward_idx
-
-                if backward_idx == 0:
-
-                    self.set_value(value)
-
-                    if self.is_tracing():
-
-                        value = self.graph.get_swap(value)
-
-                    backward_idx = -1
-
-                    return value
-
-                else:
-
-                    backward_idx -= 1
-
-                    return None
-
-            tensor.register_hook(lambda value: grad(value))
-
-            return
-
-        # Call the target to get value.
-        output = self.target(*args, **kwargs)
-
-        self.set_value(output)
+            self.set_value(output)
 
     def set_value(self, value: Any):
         """Sets the value of this Node and logs the event.

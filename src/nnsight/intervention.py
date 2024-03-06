@@ -20,7 +20,7 @@ from . import util
 from .tracing.Graph import Graph
 from .tracing.Node import Node
 from .tracing.Proxy import Proxy
-
+from .tracing import protocol
 
 class InterventionProxy(Proxy):
     """Sub-class for Proxy that adds additional user functionality to proxies.
@@ -61,15 +61,12 @@ class InterventionProxy(Proxy):
             InterventionProxy: Save proxy.
         """
 
-        # Add a 'null' node with the save proxy as an argument to ensure the values are never deleted.
-        # This is because 'null' nodes never actually get set and therefore there will always be a
+        # Add a 'latch' node with the save proxy as an argument to ensure the values are never deleted.
+        # This is because 'latch' nodes never actually get set and therefore there will always be a
         # dependency for the save proxy.
-        self.node.add(
-            value=None,
-            target="null",
-            args=[self.node],
-        )
 
+        protocol.LatchProtocol.add(self.node)
+        
         return self
 
     @property
@@ -83,16 +80,7 @@ class InterventionProxy(Proxy):
         """
         if self._grad is None:
 
-            # We track how many times backward is called via an attribute on the Graph
-            if not hasattr(self.node.graph, "n_backward_calls"):
-
-                setattr(self.node.graph, "n_backward_calls", 0)
-
-            self.__dict__["_grad"] = self.node.add(
-                value=self.node.proxy_value,
-                target="grad",
-                args=[self.node, self.node.graph.n_backward_calls],
-            )
+            self.__dict__["_grad"] = protocol.GradProtocol.add(self.node)
 
         return self._grad
 
@@ -104,7 +92,7 @@ class InterventionProxy(Proxy):
         Args:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
-        self.node.add(target="swap", args=[self.grad.node, value], value=True)
+        protocol.SwapProtocol.add(self.grad.node, value)
 
     def __call__(self, *args, **kwargs) -> Self:
 

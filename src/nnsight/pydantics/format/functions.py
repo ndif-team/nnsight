@@ -7,7 +7,7 @@ import torch
 
 from ... import util
 from ...tracing.Proxy import Proxy
-
+from ...tracing.protocol import PROTOCOLS
 
 def get_function_name(fn, module_name=None):
     if isinstance(fn, str):
@@ -43,6 +43,7 @@ FUNCTIONS_WHITELIST.update(
         for key, value in getmembers(torch.Tensor, ismethoddescriptor)
     }
 )
+### operator functions
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(value): value
@@ -50,21 +51,21 @@ FUNCTIONS_WHITELIST.update(
         if not key.startswith("_")
     }
 )
+### einops functions
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(value): value
         for key, value in getmembers(einops.einops, isfunction)
     }
 )
+
+### nnsight functions
 FUNCTIONS_WHITELIST.update(
     {
-        "null": "null",
-        "module": "module",
-        "argument": "argument",
-        "swap": "swap",
-        "grad": "grad",
         get_function_name(setattr): setattr,
         get_function_name(util.fetch_attr): util.fetch_attr,
         get_function_name(Proxy.proxy_call): Proxy.proxy_call,
     }
 )
+### protocols
+FUNCTIONS_WHITELIST.update({protocol: protocol for protocol in PROTOCOLS.keys()})

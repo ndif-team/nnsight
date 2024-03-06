@@ -11,7 +11,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from .. import util
 from .Node import Node
 from .Proxy import Proxy
-
+from . import protocol
 
 class Graph:
     """Represents a computation graph involving a torch.nn.module.
@@ -55,9 +55,7 @@ class Graph:
 
         self.swap: Node = None
 
-        self.module_proxy = self.add(
-            value=module, target="argument", args=["nnsight_root_module"]
-        )
+        self.module_proxy = protocol.ArgumentProtocol.add(self, "nnsight_root_module", module)
 
     def get_swap(self, value):
         if self.swap is not None:
@@ -177,15 +175,7 @@ class Graph:
         self.name_idx[target_name] += 1
 
         self.nodes[name] = node
-
-        if target_name == "argument":
-            module_path = args[0]
-
-            if module_path not in self.argument_node_names:
-                self.argument_node_names[module_path] = []
-
-            self.argument_node_names[module_path].append(name)
-
+                 
         return self.proxy_class(node)
 
     def eliminate_dead_code(self):
