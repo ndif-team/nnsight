@@ -9,9 +9,10 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
+from . import protocol
 from .Node import Node
 from .Proxy import Proxy
-from . import protocol
+
 
 class Graph:
     """Represents a computation graph involving a torch.nn.module.
@@ -51,11 +52,15 @@ class Graph:
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
 
+        # Used by ArgumentProtocol
         self.argument_node_names: Dict[str, List[str]] = dict()
 
+        # Used by SwapProtocol
         self.swap: Node = None
 
-        self.module_proxy = protocol.ArgumentProtocol.add(self, "nnsight_root_module", module)
+        self.module_proxy = protocol.ArgumentProtocol.add(
+            self, "nnsight_root_module", module
+        )
 
     def get_swap(self, value):
         if self.swap is not None:
@@ -175,7 +180,7 @@ class Graph:
         self.name_idx[target_name] += 1
 
         self.nodes[name] = node
-                 
+
         return self.proxy_class(node)
 
     def eliminate_dead_code(self):

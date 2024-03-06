@@ -1,6 +1,5 @@
 import operator
-from inspect import (getmembers, isbuiltin, isfunction, ismethod,
-                     ismethoddescriptor)
+from inspect import getmembers, isbuiltin, isfunction, ismethod, ismethoddescriptor
 
 import einops
 import torch
@@ -8,6 +7,7 @@ import torch
 from ... import util
 from ...tracing.Proxy import Proxy
 from ...tracing.protocol import PROTOCOLS
+
 
 def get_function_name(fn, module_name=None):
     if isinstance(fn, str):
