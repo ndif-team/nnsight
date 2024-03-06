@@ -54,6 +54,7 @@ class NNsight:
         self._custom_model = False
 
         self._model: torch.nn.Module = None
+        self._attr_map = None
 
         logger.info(f"Initializing `{self._model_key}`...")
 
@@ -73,6 +74,9 @@ class NNsight:
                 self._model = self._load(self._model_key, *args, **kwargs).to("meta")
 
         if dispatch and not self._dispatched:
+            if unified:
+                model_class = self._model.__class__.__name__
+                self._attr_map = get_attr_map(model_class)
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
 

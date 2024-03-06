@@ -179,6 +179,7 @@ class LanguageModel(GenerationMixin, NNsight):
                 raise ValueError("Model has not been dispatched yet.")
 
         self._envoy = Envoy(self._model)
+        self._envoy.fold("_orig_mod")
 
     # Maybe raise an error if not there are no declared edits
     def clean_edits(self):

@@ -52,8 +52,6 @@ class Compiler:
 
             fetch_and_set(obj, parent, edited_module)
 
-        
-
     def decompile_edits(self, obj):
         for branch, edits in self.edit_branches.items():
             fetch_and_set(obj, branch, fetch_attr(obj, branch)._orig_mod)
@@ -62,14 +60,10 @@ class Compiler:
                 mod = fetch_attr(obj, edit.parent)
                 delattr(mod, edit.key)
 
-    def trim_graph(self):
-        # TODO: Use this
-        # torch._dynamo.decorators.skip(WrappedLayer.forward)
-        pass
-
     def group_by_hierarchy(self):
         paths = [edit.parent + "." + edit.target for edit in self.edits]
         edit_map = {path: edit for path, edit in zip(paths, self.edits)}
+
         # Sort paths to ensure similar paths are adjacent
         sorted_paths = sorted(set(paths))  # Removing duplicates and sorting
         groups = []
@@ -80,7 +74,6 @@ class Compiler:
             parts = path.split('.')
             # Determine the current prefix (excluding the last part)
             prefix = '.'.join(parts[:-1])
-
             # Start a new group if the prefix has changed and the current group is not empty
             if prefix != last_prefix and current_group:
                 groups.append(current_group)
@@ -101,7 +94,6 @@ class Compiler:
             
         self.groups = parent_grouped
 
-
     def get_backend(
         self,
         edit_batch: List[Edit],
@@ -109,15 +101,14 @@ class Compiler:
         target_dict = {edit.target: edit.key for edit in edit_batch}
 
         def edited_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
+            # Popping keys from the target dict doesn't persist in the edited backend.
             unseen = set(target_dict.keys())
             
             for edit in edit_batch:
                 gm.add_submodule(edit.key, edit.replacement)
 
             for node in gm.graph.nodes:
-
                 if node.name in unseen:
-                    
                     with gm.graph.inserting_before(node):
                         new = gm.graph.create_node(node.op, node.target, args=node.args, kwargs=node.kwargs, name="original_" + node.name)
                         wrapper_node = gm.graph.call_module(target_dict[node.name], args=(new,))
@@ -128,7 +119,6 @@ class Compiler:
                 
                 if not unseen:
                     break
-
 
             gm.recompile()
             return gm.forward
