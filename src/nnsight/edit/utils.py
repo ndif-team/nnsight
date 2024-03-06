@@ -1,9 +1,10 @@
 from typing import List
 import torch
 import re
-from rich.console import Console
 
 def print_gm(module, input, clear_hooks = True):
+    from rich.console import Console
+    
     if clear_hooks:
         module.clear_hooks(propagate=True)
 
