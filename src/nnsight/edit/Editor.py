@@ -39,21 +39,20 @@ class Compiler:
         self.edit_branches = None
 
     def compile_edits(self, obj):
-        self.group_edit_branches()
+        self.group_by_hierarchy()
 
-        for branch in self.edit_branches:
-            for branch, edits in self.edit_branches.items():
-                wrapper_dict = {edit.key: edit.replacement for edit in edits}
-                target_dict = {edit.target: edit.key for edit in edits}
+        for parent, branch in self.groups.items():
+            for edit in branch:
+                mod = fetch_attr(obj, edit.parent)
+                setattr(mod, edit.key, edit.replacement)
 
-                for edit in edits:
-                    mod = fetch_attr(obj, edit.parent)
-                    setattr(mod, edit.key, edit.replacement)
-
-            backend = self.get_backend(target_dict, wrapper_dict)    
-            parent_module = fetch_attr(obj, branch)        
+            backend = self.get_backend(branch)
+            parent_module = fetch_attr(obj, parent)
             edited_module = torch.compile(parent_module, backend=backend, dynamic=True)
-            fetch_and_set(obj, branch, edited_module)
+
+            fetch_and_set(obj, parent, edited_module)
+
+        
 
     def decompile_edits(self, obj):
         for branch, edits in self.edit_branches.items():
@@ -63,54 +62,75 @@ class Compiler:
                 mod = fetch_attr(obj, edit.parent)
                 delattr(mod, edit.key)
 
-    def group_edit_branches(self):
-        # Normalize attribute strings and group by their root branch
-        branches = defaultdict(list)
-        for edit in self.edits:
-            # Remove leading dot or split[0] is ""
-            normalized_attr = edit.parent.lstrip('.')
-            root = normalized_attr.split('.')[0] if normalized_attr else ""
-            branches[root].append(edit)
-        
-        self.edit_branches = branches
-
     def trim_graph(self):
         # TODO: Use this
         # torch._dynamo.decorators.skip(WrappedLayer.forward)
+        pass
+
+    def group_by_hierarchy(self):
+        paths = [edit.parent + "." + edit.target for edit in self.edits]
+        edit_map = {path: edit for path, edit in zip(paths, self.edits)}
+        # Sort paths to ensure similar paths are adjacent
+        sorted_paths = sorted(set(paths))  # Removing duplicates and sorting
+        groups = []
+        current_group = []
+        last_prefix = None
+
+        for path in sorted_paths:
+            parts = path.split('.')
+            # Determine the current prefix (excluding the last part)
+            prefix = '.'.join(parts[:-1])
+
+            # Start a new group if the prefix has changed and the current group is not empty
+            if prefix != last_prefix and current_group:
+                groups.append(current_group)
+                current_group = []
+
+            current_group.append(path)
+            last_prefix = prefix
+
+        # Add the last group if it's not empty
+        if current_group:
+            groups.append(current_group)
+
+        parent_grouped = {}
+        # Replace the paths with the corresponding edits
+        for i, group in enumerate(groups):
+            batch = [edit_map[path] for path in group]
+            parent_grouped[batch[0].parent] = batch
+            
+        self.groups = parent_grouped
 
 
     def get_backend(
-        self, 
-        target_dict: dict[str, str],
-        wrapper_dict: dict[str, torch.nn.Module]
+        self,
+        edit_batch: List[Edit],
     ):  
-        unseen = set(list(target_dict.keys()))
+        target_dict = {edit.target: edit.key for edit in edit_batch}
 
         def edited_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
+            unseen = set(target_dict.keys())
+            
+            for edit in edit_batch:
+                gm.add_submodule(edit.key, edit.replacement)
 
-            # TODO: Do I need to check whether the wrapper is already in the graph?
-            for wrapper_name in wrapper_dict.keys():
-                gm.add_submodule(wrapper_name, wrapper_dict[wrapper_name])
+            for node in gm.graph.nodes:
 
-            for node in gm.graph.nodes:    
+                if node.name in unseen:
+                    
+                    with gm.graph.inserting_before(node):
+                        new = gm.graph.create_node(node.op, node.target, args=node.args, kwargs=node.kwargs, name="original_" + node.name)
+                        wrapper_node = gm.graph.call_module(target_dict[node.name], args=(new,))
+                        node.replace_all_uses_with(wrapper_node)
+                        gm.graph.erase_node(node)
 
-                for target, replacement in target_dict.items():
-                    if target == node.name and target in unseen:
-
-                        with gm.graph.inserting_before(node):
-                            new = gm.graph.create_node(node.op, node.target, args=node.args, kwargs=node.kwargs)
-                            wrapper_node = gm.graph.call_module(replacement, args=(new,))
-                            node.replace_all_uses_with(wrapper_node)
-                            gm.graph.erase_node(node)
-
-                        unseen.remove(target)
-                        continue
-
+                    unseen.remove(node.name)
+                
                 if not unseen:
                     break
-                    
-            gm.recompile()
 
+
+            gm.recompile()
             return gm.forward
 
         return edited_backend
