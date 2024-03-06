@@ -3,9 +3,9 @@ import torch
 import re
 from rich.console import Console
 
-def print_gm(module):
-    module.clear_hooks(propagate=True)
-    fake_inputs = module._fake_inputs[0][0][0]
+def print_gm(module, input, clear_hooks = True):
+    if clear_hooks:
+        module.clear_hooks(propagate=True)
 
     def custom_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
         colors = {
@@ -54,5 +54,25 @@ def print_gm(module):
     # Reset and compile with the custom backend, then set hooks
     torch._dynamo.reset()
     opt_model = torch.compile(module._module, backend=custom_backend, dynamic=True)
-    _ = opt_model(fake_inputs)  # Execute optimized model with fake inputs
-    module.set_hooks()
+    _ = opt_model(input)  # Execute optimized model with fake inputs
+    
+    if clear_hooks:
+        module.set_hooks()
+
+
+def print_tabular(module, input, clear_hooks = True):
+    if clear_hooks: 
+        module.clear_hooks(propagate=True)
+
+    def custom_backend(gm: torch.fx.GraphModule, _: List[torch.Tensor]):
+        gm.graph.print_tabular()
+
+        return gm.forward
+
+    # Reset and compile with the custom backend, then set hooks
+    torch._dynamo.reset()
+    opt_model = torch.compile(module._module, backend=custom_backend, dynamic=True)
+    _ = opt_model(input)  # Execute optimized model with fake inputs
+    
+    if clear_hooks:
+        module.set_hooks()
