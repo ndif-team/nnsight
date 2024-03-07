@@ -6,7 +6,7 @@ import torch
 
 from ... import util
 from ...tracing.Proxy import Proxy
-from ...tracing.protocol import PROTOCOLS
+from ...tracing.protocols import PROTOCOLS
 
 
 def get_function_name(fn, module_name=None):

@@ -15,6 +15,7 @@ from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
                             InterventionProxy, intervene)
 from ..logger import logger
+from ..tracing import protocols
 from ..tracing.Graph import Graph
 
 
@@ -174,17 +175,17 @@ class NNsight:
 
             For a proxy tensor with 3 tokens.
         """
-        
+
         if backend is None:
-            
+
             backend = LocalBackend()
-            
+
         elif isinstance(backend, str):
-            
+
             backend = RemoteBackend(backend)
 
         # Create Tracer object.
-        tracer = Tracer(self, backend, **kwargs)
+        tracer = Tracer(backend, self, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -214,11 +215,11 @@ class NNsight:
 
         return tracer
 
-    # def accumulate(self) -> Accumulator:
+    def accumulate(self) -> Accumulator:
 
-    #     self._accumulator = Accumulator(self)
+        self._accumulator = Accumulator(self)
 
-    #     return self._accumulator
+        return self._accumulator
 
     def interleave(
         self,
@@ -254,15 +255,17 @@ class NNsight:
 
         logger.info(f"Running `{self._model_key}`...")
 
-        intervention_graph.compile(self._model)
-
         inputs, total_batch_size = self._prepare_inputs(*inputs)
 
         intervention_handler = InterventionHandler(intervention_graph, total_batch_size)
 
+        module_paths = protocols.InterventionProtocol.get_interventions(
+            intervention_graph
+        ).keys()
+
         with HookHandler(
             self._model,
-            list(intervention_graph.argument_node_names.keys()),
+            list(module_paths),
             input_hook=lambda activations, module_path: intervene(
                 activations, module_path, "input", intervention_handler
             ),
@@ -273,9 +276,6 @@ class NNsight:
             output = fn(*inputs, **kwargs)
 
         logger.info(f"Completed `{self._model_key}`")
-
-        # gc.collect()
-        # torch.cuda.empty_cache()
 
         return output
 

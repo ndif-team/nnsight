@@ -100,8 +100,6 @@ def blocking_request(request: pydantics.RequestModel, handle_result: Callable):
                 break
 
 
-from nnsight.tracing.Graph import Graph
-
 from . import Backend
 
 

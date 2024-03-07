@@ -9,8 +9,8 @@ from torch._subclasses.fake_tensor import FakeTensor
 
 from .. import util
 from ..logger import logger
+from .protocols import PROTOCOLS
 from .Proxy import Proxy
-from .protocol import PROTOCOLS
 
 if TYPE_CHECKING:
     from .Graph import Graph
@@ -32,12 +32,13 @@ class Node:
     """
 
     @staticmethod
-    def prepare_proxy_values(values):
+    def prepare_proxy_values(values, device: torch.device = None):
         """Prepare arguments for validating a node's target.
         Converts Proxies and Nodes to their proxy_value and moves tensors to 'meta' device.
 
         Args:
             values (Any): Values to prepare.
+            device (torch.device): Device to try and move all tensors to. If None, moves all tensors to device of first tensor.
         Returns:
             values (Any): Prepared values.
         """
@@ -55,12 +56,6 @@ class Node:
         values = util.apply(values, lambda x: x.proxy_value, Node)
         # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
-
-        device = (
-            torch._GLOBAL_DEVICE_CONTEXT.device
-            if torch._GLOBAL_DEVICE_CONTEXT is not None
-            else None
-        )
 
         if device is None:
 
@@ -269,16 +264,16 @@ class Node:
 
     def execute(self) -> None:
         """Actually executes this node.
-        Lets protocol execute if taget is str.   
+        Lets protocol execute if target is str.
         Else prepares args and kwargs and passed them to target.
         """
-        
+
         if isinstance(self.target, str):
-            
-            #TODO error if not in protocols?
-            
+
+            # TODO error if not in protocols?
+
             PROTOCOLS[self.target].execute(self)
-            
+
         else:
 
             # Prepare arguments.

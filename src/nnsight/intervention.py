@@ -17,10 +17,11 @@ from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from . import util
+from .tracing import protocols
 from .tracing.Graph import Graph
 from .tracing.Node import Node
 from .tracing.Proxy import Proxy
-from .tracing import protocol
+
 
 class InterventionProxy(Proxy):
     """Sub-class for Proxy that adds additional user functionality to proxies.
@@ -65,8 +66,8 @@ class InterventionProxy(Proxy):
         # This is because 'latch' nodes never actually get set and therefore there will always be a
         # dependency for the save proxy.
 
-        protocol.LatchProtocol.add(self.node)
-        
+        protocols.LatchProtocol.add(self.node)
+
         return self
 
     @property
@@ -80,7 +81,7 @@ class InterventionProxy(Proxy):
         """
         if self._grad is None:
 
-            self.__dict__["_grad"] = protocol.GradProtocol.add(self.node)
+            self.__dict__["_grad"] = protocols.GradProtocol.add(self.node)
 
         return self._grad
 
@@ -92,7 +93,7 @@ class InterventionProxy(Proxy):
         Args:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
-        protocol.SwapProtocol.add(self.grad.node, value)
+        protocols.SwapProtocol.add(self.grad.node, value)
 
     def __call__(self, *args, **kwargs) -> Self:
 
@@ -102,10 +103,6 @@ class InterventionProxy(Proxy):
             and isinstance(self.node.args[1], str)
             and self.node.args[1] == "backward"
         ):
-            # We track how many times backward is called via an attribute on the Graph
-            if not hasattr(self.node.graph, "n_backward_calls"):
-
-                setattr(self.node.graph, "n_backward_calls", 0)
 
             # Clear all .grad proxies
             for node in self.node.graph.nodes.values():
@@ -119,7 +116,7 @@ class InterventionProxy(Proxy):
                 except ReferenceError:
                     pass
 
-            self.node.graph.n_backward_calls += 1
+            protocols.GradProtocol.increment(self.node.graph)
 
             return self.node.add(
                 value=None,
@@ -150,11 +147,11 @@ class InterventionProxy(Proxy):
         if not self.node.is_tracing():
 
             return util.apply(self.value, lambda x: x.shape, torch.Tensor)
-        
+
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
         if self.node.proxy_value is None:
-            
-            return super().__getattr__('shape')
+
+            return super().__getattr__("shape")
 
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
@@ -169,11 +166,11 @@ class InterventionProxy(Proxy):
         if not self.node.is_tracing():
 
             return util.apply(self.value, lambda x: x.device, torch.Tensor)
-        
+
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
         if self.node.proxy_value is None:
-            
-            return super().__getattr__('device')
+
+            return super().__getattr__("device")
 
         return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
 
@@ -188,11 +185,11 @@ class InterventionProxy(Proxy):
         if not self.node.is_tracing():
 
             return util.apply(self.value, lambda x: x.dtype, torch.Tensor)
-        
+
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
         if self.node.proxy_value is None:
-            
-            return super().__getattr__('dtype')
+
+            return super().__getattr__("dtype")
 
         return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
@@ -290,10 +287,12 @@ def intervene(
     # Key to module activation argument nodes has format: <module path>.<output/input>
     module_path = f"{module_path}.{key}"
 
-    if module_path in intervention_handler.graph.argument_node_names:
-        argument_node_names = intervention_handler.graph.argument_node_names[
-            module_path
-        ]
+    arguments = protocols.InterventionProtocol.get_interventions(
+        intervention_handler.graph
+    )
+
+    if module_path in arguments:
+        argument_node_names = arguments[module_path]
 
         # Multiple argument nodes can have same module_path if there are multiple invocations.
         for argument_node_name in argument_node_names:
@@ -339,7 +338,7 @@ def intervene(
 
             # Check if through the previous value injection, there was a 'swap' intervention.
             # This would mean we want to replace activations for this batch with some other ones.
-            value = intervention_handler.graph.get_swap(value)
+            value = protocols.SwapProtocol.get_swap(intervention_handler.graph, value)
 
             # If we narrowed any data, we need to concat it with data before and after it.
             if narrowed:

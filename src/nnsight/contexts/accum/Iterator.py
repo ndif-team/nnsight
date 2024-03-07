@@ -1,27 +1,42 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Iterable
+
 from ...tracing.Graph import Graph
-from .Collection import Collection
+from ..Tracer import Executable
+from ..backends import LocalMixin
+
 if TYPE_CHECKING:
     from .Accumulator import Accumulator
 
-class Iterator(AbstractContextManager, Collection):
-    
-    def __init__(self, accumulator: "Accumulator") -> None:
-        
-        self.accumulator = accumulator
-        
-        self.graph: Graph = Graph(
-            self.accumulator.model, proxy_class=self.accumulator.model.proxy_class, validate=validate
-        )
 
-        
-        self.collection = [] 
+class Iterator(AbstractContextManager, Accumulator, Executable):
+
+    def __init__(self, accumulator: "Accumulator", data: Iterable) -> None:
+
+        self.accumulator = accumulator
+        self.data = data
+
 
     def __enter__(self) -> Iterator:
         pass
+        
+        
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         pass
+    
+    
+    ### BACKENDS ########
+    
+    def local_backend_execute(self) -> None:
+        
+        
+        for item in self.data:
+            pass
+            
+            
+            
+        
+        return super().local_backend_execute()

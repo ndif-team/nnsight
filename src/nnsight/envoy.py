@@ -8,7 +8,7 @@ from torch._guards import detect_fake_mode
 
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProxy
-from .tracing import protocol
+from .tracing import protocols
 
 
 class Envoy:
@@ -305,19 +305,7 @@ class Envoy:
             InterventionProxy: Module call proxy.
         """
 
-        module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
-
-        torch.set_default_device(next(self._module.parameters()).device)
-
-        proxy = module_proxy.forward(*args, **kwargs)
-
-        torch._GLOBAL_DEVICE_CONTEXT.__exit__(None, None, None)
-
-        torch._GLOBAL_DEVICE_CONTEXT = None
-
-        return proxy
-
-    torch.set_default_device
+        return protocols.ApplyModuleProtocol.add(self._tracer.executable_graph, self._module_path, *args, **kwargs)
 
     @property
     def output(self) -> InterventionProxy:
@@ -346,8 +334,8 @@ class Envoy:
 
             module_path = f"{self._module_path}.output"
 
-            self._output = protocol.ArgumentProtocol.add(
-                self._tracer._graph,
+            self._output = protocols.InterventionProtocol.add(
+                self._tracer.executable_graph,
                 module_path,
                 fake_output,
                 args=[
@@ -369,7 +357,7 @@ class Envoy:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
 
-        protocol.SwapProtocol.add(self.output.node, value)
+        protocols.SwapProtocol.add(self.output.node, value)
 
         self._output = None
 
@@ -400,8 +388,8 @@ class Envoy:
 
             module_path = f"{self._module_path}.input"
 
-            self._input = protocol.ArgumentProtocol.add(
-                self._tracer._graph,
+            self._input = protocols.InterventionProtocol.add(
+                self._tracer.executable_graph,
                 module_path,
                 fake_input,
                 args=[
@@ -423,6 +411,6 @@ class Envoy:
             value (Union[InterventionProxy, Any]): Value to set input to.
         """
 
-        protocol.SwapProtocol.add(self.input.node, value)
+        protocols.SwapProtocol.add(self.input.node, value)
 
         self._input = None

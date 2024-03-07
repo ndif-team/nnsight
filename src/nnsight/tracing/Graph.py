@@ -8,8 +8,6 @@ import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-from .. import util
-from . import protocol
 from .Node import Node
 from .Proxy import Proxy
 
@@ -39,7 +37,6 @@ class Graph:
 
     def __init__(
         self,
-        module: torch.nn.Module,
         proxy_class: Type[Proxy] = Proxy,
         validate: bool = True,
     ) -> None:
@@ -52,64 +49,17 @@ class Graph:
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
 
-        # Used by ArgumentProtocol
-        self.argument_node_names: Dict[str, List[str]] = dict()
+        self.attachments = dict()
 
-        # Used by SwapProtocol
-        self.swap: Node = None
-
-        self.module_proxy = protocol.ArgumentProtocol.add(
-            self, "nnsight_root_module", module
-        )
-
-    def get_swap(self, value):
-        if self.swap is not None:
-            device = None
-
-            def _device(value: torch.Tensor):
-                nonlocal device
-
-                device = value.device
-
-            util.apply(value, _device, torch.Tensor)
-
-            value = util.apply(self.swap.args[1], lambda x: x.value, Node)
-
-            if device is not None:
-
-                def _to(value: torch.Tensor):
-                    return value.to(device)
-
-                value = util.apply(value, _to, torch.Tensor)
-
-            # Set value of 'swp' node so it destroys itself and listeners.
-            self.swap.set_value(True)
-
-            # Un-set swap.
-            self.swap = None
-
-        return value
-
-    def compile(self, module: torch.nn.Module) -> None:
+    def compile(self) -> None:
         """Re-compile graph to prepare for a new execution of the graph.
 
         Compiles all nodes.
-
-        Finally, sets the "nnsight_root_module" node's value to the module that is being interleaved.
-
-        Args:
-            module (torch.nn.Module): Module to be considered the root module of the graph.
         """
-
-        # Remove nodes that have no effect.
-        self.eliminate_dead_code()
 
         # Compile nodes individually.
         for node in self.nodes.values():
             node.compile()
-
-        # Setting the root module kicks off the graph execution.
-        self.module_proxy.node.set_value(module)
 
     def add(
         self,
@@ -145,7 +95,7 @@ class Graph:
                 shape_env=ShapeEnv(assume_static_by_default=True),
             ) as fake_mode:
                 with FakeCopyMode(fake_mode):
-                    
+
                     value = target(
                         *Node.prepare_proxy_values(_args),
                         **Node.prepare_proxy_values(_kwargs),
@@ -165,7 +115,7 @@ class Graph:
             value=value,
             target=target,
             args=args,
-            kwargs=kwargs
+            kwargs=kwargs,
         )
 
         self.name_idx[target_name] += 1
@@ -173,10 +123,6 @@ class Graph:
         self.nodes[name] = node
 
         return self.proxy_class(node)
-
-    def eliminate_dead_code(self):
-        # TODO
-        pass
 
     def vis(self, filename: str = "graph", format: str = "png"):
         import graphviz

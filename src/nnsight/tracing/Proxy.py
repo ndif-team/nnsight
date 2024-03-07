@@ -131,7 +131,7 @@ class Proxy:
             target=operator.invert,
             args=[self.node],
         )
-        
+
     def __neg__(self) -> Self:
         return self.node.add(
             target=operator.neg,
