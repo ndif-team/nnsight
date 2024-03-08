@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Iterable
 from ...tracing.Graph import Graph
 from ..Tracer import Executable
 from ..backends import LocalMixin
-
+from .Collector import Collection
 if TYPE_CHECKING:
     from .Accumulator import Accumulator
 
 
-class Iterator(AbstractContextManager, Accumulator, Executable):
+class Iterator(AbstractContextManager, Collection, Executable):
 
     def __init__(self, accumulator: "Accumulator", data: Iterable) -> None:
 

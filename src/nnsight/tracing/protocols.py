@@ -39,43 +39,6 @@ def register_protocol(protocol):
 
 
 @register_protocol
-class InterventionProtocol(Protocol):
-    
-    name = "intervention"
-    attachment_name = "nnsight_module_nodes"
-
-    @classmethod
-    def add(
-        cls,
-        graph: "Graph",
-        name: str,
-        value: Any,
-        args: List[Any] = None,
-        kwargs: Dict[str, Any] = None,
-    ) -> Proxy:
-
-        proxy = graph.add(value=value, target=cls.name, args=args, kwargs=kwargs)
-
-        if cls.attachment_name not in graph.attachments:
-
-            graph.attachments[cls.attachment_name] = dict()
-
-        arguments = graph.attachments[cls.attachment_name]
-
-        if name not in arguments:
-            arguments[name] = []
-
-        arguments[name].append(proxy.node.name)
-
-        return proxy
-
-    @classmethod
-    def get_interventions(cls, graph: "Graph") -> Dict:
-
-        return graph.attachments.get(cls.attachment_name, dict())
-
-
-@register_protocol
 class ApplyModuleProtocol(Protocol):
 
     name = "module"

@@ -7,7 +7,7 @@ import torch
 from torch._guards import detect_fake_mode
 
 from .contexts.Tracer import Tracer
-from .intervention import InterventionProxy
+from .intervention import InterventionProtocol, InterventionProxy
 from .tracing import protocols
 
 
@@ -305,7 +305,9 @@ class Envoy:
             InterventionProxy: Module call proxy.
         """
 
-        return protocols.ApplyModuleProtocol.add(self._tracer.executable_graph, self._module_path, *args, **kwargs)
+        return protocols.ApplyModuleProtocol.add(
+            self._tracer.executable_graph, self._module_path, *args, **kwargs
+        )
 
     @property
     def output(self) -> InterventionProxy:
@@ -334,7 +336,7 @@ class Envoy:
 
             module_path = f"{self._module_path}.output"
 
-            self._output = protocols.InterventionProtocol.add(
+            self._output = InterventionProtocol.add(
                 self._tracer.executable_graph,
                 module_path,
                 fake_output,
@@ -388,7 +390,7 @@ class Envoy:
 
             module_path = f"{self._module_path}.input"
 
-            self._input = protocols.InterventionProtocol.add(
+            self._input = InterventionProtocol.add(
                 self._tracer.executable_graph,
                 module_path,
                 fake_input,

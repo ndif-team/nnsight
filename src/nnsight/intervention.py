@@ -2,7 +2,7 @@
 
 The :class:`InterventionProxy <nnsight.intervention.InterventionProxy>` class extends the functionality of a base nnsight.tracing.Proxy.Proxy object and makes it easier for users to interact with.
 
-:func:`intervene() <nnsight.intervention.intervene>` is the entry hook into the models computation graph in order to interleave an intervention graph.
+:func:`intervene() <nnsight.intervention.InterventionProtocol.intervene>` is the entry hook into the models computation graph in order to interleave an intervention graph.
 
 The :class:`HookModel <nnsight.intervention.HookModel>` provides a context manager for adding input and output hooks to modules and removing them upon context exit.
 """
@@ -20,6 +20,7 @@ from . import util
 from .tracing import protocols
 from .tracing.Graph import Graph
 from .tracing.Node import Node
+from .tracing.protocols import Protocol, register_protocol
 from .tracing.Proxy import Proxy
 
 
@@ -194,168 +195,209 @@ class InterventionProxy(Proxy):
         return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
 
-def concat(
-    activations: Any,
-    value: Any,
-    batch_start: int,
-    batch_size: int,
-    total_batch_size: int,
-):
-    def _concat(values):
-        if isinstance(values[0], torch.Tensor):
-            orig_size = values[-1]
-            new_size = sum([value.shape[0] for value in values[:-1]])
-            if new_size == orig_size:
-                return torch.concatenate(values[:-1])
-            return values[0]
-        elif isinstance(values[0], list):
-            return [
-                _concat([value[value_idx] for value in values])
-                for value_idx in range(len(values[0]))
-            ]
-        elif isinstance(values[0], tuple):
-            return tuple(
-                [
+@register_protocol
+class InterventionProtocol(Protocol):
+
+    name = "intervention"
+    attachment_name = "nnsight_module_nodes"
+
+    @classmethod
+    def add(
+        cls,
+        graph: "Graph",
+        name: str,
+        value: Any,
+        args: List[Any] = None,
+        kwargs: Dict[str, Any] = None,
+    ) -> Proxy:
+
+        proxy = graph.add(value=value, target=cls.name, args=args, kwargs=kwargs)
+
+        if cls.attachment_name not in graph.attachments:
+
+            graph.attachments[cls.attachment_name] = dict()
+
+        arguments = graph.attachments[cls.attachment_name]
+
+        if name not in arguments:
+            arguments[name] = []
+
+        arguments[name].append(proxy.node.name)
+
+        return proxy
+
+    @classmethod
+    def get_interventions(cls, graph: "Graph") -> Dict:
+
+        return graph.attachments.get(cls.attachment_name, dict())
+
+    @classmethod
+    def concat(
+        cls,
+        activations: Any,
+        value: Any,
+        batch_start: int,
+        batch_size: int,
+        total_batch_size: int,
+    ):
+        def _concat(values):
+            if isinstance(values[0], torch.Tensor):
+                orig_size = values[-1]
+                new_size = sum([value.shape[0] for value in values[:-1]])
+                if new_size == orig_size:
+                    return torch.concatenate(values[:-1])
+                return values[0]
+            elif isinstance(values[0], list):
+                return [
                     _concat([value[value_idx] for value in values])
                     for value_idx in range(len(values[0]))
                 ]
-            )
-        elif isinstance(values[0], dict):
-            return {
-                key: _concat([value[key] for value in values])
-                for key in values[0].keys()
-            }
-        return values[0]
-
-    def narrow1(acts: torch.Tensor):
-        if total_batch_size == acts.shape[0]:
-            return acts.narrow(0, 0, batch_start)
-
-        return acts
-
-    pre = util.apply(activations, narrow1, torch.Tensor)
-
-    post_batch_start = batch_start + batch_size
-
-    def narrow2(acts: torch.Tensor):
-        if total_batch_size == acts.shape[0]:
-            return acts.narrow(0, post_batch_start, acts.shape[0] - post_batch_start)
-
-        return acts
-
-    post = util.apply(
-        activations,
-        narrow2,
-        torch.Tensor,
-    )
-
-    orig_sizes = util.apply(activations, lambda x: x.shape[0], torch.Tensor)
-
-    return _concat([pre, value, post, orig_sizes])
-
-
-def intervene(
-    activations: Any,
-    module_path: str,
-    key: str,
-    intervention_handler: InterventionHandler,
-):
-    """Entry to intervention graph. This should be hooked to all modules involved in the intervention graph.
-
-    Forms the current module_path key in the form of <module path>.<output/input>
-    Checks the graphs argument_node_names attribute for this key.
-    If exists, value is a list of node names to iterate through.
-    Node args for argument type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
-    Checks and updates the counter for the given argument node. If counter is not ready yet continue.
-    Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
-    only batch indexed tensors relevant to this intervention node. Sets the value of a node
-    using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
-    subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
-    tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
-    to the output from downstream intervention nodes in the graph.
-
-    Args:
-        activations (Any): Either the inputs or outputs of a torch module.
-        module_path (str): Module path of the current relevant module relative to the root model.
-        key (str): Key denoting either "input" or "output" of module.
-        intervention_handler (InterventionHandler): Handler object that stores the intervention graph and keeps track of module call count.
-
-    Returns:
-        Any: The activations, potentially modified by the intervention graph.
-    """
-
-    # Key to module activation argument nodes has format: <module path>.<output/input>
-    module_path = f"{module_path}.{key}"
-
-    arguments = protocols.InterventionProtocol.get_interventions(
-        intervention_handler.graph
-    )
-
-    if module_path in arguments:
-        argument_node_names = arguments[module_path]
-
-        # Multiple argument nodes can have same module_path if there are multiple invocations.
-        for argument_node_name in argument_node_names:
-
-            node = intervention_handler.graph.nodes[argument_node_name]
-
-            # Args for argument nodes are (module_path, batch_size, batch_start, call_iter).
-            _, batch_size, batch_start, call_iter = node.args
-
-            # Updates the count of argument node calls.
-            # If count matches call_iter, time to inject value into node.
-            if call_iter != intervention_handler.count(argument_node_name):
-
-                continue
-
-            # Narrow tensor values in activations only to relevant batch idxs.
-            # Only narrow if batch_size != total batch size ( no need to narrow when its the entire batch )
-            # and if the first dim == total_batch_size ( otherwise must not be a batched tensor ).
-            # Checks to see if anything was narrowed. If not, no need to concat later.
-            narrowed = False
-
-            def narrow(acts: torch.Tensor):
-
-                nonlocal narrowed
-
-                if (
-                    batch_size != intervention_handler.total_batch_size
-                    and intervention_handler.total_batch_size == acts.shape[0]
-                ):
-                    narrowed = True
-                    return acts.narrow(0, batch_start, batch_size)
-
-                return acts
-
-            value = util.apply(
-                activations,
-                narrow,
-                torch.Tensor,
-            )
-
-            # Value injection.
-            node.set_value(value)
-
-            # Check if through the previous value injection, there was a 'swap' intervention.
-            # This would mean we want to replace activations for this batch with some other ones.
-            value = protocols.SwapProtocol.get_swap(intervention_handler.graph, value)
-
-            # If we narrowed any data, we need to concat it with data before and after it.
-            if narrowed:
-
-                activations = concat(
-                    activations,
-                    value,
-                    batch_start,
-                    batch_size,
-                    intervention_handler.total_batch_size,
+            elif isinstance(values[0], tuple):
+                return tuple(
+                    [
+                        _concat([value[value_idx] for value in values])
+                        for value_idx in range(len(values[0]))
+                    ]
                 )
-            # Otherwise just return the whole value as the activations.
-            else:
+            elif isinstance(values[0], dict):
+                return {
+                    key: _concat([value[key] for value in values])
+                    for key in values[0].keys()
+                }
+            return values[0]
 
-                activations = value
+        def narrow1(acts: torch.Tensor):
+            if total_batch_size == acts.shape[0]:
+                return acts.narrow(0, 0, batch_start)
 
-    return activations
+            return acts
+
+        pre = util.apply(activations, narrow1, torch.Tensor)
+
+        post_batch_start = batch_start + batch_size
+
+        def narrow2(acts: torch.Tensor):
+            if total_batch_size == acts.shape[0]:
+                return acts.narrow(
+                    0, post_batch_start, acts.shape[0] - post_batch_start
+                )
+
+            return acts
+
+        post = util.apply(
+            activations,
+            narrow2,
+            torch.Tensor,
+        )
+
+        orig_sizes = util.apply(activations, lambda x: x.shape[0], torch.Tensor)
+
+        return _concat([pre, value, post, orig_sizes])
+
+    @classmethod
+    def intervene(
+        cls,
+        activations: Any,
+        module_path: str,
+        key: str,
+        intervention_handler: InterventionHandler,
+    ):
+        """Entry to intervention graph. This should be hooked to all modules involved in the intervention graph.
+
+        Forms the current module_path key in the form of <module path>.<output/input>
+        Checks the graphs argument_node_names attribute for this key.
+        If exists, value is a list of node names to iterate through.
+        Node args for argument type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
+        Checks and updates the counter for the given argument node. If counter is not ready yet continue.
+        Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
+        only batch indexed tensors relevant to this intervention node. Sets the value of a node
+        using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
+        subsequent downstream nodes to make edits to the values only in the relevant tensors, and have it update the original
+        tensors. This both prevents interventions from effecting bathes outside their preview and allows edits
+        to the output from downstream intervention nodes in the graph.
+
+        Args:
+            activations (Any): Either the inputs or outputs of a torch module.
+            module_path (str): Module path of the current relevant module relative to the root model.
+            key (str): Key denoting either "input" or "output" of module.
+            intervention_handler (InterventionHandler): Handler object that stores the intervention graph and keeps track of module call count.
+
+        Returns:
+            Any: The activations, potentially modified by the intervention graph.
+        """
+
+        # Key to module activation argument nodes has format: <module path>.<output/input>
+        module_path = f"{module_path}.{key}"
+
+        arguments = cls.get_interventions(intervention_handler.graph)
+
+        if module_path in arguments:
+            argument_node_names = arguments[module_path]
+
+            # Multiple argument nodes can have same module_path if there are multiple invocations.
+            for argument_node_name in argument_node_names:
+
+                node = intervention_handler.graph.nodes[argument_node_name]
+
+                # Args for argument nodes are (module_path, batch_size, batch_start, call_iter).
+                _, batch_size, batch_start, call_iter = node.args
+
+                # Updates the count of argument node calls.
+                # If count matches call_iter, time to inject value into node.
+                if call_iter != intervention_handler.count(argument_node_name):
+
+                    continue
+
+                # Narrow tensor values in activations only to relevant batch idxs.
+                # Only narrow if batch_size != total batch size ( no need to narrow when its the entire batch )
+                # and if the first dim == total_batch_size ( otherwise must not be a batched tensor ).
+                # Checks to see if anything was narrowed. If not, no need to concat later.
+                narrowed = False
+
+                def narrow(acts: torch.Tensor):
+
+                    nonlocal narrowed
+
+                    if (
+                        batch_size != intervention_handler.total_batch_size
+                        and intervention_handler.total_batch_size == acts.shape[0]
+                    ):
+                        narrowed = True
+                        return acts.narrow(0, batch_start, batch_size)
+
+                    return acts
+
+                value = util.apply(
+                    activations,
+                    narrow,
+                    torch.Tensor,
+                )
+
+                # Value injection.
+                node.set_value(value)
+
+                # Check if through the previous value injection, there was a 'swap' intervention.
+                # This would mean we want to replace activations for this batch with some other ones.
+                value = protocols.SwapProtocol.get_swap(
+                    intervention_handler.graph, value
+                )
+
+                # If we narrowed any data, we need to concat it with data before and after it.
+                if narrowed:
+
+                    activations = cls.concat(
+                        activations,
+                        value,
+                        batch_start,
+                        batch_size,
+                        intervention_handler.total_batch_size,
+                    )
+                # Otherwise just return the whole value as the activations.
+                else:
+
+                    activations = value
+
+        return activations
 
 
 class HookHandler(AbstractContextManager):

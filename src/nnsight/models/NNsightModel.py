@@ -13,7 +13,7 @@ from ..contexts.backends import Backend, LocalBackend, RemoteBackend
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
-                            InterventionProxy, intervene)
+                            InterventionProtocol, InterventionProxy)
 from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
@@ -259,17 +259,15 @@ class NNsight:
 
         intervention_handler = InterventionHandler(intervention_graph, total_batch_size)
 
-        module_paths = protocols.InterventionProtocol.get_interventions(
-            intervention_graph
-        ).keys()
+        module_paths = InterventionProtocol.get_interventions(intervention_graph).keys()
 
         with HookHandler(
             self._model,
             list(module_paths),
-            input_hook=lambda activations, module_path: intervene(
+            input_hook=lambda activations, module_path: InterventionProtocol.intervene(
                 activations, module_path, "input", intervention_handler
             ),
-            output_hook=lambda activations, module_path: intervene(
+            output_hook=lambda activations, module_path: InterventionProtocol.intervene(
                 activations, module_path, "output", intervention_handler
             ),
         ):
