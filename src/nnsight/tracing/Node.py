@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import weakref
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 
@@ -9,6 +10,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 
 from .. import util
 from ..logger import logger
+from . import protocols
 from .protocols import PROTOCOLS
 from .Proxy import Proxy
 
@@ -85,12 +87,12 @@ class Node:
 
     def __init__(
         self,
-        name: str,
-        graph: "Graph",
-        value: Any,
         target: Union[Callable, str],
+        graph: "Graph" = None,
+        proxy_value: Any = inspect._empty,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
+        name: str = None,
     ) -> None:
         super().__init__()
 
@@ -99,107 +101,157 @@ class Node:
         if kwargs is None:
             kwargs = dict()
 
-        self.name = name
+        graph = weakref.proxy(graph) if graph is not None else None
+
         self.graph: "Graph" = graph
-        self.proxy_value = value
+        self.proxy_value = proxy_value
         self.target = target
-        self.args: List = util.apply(args, lambda x: x.node, Proxy)
-        self.kwargs: Dict = util.apply(kwargs, lambda x: x.node, Proxy)
 
         self.proxy: Optional[Proxy] = None
 
-        self.value: Any = inspect._empty
+        self._value: Any = inspect._empty
 
         self.listeners: List[Node] = list()
         self.dependencies: List[Node] = list()
 
-        # Add all arguments that are nodes to nodes dependencies
-        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
-        util.apply(
-            self.args,
-            lambda x: self.dependencies.append(x) if not x.done() else None,
-            Node,
-        )
-        util.apply(
-            self.kwargs,
-            lambda x: self.dependencies.append(x) if not x.done() else None,
-            Node,
-        )
-        # Add node to all arguments that are nodes' listeners
-        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
-        util.apply(
-            self.args,
-            lambda x: x.listeners.append(self) if not x.done() else None,
-            Node,
-        )
-        util.apply(
-            self.kwargs,
-            lambda x: x.listeners.append(self) if not x.done() else None,
-            Node,
+        def preprocess_arg(arg):
+
+            if isinstance(arg, Proxy):
+
+                arg = arg.node
+
+            if isinstance(arg, Node) and not arg.done():
+
+                # Check for nodes from other graphs to create bridge.
+                if self.graph is not arg.graph:
+
+                    if protocols.BridgeProtocol.has_bridge(arg.graph):
+
+                        arg = protocols.BridgeProtocol.add(arg, self).node
+
+                    else:
+                        # TODO error
+                        pass
+
+                self.dependencies.append(arg)
+                arg.listeners.append(self)
+
+            return arg
+
+        def check_for_bridge_swap(arg):
+
+            if isinstance(arg, Proxy):
+
+                arg = arg.node
+
+            if isinstance(arg, Node) and not arg.done():
+
+                if self.graph is not arg.graph and protocols.BridgeProtocol.has_bridge(
+                    self.graph
+                ):
+
+                    self.graph = arg.graph
+
+        util.apply((args, kwargs), check_for_bridge_swap, (Proxy, Node))
+
+        self.args, self.kwargs = util.apply(
+            (args, kwargs), preprocess_arg, (Proxy, Node)
         )
 
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
-        self.compile()
+        self.name: str = name
 
-        # (for when you want to apply things to proxies after model execution)
-        if self.fulfilled() and not isinstance(self.target, str):
-            # So it doesn't get destroyed.
-            self.remaining_listeners = 1
+        if not self.attached():
 
-            self.execute()
+            self.reset()
 
-    def is_tracing(self) -> bool:
-        """Checks to see if the weakref to the Graph is alive and tracing or dead.
+            self.compile()
+
+        else:
+
+            self.graph.add(self)
+
+    @property
+    def value(self) -> Any:
+        """Property to return the value of this node.
 
         Returns:
-            bool: Is Graph tracing.
+            Any: The stored value of the node, populated during execution of the model.
+        """
+
+        if not self.done():
+            raise ValueError("Accessing value before it's been set.")
+
+        return self._value
+
+    def attached(self) -> bool:
+        """Checks to see if the weakref to the Graph is aliveor dead.
+
+        Returns:
+            bool: Is Node attached.
         """
 
         try:
 
-            return self.graph.tracing
+            return self.graph.alive
 
         except:
             return False
 
-    def add(
+    def create(
         self,
         target: Union[Callable, str],
-        value: Any = inspect._empty,
+        proxy_value: Any = None,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
         name: str = None,
-    ) -> Proxy:
+    ) -> Union[Proxy, Any]:
         """We use Node.add vs Graph.add in case the weakref to Graph is gone.
 
         Returns:
             Proxy: Proxy
         """
 
-        if not self.is_tracing():
+        if not self.attached():
 
-            return Proxy(
-                Node(
-                    name=None,
-                    graph=None,
-                    value=None,
-                    target=target,
-                    args=args,
-                    kwargs=kwargs,
-                )
+            return Node(
+                target=target,
+                graph=None,
+                proxy_value=None,
+                args=args,
+                kwargs=kwargs,
             ).value
 
-        return self.graph.add(
-            target=target, value=value, args=args, kwargs=kwargs, name=name
+        return self.graph.create(
+            target=target,
+            name=name,
+            proxy_value=proxy_value,
+            args=args,
+            kwargs=kwargs,
         )
 
-    def compile(self) -> None:
-        """Resets this Nodes remaining_listeners and remaining_dependencies and sets its value to None."""
+    def reset(self) -> None:
+        """Resets this Nodes remaining_listeners and remaining_dependencies."""
+
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
-        self.value = inspect._empty
+
+    def compile(self) -> None:
+        """If fufuilled, execute the node, otherwise set its value to empty."""
+
+        if self.fulfilled():
+
+            if not self.attached():
+                # So it doesn't get destroyed.
+                self.remaining_listeners = 1
+
+            self.execute()
+
+        else:
+
+            self._value = inspect._empty
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
@@ -207,7 +259,7 @@ class Node:
         Returns:
             bool: If done.
         """
-        return self.value is not inspect._empty
+        return self._value is not inspect._empty
 
     def fulfilled(self) -> bool:
         """Returns true if remaining_dependencies is 0.
@@ -238,27 +290,22 @@ class Node:
         def _value(node: Node):
             return node.value
 
-        args = util.apply(self.args, _value, Node)
-        kwargs = util.apply(self.kwargs, _value, Node)
+        args, kwargs = util.apply((self.args, self.kwargs), _value, Node)
 
         device = None
 
-        def _device(value):
+        def _device(value: torch.Tensor):
             nonlocal device
-            device = value.device
 
-        all_args = list(args) + list(kwargs.values())
+            if device is None:
+                device = value.device
 
-        util.apply(list(reversed(all_args)), _device, torch.Tensor)
-        # TODO
-        # util.apply(list(reversed(all_args)), _device, torch.nn.Module)
+        util.apply((args, kwargs), _device, torch.Tensor)
 
-        # Move tensors to device
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        args = util.apply(args, _to, torch.Tensor)
-        kwargs = util.apply(kwargs, _to, torch.Tensor)
+        util.apply((args, kwargs), _to, torch.Tensor)
 
         return args, kwargs
 
@@ -292,7 +339,7 @@ class Node:
         Args:
             value (Any): Value.
         """
-        self.value = value
+        self._value = value
 
         logger.info(f"=> SET({self.name})")
 
@@ -315,7 +362,7 @@ class Node:
         """Removes the reference to the node's value and logs it's destruction."""
         logger.info(f"=> DEL({self.name})")
 
-        self.value = inspect._empty
+        self._value = inspect._empty
 
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)

@@ -10,24 +10,14 @@ from .. import pydantics
 from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
-from .backends import Backend, LocalMixin, RemoteMixin
+from .backends import AccumulatorMixin, Backend, LocalMixin, RemoteMixin
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
+    from .accum.Accumulator import Accumulator
 
-
-class Executable(LocalMixin):
-
-    def __init__(self, graph: Graph = None) -> None:
-
-        if graph is None:
-            graph = Graph()
-
-        self.executable_graph: Graph = graph
-
-
-class Tracer(AbstractContextManager, Executable, RemoteMixin):
+class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -50,11 +40,9 @@ class Tracer(AbstractContextManager, Executable, RemoteMixin):
 
         self._model = model
 
-        graph = Graph(proxy_class=model.proxy_class, validate=validate)
+        self._graph = Graph(proxy_class=model.proxy_class, validate=validate)
 
-        Executable.__init__(self, graph)
-
-        protocols.ApplyModuleProtocol.set_module(self.executable_graph, self._model)
+        protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
 
         self._backend = backend
 
@@ -86,9 +74,6 @@ class Tracer(AbstractContextManager, Executable, RemoteMixin):
             raise exc_val
 
         self._backend(self)
-
-        self.executable_graph.tracing = False
-        self.executable_graph = None
 
     def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
         """Create an Invoker context dor a given input.
@@ -124,22 +109,27 @@ class Tracer(AbstractContextManager, Executable, RemoteMixin):
         Returns:
             InterventionProxy: Proxy of applying that function.
         """
-        return self.executable_graph.add(target=target, args=args, kwargs=kwargs)
+        return self._graph.add(target=target, args=args, kwargs=kwargs)
 
     ##### BACKENDS ###############################
 
     def local_backend_execute(self):
 
-        self.executable_graph.compile()
-        
-        protocols.ApplyModuleProtocol.set_module(self.executable_graph, self._model._model)
+        self._graph.compile()
+
+        protocols.ApplyModuleProtocol.set_module(
+            self._graph, self._model._model
+        )
 
         self._model.interleave(
             self._model._execute,
-            self.executable_graph,
+            self._graph,
             *self._batched_input,
             **self._kwargs,
         )
+        
+        self._graph.alive = False
+        self._graph = None
 
     def remote_backend_create_request(self) -> RequestModel:
 
@@ -147,11 +137,23 @@ class Tracer(AbstractContextManager, Executable, RemoteMixin):
             kwargs=self._kwargs,
             repo_id=self._model._model_key,
             batched_input=self._batched_input,
-            intervention_graph=self.executable_graph.nodes,
+            intervention_graph=self._graph.nodes,
         )
 
     def remote_backend_handle_result(self, result: pydantics.ResultModel) -> None:
 
         # Set save data.
         for name, value in result.saves.items():
-            self.executable_graph.nodes[name].value = value
+            self._graph.nodes[name]._value = value
+            
+        self._graph.alive = False
+        self._graph = None
+
+    def accumulator_backend_handle(self, accumulator: "Accumulator"):
+        
+        accumulator.collector_stack[-1].collection.append(self)
+        
+        protocols.BridgeProtocol.set_bridge(self._graph, accumulator.bridge)
+  
+        accumulator.bridge.add(self._graph)
+        

@@ -45,15 +45,12 @@ class Proxy:
         Returns:
             Any: The stored value of the proxy, populated during execution of the model.
         """
-
-        if not self.node.done():
-            raise ValueError("Accessing Proxy value before it's been set.")
-
+        
         return self.node.value
 
     def __str__(self) -> str:
 
-        if not self.node.is_tracing():
+        if not self.node.attached():
 
             return str(self.value)
 
@@ -63,7 +60,7 @@ class Proxy:
 
     def __repr__(self) -> str:
 
-        if not self.node.is_tracing():
+        if not self.node.attached():
 
             return repr(self.value)
 
@@ -77,26 +74,26 @@ class Proxy:
             Proxy: New call proxy.
         """
 
-        return self.node.add(
+        return self.node.create(
             target=Proxy.proxy_call,
             args=[self.node] + list(args),
             kwargs=kwargs,
         )
 
     def __getitem__(self, key: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.getitem,
             args=[self.node, key],
         )
 
     def __setitem__(self, key: Union[Proxy, Any], value: Union[Self, Any]) -> None:
-        self.node.add(
+        self.node.create(
             target=operator.setitem,
             args=[self.node, key, value],
         )
 
     def __getattr__(self, key: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=util.fetch_attr,
             args=[self.node, key],
         )
@@ -109,121 +106,121 @@ class Proxy:
 
             return
 
-        return self.node.add(
+        return self.node.create(
             target=setattr,
             args=[self.node, key, value],
         )
 
     def __len__(self) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=len,
             args=[self.node],
         )
 
     def __abs__(self) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.abs,
             args=[self.node],
         )
 
     def __invert__(self) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.invert,
             args=[self.node],
         )
 
     def __neg__(self) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.neg,
             args=[self.node],
         )
 
     def __add__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.add,
             args=[self.node, other],
         )
 
     def __radd__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.add,
             args=[other, self.node],
         )
 
     def __sub__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.sub,
             args=[self.node, other],
         )
 
     def __rsub__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.sub,
             args=[other, self.node],
         )
 
     def __pow__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.pow,
             args=[self.node, other],
         )
 
     def __rpow__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.pow,
             args=[other, self.node],
         )
 
     def __mul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.mul,
             args=[self.node, other],
         )
 
     def __rmul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.mul,
             args=[other, self.node],
         )
 
     def __mod__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.mod,
             args=[self.node, other],
         )
 
     def __rmod__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.mod,
             args=[other, self.node],
         )
 
     def __matmul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.matmul,
             args=[self.node, other],
         )
 
     def __rmatmul__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.matmul,
             args=[other, self.node],
         )
 
     def __truediv__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.truediv,
             args=[self.node, other],
         )
 
     def __rtruediv__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(
+        return self.node.create(
             target=operator.truediv,
             args=[other, self.node],
         )
 
     def __index__(self) -> Self:
-        return self.node.add(target=operator.index, args=[self.node])
+        return self.node.create(target=operator.index, args=[self.node])
 
     def __bool__(self) -> bool:
         return self.node.proxy_value.__bool__()
@@ -247,7 +244,7 @@ class Proxy:
 
         util.apply(args, get_proxy, Proxy)
 
-        return proxy.node.add(
+        return proxy.node.create(
             target=orig_method,
             args=args,
             kwargs=kwargs,

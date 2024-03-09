@@ -63,11 +63,11 @@ class InterventionProxy(Proxy):
             InterventionProxy: Save proxy.
         """
 
-        # Add a 'latch' node with the save proxy as an argument to ensure the values are never deleted.
-        # This is because 'latch' nodes never actually get set and therefore there will always be a
+        # Add a 'lock' node with the save proxy as an argument to ensure the values are never deleted.
+        # This is because 'lock' nodes never actually get set and therefore there will always be a
         # dependency for the save proxy.
 
-        protocols.LatchProtocol.add(self.node)
+        protocols.LockProtocol.add(self.node)
 
         return self
 
@@ -119,8 +119,8 @@ class InterventionProxy(Proxy):
 
             protocols.GradProtocol.increment(self.node.graph)
 
-            return self.node.add(
-                value=None,
+            return self.node.create(
+                proxy_value=None,
                 target=Proxy.proxy_call,
                 args=[self.node] + list(args),
                 kwargs=kwargs,
@@ -145,7 +145,7 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
 
-        if not self.node.is_tracing():
+        if not self.node.attached():
 
             return util.apply(self.value, lambda x: x.shape, torch.Tensor)
 
@@ -164,7 +164,7 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.device]]: Proxy value device or collection of devices.
         """
 
-        if not self.node.is_tracing():
+        if not self.node.attached():
 
             return util.apply(self.value, lambda x: x.device, torch.Tensor)
 
@@ -183,7 +183,7 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.dtype]]: Proxy value dtype or collection of dtypes.
         """
 
-        if not self.node.is_tracing():
+        if not self.node.attached():
 
             return util.apply(self.value, lambda x: x.dtype, torch.Tensor)
 
@@ -206,12 +206,14 @@ class InterventionProtocol(Protocol):
         cls,
         graph: "Graph",
         name: str,
-        value: Any,
+        proxy_value: Any,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
     ) -> Proxy:
 
-        proxy = graph.add(value=value, target=cls.name, args=args, kwargs=kwargs)
+        proxy = graph.create(
+            proxy_value=proxy_value, target=cls.name, args=args, kwargs=kwargs
+        )
 
         if cls.attachment_name not in graph.attachments:
 

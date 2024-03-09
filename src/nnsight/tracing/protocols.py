@@ -9,6 +9,7 @@ from .. import util
 from .Proxy import Proxy
 
 if TYPE_CHECKING:
+    from .Bridge import Bridge
     from .Graph import Graph
     from .Node import Node
 
@@ -24,8 +25,7 @@ class Protocol:
 
     @classmethod
     def execute(cls, node: "Node"):
-
-        raise NotImplementedError()
+        pass
 
 
 PROTOCOLS: Dict[str, Protocol] = dict()
@@ -73,8 +73,11 @@ class ApplyModuleProtocol(Protocol):
                         **Node.prepare_proxy_values(kwargs, device=device),
                     )
 
-        return graph.add(
-            target=cls.name, value=value, args=[module_path] + list(args), kwargs=kwargs
+        return graph.create(
+            target=cls.name,
+            proxy_value=value,
+            args=[module_path] + list(args),
+            kwargs=kwargs,
         )
 
     @classmethod
@@ -107,22 +110,18 @@ class ApplyModuleProtocol(Protocol):
 
 
 @register_protocol
-class LatchProtocol(Protocol):
+class LockProtocol(Protocol):
 
-    name = "latch"
+    name = "lock"
 
     @classmethod
     def add(cls, node: "Node") -> Proxy:
 
-        return node.add(
-            value=None,
+        return node.create(
+            proxy_value=None,
             target=cls.name,
             args=[node],
         )
-
-    @classmethod
-    def execute(cls, node: "Node") -> None:
-        pass
 
 
 @register_protocol
@@ -136,8 +135,8 @@ class GradProtocol(Protocol):
 
         backward_idx = node.graph.attachments.get(cls.attachment_name, 0)
 
-        return node.add(
-            value=node.proxy_value,
+        return node.create(
+            proxy_value=node.proxy_value,
             target=cls.name,
             args=[node, backward_idx],
         )
@@ -158,7 +157,7 @@ class GradProtocol(Protocol):
 
                 node.set_value(value)
 
-                if node.is_tracing():
+                if node.attached():
 
                     value = SwapProtocol.get_swap(node.graph, value)
 
@@ -191,10 +190,10 @@ class SwapProtocol(Protocol):
     @classmethod
     def add(cls, node: "Node", value: Any) -> Proxy:
 
-        return node.graph.add(target=cls.name, args=[node, value], value=True)
+        return node.create(target=cls.name, args=[node, value], proxy_value=True)
 
     @classmethod
-    def execute(cls, node: "Node"):
+    def execute(cls, node: "Node") -> None:
 
         swap: "Node" = node.graph.attachments.get(cls.attachment_name, None)
 
@@ -204,7 +203,7 @@ class SwapProtocol(Protocol):
         node.graph.attachments[cls.attachment_name] = node
 
     @classmethod
-    def get_swap(cls, graph: "Graph", value: Any):
+    def get_swap(cls, graph: "Graph", value: Any) -> Any:
 
         swap: "Node" = graph.attachments.get(cls.attachment_name, None)
 
@@ -235,3 +234,57 @@ class SwapProtocol(Protocol):
             graph.attachments[cls.attachment_name] = None
 
         return value
+
+
+@register_protocol
+class BridgeProtocol(Protocol):
+
+    name = "bridge"
+    attachment_name = "nnsight_bridge"
+
+    @classmethod
+    def add(cls, from_node: "Node", to_node: "Node") -> Proxy:
+
+        lock_node = LockProtocol.add(from_node).node
+
+        return to_node.create(
+            target=cls.name,
+            proxy_value=from_node.proxy_value,
+            args=[from_node.graph.id, lock_node.name],
+        )
+
+    @classmethod
+    def execute(cls, node: "Node"):
+
+        bridge = cls.get_bridge(node.graph)
+
+        from_graph_id, lock_node_name = node.args
+
+        lock_node = bridge.get_graph(from_graph_id).nodes[lock_node_name]
+
+        value_node: "Node" = lock_node.args[0]
+
+        node.set_value(value_node.value)
+
+        if bridge.release:
+
+            lock_node.set_value(None)
+
+    @classmethod
+    def set_bridge(cls, graph: "Graph", bridge: "Bridge") -> None:
+
+        graph.attachments[cls.attachment_name] = bridge
+
+    @classmethod
+    def get_bridge(cls, graph: "Graph") -> "Bridge":
+
+        if not cls.has_bridge(graph):
+            # TODO error
+            pass
+
+        return graph.attachments[cls.attachment_name]
+
+    @classmethod
+    def has_bridge(cls, graph: "Graph") -> bool:
+
+        return cls.attachment_name in graph.attachments

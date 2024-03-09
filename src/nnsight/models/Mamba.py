@@ -129,7 +129,7 @@ class Mamba(LanguageModel):
 
         if self._envoy._output != None:
 
-            self._envoy._output.node.value = output
+            self._envoy._output.node._value = output
 
         return output
 

@@ -306,7 +306,7 @@ class Envoy:
         """
 
         return protocols.ApplyModuleProtocol.add(
-            self._tracer.executable_graph, self._module_path, *args, **kwargs
+            self._tracer._graph, self._module_path, *args, **kwargs
         )
 
     @property
@@ -337,7 +337,7 @@ class Envoy:
             module_path = f"{self._module_path}.output"
 
             self._output = InterventionProtocol.add(
-                self._tracer.executable_graph,
+                self._tracer._graph,
                 module_path,
                 fake_output,
                 args=[
@@ -391,7 +391,7 @@ class Envoy:
             module_path = f"{self._module_path}.input"
 
             self._input = InterventionProtocol.add(
-                self._tracer.executable_graph,
+                self._tracer._graph,
                 module_path,
                 fake_input,
                 args=[

@@ -9,7 +9,8 @@ from transformers import AutoConfig, AutoModel
 
 from .. import util
 from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import Backend, LocalBackend, RemoteBackend
+from ..contexts.backends import (AccumulatorBackend, Backend, LocalBackend,
+                                 RemoteBackend)
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
@@ -175,8 +176,14 @@ class NNsight:
 
             For a proxy tensor with 3 tokens.
         """
+        
+        # TODO raise error/warning if trying to use one backend with another condition satisfied?
 
-        if backend is None:
+        if self._accumulator is not None:
+
+            backend = AccumulatorBackend(self._accumulator)
+
+        elif backend is None:
 
             backend = LocalBackend()
 
@@ -216,8 +223,10 @@ class NNsight:
         return tracer
 
     def accumulate(self) -> Accumulator:
+        
+        backend = LocalBackend()
 
-        self._accumulator = Accumulator(self)
+        self._accumulator = Accumulator(self, backend)
 
         return self._accumulator
 
