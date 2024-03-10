@@ -12,3 +12,4 @@ class Backend:
 from .LocalBackend import LocalBackend, LocalMixin
 from .RemoteBackend import RemoteBackend, RemoteMixin
 from .AccumulatorBackend import AccumulatorBackend, AccumulatorMixin
+from .IteratorBackend import IteratorMixin

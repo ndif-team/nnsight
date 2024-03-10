@@ -6,9 +6,9 @@ from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
-from .Proxy import Proxy
 
 if TYPE_CHECKING:
+    from ..intervention import InterventionProxy
     from .Bridge import Bridge
     from .Graph import Graph
     from .Node import Node
@@ -19,7 +19,7 @@ class Protocol:
     name: str
 
     @classmethod
-    def add(cls, *args, **kwargs) -> Proxy:
+    def add(cls, *args, **kwargs) -> "InterventionProxy":
 
         raise NotImplementedError()
 
@@ -45,7 +45,9 @@ class ApplyModuleProtocol(Protocol):
     attachment_name = "nnsight_root_module"
 
     @classmethod
-    def add(cls, graph: "Graph", module_path: str, *args, **kwargs) -> Proxy:
+    def add(
+        cls, graph: "Graph", module_path: str, *args, **kwargs
+    ) -> "InterventionProxy":
 
         value = inspect._empty
 
@@ -115,7 +117,7 @@ class LockProtocol(Protocol):
     name = "lock"
 
     @classmethod
-    def add(cls, node: "Node") -> Proxy:
+    def add(cls, node: "Node") -> "InterventionProxy":
 
         return node.create(
             proxy_value=None,
@@ -131,7 +133,7 @@ class GradProtocol(Protocol):
     attachment_name = "nnsight_backward_idx"
 
     @classmethod
-    def add(cls, node: "Node") -> Proxy:
+    def add(cls, node: "Node") -> "InterventionProxy":
 
         backward_idx = node.graph.attachments.get(cls.attachment_name, 0)
 
@@ -188,7 +190,7 @@ class SwapProtocol(Protocol):
     attachment_name = "nnsight_swap"
 
     @classmethod
-    def add(cls, node: "Node", value: Any) -> Proxy:
+    def add(cls, node: "Node", value: Any) -> "InterventionProxy":
 
         return node.create(target=cls.name, args=[node, value], proxy_value=True)
 
@@ -243,7 +245,7 @@ class BridgeProtocol(Protocol):
     attachment_name = "nnsight_bridge"
 
     @classmethod
-    def add(cls, from_node: "Node", to_node: "Node") -> Proxy:
+    def add(cls, from_node: "Node", to_node: "Node") -> "InterventionProxy":
 
         lock_node = LockProtocol.add(from_node).node
 
@@ -254,7 +256,7 @@ class BridgeProtocol(Protocol):
         )
 
     @classmethod
-    def execute(cls, node: "Node"):
+    def execute(cls, node: "Node") -> None:
 
         bridge = cls.get_bridge(node.graph)
 

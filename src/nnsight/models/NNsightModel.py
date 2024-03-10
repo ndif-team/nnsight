@@ -226,7 +226,7 @@ class NNsight:
         
         backend = LocalBackend()
 
-        self._accumulator = Accumulator(self, backend)
+        self._accumulator = Accumulator(backend, self)
 
         return self._accumulator
 

@@ -1,16 +1,18 @@
 from __future__ import annotations
-from contextlib import AbstractContextManager
 
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Union
 
-from ..backends import AccumulatorMixin, Backend, LocalMixin
+from typing_extensions import Self
+
+from ..backends import AccumulatorMixin, Backend, IteratorMixin, LocalMixin
 from ..Tracer import Tracer
 
 if TYPE_CHECKING:
     from .Accumulator import Accumulator
 
 
-class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin):
+class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorMixin):
 
     def __init__(self, backend: Backend, accumulator: Accumulator = None) -> None:
 
@@ -19,7 +21,7 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin):
 
         self.collection: List[Union[Collection, Tracer]] = []
 
-    def __enter__(self) -> Collection:
+    def __enter__(self) -> Self:
 
         if len(self.accumulator.collector_stack) > 0:
             self.accumulator.collector_stack[-1].collection.append(self)
@@ -45,3 +47,9 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin):
     def accumulator_backend_handle(self, accumulator: Accumulator):
 
         accumulator.collector_stack.pop()
+
+    def iterator_backend_execute(self, last_iter: bool = False):
+
+        for executable in self.collection:
+
+            executable.iterator_backend_execute(last_iter=last_iter)

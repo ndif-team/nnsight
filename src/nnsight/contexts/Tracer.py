@@ -10,14 +10,18 @@ from .. import pydantics
 from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
-from .backends import AccumulatorMixin, Backend, LocalMixin, RemoteMixin
+from .backends import (AccumulatorMixin, Backend, IteratorMixin, LocalMixin,
+                       RemoteMixin)
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
     from .accum.Accumulator import Accumulator
 
-class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin):
+
+class Tracer(
+    AbstractContextManager, LocalMixin, RemoteMixin, AccumulatorMixin, IteratorMixin
+):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -117,9 +121,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin):
 
         self._graph.compile()
 
-        protocols.ApplyModuleProtocol.set_module(
-            self._graph, self._model._model
-        )
+        protocols.ApplyModuleProtocol.set_module(self._graph, self._model._model)
 
         self._model.interleave(
             self._model._execute,
@@ -127,7 +129,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin):
             *self._batched_input,
             **self._kwargs,
         )
-        
+
         self._graph.alive = False
         self._graph = None
 
@@ -145,15 +147,25 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin):
         # Set save data.
         for name, value in result.saves.items():
             self._graph.nodes[name]._value = value
-            
+
         self._graph.alive = False
         self._graph = None
 
     def accumulator_backend_handle(self, accumulator: "Accumulator"):
-        
+
         accumulator.collector_stack[-1].collection.append(self)
-        
+
         protocols.BridgeProtocol.set_bridge(self._graph, accumulator.bridge)
-  
+
         accumulator.bridge.add(self._graph)
-        
+
+    def iterator_backend_execute(self, last_iter: bool = False):
+
+        graph = self._graph
+
+        self.local_backend_execute()
+
+        if not last_iter:
+
+            self._graph = graph
+            self._graph.alive = True

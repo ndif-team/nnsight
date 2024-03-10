@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Union
 from nnsight.pydantics.Request import RequestModel
 from nnsight.pydantics.Response import ResultModel
 
+from ...tracing import protocols
 from ...tracing.Bridge import Bridge
-from ..backends import Backend, LocalMixin, RemoteMixin, AccumulatorBackend
+from ...tracing.Graph import Graph
+from ..backends import AccumulatorBackend, Backend, LocalMixin, RemoteMixin
 from .Collector import Collection
 from .Iterator import Iterator
 
@@ -16,10 +18,15 @@ if TYPE_CHECKING:
 
 class Accumulator(Collection, RemoteMixin):
 
-    def __init__(self, model: "NNsight", backend: Backend) -> None:
-        
+    def __init__(self, backend: Backend, model: "NNsight") -> None:
+
         self.bridge = Bridge()
+        self.graph = Graph(proxy_class=model.proxy_class)
+
+        protocols.BridgeProtocol.set_bridge(self.graph, self.bridge)
         
+        self.bridge.add(self.graph)
+
         Collection.__init__(self, AccumulatorBackend(self), self)
 
         self.model = model
@@ -35,7 +42,9 @@ class Accumulator(Collection, RemoteMixin):
 
     def iter(self, iterable) -> Iterator:
 
-        return Iterator(self, iterable)
+        backend = AccumulatorBackend(self)
+
+        return Iterator(iterable, backend, self)
 
     ### BACKENDS ########
 

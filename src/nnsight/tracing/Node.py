@@ -106,6 +106,7 @@ class Node:
         self.graph: "Graph" = graph
         self.proxy_value = proxy_value
         self.target = target
+        self.args, self.kwargs = args, kwargs
 
         self.proxy: Optional[Proxy] = None
 
@@ -114,64 +115,83 @@ class Node:
         self.listeners: List[Node] = list()
         self.dependencies: List[Node] = list()
 
-        def preprocess_arg(arg):
-
-            if isinstance(arg, Proxy):
-
-                arg = arg.node
-
-            if isinstance(arg, Node) and not arg.done():
-
-                # Check for nodes from other graphs to create bridge.
-                if self.graph is not arg.graph:
-
-                    if protocols.BridgeProtocol.has_bridge(arg.graph):
-
-                        arg = protocols.BridgeProtocol.add(arg, self).node
-
-                    else:
-                        # TODO error
-                        pass
-
-                self.dependencies.append(arg)
-                arg.listeners.append(self)
-
-            return arg
-
-        def check_for_bridge_swap(arg):
-
-            if isinstance(arg, Proxy):
-
-                arg = arg.node
-
-            if isinstance(arg, Node) and not arg.done():
-
-                if self.graph is not arg.graph and protocols.BridgeProtocol.has_bridge(
-                    self.graph
-                ):
-
-                    self.graph = arg.graph
-
-        util.apply((args, kwargs), check_for_bridge_swap, (Proxy, Node))
-
-        self.args, self.kwargs = util.apply(
-            (args, kwargs), preprocess_arg, (Proxy, Node)
-        )
-
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
+        self.preprocess()
+
         self.name: str = name
 
-        if not self.attached():
+        if self.attached():
 
-            self.reset()
+            self.graph.add(self)
 
-            self.compile()
+    def preprocess(self) -> None:
+
+        max_rank = None
+        max_graph = self.graph
+
+        if self.attached() and protocols.BridgeProtocol.has_bridge(self.graph):
+
+            bridge = protocols.BridgeProtocol.get_bridge(self.graph)
+            max_rank = bridge.rank(self.graph)
 
         else:
 
-            self.graph.add(self)
+            bridge = None
+
+        def preprocess_arg(arg: Any):
+
+            nonlocal bridge
+            nonlocal max_rank
+            nonlocal max_graph
+
+            if isinstance(arg, Proxy):
+
+                arg = arg.node
+
+            if isinstance(arg, Node):
+
+                if bridge is not None:
+
+                    graph = arg.graph
+                    rank = bridge.rank(graph)
+
+                    if rank > max_rank:
+
+                        max_rank = rank
+                        max_graph = graph
+
+            return arg
+
+        self.args, self.kwargs = util.apply(
+            (self.args, self.kwargs), preprocess_arg, (Proxy, Node)
+        )
+
+        self.graph = max_graph
+
+        def preprocess_arg2(node: Node):
+
+            if self.graph is not node.graph:
+
+                if self.attached() and protocols.BridgeProtocol.has_bridge(node.graph):
+
+                    node = protocols.BridgeProtocol.add(node, self).node
+
+                else:
+                    # TODO error
+                    pass
+                
+            if not node.done():
+
+                self.dependencies.append(node)
+                node.listeners.append(self)
+
+            return node
+
+        self.args, self.kwargs = util.apply(
+            (self.args, self.kwargs), preprocess_arg2, Node
+        )
 
     @property
     def value(self) -> Any:
@@ -208,21 +228,35 @@ class Node:
         kwargs: Dict[str, Any] = None,
         name: str = None,
     ) -> Union[Proxy, Any]:
-        """We use Node.add vs Graph.add in case the weakref to Graph is gone.
+        """We use Node.add vs Graph.add in case graph is dead.
+        If the graph is dead, we assume this node is ready to execute and therfore we try and execute it and then return its value.
 
         Returns:
-            Proxy: Proxy
+            Union[Proxy, Any]: Proxy or value
         """
 
         if not self.attached():
 
-            return Node(
+            node = Node(
                 target=target,
                 graph=None,
                 proxy_value=None,
                 args=args,
                 kwargs=kwargs,
-            ).value
+            )
+            
+            node.reset()
+
+            # So it doesn't get destroyed.
+            node.remaining_listeners = 1
+            
+            node.compile()
+
+            value = node.value
+
+            node.destroy()
+
+            return value
 
         return self.graph.create(
             target=target,
@@ -239,19 +273,11 @@ class Node:
         self.remaining_dependencies = len(self.dependencies)
 
     def compile(self) -> None:
-        """If fufuilled, execute the node, otherwise set its value to empty."""
+        """If fulfilled, execute the node, otherwise set its value to empty."""
 
         if self.fulfilled():
-
-            if not self.attached():
-                # So it doesn't get destroyed.
-                self.remaining_listeners = 1
-
+            
             self.execute()
-
-        else:
-
-            self._value = inspect._empty
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
