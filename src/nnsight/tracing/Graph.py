@@ -156,17 +156,13 @@ class Graph:
         if name is None:
             name = f"{target_name}_{self.name_idx[target_name]}"
 
-        stack = inspect.stack()
-        proxy_frame = stack[2]
-
         node = Node(
             name=name,
             graph=weakref.proxy(self),
             value=value,
             target=target,
             args=args,
-            kwargs=kwargs,
-            meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
+            kwargs=kwargs
         )
 
         self.name_idx[target_name] += 1

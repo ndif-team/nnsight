@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -24,7 +25,6 @@ class Node:
         target (Union[Callable, str]): Function to execute or reserved string name.
         args (List[Any], optional): Positional arguments. Defaults to None.
         kwargs (Dict[str, Any], optional): Keyword arguments. Defaults to None.
-        meta (Dict[str, Any], optional): Meta information (used when tracing whole modules). Defaults to None.
         listeners (List[Node]): Nodes that depend on this node.
         dependencies (List[Node]): Nodes that this node depends on.
         value (Any): Actual value to be populated during execution.
@@ -60,21 +60,25 @@ class Node:
             if torch._GLOBAL_DEVICE_CONTEXT is not None
             else None
         )
-        
+
         if device is None:
-            
+
             # Arguments might be tensors created outside of scanning. Also the model might be a 'meta' pre-dispatched version of the model.
             # That means the tensors as args and the model are different devices but we dont want to have to have the users move tensors to 'meta'
             # So only when theres a FakeTensor with device meta, we move other tensors also to meta.
-            
-            def get_device(tensor:torch.Tensor):
-                
+
+            def get_device(tensor: torch.Tensor):
+
                 nonlocal device
-                
-                if device is None and isinstance(tensor, FakeTensor) and tensor.device.type == 'meta':
-                                        
+
+                if (
+                    device is None
+                    and isinstance(tensor, FakeTensor)
+                    and tensor.device.type == "meta"
+                ):
+
                     device = tensor.device.type
-            
+
             util.apply(values, get_device, torch.Tensor)
 
         if device is not None:
@@ -91,7 +95,6 @@ class Node:
         target: Union[Callable, str],
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
-        meta: Dict[str, Any] = None,
     ) -> None:
         super().__init__()
 
@@ -99,8 +102,6 @@ class Node:
             args = list()
         if kwargs is None:
             kwargs = dict()
-        if meta is None:
-            meta = dict()
 
         self.name = name
         self.graph: "Graph" = graph
@@ -108,7 +109,6 @@ class Node:
         self.target = target
         self.args: List = util.apply(args, lambda x: x.node, Proxy)
         self.kwargs: Dict = util.apply(kwargs, lambda x: x.node, Proxy)
-        self.meta = meta
 
         self.proxy: Optional[Proxy] = None
 
@@ -204,7 +204,6 @@ class Node:
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
         self.value = inspect._empty
-        self.meta = dict()
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
@@ -291,10 +290,13 @@ class Node:
 
             tensor: torch.Tensor = args[0]
             backward_idx: int = args[1]
+            
+            hook = None
 
             def grad(value):
 
                 nonlocal backward_idx
+                nonlocal hook
 
                 if backward_idx == 0:
 
@@ -305,6 +307,8 @@ class Node:
                         value = self.graph.get_swap(value)
 
                     backward_idx = -1
+                    
+                    hook.remove()
 
                     return value
 
@@ -314,7 +318,7 @@ class Node:
 
                     return None
 
-            tensor.register_hook(lambda value: grad(value))
+            hook = tensor.register_hook(lambda value: grad(value))
 
             return
 
@@ -360,5 +364,4 @@ class Node:
         args = util.apply(self.args, lambda x: f"'{x}'", str)
         args = util.apply(args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]
-        meta = f"{self.meta['file']}({self.meta['line']})" if self.meta else ""
-        return f"{self.name}:[ {meta} args:({','.join(args)}) l:{len(self.listeners)} d:{len(self.dependencies)}]"
+        return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} d:{len(self.dependencies)}]"
