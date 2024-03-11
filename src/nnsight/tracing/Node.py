@@ -290,10 +290,13 @@ class Node:
 
             tensor: torch.Tensor = args[0]
             backward_idx: int = args[1]
+            
+            hook = None
 
             def grad(value):
 
                 nonlocal backward_idx
+                nonlocal hook
 
                 if backward_idx == 0:
 
@@ -304,6 +307,8 @@ class Node:
                         value = self.graph.get_swap(value)
 
                     backward_idx = -1
+                    
+                    hook.remove()
 
                     return value
 
@@ -313,7 +318,7 @@ class Node:
 
                     return None
 
-            tensor.register_hook(lambda value: grad(value))
+            hook = tensor.register_hook(lambda value: grad(value))
 
             return
 
