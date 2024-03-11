@@ -151,6 +151,8 @@ class GradProtocol(Protocol):
         tensor: torch.Tensor = args[0]
         backward_idx: int = args[1]
 
+        hook = None
+
         def grad(value):
 
             nonlocal backward_idx
@@ -165,6 +167,8 @@ class GradProtocol(Protocol):
 
                 backward_idx = -1
 
+                hook.remove()
+
                 return value
 
             else:
@@ -173,7 +177,7 @@ class GradProtocol(Protocol):
 
                 return None
 
-        tensor.register_hook(lambda value: grad(value))
+        hook = tensor.register_hook(lambda value: grad(value))
 
     @classmethod
     def increment(cls, graph: "Graph"):
