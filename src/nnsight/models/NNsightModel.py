@@ -8,6 +8,7 @@ import torch
 from transformers import AutoConfig, AutoModel
 
 from .. import util
+from ..alterations import get_attr_map
 from ..contexts.Runner import Runner
 from ..envoy import Envoy
 from ..intervention import (HookHandler, InterventionHandler,
@@ -39,6 +40,7 @@ class NNsight:
         model_key: Union[str, torch.nn.Module],
         *args,
         dispatch: bool = False,
+        unified: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -71,8 +73,16 @@ class NNsight:
                 self._model = self._load(self._model_key, *args, **kwargs).to("meta")
 
         if dispatch and not self._dispatched:
+            if unified:
+                model_class = self._model.__class__.__name__
+                self._attr_map = get_attr_map(model_class)
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
+
+        elif unified:
+            model_class = self._model.__class__.__name__
+            self._attr_map = get_attr_map(model_class)
+            self._envoy = Envoy(self._model, attr_map = self._attr_map)
 
         else:
             self._envoy = Envoy(self._model)
@@ -270,7 +280,10 @@ class NNsight:
             self._model_key, *self._args, *args, **kwargs, **self._kwargs
         )
 
-        self._envoy = Envoy(self._model)
+        if self._attr_map is not None:
+            self._envoy = Envoy(self._model, attr_map = self._attr_map)
+        else:
+            self._envoy = Envoy(self._model)
 
         self._dispatched = True
 
@@ -377,3 +390,11 @@ class NNsight:
             )
 
         return batched_inputs
+
+    def __repr__(self) -> str:
+        """Wrapper of ._model's representation as the NNsight model's representation.
+
+        Returns:
+            str: Representation.
+        """
+        return repr(self._envoy)
