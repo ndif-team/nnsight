@@ -52,6 +52,7 @@ class NNsight:
 
         self._dispatched = False
         self._custom_model = False
+        self._attr_map = None
 
         self._model: torch.nn.Module = None
 
@@ -295,7 +296,7 @@ class NNsight:
         Returns:
             str: Representation.
         """
-        return repr(self._model)
+        return repr(self._envoy)
 
     def __getattr__(self, key: Any) -> Union[Envoy, InterventionProxy, Any]:
         """Wrapper of ._envoy's attributes to access module's inputs and outputs.
@@ -390,11 +391,3 @@ class NNsight:
             )
 
         return batched_inputs
-
-    def __repr__(self) -> str:
-        """Wrapper of ._model's representation as the NNsight model's representation.
-
-        Returns:
-            str: Representation.
-        """
-        return repr(self._envoy)
