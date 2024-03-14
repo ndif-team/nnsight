@@ -20,7 +20,7 @@ from . import util
 from .tracing import protocols
 from .tracing.Graph import Graph
 from .tracing.Node import Node
-from .tracing.protocols import Protocol, register_protocol
+from .tracing.protocols import Protocol
 from .tracing.Proxy import Proxy
 
 
@@ -33,20 +33,12 @@ class InterventionProxy(Proxy):
 
         .. code-block:: python
 
-            with runner.invoke('The Eiffel Tower is in the city of') as invoker:
+            with model.trace('The Eiffel Tower is in the city of'):
                 hidden_states = model.lm_head.input.save()
                 logits = model.lm_head.output.save()
 
-            print(hidden_states.value)
-            print(logits.value)
-
-        This works and would output the inputs and outputs to the model.lm_head module.
-        Had you not called .save(), calling .value would have been None.
-
-        Calling ``.shape`` on an InterventionProxy returns the shape or collection of shapes for the tensors traced through this module.
-
-        Calling ``.value`` on an InterventionProxy returns the actual populated values, updated during actual execution of the model.
-
+            print(hidden_states)
+            print(logits)
     """
 
     def __init__(self, node: Node) -> None:
@@ -89,7 +81,7 @@ class InterventionProxy(Proxy):
     @grad.setter
     def grad(self, value: Union[InterventionProxy, Any]) -> None:
         """
-        Calling denotes the user wishes to set the grad of this proxy tensor and therefore we create a Proxy of that request.
+        Calling denotes the user wishes to set the grad of this proxy tensor and therefore we create a Proxy of that request via a SwapProtocol.
 
         Args:
             value (Union[InterventionProxy, Any]): Value to set output to.
@@ -98,14 +90,15 @@ class InterventionProxy(Proxy):
 
     def __call__(self, *args, **kwargs) -> Self:
 
-        # We don't want to call backward on fake tensors
+        # We don't want to call backward on fake tensors.
+        # We also want to track the number of times .backward() has been called so .grad on a Proxy refers to the right backward pass.
         if (
             self.node.target is util.fetch_attr
             and isinstance(self.node.args[1], str)
             and self.node.args[1] == "backward"
         ):
 
-            # Clear all .grad proxies
+            # Clear all .grad proxies so allow users to get the ,.grad of the next backward pass.
             for node in self.node.graph.nodes.values():
 
                 try:
@@ -117,6 +110,7 @@ class InterventionProxy(Proxy):
                 except ReferenceError:
                     pass
 
+            # Use GradProtocol to increment the tracking of the number of times .backward() has been called.
             protocols.GradProtocol.increment(self.node.graph)
 
             return self.node.create(
@@ -132,6 +126,7 @@ class InterventionProxy(Proxy):
         self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
     ) -> None:
 
+        # We catch setting .grad as that is a special Protocol vs. setting attributes generally.
         if key == "grad":
             getattr(self.__class__, key).fset(self, value)
 
@@ -195,41 +190,74 @@ class InterventionProxy(Proxy):
         return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
 
-@register_protocol
 class InterventionProtocol(Protocol):
+    """Primary Protocol that handles tracking and injecting inputs and outputs from a torch model into the overall intervention Graph.
+    Uses an attachment on the Graph to store the names of nodes that need to be injected with data from inputs or outputs of modules.
+    """
 
-    name = "intervention"
     attachment_name = "nnsight_module_nodes"
 
     @classmethod
     def add(
         cls,
         graph: "Graph",
-        name: str,
         proxy_value: Any,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
     ) -> Proxy:
+        """Adds an InterventionProtocol Node to a Graph.
 
+        Args:
+            graph (Graph): Graph to add to.
+            module_path (str): Module path of data this Node depends on (ex. model.module1.module2.output)
+            proxy_value (Any): Proxy value.
+            args (List[Any], optional): Args. Defaults to None.
+            kwargs (Dict[str, Any], optional): Kwargs. Defaults to None.
+
+        Returns:
+            Proxy: _description_
+        """
+
+        # Creates the InterventionProtocol Node.
         proxy = graph.create(
-            proxy_value=proxy_value, target=cls.name, args=args, kwargs=kwargs
+            proxy_value=proxy_value, target=cls, args=args, kwargs=kwargs
         )
 
-        if cls.attachment_name not in graph.attachments:
-
-            graph.attachments[cls.attachment_name] = dict()
-
-        arguments = graph.attachments[cls.attachment_name]
-
-        if name not in arguments:
-            arguments[name] = []
-
-        arguments[name].append(proxy.node.name)
+        cls.compile(proxy.node)
 
         return proxy
 
     @classmethod
+    def compile(cls, node: Node) -> None:
+
+        graph = node.graph
+
+        module_path, *_ = node.args
+
+        # Add attachment if it does not exist.
+        if cls.attachment_name not in graph.attachments:
+
+            graph.attachments[cls.attachment_name] = dict()
+
+        # More than one Node can depend on a given input or output, therefore we store a list of node names.
+        arguments = graph.attachments[cls.attachment_name]
+
+        if module_path not in arguments:
+            arguments[module_path] = []
+
+        # Append the newly created nodes name.
+        arguments[module_path].append(node.name)
+
+    @classmethod
     def get_interventions(cls, graph: "Graph") -> Dict:
+        """Returns mapping from module_paths to  InterventionNode names added to the given Graph.
+
+        Args:
+            graph (Graph): Graph.
+
+        Returns:
+            Dict: Interventions.
+        """
 
         return graph.attachments.get(cls.attachment_name, dict())
 
@@ -307,7 +335,7 @@ class InterventionProtocol(Protocol):
         """Entry to intervention graph. This should be hooked to all modules involved in the intervention graph.
 
         Forms the current module_path key in the form of <module path>.<output/input>
-        Checks the graphs argument_node_names attribute for this key.
+        Checks the graphs InterventionProtocol attachment attribute for this key.
         If exists, value is a list of node names to iterate through.
         Node args for argument type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
         Checks and updates the counter for the given argument node. If counter is not ready yet continue.

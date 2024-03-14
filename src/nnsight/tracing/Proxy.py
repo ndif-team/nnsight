@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class Proxy:
-    """Proxy objects are the actual objects that interact with operations in order to update the graph to create new nodes.
+    """Proxy objects are the actual objects that interact with operations in order to update the graph to create new Nodes.
 
     The operations that are traceable on base Proxy objects are many python built-in and magic methods, as well as implementing __torch_function__ to trace torch operations.
 
@@ -45,7 +45,7 @@ class Proxy:
         Returns:
             Any: The stored value of the proxy, populated during execution of the model.
         """
-        
+
         return self.node.value
 
     def __str__(self) -> str:
@@ -135,6 +135,9 @@ class Proxy:
             args=[self.node],
         )
 
+    def __index__(self) -> Self:
+        return self.node.create(target=operator.index, args=[self.node])
+
     def __add__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.create(
             target=operator.add,
@@ -219,9 +222,6 @@ class Proxy:
             args=[other, self.node],
         )
 
-    def __index__(self) -> Self:
-        return self.node.create(target=operator.index, args=[self.node])
-
     def __bool__(self) -> bool:
         return self.node.proxy_value.__bool__()
 
@@ -268,7 +268,6 @@ def proxy_wrapper(fn) -> None:
 
     @wraps(fn)
     def patched(*args, **kwargs):
-        arguments = list(args) + list(kwargs.values())
 
         node = None
 
@@ -277,7 +276,7 @@ def proxy_wrapper(fn) -> None:
 
             node = proxy.node
 
-        util.apply(list(args) + list(kwargs.values()), get_node, Proxy)
+        util.apply((args, kwargs), get_node, Proxy)
 
         if node is not None:
             return node.add(target=fn, args=args, kwargs=kwargs)

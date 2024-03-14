@@ -2,14 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Union
 
-from nnsight.pydantics.Request import RequestModel
-from nnsight.pydantics.Response import ResultModel
-
 from ...tracing import protocols
 from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
-from ..backends import AccumulatorBackend, Backend, LocalMixin, RemoteMixin
-from .Collector import Collection
+from ..backends import AccumulatorBackend, Backend, RemoteMixin
+from .Collection import Collection
 from .Iterator import Iterator
 
 if TYPE_CHECKING:
@@ -17,11 +14,20 @@ if TYPE_CHECKING:
 
 
 class Accumulator(Collection, RemoteMixin):
+    """An Accumulator is a root Collection that handles adding new Graphs and new Collections while accumulating.
 
-    def __init__(self, backend: Backend, model: "NNsight") -> None:
+    Attributes:
+        bridge (Bridge): Bridge object which stores all Graphs added during accumulation and handles interaction between them
+        graph (Graph): Root Graph where operations and values meant for access by all subsequent Graphs should be stored and referenced.
+        model (NNsight): NNsight model this Accumulator is accumulating for. 
+        backend (Backend): Backend for this Accumulator object.
+        collector_stack (List[Collection]): Stack of all Collections added during accumulation to keep track of which Collection to add a Tracer to when calling model.trace().
+    """
+
+    def __init__(self, backend: Backend, model: "NNsight", graph: Graph = None) -> None:
 
         self.bridge = Bridge()
-        self.graph = Graph(proxy_class=model.proxy_class)
+        self.graph = Graph(proxy_class=model.proxy_class, validate=False) if graph is None else graph
 
         protocols.BridgeProtocol.set_bridge(self.graph, self.bridge)
         
@@ -39,6 +45,8 @@ class Accumulator(Collection, RemoteMixin):
             raise exc_val
 
         self.backend(self)
+        
+        self.model._accumulator = None
 
     def iter(self, iterable) -> Iterator:
 
@@ -47,9 +55,16 @@ class Accumulator(Collection, RemoteMixin):
         return Iterator(iterable, backend, self)
 
     ### BACKENDS ########
+    
+    def remote_backend_create_request(self):
+        
+        from ...pydantics.Request import RequestModel
 
-    def remote_backend_create_request(self) -> RequestModel:
-        return super().remote_backend_create_request()
+
+        return RequestModel(
+            object=self,
+            repo_id=self.model._model_key
+        )
 
     def remote_backend_handle_result(self, result: ResultModel) -> None:
         return super().remote_backend_handle_result(result)

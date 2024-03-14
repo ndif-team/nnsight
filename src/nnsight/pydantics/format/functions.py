@@ -6,8 +6,8 @@ import torch
 
 from ... import util
 from ...tracing.Proxy import Proxy
-from ...tracing.protocols import PROTOCOLS
-
+from ...tracing import protocols
+from ...intervention import InterventionProtocol
 
 def get_function_name(fn, module_name=None):
     if isinstance(fn, str):
@@ -67,5 +67,7 @@ FUNCTIONS_WHITELIST.update(
         get_function_name(Proxy.proxy_call): Proxy.proxy_call,
     }
 )
+
 ### protocols
-FUNCTIONS_WHITELIST.update({protocol: protocol for protocol in PROTOCOLS.keys()})
+FUNCTIONS_WHITELIST.update({get_function_name(protocol): protocol for key, protocol in getmembers(protocols) if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)})
+FUNCTIONS_WHITELIST[get_function_name(InterventionProtocol)] = InterventionProtocol

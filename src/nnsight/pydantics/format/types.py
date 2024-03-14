@@ -10,11 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.functional_validators import AfterValidator
 from typing_extensions import Annotated
 
+from ...tracing import protocols
 from ...tracing.Graph import Graph
 from ...tracing.Node import Node
 from . import FUNCTIONS_WHITELIST, get_function_name
 
-FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, str]
+FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, type]
 PRIMITIVE = Union[int, float, str, bool, None]
 
 
@@ -35,18 +36,27 @@ class NodeModel(BaseModel):
     kwargs: Dict[str, ValueTypes]
 
     def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> Node:
+
         if self.name in graph.nodes:
             return graph.nodes[self.name]
 
-        return graph.add(
-            value=None,
+        node = graph.create(
+            proxy_value=None,
             target=self.target.compile(graph, nodes),
             args=[value.compile(graph, nodes) for value in self.args],
             kwargs={
                 key: value.compile(graph, nodes) for key, value in self.kwargs.items()
             },
             name=self.name,
-        )
+        ).node
+
+        if isinstance(node.target, type) and issubclass(
+            node.target, protocols.Protocol
+        ):
+
+            node.target.compile(node)
+
+        return node
 
 
 class PrimitiveModel(BaseModel):

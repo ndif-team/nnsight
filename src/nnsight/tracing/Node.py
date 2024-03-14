@@ -11,7 +11,6 @@ from torch._subclasses.fake_tensor import FakeTensor
 from .. import util
 from ..logger import logger
 from . import protocols
-from .protocols import PROTOCOLS
 from .Proxy import Proxy
 
 if TYPE_CHECKING:
@@ -23,9 +22,10 @@ class Node:
 
     Attributes:
         name (str): Unique name of node.
-        graph (Graph): Reference to parent Graph object.
-        proxy_value (Any): Meta version of value. Used when graph has validate = True.
-        target (Union[Callable, str]): Function to execute or reserved string name.
+        graph (Graph): Weak reference to parent Graph object.
+        proxy (Proxy): Weak reference to Proxy created from this Node.
+        proxy_value (Any): Fake Tensor version of value. Used when graph has validate = True to check of Node actions are possible.
+        target (Union[Callable, str]): Function to execute or name of Protocol.
         args (List[Any], optional): Positional arguments. Defaults to None.
         kwargs (Dict[str, Any], optional): Keyword arguments. Defaults to None.
         listeners (List[Node]): Nodes that depend on this node.
@@ -34,13 +34,14 @@ class Node:
     """
 
     @staticmethod
-    def prepare_proxy_values(values, device: torch.device = None):
+    def prepare_proxy_values(values: Any, device: torch.device = None):
         """Prepare arguments for validating a node's target.
-        Converts Proxies and Nodes to their proxy_value and moves tensors to 'meta' device.
+        Converts Proxies and Nodes to their proxy_value and moves tensors to given device.
 
         Args:
             values (Any): Values to prepare.
-            device (torch.device): Device to try and move all tensors to. If None, moves all tensors to device of first tensor.
+            device (torch.device): Device to try and move all tensors to. If None, moves all tensors to device of first tensor if its on 'meta'.
+
         Returns:
             values (Any): Prepared values.
         """
@@ -52,11 +53,11 @@ class Node:
                 Node.prepare_proxy_values(arg.step),
             )
 
-        # Convert proxies to their proxy_value
+        # Convert proxies to their proxy_value.
         values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
-        # Convert nodes to their proxy_value
+        # Convert nodes to their proxy_value.
         values = util.apply(values, lambda x: x.proxy_value, Node)
-        # Slices may have proxies as part of their attributes so convert those to their proxy_values
+        # Slices may have proxies as part of their attributes so convert those to their proxy_values.
         values = util.apply(values, slice_to_value, slice)
 
         if device is None:
@@ -101,6 +102,7 @@ class Node:
         if kwargs is None:
             kwargs = dict()
 
+        # Node.graph is a weak reference to avoid reference loops.
         graph = weakref.proxy(graph) if graph is not None else None
 
         self.graph: "Graph" = graph
@@ -118,15 +120,18 @@ class Node:
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
+        # Preprocess args.
         self.preprocess()
 
         self.name: str = name
 
+        # If theres an alive Graph, add it.
         if self.attached():
 
             self.graph.add(self)
 
     def preprocess(self) -> None:
+        """Preprocess Node.args and Node.kwargs."""
 
         max_rank = None
         max_graph = self.graph
@@ -181,7 +186,7 @@ class Node:
                 else:
                     # TODO error
                     pass
-                
+
             if not node.done():
 
                 self.dependencies.append(node)
@@ -199,6 +204,9 @@ class Node:
 
         Returns:
             Any: The stored value of the node, populated during execution of the model.
+
+        Raises:
+            ValueError: If the underlying ._value is inspect._empty (therefore never set or destroyed).
         """
 
         if not self.done():
@@ -207,7 +215,7 @@ class Node:
         return self._value
 
     def attached(self) -> bool:
-        """Checks to see if the weakref to the Graph is aliveor dead.
+        """Checks to see if the weakref to the Graph is alive or dead.
 
         Returns:
             bool: Is Node attached.
@@ -229,7 +237,7 @@ class Node:
         name: str = None,
     ) -> Union[Proxy, Any]:
         """We use Node.add vs Graph.add in case graph is dead.
-        If the graph is dead, we assume this node is ready to execute and therfore we try and execute it and then return its value.
+        If the graph is dead, we assume this node is ready to execute and therefore we try and execute it and then return its value.
 
         Returns:
             Union[Proxy, Any]: Proxy or value
@@ -237,6 +245,7 @@ class Node:
 
         if not self.attached():
 
+            # Create Node with no values or Graph.
             node = Node(
                 target=target,
                 graph=None,
@@ -244,20 +253,25 @@ class Node:
                 args=args,
                 kwargs=kwargs,
             )
-            
+
+            # Reset it.
             node.reset()
 
             # So it doesn't get destroyed.
             node.remaining_listeners = 1
-            
+
+            # Compile Node (execute if Node.Fulfilled())
             node.compile()
 
+            # Get value.
             value = node.value
 
+            # Destroy.
             node.destroy()
 
             return value
 
+        # Otherwise just create the Node on the Graph like normal.
         return self.graph.create(
             target=target,
             name=name,
@@ -273,10 +287,10 @@ class Node:
         self.remaining_dependencies = len(self.dependencies)
 
     def compile(self) -> None:
-        """If fulfilled, execute the node, otherwise set its value to empty."""
+        """If fulfilled and not done, execute the node."""
 
-        if self.fulfilled():
-            
+        if self.fulfilled() and not self.done():
+
             self.execute()
 
     def done(self) -> bool:
@@ -306,7 +320,6 @@ class Node:
     def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
         """Prepare arguments for executing this node's target.
         Converts Nodes in args and kwargs to their value and moves tensors to correct device.
-
 
         Returns:
             Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
@@ -338,14 +351,14 @@ class Node:
     def execute(self) -> None:
         """Actually executes this node.
         Lets protocol execute if target is str.
-        Else prepares args and kwargs and passed them to target.
+        Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
 
-        if isinstance(self.target, str):
+        if isinstance(self.target, type) and issubclass(
+            self.target, protocols.Protocol
+        ):
 
-            # TODO error if not in protocols?
-
-            PROTOCOLS[self.target].execute(self)
+            self.target.execute(self)
 
         else:
 
@@ -355,9 +368,10 @@ class Node:
             # Call the target to get value.
             output = self.target(*args, **kwargs)
 
+            # Set value.
             self.set_value(output)
 
-    def set_value(self, value: Any):
+    def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
         Updates remaining_dependencies of listeners. If they are now fulfilled, execute them.
         Updates remaining_listeners of dependencies. If they are now redundant, destroy them.
@@ -386,6 +400,7 @@ class Node:
 
     def destroy(self) -> None:
         """Removes the reference to the node's value and logs it's destruction."""
+
         logger.info(f"=> DEL({self.name})")
 
         self._value = inspect._empty

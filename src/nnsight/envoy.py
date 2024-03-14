@@ -338,7 +338,6 @@ class Envoy:
 
             self._output = InterventionProtocol.add(
                 self._tracer._graph,
-                module_path,
                 fake_output,
                 args=[
                     module_path,
@@ -392,7 +391,6 @@ class Envoy:
 
             self._input = InterventionProtocol.add(
                 self._tracer._graph,
-                module_path,
                 fake_input,
                 args=[
                     module_path,

@@ -28,12 +28,14 @@ class NNsight:
         proxy_class (Type[InterventionProxy]): InterventionProxy like type to use as a Proxy for this Model's inputs and outputs. Can have Model specific functionality added to a new sub-class.
 
     Attributes:
-        model_key (str): String representing what kind of model this is. Usually hugging face repo id of model to load, path to checkpoint, or class name of custom model.
-        args (List[Any]): Positional arguments used to initialize model.
-        kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
-        dispatched (bool): If the _model has been loaded yet with real parameters yet.
-        custom_model (bool): If the value passed to repoid_path_model was a custom model.
+        _model_key (str): String representing what kind of model this is. Usually hugging face repo id of model to load, path to checkpoint, or class name of custom model.
+        _args (List[Any]): Positional arguments used to initialize model.
+        _kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
+        _dispatched (bool): If the _model has been loaded yet with real parameters yet.
+        _custom_model (bool): If the value passed to repoid_path_model was a custom model.
         _model (torch.nn.Module): Underlying torch module.
+        _envoy (Envoy): Envoy for underlying model.
+        _accumulator (Accumulator): Accumulator object if accumulating.
     """
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
@@ -90,6 +92,7 @@ class NNsight:
         trace: bool = True,
         invoker_args: Dict[str, Any] = None,
         backend: Union[Backend, str] = None,
+        remote: bool = False,
         scan: bool = True,
         **kwargs: Dict[str, Any],
     ) -> Union[Tracer, Any]:
@@ -103,6 +106,8 @@ class NNsight:
             trace (bool, optional): If to open a tracing context. Otherwise immediately run the model and return the raw output. Defaults to True.
             invoker_args (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
             kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
+            backend (Backend): Backend for this Tracer object.
+            remote (bool): Use RemoteBackend with default url.
 
         Raises:
             ValueError: If trace is False and no inputs were provided (nothing to run with)
@@ -171,22 +176,26 @@ class NNsight:
 
                 print(output1)
                 print(output2)
-
-
-
-            For a proxy tensor with 3 tokens.
         """
-        
+
         # TODO raise error/warning if trying to use one backend with another condition satisfied?
 
+        # If accumulating, use AccumulatorBackend.
         if self._accumulator is not None:
 
             backend = AccumulatorBackend(self._accumulator)
 
+        # If remote, use RemoteBackend with default url.
+        elif remote:
+            
+            backend = RemoteBackend()
+
+        # By default, use LocalBackend.
         elif backend is None:
 
             backend = LocalBackend()
 
+        # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
 
             backend = RemoteBackend(backend)
@@ -222,9 +231,17 @@ class NNsight:
 
         return tracer
 
-    def accumulate(self) -> Accumulator:
+    def accumulate(self, backend: Union[Backend, str] = None) -> Accumulator:
         
-        backend = LocalBackend()
+        # By default, use LocalBackend.
+        if backend is None:
+
+            backend = LocalBackend()
+
+        # If backend is a string, assume RemoteBackend url.
+        elif isinstance(backend, str):
+
+            backend = RemoteBackend()
 
         self._accumulator = Accumulator(backend, self)
 

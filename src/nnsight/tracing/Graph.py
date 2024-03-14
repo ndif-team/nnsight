@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import weakref
 from typing import Any, Callable, Dict, List, Type, Union
 
 import torch
@@ -13,26 +12,17 @@ from .Proxy import Proxy
 
 
 class Graph:
-    """Represents a computation graph involving a torch.nn.module.
+    """Represents a computation graph composed of Nodes
 
-    Reserved target names:
-
-    * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
-    * 'swap' : swp nodes indicate populating the graph's swap attribute. When executed, its value is not set. Logic involving the swap value should set its value after using it.
-    * 'null' : Null nodes never get executed and therefore their listeners never get destroyed.
-    * 'grad' : grad nodes indicates adding a `.register_hook()` to a tensor proxy
 
     Attributes:
         validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
-        tracing (bool): If currently tracing operations
+        alive (bool): If this Graph should be considered alive, and therefore added to. Used by Nodes.
         nodes (Dict[str, Node]): Mapping of node name to node.
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
             Used so names are unique.
-        module_proxy (Proxy): Proxy for given root meta module.
-        argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
-        generation_idx (int): Current generation index.
-        swap (Node): Attribute to store swap values from 'swap' nodes.
+        attachments (Dict[str, Any]): Dictionary object used to add extra functionality to this Graph. Used by Protocols.
     """
 
     def __init__(
@@ -69,16 +59,27 @@ class Graph:
             node.compile()
 
     def create(self, *args, **kwargs) -> Proxy:
+        """Creates a Node directly on this Graph and returns its Proxy.
+
+        Returns:
+            Proxy: Proxy for newly created Node.
+        """
 
         return self.proxy_class(Node(*args, graph=self, **kwargs))
 
     def add(self, node: Node) -> None:
+        """Adds a Node to this Graph. Called by Nodes on __init__.
+
+        Args:
+            node (Node): Node to add.
+        """
 
         # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.
         if self.validate and node.proxy_value is inspect._empty:
             _args = node.args if node.args is not None else []
             _kwargs = node.kwargs if node.kwargs is not None else {}
 
+            # Enter FakeMode.
             with FakeTensorMode(
                 allow_non_fake_inputs=True,
                 shape_env=ShapeEnv(assume_static_by_default=True),
@@ -90,16 +91,21 @@ class Graph:
                         **Node.prepare_proxy_values(_kwargs),
                     )
 
+        # Get name of target.
         name = node.target if isinstance(node.target, str) else node.target.__name__
 
+        # Init name_idx tracker for this Node's name if not already added.
         if name not in self.name_idx:
             self.name_idx[name] = 0
 
+        # If Node's name is not set, set it to the name_idxed version.
         if node.name is None:
             node.name = f"{name}_{self.name_idx[name]}"
 
+        # Increment name_idx for name.
         self.name_idx[name] += 1
 
+        # Add Node.
         self.nodes[node.name] = node
 
     def vis(self, filename: str = "graph", format: str = "png"):

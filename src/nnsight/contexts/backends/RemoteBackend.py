@@ -64,7 +64,7 @@ def handle_response(handle_result: Callable, event: str, data: Any) -> bool:
     return False
 
 
-def blocking_request(request: pydantics.RequestModel, handle_result: Callable):
+def blocking_request(url: str, request: pydantics.Request.RequestModel, handle_result: Callable):
     # Create a socketio connection to the server.
     with socketio.SimpleClient(logger=logger, reconnection_attempts=10) as sio:
         # Connect
@@ -87,7 +87,7 @@ def blocking_request(request: pydantics.RequestModel, handle_result: Callable):
 
         if response.status_code == 200:
 
-            response = pydantics.ResponseModel(**response.json())
+            response = pydantics.Response.ResponseModel(**response.json())
 
         else:
 
@@ -123,5 +123,7 @@ class RemoteBackend(Backend):
     def __call__(self, obj: RemoteMixin):
 
         request = obj.remote_backend_create_request()
+        
+        breakpoint()
 
-        blocking_request(request, obj.remote_backend_handle_result)
+        blocking_request(self.url, request, obj.remote_backend_handle_result)

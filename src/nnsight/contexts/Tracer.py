@@ -4,7 +4,6 @@ import weakref
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
-from nnsight.pydantics import RequestModel
 
 from .. import pydantics
 from ..intervention import InterventionProxy
@@ -38,13 +37,14 @@ class Tracer(
         self,
         backend: Backend,
         model: "NNsight",
+        graph: Graph = None,
         validate: bool = False,
         **kwargs,
     ) -> None:
 
         self._model = model
 
-        self._graph = Graph(proxy_class=model.proxy_class, validate=validate)
+        self._graph = Graph(proxy_class=model.proxy_class, validate=validate) if graph is None else graph
 
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
 
@@ -133,13 +133,14 @@ class Tracer(
         self._graph.alive = False
         self._graph = None
 
-    def remote_backend_create_request(self) -> RequestModel:
+    def remote_backend_create_request(self):
+        
+        from ..pydantics.Request import RequestModel
 
-        return pydantics.RequestModel(
-            kwargs=self._kwargs,
-            repo_id=self._model._model_key,
-            batched_input=self._batched_input,
-            intervention_graph=self._graph.nodes,
+
+        return RequestModel(
+            object=self,
+            repo_id=self._model._model_key
         )
 
     def remote_backend_handle_result(self, result: pydantics.ResultModel) -> None:
