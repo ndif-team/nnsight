@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import warnings
 from typing import Any, Dict, Iterator, List, Optional, Union
 
@@ -327,7 +328,7 @@ class Envoy:
                 return self._output
 
             if len(self._fake_outputs) == 0:
-                fake_output = None
+                fake_output = inspect._empty
             elif self._call_iter >= len(self._fake_outputs):
                 # TODO warning?
                 fake_output = self._fake_outputs[-1]
@@ -380,7 +381,7 @@ class Envoy:
                 return self._input
 
             if len(self._fake_inputs) == 0:
-                fake_input = None
+                fake_input = inspect._empty
             elif self._call_iter >= len(self._fake_inputs):
                 # TODO warning?
                 fake_input = self._fake_inputs[-1]
