@@ -3,7 +3,7 @@ import torch
 
 import nnsight
 from nnsight.contexts.Tracer import Tracer
-from nnsight.pydantics import RequestModel
+from nnsight.pydantics.Request import RequestModel
 from nnsight.tracing.Graph import Graph
 
 
@@ -20,17 +20,16 @@ def MSG_prompt():
 
 
 def _test_serialize(tracer: Tracer):
-    #TODO
-    pass
-    # request = tracer.remote_backend_create_request()
-    # request_json = request.model_dump(
-    #     mode="json", exclude=["session_id", "received", "id"]
-    # )
 
-    # request2 = RequestModel(**request_json)
-    # request2.compile()
+    request = tracer.remote_backend_create_request()
+    request_json = request.model_dump(
+        mode="json", exclude=["session_id", "received", "id"]
+    )
 
-    # assert isinstance(request2.intervention_graph, Graph)
+    request2 = RequestModel(**request_json)
+    tracer = request2.compile(tracer._model)
+
+    assert isinstance(tracer._graph, Graph)
 
 
 @torch.no_grad()
@@ -217,44 +216,43 @@ def test_grad(gpt2: nnsight.LanguageModel):
 
 
 def test_other_device_tensors(gpt2: nnsight.LanguageModel):
-    
+
     device = next(gpt2.parameters())
-    
+
     lin = torch.nn.Linear(768, 768).to(device)
     bias = torch.randn(768).to(device)
 
     def fun(x):
         return torch.nn.ReLU()(lin(x) - bias)
 
-
     with gpt2.trace("fish") as tracer:
         x = gpt2.transformer.h[0].mlp.output
         y = fun(x)
         z = y.save()
-        
+
         # TODO
-        #_test_serialize(tracer)
-    
+        # _test_serialize(tracer)
 
     z.value
-    
+
+
 def test_multi_grad(gpt2: nnsight.LanguageModel):
     with gpt2.trace() as tracer:
         with tracer.invoke("Hello World") as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
-            
+
             hidden_states_grad1 = hidden_states.grad.save()
 
             logits = gpt2.lm_head.output
 
             logits.sum().backward(retain_graph=True)
-            
+
             hidden_states_grad2 = hidden_states.grad.save()
-            
+
             logits = logits * 2
-            
+
             logits.sum().backward()
 
         _test_serialize(tracer)
-        
+
     assert not torch.all(hidden_states_grad1.eq(hidden_states_grad2))
