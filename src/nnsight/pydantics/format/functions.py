@@ -1,13 +1,16 @@
 import operator
-from inspect import getmembers, isbuiltin, isfunction, ismethod, ismethoddescriptor
+from inspect import (getmembers, isbuiltin, isfunction, ismethod,
+                     ismethoddescriptor)
 
 import einops
 import torch
 
 from ... import util
-from ...tracing.Proxy import Proxy
-from ...tracing import protocols
+from ...contexts.accum.Iterator import IteratorItemProtocol
 from ...intervention import InterventionProtocol
+from ...tracing import protocols
+from ...tracing.Proxy import Proxy
+
 
 def get_function_name(fn, module_name=None):
     if isinstance(fn, str):
@@ -40,7 +43,9 @@ FUNCTIONS_WHITELIST.update(
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(value, module_name="Tensor"): value
-        for key, value in getmembers(torch.Tensor, lambda x : ismethoddescriptor(x) or isfunction(x))
+        for key, value in getmembers(
+            torch.Tensor, lambda x: ismethoddescriptor(x) or isfunction(x)
+        )
     }
 )
 ### operator functions
@@ -69,5 +74,12 @@ FUNCTIONS_WHITELIST.update(
 )
 
 ### protocols
-FUNCTIONS_WHITELIST.update({get_function_name(protocol): protocol for key, protocol in getmembers(protocols) if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)})
+FUNCTIONS_WHITELIST.update(
+    {
+        get_function_name(protocol): protocol
+        for key, protocol in getmembers(protocols)
+        if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
+    }
+)
 FUNCTIONS_WHITELIST[get_function_name(InterventionProtocol)] = InterventionProtocol
+FUNCTIONS_WHITELIST[get_function_name(IteratorItemProtocol)] = IteratorItemProtocol

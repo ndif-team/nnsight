@@ -7,9 +7,10 @@ from ...tracing.Graph import Graph
 from .Collection import Collection
 
 if TYPE_CHECKING:
+    from ...intervention import InterventionProxy
     from ...tracing.Node import Node
     from ...tracing.Proxy import Proxy
-    from ...intervention import InterventionProxy
+
 
 class SumProtocol(protocols.Protocol):
 
@@ -38,9 +39,9 @@ class SumProtocol(protocols.Protocol):
             node._value += value_node.value
 
         node.reset()
-        
+
         if protocols.BridgeProtocol.get_bridge(node.graph).release:
-            
+
             node.set_value(node._value)
 
 
@@ -51,6 +52,11 @@ class IteratorItemProtocol(protocols.Protocol):
     @classmethod
     def add(cls, graph: Graph, value: Any) -> "Proxy":
 
+        return graph.create(target=cls, proxy_value=value)
+
+    @classmethod
+    def idx(cls, graph: Graph) -> int:
+
         if not cls.attachment_name in graph.attachments:
 
             graph.attachments[cls.attachment_name] = 0
@@ -59,10 +65,7 @@ class IteratorItemProtocol(protocols.Protocol):
 
             graph.attachments[cls.attachment_name] += 1
 
-        return (
-            graph.create(target=cls, proxy_value=value),
-            graph.attachments[cls.attachment_name],
-        )
+        return graph.attachments[cls.attachment_name]
 
     @classmethod
     def set(cls, graph: Graph, value: Any, iter_idx: int) -> None:
@@ -77,13 +80,13 @@ class Iterator(Collection):
         super().__init__(*args, **kwargs)
 
         self.data = data
-        self.iter_idx = iter_idx
+        self.iter_idx = IteratorItemProtocol.idx(self.accumulator.graph)
 
     def __enter__(self) -> Tuple[int, Iterator]:
 
         super().__enter__()
 
-        iter_item_proxy, self.iter_idx = IteratorItemProtocol.add(
+        iter_item_proxy = IteratorItemProtocol.add(
             self.accumulator.graph, next(iter(self.data))
         )
 
@@ -100,7 +103,7 @@ class Iterator(Collection):
         last_idx = len(self.data) - 1
 
         for idx, item in enumerate(self.data):
-            
+
             last_iter = idx == last_idx
 
             if last_iter:

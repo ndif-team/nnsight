@@ -91,7 +91,7 @@ class IteratorModel(CollectionModel):
 
     def compile(self, model: NNsight, accumulator: Accumulator) -> Iterator:
 
-        data = [value.compile() for value in self.data]
+        data = [value.compile(None, None) for value in self.data]
 
         iterator = Iterator(data, None, accumulator=accumulator)
 

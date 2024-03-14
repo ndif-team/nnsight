@@ -20,15 +20,12 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorM
         self.accumulator = accumulator
 
         self.collection: List[Union[Collection, Tracer]] = []
-
-    def __enter__(self) -> Self:
-
+        
+        
         if len(self.accumulator.collector_stack) > 0:
             self.accumulator.collector_stack[-1].collection.append(self)
 
         self.accumulator.collector_stack.append(self)
-
-        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
