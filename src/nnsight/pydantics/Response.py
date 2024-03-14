@@ -3,15 +3,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Union, Optional
+from typing import Any, Dict, Union, Optional, List
 
 from pydantic import BaseModel
 
 
 class ResultModel(BaseModel):
     id: str
-    output: Any = None
-    saves: Dict[str, Any] = None
+    saves: List[Dict[str, Any]] = None
 
 
 class ResponseModel(BaseModel):
