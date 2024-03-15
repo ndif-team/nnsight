@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import operator
 import weakref
 from typing import TYPE_CHECKING, Any, Callable, Union
@@ -54,9 +55,7 @@ class Proxy:
 
             return str(self.value)
 
-        return (
-            f"{type(self).__name__} ({self.node.name}): {self.node.proxy_value or ''}"
-        )
+        return f"{type(self).__name__} ({self.node.name}): {self.node.proxy_value if self.node.proxy_value is not inspect._empty else ''}"
 
     def __repr__(self) -> str:
 

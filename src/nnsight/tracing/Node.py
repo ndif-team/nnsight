@@ -210,6 +210,7 @@ class Node:
         """
 
         if not self.done():
+            breakpoint()
             raise ValueError("Accessing value before it's been set.")
 
         return self._value

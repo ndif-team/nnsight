@@ -4,17 +4,19 @@ import weakref
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
-
-from .. import pydantics
+from .. import pydantics, util
 from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
+from ..tracing.Node import Node
 from .backends import (AccumulatorMixin, Backend, IteratorMixin, LocalMixin,
                        RemoteMixin)
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
+    from ..pydantics.Request import RequestModel
+    from ..pydantics.Response import ResultModel
     from .accum.Accumulator import Accumulator
 
 
@@ -44,7 +46,11 @@ class Tracer(
 
         self._model = model
 
-        self._graph = Graph(proxy_class=model.proxy_class, validate=validate) if graph is None else graph
+        self._graph = (
+            Graph(proxy_class=model.proxy_class, validate=validate)
+            if graph is None
+            else graph
+        )
 
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
 
@@ -123,25 +129,33 @@ class Tracer(
 
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model._model)
 
+        _batched_input = util.apply(self._batched_input, lambda x: x.value, Node)
+
         self._model.interleave(
             self._model._execute,
             self._graph,
-            *self._batched_input,
+            *_batched_input,
             **self._kwargs,
         )
 
         self._graph.alive = False
         self._graph = None
 
-    def remote_backend_create_request(self):
-        
+    def remote_backend_create_request(self) -> "RequestModel":
+
         from ..pydantics.Request import RequestModel
 
+        return RequestModel(object=self, repo_id=self._model._model_key)
 
-        return RequestModel(
-            object=self,
-            repo_id=self._model._model_key
-        )
+    def remote_backend_create_result(
+        self,
+    ) -> "ResultModel":
+
+        from ..pydantics.Response import ResultModel
+
+        saves = ResultModel.from_graph(self._graph)
+
+        return ResultModel(saves=[saves])
 
     def remote_backend_handle_result(self, result: pydantics.ResultModel) -> None:
 
@@ -152,7 +166,7 @@ class Tracer(
         self._graph.alive = False
         self._graph = None
 
-    def accumulator_backend_handle(self, accumulator: "Accumulator"):
+    def accumulator_backend_handle(self, accumulator: "Accumulator") -> None:
 
         accumulator.collector_stack[-1].collection.append(self)
 
@@ -160,7 +174,7 @@ class Tracer(
 
         accumulator.bridge.add(self._graph)
 
-    def iterator_backend_execute(self, last_iter: bool = False):
+    def iterator_backend_execute(self, last_iter: bool = False) -> None:
 
         graph = self._graph
 

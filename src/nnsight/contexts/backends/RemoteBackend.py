@@ -105,7 +105,11 @@ from . import Backend
 
 class RemoteMixin:
 
-    def remote_backend_create_request(self) -> pydantics.RequestModel:
+    def remote_backend_create_request(self) -> pydantics.Request.RequestModel:
+
+        raise NotImplementedError()
+    
+    def remote_backend_create_result(self,) -> pydantics.Response.ResultModel:
 
         raise NotImplementedError()
 

@@ -40,9 +40,10 @@ class Accumulator(Collection, RemoteMixin):
         self.collector_stack: List[Collection] = list()
 
         self.model = model
-        self.backend = backend
 
         Collection.__init__(self, AccumulatorBackend(self), self)
+        
+        self.backend = backend
         
         
     def __enter__(self) -> Accumulator:
@@ -54,7 +55,7 @@ class Accumulator(Collection, RemoteMixin):
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
-
+        
         self.backend(self)
 
         self.model._accumulator = None
