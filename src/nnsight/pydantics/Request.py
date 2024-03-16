@@ -9,21 +9,18 @@ from ..tracing.Graph import Graph
 from .format import types
 from .format.types import *
 
+
 class RequestModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    args: List
-    kwargs: Dict
+    kwargs: Dict[str, types.ValueTypes]
     repo_id: str
     batched_input: types.ValueTypes
     intervention_graph: Union[Dict[str, Union[types.NodeType, types.NodeModel]], Graph]
-    generation: bool
 
     id: str = None
     session_id: str = None
     received: datetime = None
-    blocking: bool = False
-    include_output: bool = False
 
     def compile(self) -> RequestModel:
         graph = Graph(None, validate=False)
@@ -35,7 +32,8 @@ class RequestModel(BaseModel):
 
         self.batched_input = self.batched_input.compile(None, None)
 
+        self.kwargs = {
+            key: value.compile(None, None) for key, value in self.kwargs.items()
+        }
+
         return self
-
-
-RequestModel.model_rebuild()

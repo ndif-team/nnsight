@@ -14,5 +14,5 @@ nnsight.models
    :members:
 
 
-.. automodule:: nnsight.models.DiffuserModel
+.. automodule:: nnsight.models.UnifiedTransformer
    :members:

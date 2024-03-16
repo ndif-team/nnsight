@@ -1,457 +1,379 @@
 from __future__ import annotations
 
-import copy
 import gc
-from typing import Any, Callable, Dict, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
-from torch.utils.hooks import RemovableHandle
 from transformers import AutoConfig, AutoModel
 
-from ..contexts.DirectInvoker import DirectInvoker
+from .. import util
 from ..contexts.Runner import Runner
-from ..editing.Editor import Edit, Editor
-from ..editing.GraphEdit import GraphEdit
-from ..editing.WrapperModuleEdit import WrapperModuleEdit
-from ..intervention import HookModel, intervene
+from ..envoy import Envoy
+from ..intervention import (HookHandler, InterventionHandler,
+                            InterventionProxy, intervene)
 from ..logger import logger
-from ..module import Module
-from ..patching import Patch, Patcher
 from ..tracing.Graph import Graph
 
 
-class NNsightModel:
-    """Class to be implemented for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
+class NNsight:
+    """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
+
+    Class Attributes:
+
+        proxy_class (Type[InterventionProxy]): InterventionProxy like type to use as a Proxy for this Model's inputs and outputs. Can have Model specific functionality added to a new sub-class.
 
     Attributes:
-        repoid_path_clsname (str): Hugging face repo id of model to load, path to checkpoint, or class name of custom model.
+        model_key (str): String representing what kind of model this is. Usually hugging face repo id of model to load, path to checkpoint, or class name of custom model.
         args (List[Any]): Positional arguments used to initialize model.
         kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
-        dispatched (bool): If the local_model has bee loaded yet.
-        dispatch (bool): If to load and dispatch model on init. Defaults to False.
+        dispatched (bool): If the _model has been loaded yet with real parameters yet.
         custom_model (bool): If the value passed to repoid_path_model was a custom model.
-        meta_model (nnsight.Module): Version of the root model where all parameters and tensors are on the 'meta'
-            device. All modules are wrapped in nnsight.Module adding interleaving operation functionality.
-        local_model (torch.nn.Module): Locally loaded and dispatched model. Only loaded and dispatched on first use.
-            This is the actual model that is ran with hooks added to it to enter the intervention graph.
+        _model (torch.nn.Module): Underlying torch module.
     """
+
+    proxy_class: Type[InterventionProxy] = InterventionProxy
 
     def __init__(
         self,
-        repoid_path_model: Union[str, torch.nn.Module],
+        model_key: Union[str, torch.nn.Module],
         *args,
         dispatch: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
 
-        self.repoid_path_clsname = repoid_path_model
-        self.args = args
-        self.kwargs = kwargs
-        self.dispatch = dispatch
-        self.dispatched = False
-        self.custom_model = False
-        self.meta_model: Module = None
-        self.local_model: torch.nn.Module = None
-        self.edits: List[Edit] = list()
+        self._model_key = model_key
 
-        # If using a custom passed in model.
-        if isinstance(repoid_path_model, torch.nn.Module):
-            self.repoid_path_clsname = repoid_path_model.__class__.__name__
-            self.custom_model = True
-            self.dispatched = True
-            self.local_model = repoid_path_model
+        self._args = args
+        self._kwargs = kwargs
 
-        logger.info(f"Initializing `{self.repoid_path_clsname}`...")
+        self._dispatched = False
+        self._custom_model = False
 
-        # Use accelerate and .to('meta') to assure tensors are loaded to 'meta' device
-        with accelerate.init_empty_weights(include_buffers=True):
-            if self.custom_model:
-                # Need to force parameters when deepcopied, to instead create a meta tensor of the same size/dtype
-                def meta_deepcopy(self: torch.nn.parameter.Parameter, memo):
-                    if id(self) in memo:
-                        return memo[id(self)]
-                    else:
-                        result = type(self)(
-                            torch.empty_like(
-                                self.data, dtype=self.data.dtype, device="meta"
-                            ),
-                            self.requires_grad,
-                        )
-                        memo[id(self)] = result
-                        return result
+        self._model: torch.nn.Module = None
 
-                # Patching Parameter __deepcopy__
-                with Patcher() as patcher:
-                    patcher.add(
-                        Patch(
-                            torch.nn.parameter.Parameter, meta_deepcopy, "__deepcopy__"
-                        )
-                    )
+        logger.info(f"Initializing `{self._model_key}`...")
 
-                    self.meta_model: Module = Module.wrap(
-                        copy.deepcopy(self.local_model).to("meta")
-                    )
-            else:
-                self.meta_model: Module = Module.wrap(
-                    self._load_meta(self.repoid_path_clsname, *args, **kwargs).to(
-                        "meta"
-                    )
-                )
+        # Handle passing in a pre-initialized model to wrap.
+        # Therefore the NNsight model is "pre-dispatched".
+        if isinstance(model_key, torch.nn.Module):
+            self._model_key = model_key.__class__.__name__
+            self._custom_model = True
+            self._dispatched = True
+            self._model = model_key
 
-        # Wrap all modules in our Module class.
-        for name, module in self.meta_model.named_children():
-            module = Module.wrap(module)
+        # Otherwise load from _load(...).
+        if not self._custom_model:
+            # accelerate.init_empty_weights makes all parameters loaded on the 'meta' device.
+            # Also do .to('meta') because why not.
+            with accelerate.init_empty_weights(include_buffers=True):
+                self._model = self._load(self._model_key, *args, **kwargs).to("meta")
 
-            setattr(self.meta_model, name, module)
+        if dispatch and not self._dispatched:
+            # Dispatch ._model on initialization vs lazy dispatching.
+            self.dispatch_model()
 
-        # Set module_path attribute so Modules know their place.
-        for name, module in self.meta_model.named_modules():
-            module.module_path = name
+        else:
+            self._envoy = Envoy(self._model)
 
-        # Run initial dummy string to populate Module shapes, dtypes etc
-        self._scan(self._prepare_inputs(self._example_input()))
+        logger.info(f"Initialized `{self._model_key}`")
 
-        if self.dispatch:
-            self.dispatch_local_model()
+    def trace(
+        self,
+        *inputs: Tuple[Any],
+        trace: bool = True,
+        invoker_args: Dict[str, Any] = None,
+        scan: bool = True,
+        **kwargs: Dict[str, Any],
+    ) -> Union[Runner, Any]:
+        """Entrypoint into the tracing and interleaving functionality nnsight provides.
 
-        logger.info(f"Initialized `{self.repoid_path_clsname}`")
-
-    def __repr__(self) -> str:
-        return repr(self.meta_model)
-
-    def __getattr__(self, key: Any) -> Any:
-        """Allows access of sub-modules on meta_model
+        In short, allows access to the future inputs and outputs of modules in order to trace what operations you would like to perform on them.
+        This can be as simple as accessing and saving activations for inspection, or as complicated as transforming the activations and gradients in a forward pass over multiple inputs.
 
         Args:
-            key (Any): Key.
+            inputs (Tuple[Any])
+            trace (bool, optional): If to open a tracing context. Otherwise immediately run the model and return the raw output. Defaults to True.
+            invoker_args (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
+            kwargs (Dict[str, Any]): Keyword arguments passed to Runner/Tracer initialization, and then downstream to the model's ._execute(...) method.
+
+        Raises:
+            ValueError: If trace is False and no inputs were provided (nothing to run with)
 
         Returns:
-            Any: Attribute.
-        """
-        return getattr(self.meta_model, key)
+            Union[Runner, Any]: Either the Runner used for tracing, or the raw output if trace is False.
 
-    def __call__(
+        Examples:
+
+            There are a few ways you can use ``.trace(...)`` depending in your use case.
+
+            Lets use this extremely basic model for our examples:
+
+            .. code-block:: python
+
+                import torch
+                from collections import OrderedDict
+
+                input_size = 5
+                hidden_dims = 10
+                output_size = 2
+
+                model = nn.Sequential(OrderedDict([
+                    ('layer1', torch.nn.Linear(input_size, hidden_dims)),
+                    ('sigma1', torch.nn.Sigmoid()),
+                    ('layer2', torch.nn.Linear(hidden_dims, output_size)),
+                    ('sigma2', torch.nn.Sigmoid()),
+                ]))
+
+                example_input = torch.rand((1, input_size))
+
+
+            The first example has us running the model with a single example input, and saving the input and output of 'layer2' as well as the final output using the tracing context.
+
+            .. code-block:: python
+
+                from nnsight import NNsight
+
+                with NNsight(model).trace(example_input) as model:
+
+                    l2_input = model.layer2.input.save()
+                    l2_output = model.layer2.output.save()
+
+                    output = model.output.save()
+
+                print(l2_input)
+                print(l2_output)
+                print(output)
+
+            The second example allows us to divide up multiple inputs into one batch, and scope an inner invoker context to each one.
+            We indicate this simply by not passing and positional inputs into `.trace(...)`. The Tracer object then expects you to enter each input via `Tracer.invoke(...)`
+
+            .. code-block:: python
+
+                example_input2 = torch.rand((1, input_size))
+
+                with NNsight(model).trace() as model:
+
+                    with model.invoke(example_input):
+
+                        output1 = model.output.save()
+
+                    with model.invoke(example_input2):
+
+                        output2 = model.output.save()
+
+                print(output1)
+                print(output2)
+
+
+
+            For a proxy tensor with 3 tokens.
+        """
+
+        # Create Runner/Tracer object.
+        runner = Runner(self, **kwargs)
+
+        # If user provided input directly to .trace(...).
+        if len(inputs) > 0:
+
+            invoker_args = invoker_args or {}
+
+            invoker_args["scan"] = scan
+
+            # If trace is False, we'll enter the Tracer context immediately and enter an Invoker context with the provided inputs as well.
+            # We'll also save the output of the model and return its value directly.
+            if not trace:
+
+                with runner:
+                    with runner.invoke(*inputs, **invoker_args):
+
+                        output = self._envoy.output.save()
+
+                return output.value
+
+            # Otherwise open an invoker context with the give args.
+            runner.invoke(*inputs, **invoker_args).__enter__()
+
+        # If trace is False, you had to have provided an input.
+        if not trace:
+
+            raise ValueError("Can't execute on no inputs!")
+
+        return runner
+
+    def interleave(
         self,
         fn: Callable,
-        inputs: Any,
-        graph: Graph,
-        *args,
-        edits: List[Edit] = None,
-        inference: bool = True,
+        intervention_graph: Graph,
+        *inputs: List[Any],
         **kwargs,
     ) -> Any:
         """Runs some function with some inputs and some graph with the appropriate contexts for this model.
 
-        Loads and dispatched local_model if not already done so.
+        Loads and dispatched ._model if not already done so.
+
+        Re-compiles Graph with ._model to prepare for a new execution of graph.
+
+        Runs ._prepare_inputs(...) one last time to get total_batch_size.
+
+        Handles adding and removing hooks on modules via HookHandler and tracking number of times a module has been called via InterventionHandler.
+
+        After execution, garbage collects and clears cuda memory.
 
         Args:
-            fn (Callable): Function to run.
-            inputs (Any): Inputs to give to function.
-            graph (Graph): Intervention graph to interleave with model's computation graph.
-            inference (bool): If running in inference mode. Defaults to True.
+            fn (Callable): Function or method to run.
+            intervention_graph (Graph): Intervention graph to interleave with model's computation graph.
+            inputs (List[Any]): Inputs to give to function.
 
         Returns:
             Any: Output of model.
         """
-        if edits is None:
-            edits = self.edits
 
-        # If local_model not yet loaded, do so.
-        if not self.dispatched:
-            self.dispatch_local_model()
+        # Loads and dispatched ._model if not already done so.
+        if not self._dispatched:
+            self.dispatch_model()
 
-        with Editor(self, edits):
-            increment_hook = self._register_increment_hook(
-                lambda module, input, output: graph.increment()
-            )
+        logger.info(f"Running `{self._model_key}`...")
 
-            logger.info(f"Running `{self.repoid_path_clsname}`...")
+        intervention_graph.compile(self._model)
 
-            # Send local_model to graph to re-compile
-            graph.compile(self.local_model)
+        inputs, total_batch_size = self._prepare_inputs(*inputs)
 
-            inputs = self._prepare_inputs(inputs)
+        intervention_handler = InterventionHandler(intervention_graph, total_batch_size)
 
-            with torch.inference_mode(mode=inference):
-                with HookModel(
-                    self.local_model,
-                    list(graph.argument_node_names.keys()),
-                    input_hook=lambda activations, module_path: intervene(
-                        activations, module_path, graph, "input"
-                    ),
-                    output_hook=lambda activations, module_path: intervene(
-                        activations, module_path, graph, "output"
-                    ),
-                    backward_input_hook=lambda activations, module_path: intervene(
-                        activations, module_path, graph, "backward_input"
-                    ),
-                    backward_output_hook=lambda activations, module_path: intervene(
-                        activations, module_path, graph, "backward_output"
-                    ),
-                ):
-                    output = fn(inputs, *args, **kwargs)
+        with HookHandler(
+            self._model,
+            list(intervention_graph.argument_node_names.keys()),
+            input_hook=lambda activations, module_path: intervene(
+                activations, module_path, "input", intervention_handler
+            ),
+            output_hook=lambda activations, module_path: intervene(
+                activations, module_path, "output", intervention_handler
+            ),
+        ):
+            output = fn(*inputs, **kwargs)
 
-            increment_hook.remove()
+        logger.info(f"Completed `{self._model_key}`")
 
-            logger.info(f"Completed `{self.repoid_path_clsname}`")
-
-            gc.collect()
-            torch.cuda.empty_cache()
+        # gc.collect()
+        # torch.cuda.empty_cache()
 
         return output
 
-    def dispatch_local_model(self, *args, **kwargs) -> None:
-        logger.info(f"Dispatching `{self.repoid_path_clsname}`...")
+    def dispatch_model(self, *args, **kwargs) -> None:
+        """Dispatch ._model to have real parameters  using .load(...)."""
 
-        self.local_model = self._load_local(
-            self.repoid_path_clsname, *self.args, *args, **kwargs, **self.kwargs
+        logger.info(f"Dispatching `{self._model_key}`...")
+
+        self._model = self._load(
+            self._model_key, *self._args, *args, **kwargs, **self._kwargs
         )
 
-        self.dispatched = True
+        self._envoy = Envoy(self._model)
 
-        logger.info(f"Dispatched `{self.repoid_path_clsname}`")
+        self._dispatched = True
 
-    def generate(self, *args, **kwargs) -> Runner:
-        """Returns a Runner context for this model's _generation method.
+        logger.info(f"Dispatched `{self._model_key}`")
 
-        Runner contexts are used to trace and interleave operations on the model's computation graph.
-
-        Arguments passed to ``.generate()`` are passed downstream to the model specific _generation method.
-
-        Runners are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
-
-        The output of the run is ultimately saved in the generator's ``.output`` attribute.
+    def __repr__(self) -> str:
+        """Wrapper of ._model's representation as the NNsight model's representation.
 
         Returns:
-            Runner: Runner.
-
-        Examples:
-
-            A simple entering of a generation context on a language model, and running a prompt with no interventions:
-
-            .. code-block:: python
-
-                with model.generate(max_new_tokens=1) as generator:
-                    with generator.invoke('The Eiffel Tower is in the city of') as invoker:
-                        pass
-
-                print(generator.output)
-
-            Keyword arguments like 'max_new_tokens' are model specific and in this case limits the amount of tokens to predict to one.
-
-            See the Runner docs for more information.
-
+            str: Representation.
         """
-        return Runner(self, *args, **kwargs, generation=True)
+        return repr(self._model)
 
-    def forward(self, *args, **kwargs) -> Runner:
-        """Returns a Runner context for this model's _forward method.
-
-        Runner contexts are used to trace and interleave operations on the model's computation graph.
-
-        Arguments passed to ``.forward()`` are passed downstream to the model specific _forward method.
-
-        Runners are used in tandem with their Invoker contexts to enter inputs for operation tracing and execution.
-
-        The output of the run is ultimately saved in the runner's ``.output`` attribute.
+    def __getattr__(self, key: Any) -> Union[Envoy, InterventionProxy, Any]:
+        """Wrapper of ._envoy's attributes to access module's inputs and outputs.
 
         Returns:
-            Runner: Runner.
-
-        Examples:
-
-            A simple entering of a forward context on a language model, and running a prompt with no interventions:
-
-            .. code-block:: python
-
-                with model.forward() as runner:
-                    with runner.invoke('The Eiffel Tower is in the city of') as invoker:
-                        pass
-
-                print(runner.output)
-
-            See the Runner docs for more information.
-
+            Any: Attribute.
         """
-        return Runner(self, *args, **kwargs, generation=False)
+        return getattr(self._envoy, key)
 
-    def invoke(self, *args, **kwargs):
-        """Returns a Runner context for this model's _forward method. Also acts as an invocation for the runner allowing you to create a Runner anf Invocation context in one go.
-        Gives option to create Runner context and call an invoke on it in one call. Adds an extra 'fwd_args' kwarg to allow the args normally passed to ``.forward()``
-        Returns:
-            Runner: Runner.
+    ### NNsight VIRTUAL METHODS BELOW #####################################
 
-        Examples:
+    def _load(self, repo_id: str, *args, **kwargs) -> torch.nn.Module:
+        """Virtual method to load the model from scratch.
 
-            A simple entering of a forward context on a language model, and running a prompt with no interventions:
-
-            .. code-block:: python
-
-                with model.invoke('The Eiffel Tower is in the city of', fwd_args={}) as invoker:
-                    pass
-
-                print(runner.output)
-
-            See the Runner docs for more information.
-
-        """
-        return DirectInvoker(self, *args, **kwargs)
-
-    def modulize(self, module: Module, node_name: str, module_name: str) -> None:
-        """_summary_
+        Default implementation loads a model from AutoModel.from_config if not dispatched, else uses accelerate.load_checkpoint_and_dispatch.
 
         Args:
-            module (Module): _description_
-            node_name (str): _description_
-            module_name (str): _description_
-        """
-
-        # Create a WrapperModuleEdit which just adds a WrapperModule to an existing module at the given module_name.
-        wme = WrapperModuleEdit(module.module_path, module_name)
-        # Wrap with our Module and update new attributes.
-        wme.wrapper: Module = Module.wrap(wme.wrapper)
-        wme.wrapper.module_path = f"{module.module_path}.{module_name}"
-        wme.wrapper.tracer = module.tracer
-        wme.wrapper.output_shape = module.output_shape
-        # Carry out the edit on the meta_model.
-        wme.edit(self.meta_model)
-
-        # Get/create the execution graph for the module's forward method.
-        graph = module.graph
-
-        # Add two proxies/nodes, one to get the new WrapperModule we added and another to call it with the data from the original module.
-        # Passing the data through the wrapper module allows hooking of the module's output like usual.
-        module_proxy = getattr(graph.module_proxy, module_name)
-        module_proxy(graph.nodes[node_name])
-
-        # Create and carry out the edit on the meta_model.
-        ge = GraphEdit(module.module_path, module.graph)
-        ge.edit(self.meta_model)
-
-        # Append to self.edits so when we call the local model, we temporarily edit the module in the same way as the meta model.
-        self.edits.append(wme)
-        self.edits.append(ge)
-
-    def _prepare_inputs(self, inputs: Any, **kwargs) -> Any:
-        """Abstract method which prepares inputs. To be implemented by inheritors.
-
-        Args:
-            inputs (Any): Inputs.
+            model_key (str): String value used to load model. Usually huggingface repo_id or checkpoint path.
 
         Returns:
-            Any: Prepared inputs.
+            torch.nn.Module: Model.
         """
-        return inputs
 
-    def _load_meta(self, repoid_or_path: str, *args, **kwargs) -> torch.nn.Module:
-        """
-        Abstract method to initialize meta_model. To be implemented by inheritors.
+        if self._model is None:
+
+            config = AutoConfig.from_pretrained(repo_id, *args, **kwargs)
+
+            return AutoModel.from_config(config, trust_remote_code=True)
+
+        return accelerate.load_checkpoint_and_dispatch(self._model, repo_id, **kwargs)
+
+    def _execute(self, *prepared_inputs: Tuple[Any], **kwargs) -> Any:
+        """Virtual method to run the underlying ._model with some inputs.
+
+        Default implementation util.applies moving all tensors to the device of the first parameter in ._model and passes the values into the model.
 
         Args:
-            repoid_or_path (str): Huggingface repo id or path to checkpoint.
-
-        Returns:
-            torch.nn.Module: Meta version of model
+            prepared_inputs (Tuple[Any]): Prepared inputs.
         """
-        self.config = AutoConfig.from_pretrained(repoid_or_path, *args, **kwargs)
+        device = next(self._model.parameters()).device
 
-        return AutoModel.from_config(self.config, trust_remote_code=True)
-
-    def _load_local(self, repoid_or_path, *args, **kwargs) -> torch.nn.Module:
-        """
-        Abstract method to initialize and dispatch the local_model. To be implemented by inheritors.
-
-        Args:
-            repoid_or_path (str): Huggingface repo id or path to checkpoint.
-
-        Returns:
-            torch.nn.Module: Local version of model
-        """
-        return AutoModel.from_pretrained(
-            repoid_or_path, *args, config=self.config, **kwargs
+        prepared_inputs = util.apply(
+            prepared_inputs, lambda x: x.to(device), torch.Tensor
         )
 
-    def _scan(self, prepared_inputs, *args, **kwargs) -> None:
-        """
-        Abstract method to directly call the meta_model and therefore populate the input/output shapes etc. To be implemented by inheritors.
-
-        Used for tracing operations and their input/output shapes/dtypes.
-
-        Args:
-            prepared_inputs (Any): Prepared inputs.
-        """
-        with accelerate.init_empty_weights(include_buffers=True):
-            return self.meta_model(**prepared_inputs.copy().to("meta"))
-
-    def _forward(self, prepared_inputs, *args, **kwargs) -> Any:
-        """
-        Abstract method to directly call the local_model. To be implemented by inheritors.
-
-        Args:
-            prepared_inputs (Any): Prepared inputs.
-
-        Returns:
-            Any: Output.
-        """
-        return self.local_model(
-            *args, **prepared_inputs.to(self.local_model.device), **kwargs
-        )
-
-    def _generation(self, prepared_inputs, *args, **kwargs) -> Any:
-        """
-        Abstract method to do iterative generation on the local_model. To be implemented by inheritors.
-
-        Args:
-            prepared_inputs (Any): Prepared inputs.
-
-        Returns:
-            Any: Output.
-        """
-        return self.local_model.generate(
-            *args,
-            **prepared_inputs.to(self.local_model.device),
+        return self._model(
+            *prepared_inputs,
             **kwargs,
         )
 
-    def _register_increment_hook(self, hook: Callable) -> RemovableHandle:
-        """Abstract method to hook a function on the local_model on the main module that is incremented during generation.
+    def _prepare_inputs(self, *inputs: Tuple[Any], **kwargs) -> Tuple[Tuple[Any], int]:
+        """Virtual method to prepare inputs before batching and execution and return batch size of prepared_inputs.
+
+        Default implementation just returns inputs and length of first input.
 
         Args:
-            hook (Callable): Increment hook. Probably from the Generator context.
+            inputs (Tuple[Any]): Inputs to prepare for batching and execution.
+            int: Batch size of prepared_inputs.
 
         Returns:
-            RemovableHandle: Handle to remove the applied hook after generation is done.
+            Tuple[Tuple[Any], int]: Prepared inputs, batch size of inputs.
         """
-        return self.local_model.register_forward_hook(hook)
-
-    def _example_input(self) -> Any:
-        """Abstract to provide an example input to be used with ``._scan(...)``
-
-        Returns:
-            Any: Example input.
-        """
-        return torch.tensor([0])
+        return inputs, len(inputs[0])
 
     def _batch_inputs(
-        self, prepared_inputs: Any, batched_inputs: Any
-    ) -> Tuple[Any, int]:
-        """Abstract to return a batched version of the prepared inputs from ``._prepare_inputs(...)`` that can be batched with others as well as the size of the batch being added.
-        Should batch prepared_inputs with batched_inputs and return it with the current batch_size.
+        self,
+        batched_inputs: Optional[Any],
+        *prepared_inputs: Tuple[Any],
+    ) -> Any:
+        """Virtual method to batch together results from _prepare_inputs.
+
+        Default implementation returns list of all prepared_inputs.
 
         Args:
-            prepared_inputs (Any): Inputs from ``._prepare_inputs(...)``
-            batched_inputs (Any): Current state of batched_inputs
+            batched_inputs (Any): Current state of batched_inputs. Initially None.
+            prepared_inputs (Tuple[Any]): Most recent result from _prepare_inputs.
 
         Returns:
-            Any: prepared_inputs batched with batched_inputs.
-            int: Batch size of prepared_inputs.
+            Any: Batched inputs.
         """
+
         if batched_inputs is None:
             batched_inputs = prepared_inputs
 
         else:
-            batched_inputs = torch.concatenate([batched_inputs, prepared_inputs])
 
-        return batched_inputs, len(prepared_inputs)
+            batched_inputs = tuple(
+                [
+                    torch.concatenate((batched_inputs[i], prepared_inputs[i]))
+                    for i in range(len(batched_inputs))
+                ]
+            )
+
+        return batched_inputs

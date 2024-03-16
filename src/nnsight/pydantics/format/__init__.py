@@ -1,1 +1,1 @@
-from .functions import FUNCTIONS_WHITELIST
+from .functions import FUNCTIONS_WHITELIST, get_function_name

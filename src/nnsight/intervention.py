@@ -1,19 +1,21 @@
 """This module contains logic to interleave a computation graph (an intervention graph) with the computation graph of a model.
 
-The :class:`InterventionProxy <nnsight.intervention.InterventionProxy>` class extends the functionality of a base nnsight.fx.Proxy.Proxy object and makes it easier for users to interact with.
+The :class:`InterventionProxy <nnsight.intervention.InterventionProxy>` class extends the functionality of a base nnsight.tracing.Proxy.Proxy object and makes it easier for users to interact with.
 
 :func:`intervene() <nnsight.intervention.intervene>` is the entry hook into the models computation graph in order to interleave an intervention graph.
 
 The :class:`HookModel <nnsight.intervention.HookModel>` provides a context manager for adding input and output hooks to modules and removing them upon context exit.
 """
+
 from __future__ import annotations
 
 import inspect
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, List, Tuple, Union
+from typing import Any, Callable, Collection, Dict, List, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
+from typing_extensions import Self
 
 from . import util
 from .tracing.Graph import Graph
@@ -22,7 +24,6 @@ from .tracing.Proxy import Proxy
 
 
 class InterventionProxy(Proxy):
-
     """Sub-class for Proxy that adds additional user functionality to proxies.
 
     Examples:
@@ -41,18 +42,6 @@ class InterventionProxy(Proxy):
         This works and would output the inputs and outputs to the model.lm_head module.
         Had you not called .save(), calling .value would have been None.
 
-        Indexing by token of hidden states can easily done using ``.token[<idx>]`` or ``.t[<idx>]``
-
-        .. code-block:: python
-
-            with runner.invoke('The Eiffel Tower is in the city of') as invoker:
-                logits = model.lm_head.output.t[0].save()
-
-            print(logits.value)
-
-        This would save only the first token of the output for this module.
-        This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
-
         Calling ``.shape`` on an InterventionProxy returns the shape or collection of shapes for the tensors traced through this module.
 
         Calling ``.value`` on an InterventionProxy returns the actual populated values, updated during actual execution of the model.
@@ -62,7 +51,9 @@ class InterventionProxy(Proxy):
     def __init__(self, node: Node) -> None:
         super().__init__(node)
 
-        self._grad: InterventionProxy = None
+        self.__dict__["_grad"] = None
+
+        self._grad: InterventionProxy
 
     def save(self) -> InterventionProxy:
         """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
@@ -74,7 +65,7 @@ class InterventionProxy(Proxy):
         # Add a 'null' node with the save proxy as an argument to ensure the values are never deleted.
         # This is because 'null' nodes never actually get set and therefore there will always be a
         # dependency for the save proxy.
-        self.node.graph.add(
+        self.node.add(
             value=None,
             target="null",
             args=[self.node],
@@ -92,8 +83,16 @@ class InterventionProxy(Proxy):
             Proxy: Grad proxy.
         """
         if self._grad is None:
-            self._grad = self.node.graph.add(
-                value=self.node.proxy_value, target="grad", args=[self.node]
+
+            # We track how many times backward is called via an attribute on the Graph
+            if not hasattr(self.node.graph, "n_backward_calls"):
+
+                setattr(self.node.graph, "n_backward_calls", 0)
+
+            self.__dict__["_grad"] = self.node.add(
+                value=self.node.proxy_value,
+                target="grad",
+                args=[self.node, self.node.graph.n_backward_calls],
             )
 
         return self._grad
@@ -106,68 +105,125 @@ class InterventionProxy(Proxy):
         Args:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
+        self.node.add(target="swap", args=[self.grad.node, value], value=True)
 
-        self.node.graph.add(target="swp", args=[self.grad.node, value], value=True)
+    def __call__(self, *args, **kwargs) -> Self:
 
-        self._grad = None
+        # We don't want to call backward on fake tensors
+        if (
+            self.node.target is util.fetch_attr
+            and isinstance(self.node.args[1], str)
+            and self.node.args[1] == "backward"
+        ):
+            # We track how many times backward is called via an attribute on the Graph
+            if not hasattr(self.node.graph, "n_backward_calls"):
+
+                setattr(self.node.graph, "n_backward_calls", 0)
+
+            # Clear all .grad proxies
+            for node in self.node.graph.nodes.values():
+
+                try:
+
+                    if node.proxy._grad is not None:
+
+                        node.proxy.__dict__["_grad"] = None
+
+                except ReferenceError:
+                    pass
+
+            self.node.graph.n_backward_calls += 1
+
+            return self.node.add(
+                value=None,
+                target=Proxy.proxy_call,
+                args=[self.node] + list(args),
+                kwargs=kwargs,
+            )
+
+        return super().__call__(*args, **kwargs)
+
+    def __setattr__(
+        self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
+    ) -> None:
+
+        if key == "grad":
+            getattr(self.__class__, key).fset(self, value)
+
+        return super().__setattr__(key, value)
 
     @property
-    def token(self) -> TokenIndexer:
-        """Property used to do token based indexing on a proxy.
-        Directly indexes the second dimension of tensors.
-        Makes positive indices negative as tokens are padded on the left.
-
-        Example:
-
-            .. code-block:: python
-
-                model.transformer.h[0].mlp.output.token[0]
-
-            Is equivalent to:
-
-            .. code-block:: python
-
-                model.transformer.h[0].mlp.output.token[:,-3]
-
-            For a proxy tensor with 3 tokens.
-
-        Returns:
-            TokenIndexer: Object to do token based indexing.
-        """
-        return TokenIndexer(self)
-
-    @property
-    def t(self) -> TokenIndexer:
-        """Property as alias for InterventionProxy.token"""
-        return self.token
-
-    @property
-    def shape(self) -> Union[torch.Size, Collection[torch.Size]]:
-        """Property to retrieve the shape of the traced proxy value.
+    def shape(self) -> Collection[torch.Size]:
+        """Property to retrieve the shape of the traced proxy value or real value.
 
         Returns:
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
+        
+        if not self.node.is_tracing():
+
+            return util.apply(self.value, lambda x: x.shape, torch.Tensor)
+        
+        # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
+        if self.node.proxy_value is inspect._empty:
+                        
+            return super().__getattr__('shape')
+
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
     @property
-    def value(self) -> Any:
-        """Property to return the value of this proxy's node.
+    def device(self) -> Collection[torch.device]:
+        """Property to retrieve the device of the traced proxy value or real value.
 
         Returns:
-            Any: The stored value of the proxy, populated during execution of the model.
+            Union[torch.Size,Collection[torch.device]]: Proxy value device or collection of devices.
         """
 
-        if not self.node.done():
-            raise ValueError("Accessing Proxy value before it's been set.")
+        if not self.node.is_tracing():
 
-        return self.node.value
+            return util.apply(self.value, lambda x: x.device, torch.Tensor)
+        
+        # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
+        if self.node.proxy_value is inspect._empty:
+            
+            return super().__getattr__('device')
+
+        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
+
+    @property
+    def dtype(self) -> Collection[torch.device]:
+        """Property to retrieve the dtype of the traced proxy value or real value.
+
+        Returns:
+            Union[torch.Size,Collection[torch.dtype]]: Proxy value dtype or collection of dtypes.
+        """
+
+        if not self.node.is_tracing():
+
+            return util.apply(self.value, lambda x: x.dtype, torch.Tensor)
+        
+        # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
+        if self.node.proxy_value is inspect._empty:
+            
+            return super().__getattr__('dtype')
+
+        return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
 
-def concat(activations: Any, value: Any, batch_start: int, batch_size: int):
+def concat(
+    activations: Any,
+    value: Any,
+    batch_start: int,
+    batch_size: int,
+    total_batch_size: int,
+):
     def _concat(values):
         if isinstance(values[0], torch.Tensor):
-            return torch.concatenate(values)
+            orig_size = values[-1]
+            new_size = sum([value.shape[0] for value in values[:-1]])
+            if new_size == orig_size:
+                return torch.concatenate(values[:-1])
+            return values[0]
         elif isinstance(values[0], list):
             return [
                 _concat([value[value_idx] for value in values])
@@ -187,29 +243,46 @@ def concat(activations: Any, value: Any, batch_start: int, batch_size: int):
             }
         return values[0]
 
-    # As interventions are scoped only to their relevant batch, if we want to swap in values for this batch
-    # we need to concatenate the batches before and after the relevant batch with the new values.
-    # Getting batch data before.
-    pre = util.apply(activations, lambda x: x.narrow(0, 0, batch_start), torch.Tensor)
+    def narrow1(acts: torch.Tensor):
+        if total_batch_size == acts.shape[0]:
+            return acts.narrow(0, 0, batch_start)
+
+        return acts
+
+    pre = util.apply(activations, narrow1, torch.Tensor)
+
     post_batch_start = batch_start + batch_size
-    # Getting batch data after.
+
+    def narrow2(acts: torch.Tensor):
+        if total_batch_size == acts.shape[0]:
+            return acts.narrow(0, post_batch_start, acts.shape[0] - post_batch_start)
+
+        return acts
+
     post = util.apply(
         activations,
-        lambda x: x.narrow(0, post_batch_start, x.shape[0] - post_batch_start),
+        narrow2,
         torch.Tensor,
     )
 
-    # Concatenate
-    return _concat([pre, value, post])
+    orig_sizes = util.apply(activations, lambda x: x.shape[0], torch.Tensor)
+
+    return _concat([pre, value, post, orig_sizes])
 
 
-def intervene(activations: Any, module_path: str, graph: Graph, key: str):
+def intervene(
+    activations: Any,
+    module_path: str,
+    key: str,
+    intervention_handler: InterventionHandler,
+):
     """Entry to intervention graph. This should be hooked to all modules involved in the intervention graph.
 
-    Forms the current module_path key in the form of <module path>.<output/input>.<graph generation index>
+    Forms the current module_path key in the form of <module path>.<output/input>
     Checks the graphs argument_node_names attribute for this key.
     If exists, value is a list of node names to iterate through.
-    Node args for argument type nodes should be ``[module_path, batch_size, batch_start]``.
+    Node args for argument type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
+    Checks and updates the counter for the given argument node. If counter is not ready yet continue.
     Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
     only batch indexed tensors relevant to this intervention node. Sets the value of a node
     using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
@@ -220,46 +293,86 @@ def intervene(activations: Any, module_path: str, graph: Graph, key: str):
     Args:
         activations (Any): Either the inputs or outputs of a torch module.
         module_path (str): Module path of the current relevant module relative to the root model.
-        graph (Graph): Intervention graph to interleave with the computation "graph" of the model.
         key (str): Key denoting either "input" or "output" of module.
+        intervention_handler (InterventionHandler): Handler object that stores the intervention graph and keeps track of module call count.
 
     Returns:
         Any: The activations, potentially modified by the intervention graph.
     """
 
-    # Key to module activation argument nodes has format: <module path>.<output/input>.<generation index>
-    module_path = f"{module_path}.{key}.{graph.generation_idx}"
+    # Key to module activation argument nodes has format: <module path>.<output/input>
+    module_path = f"{module_path}.{key}"
 
-    if module_path in graph.argument_node_names:
-        argument_node_names = graph.argument_node_names[module_path]
+    if module_path in intervention_handler.graph.argument_node_names:
+        argument_node_names = intervention_handler.graph.argument_node_names[
+            module_path
+        ]
 
-        # multiple argument nodes can have same module_path if there are multiple invocations.
+        # Multiple argument nodes can have same module_path if there are multiple invocations.
         for argument_node_name in argument_node_names:
-            node = graph.nodes[argument_node_name]
 
-            # args for argument nodes are (module_path, batch_size, batch_start)
-            _, batch_size, batch_start = node.args
+            node = intervention_handler.graph.nodes[argument_node_name]
 
-            # We set its result to the activations, indexed by only the relevant batch idxs.
+            # Args for argument nodes are (module_path, batch_size, batch_start, call_iter).
+            _, batch_size, batch_start, call_iter = node.args
+
+            # Updates the count of argument node calls.
+            # If count matches call_iter, time to inject value into node.
+            if call_iter != intervention_handler.count(argument_node_name):
+
+                continue
+
+            # Narrow tensor values in activations only to relevant batch idxs.
+            # Only narrow if batch_size != total batch size ( no need to narrow when its the entire batch )
+            # and if the first dim == total_batch_size ( otherwise must not be a batched tensor ).
+            # Checks to see if anything was narrowed. If not, no need to concat later.
+            narrowed = False
+
+            def narrow(acts: torch.Tensor):
+
+                nonlocal narrowed
+
+                if (
+                    batch_size != intervention_handler.total_batch_size
+                    and intervention_handler.total_batch_size == acts.shape[0]
+                ):
+                    narrowed = True
+                    return acts.narrow(0, batch_start, batch_size)
+
+                return acts
 
             value = util.apply(
                 activations,
-                lambda x: x.narrow(0, batch_start, batch_size),
+                narrow,
                 torch.Tensor,
             )
 
+            # Value injection.
             node.set_value(value)
 
-            # Check if through the previous value injection, there was a 'swp' intervention.
+            # Check if through the previous value injection, there was a 'swap' intervention.
             # This would mean we want to replace activations for this batch with some other ones.
-            value = graph.get_swap(value)
+            value = intervention_handler.graph.get_swap(value)
 
-            activations = concat(activations, value, batch_start, batch_size)
+            # If we narrowed any data, we need to concat it with data before and after it.
+            if narrowed:
+
+                activations = concat(
+                    activations,
+                    value,
+                    batch_start,
+                    batch_size,
+                    intervention_handler.total_batch_size,
+                )
+            # Otherwise just return the whole value as the activations.
+            else:
+
+                activations = value
 
     return activations
 
 
-class HookModel(AbstractContextManager):
+class HookHandler(AbstractContextManager):
     """Context manager that applies input and/or output hooks to modules in a model.
 
     Registers provided hooks on __enter__ and removes them on __exit__.
@@ -280,20 +393,16 @@ class HookModel(AbstractContextManager):
         module_keys: List[str],
         input_hook: Callable = None,
         output_hook: Callable = None,
-        backward_input_hook: Callable = None,
-        backward_output_hook: Callable = None,
     ) -> None:
         self.model = model
         self.module_keys = module_keys
 
         self.input_hook = input_hook
         self.output_hook = output_hook
-        self.backward_input_hook = backward_input_hook
-        self.backward_output_hook = backward_output_hook
 
         self.handles: List[RemovableHandle] = []
 
-    def __enter__(self) -> HookModel:
+    def __enter__(self) -> HookHandler:
         """Registers input and output hooks to modules if they are defined.
 
         Returns:
@@ -301,7 +410,14 @@ class HookModel(AbstractContextManager):
         """
 
         for module_key in self.module_keys:
-            *module_atoms, hook_type = module_key.split(".")[:-1]
+
+            module_atoms = module_key.split(".")
+
+            if len(module_atoms) == 1:
+                continue
+
+            *module_atoms, hook_type = module_atoms
+
             module_path = ".".join(module_atoms)
 
             module: torch.nn.Module = util.fetch_attr(self.model, module_path)
@@ -322,57 +438,34 @@ class HookModel(AbstractContextManager):
 
                 self.handles.append(module.register_forward_hook(output_hook))
 
-            elif hook_type == "backward_input":
-
-                def backward_input_hook(module, input, output, module_path=module_path):
-                    return self.backward_input_hook(input, module_path)
-
-                self.handles.append(
-                    module.register_full_backward_hook(backward_input_hook)
-                )
-
-            elif hook_type == "backward_output":
-
-                def backward_output_hook(module, output, module_path=module_path):
-                    return self.backward_output_hook(output, module_path)
-
-                self.handles.append(
-                    module.register_full_backward_pre_hook(backward_output_hook)
-                )
-
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Removes all handles added during __enter__."""
+
         for handle in self.handles:
             handle.remove()
 
+        if isinstance(exc_val, Exception):
+            raise exc_val
 
-class TokenIndexer:
-    """Helper class to directly access token indices of hidden states.
-    Directly indexes the second dimension of tensors.
-    Makes positive indices negative as tokens are padded on the left.
 
-    Args:
-        proxy (InterventionProxy): Proxy to aid in token indexing.
-    """
+class InterventionHandler:
 
-    def __init__(self, proxy: InterventionProxy) -> None:
-        self.proxy = proxy
+    def __init__(self, graph: Graph, total_batch_size: int) -> None:
 
-    def convert_idx(self, idx: int):
-        if idx >= 0:
-            n_tokens = self.proxy.node.proxy_value.shape[1]
-            idx = -(n_tokens - idx)
+        self.graph = graph
+        self.total_batch_size = total_batch_size
+        self.call_counter: Dict[str, int] = {}
 
-        return idx
+    def count(self, name: str):
 
-    def __getitem__(self, key: int) -> Proxy:
-        key = self.convert_idx(key)
+        if name not in self.call_counter:
 
-        return self.proxy[:, key]
+            self.call_counter[name] = 0
 
-    def __setitem__(self, key: int, value: Union[Proxy, Any]) -> None:
-        key = self.convert_idx(key)
+        else:
 
-        self.proxy[:, key] = value
+            self.call_counter[name] += 1
+
+        return self.call_counter[name]

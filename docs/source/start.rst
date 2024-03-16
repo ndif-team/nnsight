@@ -1,14 +1,14 @@
 Getting Started
 ===============
 
-**nnsight** (/ɛn.saɪt/) is a package for the interpreting and manipulating the internals of deep learning models.
+**NNsight** (/ɛn.saɪt/) is a package for the interpreting and manipulating the internals of deep learning models.
 
 .. _installation:
 
 Installation
 ------------
 
-To get started with nnsight, install it with ``pip``. 
+To get started with NNsight, install it with ``pip``. 
 
 .. code-block:: console
 
@@ -18,11 +18,11 @@ To get started with nnsight, install it with ``pip``.
 First Steps
 -----------
 
-.. grid:: 2
+.. grid:: 2 2 3 3
    :gutter: 2
 
    .. grid-item-card:: Walkthrough
-      :link: notebooks/walkthrough.ipynb
+      :link: notebooks/tutorials/walkthrough.ipynb
 
       Walk through the basic functionality of the package.
 

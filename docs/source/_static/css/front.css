@@ -1,0 +1,53 @@
+/* Custom Styles for List Group Items */
+.list-group-item {
+  background-color: transparent;
+  border: none;
+  color: var(--pst-color-on-surface);
+}
+
+.list-group-item:hover {
+  background-color: var(--pst-color-on-background);
+  color: var(--pst-color-on-surface);
+}
+
+.list-group-item.active {
+  background-color: var(--pst-color-surface);
+  color: var(--pst-color-on-surface);
+  border: none;
+}
+
+.tab-background {
+  background-color : var(--pst-color-on-background) !important;
+  color : var(--pst-color-on-surface) !important;
+  border-color: var(--pst-color-on-background) !important;
+  border: 2px !important;
+}
+
+.tab-content {
+  height: 100% !important;
+} 
+
+/* Middle section blurb */
+
+.mid-section {
+  margin-top: 5vh;
+  height: 20vh;
+  margin-bottom: 15vh;
+}
+
+
+
+/* Custom Styles for Code Widget */
+.code-surface {
+  background-color : var(--pst-color-surface) !important;
+  color : var(--pst-color-on-surface) !important;
+  border-color: var(--pst-color-surface) !important;
+}
+
+.fill-height {
+  height: 100% !important;
+}
+
+pre {
+  margin: 0 !important;
+}

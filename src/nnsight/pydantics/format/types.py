@@ -12,7 +12,7 @@ from typing_extensions import Annotated
 
 from ...tracing.Graph import Graph
 from ...tracing.Node import Node
-from . import FUNCTIONS_WHITELIST
+from . import FUNCTIONS_WHITELIST, get_function_name
 
 FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, str]
 PRIMITIVE = Union[int, float, str, bool, None]
@@ -63,9 +63,11 @@ class TensorModel(BaseModel):
     type_name: Literal["TENSOR"] = "TENSOR"
 
     values: List
+    dtype: str
 
     def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> torch.Tensor:
-        return torch.tensor(self.values)
+        dtype = getattr(torch, self.dtype)
+        return torch.tensor(self.values, dtype=dtype)
 
 
 class SliceModel(BaseModel):
@@ -148,7 +150,12 @@ PrimitiveType = Annotated[
 ]
 
 TensorType = Annotated[
-    torch.Tensor, AfterValidator(lambda value: TensorModel(values=value.tolist()))
+    torch.Tensor,
+    AfterValidator(
+        lambda value: TensorModel(
+            values=value.tolist(), dtype=str(value.dtype).split(".")[-1]
+        )
+    ),
 ]
 
 SliceType = Annotated[
@@ -168,11 +175,7 @@ DictType = Annotated[dict, AfterValidator(lambda value: DictModel(values=value))
 
 FunctionType = Annotated[
     FUNCTION,
-    AfterValidator(
-        lambda value: FunctionModel(
-            function_name=value.__qualname__ if not isinstance(value, str) else value
-        )
-    ),
+    AfterValidator(lambda value: FunctionModel(function_name=get_function_name(value))),
 ]
 
 NodeReferenceType = Annotated[

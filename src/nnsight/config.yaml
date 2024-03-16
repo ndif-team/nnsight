@@ -1,4 +1,5 @@
 API:
+  APIKEY: null
   HOST: ndif.dev
 APP:
-  LOGGING: False
+  LOGGING: false
