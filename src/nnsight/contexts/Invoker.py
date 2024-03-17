@@ -28,7 +28,7 @@ class Invoker(AbstractContextManager):
     def __init__(
         self,
         tracer: "Tracer",
-        *inputs: Tuple[Any],
+        *inputs: Any,
         scan: bool = True,
         **kwargs,
     ) -> None:
@@ -52,9 +52,7 @@ class Invoker(AbstractContextManager):
 
         self.tracer._invoker = self
 
-        self.inputs, batch_size = self.tracer._model._prepare_inputs(
-            *self.inputs, **self.kwargs
-        )
+        self.inputs, batch_size = self.tracer._model._prepare_inputs(*self.inputs, **self.kwargs)
 
         if self.scan:
             self.tracer._model._envoy._clear()
