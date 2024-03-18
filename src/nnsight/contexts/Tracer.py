@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
@@ -39,7 +39,7 @@ class Tracer:
             self._model._envoy, proxy_class=model.proxy_class, validate=validate
         )
 
-        self._invoker: Invoker = None
+        self._invoker: Optional[Invoker] = None
 
         self._batch_size: int = 0
         self._batch_start: int = 0
@@ -74,7 +74,7 @@ class Tracer:
         self._graph.tracing = False
         self._graph = None
 
-    def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
+    def invoke(self, *inputs: Any, **kwargs) -> Invoker:
         """Create an Invoker context dor a given input.
 
         Raises:

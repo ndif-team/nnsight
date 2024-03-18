@@ -17,7 +17,7 @@ class Invoker(AbstractContextManager):
 
     Attributes:
         tracer (nnsight.contexts.Tracer.Tracer): Tracer object to enter input and manage context.
-        inputs (Tuple[Any]): Initially entered inputs, then post-processed inputs from model's ._prepare_inputs(...) method.
+        inputs (tuple[Any]): Initially entered inputs, then post-processed inputs from model's ._prepare_inputs(...) method.
         scan (bool): If to execute the model using `FakeTensor` in order to update the potential sizes/dtypes of all modules' Envoys' inputs/outputs as well as validate things work correctly.
             Scanning is not free computation wise so you may want to turn this to false when running in a loop.
             When making interventions, you made get shape errors if scan is false as it validates operations based on shapes so
@@ -28,7 +28,7 @@ class Invoker(AbstractContextManager):
     def __init__(
         self,
         tracer: "Tracer",
-        *inputs: Tuple[Any],
+        *inputs: Any,
         scan: bool = True,
         **kwargs,
     ) -> None:
@@ -52,9 +52,7 @@ class Invoker(AbstractContextManager):
 
         self.tracer._invoker = self
 
-        self.inputs, batch_size = self.tracer._model._prepare_inputs(
-            *self.inputs, **self.kwargs
-        )
+        self.inputs, batch_size = self.tracer._model._prepare_inputs(*self.inputs, **self.kwargs)
 
         if self.scan:
             self.tracer._model._envoy._clear()
