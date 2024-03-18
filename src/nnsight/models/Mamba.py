@@ -23,7 +23,7 @@ from torch._guards import detect_fake_mode
 
 class Mamba(LanguageModel):
 
-    def _load(self, repo_id: str, device='meta', **kwargs) -> PreTrainedModel:
+    def _load(self, repo_id: str, device='cpu', **kwargs) -> PreTrainedModel:
 
         config = MambaConfig(**load_config_hf(repo_id))
 
