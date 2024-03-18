@@ -128,8 +128,16 @@ class Tracer(
         self._graph.compile()
 
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model._model)
+        
+        def get_value(node: Node):
+                    
+            value = node.args[0].value
+            
+            node.set_value(None)
+                                    
+            return value
 
-        _batched_input = util.apply(self._batched_input, lambda x: x.value, Node)
+        _batched_input = util.apply(self._batched_input, get_value, Node)
 
         self._model.interleave(
             self._model._execute,

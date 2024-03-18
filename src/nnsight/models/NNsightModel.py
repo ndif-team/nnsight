@@ -281,8 +281,6 @@ class NNsight:
 
         logger.info(f"Running `{self._model_key}`...")
         
-        breakpoint()
-
         inputs, total_batch_size = self._prepare_inputs(*inputs)
 
         intervention_handler = InterventionHandler(intervention_graph, total_batch_size)

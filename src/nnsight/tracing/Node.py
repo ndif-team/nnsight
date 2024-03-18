@@ -181,7 +181,7 @@ class Node:
 
                 if self.attached() and protocols.BridgeProtocol.has_bridge(node.graph):
 
-                    node = protocols.BridgeProtocol.add(node, self).node
+                    node = protocols.BridgeProtocol.add(node, self.graph).node
 
                 else:
                     # TODO error
@@ -210,7 +210,6 @@ class Node:
         """
 
         if not self.done():
-            breakpoint()
             raise ValueError("Accessing value before it's been set.")
 
         return self._value

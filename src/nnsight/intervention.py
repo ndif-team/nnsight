@@ -397,7 +397,7 @@ class InterventionProtocol(Protocol):
                         return acts.narrow(0, batch_start, batch_size)
 
                     return acts
-
+                
                 value = util.apply(
                     activations,
                     narrow,

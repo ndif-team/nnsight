@@ -6,9 +6,12 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
 
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
-from ..tracing.Proxy import Proxy
-from ..tracing.Node import Node
+
 from .. import util
+from ..tracing import protocols
+from ..tracing.Node import Node
+from ..tracing.Proxy import Proxy
+
 if TYPE_CHECKING:
 
     from .Tracer import Tracer
@@ -53,25 +56,29 @@ class Invoker(AbstractContextManager):
         """
 
         self.tracer._invoker = self
-        
+
         preserved_inputs = None
-        
-        def check_for_nodes(node: Node):
-            
+
+        def check_for_nodes(proxy: Proxy):
+
             nonlocal preserved_inputs
-            
+
             preserved_inputs = self.inputs
-            
-            return node.proxy_value
-        
-        
-        self.inputs = util.apply(self.inputs, lambda x: x.node, Proxy)            
-        checked_inputs = util.apply(self.inputs, check_for_nodes, Node)
+
+            node = proxy.node
+
+            return protocols.LockProtocol.add(
+                protocols.BridgeProtocol.add(node, self.tracer._graph).node
+            ).node
+
+        inputs = util.apply(self.inputs,check_for_nodes,Proxy)
         
         if preserved_inputs is not None:
             
-            self.inputs = checked_inputs
-        
+            preserved_inputs = inputs
+            
+            self.inputs = util.apply(self.inputs, lambda x : x.node.proxy_value, Proxy)
+    
         self.inputs, batch_size = self.tracer._model._prepare_inputs(
             *self.inputs, **self.kwargs
         )
@@ -93,21 +100,21 @@ class Invoker(AbstractContextManager):
 
         self.tracer._batch_start += self.tracer._batch_size
         self.tracer._batch_size = batch_size
-        
+
         if preserved_inputs is None:
 
             self.tracer._batched_input = self.tracer._model._batch_inputs(
                 self.tracer._batched_input,
                 *self.inputs,
             )
-            
+
         else:
-            
+
             if self.tracer._batched_input is None:
-                
+
                 self.tracer._batched_input = [*preserved_inputs]
             else:
-                
+
                 self.tracer._batched_input.extend(preserved_inputs)
 
         return self

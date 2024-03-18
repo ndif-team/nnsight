@@ -343,14 +343,14 @@ class BridgeProtocol(Protocol):
     attachment_name = "nnsight_bridge"
 
     @classmethod
-    def add(cls, from_node: "Node", to_node: "Node") -> "InterventionProxy":
+    def add(cls, from_node: "Node", to_graph: "Graph") -> "InterventionProxy":
 
         # Adds a Lock Node. One, so the value from_node isn't destroyed until the to_nodes are done with it,
         # and two acts as an easy reference to the from_node to get its value from the lock Node args.
         lock_node = LockProtocol.add(from_node).node
 
         # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
-        return to_node.create(
+        return to_graph.create(
             target=cls,
             proxy_value=from_node.proxy_value,
             args=[from_node.graph.id, lock_node.name],
