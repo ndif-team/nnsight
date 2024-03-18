@@ -4,7 +4,7 @@ from __future__ import annotations
 import importlib
 import types
 from contextlib import AbstractContextManager
-from typing import Any, List
+from typing import Any, List, Optional
 
 from . import util
 
@@ -41,7 +41,7 @@ class Patcher(AbstractContextManager):
         patches (List[Patch]):
     """
 
-    def __init__(self, patches: List[Patch] = None) -> None:
+    def __init__(self, patches: Optional[List[Patch]] = None) -> None:
         self.patches = patches or []
 
     def add(self, patch: Patch) -> None:
