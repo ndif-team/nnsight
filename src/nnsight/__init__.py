@@ -348,10 +348,12 @@ def set_module_tensor_to_device(
             ### PATCH ###
             elif isinstance(old_value, FakeTensor):
                 new_value = new_value
+            elif isinstance(new_value, FakeTensor):
+                new_value = new_value
             ### PATCH ###
             else:
                 new_value = param_cls(new_value, requires_grad=old_value.requires_grad).to(device)
-
+                
             module._parameters[tensor_name] = new_value
             if fp16_statistics is not None:
                 setattr(module._parameters[tensor_name], "SCB", fp16_statistics.to(device))
