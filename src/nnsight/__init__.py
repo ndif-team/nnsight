@@ -1,6 +1,6 @@
 from functools import wraps
 import os
-from typing import Union
+from typing import Dict, Union
 
 import yaml
 import torch
@@ -232,7 +232,7 @@ from torch.amp.autocast_mode import autocast
 
 DEFAULT_PATCHER.add(Patch(autocast, autoamp_init, "__init__"))
 
-from accelerate.utils.modeling import is_npu_available, check_device_same
+from accelerate.utils.modeling import is_npu_available, check_device_same, is_xpu_available
 
 # Hacky patch to get around this function trying to set the parameter of a non meta tensor to meta.
 # Also handles FakeTensors.
@@ -243,6 +243,7 @@ def set_module_tensor_to_device(
     value: Optional[torch.Tensor] = None,
     dtype: Optional[Union[str, torch.dtype]] = None,
     fp16_statistics: Optional[torch.HalfTensor] = None,
+    tied_params_map: Optional[Dict[int, Dict[torch.device, torch.Tensor]]] = None,
 ):
     """
     A helper function to set a given tensor (parameter of buffer) of a module on a specific device (note that doing
@@ -262,11 +263,11 @@ def set_module_tensor_to_device(
             the dtype of the existing parameter in the model.
         fp16_statistics (`torch.HalfTensor`, *optional*):
             The list of fp16 statistics to set on the module, used for 8 bit model serialization.
+        tied_params_map (Dict[int, Dict[torch.device, torch.Tensor]], *optional*, defaults to `None`):
+            A map of current data pointers to dictionaries of devices to already dispatched tied weights. For a given
+            execution device, this parameter is useful to reuse the first available pointer of a shared weight on the
+            device for all others, instead of duplicating memory.
     """
-    ### PATCH ###
-    if isinstance(device, str) and device == 'meta':
-        return
-    ### PATCH ###
     # Recurse if needed
     if "." in tensor_name:
         splits = tensor_name.split(".")
@@ -281,6 +282,24 @@ def set_module_tensor_to_device(
         raise ValueError(f"{module} does not have a parameter or a buffer named {tensor_name}.")
     is_buffer = tensor_name in module._buffers
     old_value = getattr(module, tensor_name)
+
+    # Treat the case where old_value (or a custom `value`, typically offloaded to RAM/disk) belongs to a tied group, and one of the weight
+    # in the tied group has already been dispatched to the device, by avoiding reallocating memory on the device and just copying the pointer.
+    if (
+        value is not None
+        and tied_params_map is not None
+        and value.data_ptr() in tied_params_map
+        and device in tied_params_map[value.data_ptr()]
+    ):
+        module._parameters[tensor_name] = tied_params_map[value.data_ptr()][device]
+        return
+    elif (
+        tied_params_map is not None
+        and old_value.data_ptr() in tied_params_map
+        and device in tied_params_map[old_value.data_ptr()]
+    ):
+        module._parameters[tensor_name] = tied_params_map[old_value.data_ptr()][device]
+        return
 
     if old_value.device == torch.device("meta") and device not in ["meta", torch.device("meta")] and value is None:
         raise ValueError(f"{tensor_name} is on the meta device, we need a `value` to put in on {device}.")
@@ -315,6 +334,8 @@ def set_module_tensor_to_device(
         # `torch.Tensor.to(<int num>)` is not supported by `torch_npu` (see this [issue](https://github.com/Ascend/pytorch/issues/16)).
         if is_npu_available() and isinstance(device, int):
             device = f"npu:{device}"
+        if is_xpu_available() and isinstance(device, int):
+            device = f"xpu:{device}"
         if value is None:
             new_value = old_value.to(device)
             if dtype is not None and device in ["meta", torch.device("meta")]:
@@ -345,18 +366,16 @@ def set_module_tensor_to_device(
                     new_value.SCB = new_value.SCB.to("cpu")
                 else:
                     new_value = param_cls(new_value, requires_grad=old_value.requires_grad, **kwargs).to(device)
-            ### PATCH ###
-            elif isinstance(old_value, FakeTensor):
-                new_value = new_value
-            elif isinstance(new_value, FakeTensor):
-                new_value = new_value
-            ### PATCH ###
+            elif param_cls.__name__ in ["QTensor", "QBitsTensor"]:
+                new_value = torch.nn.Parameter(new_value, requires_grad=old_value.requires_grad).to(device)
+            elif isinstance(new_value, FakeTensor) or isinstance(old_value, FakeTensor):
+                new_value = torch.nn.Parameter(new_value, requires_grad=old_value.requires_grad).to(device)
             else:
                 new_value = param_cls(new_value, requires_grad=old_value.requires_grad).to(device)
-                
+
             module._parameters[tensor_name] = new_value
             if fp16_statistics is not None:
-                setattr(module._parameters[tensor_name], "SCB", fp16_statistics.to(device))
+                module._parameters[tensor_name].SCB = fp16_statistics.to(device)
                 del fp16_statistics
             # as we put the weight to meta, it doesn't have SCB attr anymore. make sure that it is not a meta weight
             if (
@@ -381,8 +400,27 @@ def set_module_tensor_to_device(
     # clean pre and post foward hook
     if is_npu_available():
         torch.npu.empty_cache()
+    elif is_xpu_available():
+        torch.xpu.empty_cache()
     else:
         torch.cuda.empty_cache()
+
+    # When handling tied weights, we update tied_params_map to keep track of the tied weights that have already been allocated on the device in
+    # order to avoid duplicating memory, see above.
+    if (
+        tied_params_map is not None
+        and old_value.data_ptr() in tied_params_map
+        and device not in tied_params_map[old_value.data_ptr()]
+    ):
+        tied_params_map[old_value.data_ptr()][device] = new_value
+    elif (
+        value is not None
+        and tied_params_map is not None
+        and value.data_ptr() in tied_params_map
+        and device not in tied_params_map[value.data_ptr()]
+    ):
+        tied_params_map[value.data_ptr()][device] = new_value
+
         
 from accelerate import hooks
 
