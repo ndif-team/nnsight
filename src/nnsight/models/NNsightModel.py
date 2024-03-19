@@ -9,12 +9,15 @@ from transformers import AutoConfig, AutoModel
 
 from .. import util
 from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import (AccumulatorBackend, Backend, LocalBackend,
-                                 RemoteBackend)
+from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
-from ..intervention import (HookHandler, InterventionHandler,
-                            InterventionProtocol, InterventionProxy)
+from ..intervention import (
+    HookHandler,
+    InterventionHandler,
+    InterventionProtocol,
+    InterventionProxy,
+)
 from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
@@ -106,7 +109,7 @@ class NNsight:
             trace (bool, optional): If to open a tracing context. Otherwise immediately run the model and return the raw output. Defaults to True.
             invoker_args (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
             kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
-            backend (Backend): Backend for this Tracer object.
+            backend (Union[Backend, str]): Backend for this Tracer object.
             remote (bool): Use RemoteBackend with default url.
 
         Raises:
@@ -187,7 +190,7 @@ class NNsight:
 
         # If remote, use RemoteBackend with default url.
         elif remote:
-            
+
             backend = RemoteBackend()
 
         # By default, use LocalBackend.
@@ -231,17 +234,33 @@ class NNsight:
 
         return tracer
 
-    def accumulate(self, backend: Union[Backend, str] = None) -> Accumulator:
-        
+    def accumulate(
+        self, backend: Union[Backend, str] = None, remote: bool = False
+    ) -> Accumulator:
+        """Create an accumulation context using an Accumulator.
+
+        Args:
+            backend (Backend): Backend for this Tracer object.
+            remote (bool): Use RemoteBackend with default url.
+
+        Returns:
+            Accumulator: Accumulator.
+        """
+
+        # If remote, use RemoteBackend with default url.
+        if remote:
+
+            backend = RemoteBackend()
+
         # By default, use LocalBackend.
-        if backend is None:
+        elif backend is None:
 
             backend = LocalBackend()
 
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
 
-            backend = RemoteBackend()
+            backend = RemoteBackend(backend)
 
         self._accumulator = Accumulator(backend, self)
 
@@ -280,7 +299,7 @@ class NNsight:
             self.dispatch_model()
 
         logger.info(f"Running `{self._model_key}`...")
-        
+
         inputs, total_batch_size = self._prepare_inputs(*inputs)
 
         intervention_handler = InterventionHandler(intervention_graph, total_batch_size)

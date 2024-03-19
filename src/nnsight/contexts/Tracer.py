@@ -128,16 +128,21 @@ class Tracer(
         self._graph.compile()
 
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model._model)
-        
-        def get_value(node: Node):
-                    
-            value = node.args[0].value
-            
-            node.set_value(None)
-                                    
-            return value
 
-        _batched_input = util.apply(self._batched_input, get_value, Node)
+        _batched_input = self._batched_input
+
+        # If ths graph has a Bridge, we need to check for Nodes in the input itself.
+        if protocols.BridgeProtocol.has_bridge(self._graph):
+
+            def get_value(node: Node):
+
+                value = node.args[0].value
+
+                node.set_value(None)
+
+                return value
+
+            _batched_input = util.apply(_batched_input, get_value, Node)
 
         self._model.interleave(
             self._model._execute,
