@@ -47,29 +47,22 @@ class Envoy:
             self._hook, with_kwargs=True
         )
 
-        if isinstance(module, torch.nn.ModuleList):
-            for i, module in enumerate(self._module):
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{i}")
+        for name, module in self._module.named_children():
 
-                self._sub_envoys.append(envoy)
+            envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
 
-        else:
-            for name, module in self._module.named_children():
+            self._sub_envoys.append(envoy)
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
+            # If the module already has a sub-module named 'input' or 'output',
+            # mount the proxy access to 'nns_input' or 'nns_output instead.
+            if hasattr(Envoy, name):
 
-                self._sub_envoys.append(envoy)
+                self._handle_overloaded_mount(envoy, name)
 
-                # If the module already has a sub-module named 'input' or 'output',
-                # mount the proxy access to 'nns_input' or 'nns_output instead.
-                if hasattr(Envoy, name):
-
-                    self._handle_overloaded_mount(envoy, name)
-
-                else:
-
-                    setattr(self, name, envoy)
+            else:
+                
+                setattr(self, name, envoy)
 
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
 
