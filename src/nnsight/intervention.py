@@ -9,6 +9,7 @@ The :class:`HookModel <nnsight.intervention.HookModel>` provides a context manag
 
 from __future__ import annotations
 
+import inspect
 from contextlib import AbstractContextManager
 from typing import Any, Callable, Collection, Dict, List, Tuple, Union
 
@@ -158,14 +159,14 @@ class InterventionProxy(Proxy):
         Returns:
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
-
+        
         if not self.node.is_tracing():
 
             return util.apply(self.value, lambda x: x.shape, torch.Tensor)
         
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
-        if self.node.proxy_value is None:
-            
+        if self.node.proxy_value is inspect._empty:
+                        
             return super().__getattr__('shape')
 
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
@@ -183,7 +184,7 @@ class InterventionProxy(Proxy):
             return util.apply(self.value, lambda x: x.device, torch.Tensor)
         
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
-        if self.node.proxy_value is None:
+        if self.node.proxy_value is inspect._empty:
             
             return super().__getattr__('device')
 
@@ -202,7 +203,7 @@ class InterventionProxy(Proxy):
             return util.apply(self.value, lambda x: x.dtype, torch.Tensor)
         
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
-        if self.node.proxy_value is None:
+        if self.node.proxy_value is inspect._empty:
             
             return super().__getattr__('dtype')
 
