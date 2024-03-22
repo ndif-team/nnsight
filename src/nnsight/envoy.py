@@ -228,6 +228,9 @@ class Envoy:
             extra_lines = extra_repr.split("\n")
         child_lines = []
         for attribute_name, attribute in self.__dict__.items():
+            
+            if attribute_name == '_tracer':
+                continue
 
             if isinstance(attribute, Envoy):
 
