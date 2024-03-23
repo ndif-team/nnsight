@@ -138,6 +138,10 @@ class LanguageModel(GenerationMixin, NNsight):
         )
 
         super().__init__(*args, **kwargs)
+        
+        if not hasattr(self._model, 'generator'):
+            
+            setattr(self._model, 'generator', WrapperModule())
 
     def _load(self, repo_id: str, **kwargs) -> PreTrainedModel:
 
@@ -153,8 +157,6 @@ class LanguageModel(GenerationMixin, NNsight):
         if self._model is None:
 
             model = self.automodel.from_config(config, trust_remote_code=True)
-
-            setattr(model, 'generator', WrapperModule())
 
             return model
         
