@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import accelerate
 import torch
 from transformers import AutoConfig, AutoModel
+from typing_extensions import Self
 
 from .. import util
 from ..contexts.Runner import Runner
@@ -277,6 +278,17 @@ class NNsight:
         self._dispatched = True
 
         logger.info(f"Dispatched `{self._model_key}`")
+
+    def to(self, *args, **kwargs) -> Self:
+        """Override torch.nn.Module.to so this returns the NNSight model, not the underlying module when doing: model = model.to(...)
+
+        Returns:
+            Envoy: Envoy.
+        """
+
+        self._model = self._model.to(*args, **kwargs)
+
+        return self
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
