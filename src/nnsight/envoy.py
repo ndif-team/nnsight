@@ -48,29 +48,21 @@ class Envoy:
             self._hook, with_kwargs=True
         )
 
-        if isinstance(module, torch.nn.ModuleList):
-            for i, module in enumerate(self._module):
+        for name, module in self._module.named_children():
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{i}")
+            envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
 
-                self._sub_envoys.append(envoy)
+            self._sub_envoys.append(envoy)
 
-        else:
-            for name, module in self._module.named_children():
+            # If the module already has a sub-module named 'input' or 'output',
+            # mount the proxy access to 'nns_input' or 'nns_output instead.
+            if hasattr(Envoy, name):
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
+                self._handle_overloaded_mount(envoy, name)
 
-                self._sub_envoys.append(envoy)
+            else:
 
-                # If the module already has a sub-module named 'input' or 'output',
-                # mount the proxy access to 'nns_input' or 'nns_output instead.
-                if hasattr(Envoy, name):
-
-                    self._handle_overloaded_mount(envoy, name)
-
-                else:
-
-                    setattr(self, name, envoy)
+                setattr(self, name, envoy)
 
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
 
@@ -236,6 +228,9 @@ class Envoy:
             extra_lines = extra_repr.split("\n")
         child_lines = []
         for attribute_name, attribute in self.__dict__.items():
+
+            if attribute_name == "_tracer":
+                continue
 
             if isinstance(attribute, Envoy):
 
