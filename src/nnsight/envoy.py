@@ -47,7 +47,6 @@ class Envoy:
             self._hook, with_kwargs=True
         )
 
-
         for name, module in self._module.named_children():
 
             envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
@@ -61,7 +60,7 @@ class Envoy:
                 self._handle_overloaded_mount(envoy, name)
 
             else:
-                
+
                 setattr(self, name, envoy)
 
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
@@ -228,8 +227,8 @@ class Envoy:
             extra_lines = extra_repr.split("\n")
         child_lines = []
         for attribute_name, attribute in self.__dict__.items():
-            
-            if attribute_name == '_tracer':
+
+            if attribute_name == "_tracer":
                 continue
 
             if isinstance(attribute, Envoy):
@@ -303,7 +302,15 @@ class Envoy:
 
         module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
 
-        torch.set_default_device(next(self._module.parameters()).device)
+        try:
+
+            device = next(self._module.parameters()).device
+
+        except:
+
+            device = torch.device("cpu")
+
+        torch.set_default_device(device)
 
         proxy = module_proxy.forward(*args, **kwargs)
 
