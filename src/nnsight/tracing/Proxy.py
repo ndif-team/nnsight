@@ -131,7 +131,7 @@ class Proxy:
             target=operator.invert,
             args=[self.node],
         )
-        
+
     def __neg__(self) -> Self:
         return self.node.add(
             target=operator.neg,
@@ -221,6 +221,24 @@ class Proxy:
             target=operator.truediv,
             args=[other, self.node],
         )
+
+    def __eq__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.eq, args=[self.node, other])
+
+    def __ne__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.ne, args=[self.node, other])
+
+    def __lt__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.lt, args=[self.node, other])
+
+    def __gt__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.gt, args=[self.node, other])
+
+    def __le__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.eq, args=[self.node, other])
+
+    def __ge__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.ge, args=[self.node, other])
 
     def __index__(self) -> Self:
         return self.node.add(target=operator.index, args=[self.node])
