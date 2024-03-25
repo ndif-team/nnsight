@@ -12,7 +12,7 @@ class Bridge:
     def __init__(self) -> None:
 
         # Mapping fro Graph if to Graph.
-        self.id_to_graph = OrderedDict()
+        self.id_to_graph: Dict[int, Graph] = OrderedDict()
 
         # Boolean to inform objects with access to the Bridge that interaction with previous Graphs is complete.
         self.release = True

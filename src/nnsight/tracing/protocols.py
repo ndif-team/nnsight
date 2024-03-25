@@ -371,8 +371,10 @@ class BridgeProtocol(Protocol):
         # Value node is Lock Node's only arg
         value_node: "Node" = lock_node.args[0]
 
-        # Set value to that of the value Node.
-        node.set_value(value_node.value)
+        if value_node.done():
+
+            # Set value to that of the value Node.
+            node.set_value(value_node.value)
 
         # Bridge.release tells this Protocol when to release all Lock Nodes as we no longer need the data (useful when running a Graph in a loop, only release on last iteration)
         if bridge.release:

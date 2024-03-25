@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Tuple
 
+from ... import util
 from ...tracing import protocols
 from ...tracing.Graph import Graph
 from .Collection import Collection
@@ -10,39 +11,6 @@ if TYPE_CHECKING:
     from ...intervention import InterventionProxy
     from ...tracing.Node import Node
     from ...tracing.Proxy import Proxy
-
-
-class SumProtocol(protocols.Protocol):
-
-    name = "iter_sum"
-
-    @classmethod
-    def add(cls, graph: Graph, value_node: "Node") -> "InterventionProxy":
-
-        # Check  if value node's Graph is exited? Otherwise that should be an error
-
-        return graph.create(
-            target=cls.name, proxy_value=value_node.proxy_value, args=[value_node]
-        )
-
-    @classmethod
-    def execute(cls, node: "Node"):
-
-        value_node: "Node" = node.args[0]
-
-        if not node.done():
-
-            node._value = value_node.value
-
-        else:
-
-            node._value += value_node.value
-
-        node.reset()
-
-        if protocols.BridgeProtocol.get_bridge(node.graph).release:
-
-            node.set_value(node._value)
 
 
 class IteratorItemProtocol(protocols.Protocol):
@@ -69,13 +37,79 @@ class IteratorItemProtocol(protocols.Protocol):
 
     @classmethod
     def set(cls, graph: Graph, value: Any, iter_idx: int) -> None:
-        
+
         graph.nodes[f"{cls.__name__}_{iter_idx}"].set_value(value)
+
+
+class StatDefaultProtocol(protocols.Protocol):
+
+    @classmethod
+    def add(cls, graph: Graph, default_value: Any):
+
+        return graph.create(target=cls, proxy_value=default_value, args=[default_value])
+
+    @classmethod
+    def execute(cls, node: protocols.Node):
+
+        node.set_value(node.args[0])
+
+
+class StatUpdateProtocol(protocols.Protocol):
+
+    @classmethod
+    def add(cls, graph: Graph, default_value_node: "Node", update_value: Any):
+
+        return graph.create(
+            target=cls,
+            proxy_value=default_value_node.proxy_value,
+            args=[
+                default_value_node.graph.id,
+                default_value_node.name,
+                update_value,
+            ],
+        )
+
+    @classmethod
+    def execute(cls, node: "Node"):
+
+        bridge = protocols.BridgeProtocol.get_bridge(node.graph)
+
+        default_node_graph_id, default_node_name, update_value = node.args
+
+        default_node: "Node" = bridge.id_to_graph[default_node_graph_id].nodes[
+            default_node_name
+        ]
+
+        default_node._value = util.apply(update_value, lambda x: x.value, type(default_node))
+
+        if bridge.release:
+
+            node.set_value(default_node.value)
+
+
+class Stat:
+
+    def __init__(self, graph: Graph) -> None:
+
+        self.graph = graph
+        self.proxy: Proxy = None
+
+    def default(self, value: Any) -> InterventionProxy:
+
+        # TODO error if already called.
+
+        self.proxy = StatDefaultProtocol.add(self.graph, value)
+
+        return self.proxy
+
+    def update(self, value: Proxy) -> InterventionProxy:
+
+        return StatUpdateProtocol.add(self.graph, self.proxy.node, value)
 
 
 class Iterator(Collection):
 
-    def __init__(self, data: Iterable, *args, iter_idx: int = None, **kwargs) -> None:
+    def __init__(self, data: Iterable, *args, **kwargs) -> None:
 
         super().__init__(*args, **kwargs)
 
@@ -91,6 +125,10 @@ class Iterator(Collection):
         )
 
         return iter_item_proxy, self
+
+    def stat(self) -> Stat:
+
+        return Stat(self.accumulator.graph)
 
     ### BACKENDS ########
 
