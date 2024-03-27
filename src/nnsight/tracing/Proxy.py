@@ -241,7 +241,7 @@ class Proxy:
         return self.node.add(target=operator.ge, args=[self.node, other])
 
     def __index__(self) -> Self:
-        return self.node.add(target=operator.index, args=[self.node])
+        return self.node.proxy_value.__index__()
 
     def __bool__(self) -> bool:
         return self.node.proxy_value.__bool__()
