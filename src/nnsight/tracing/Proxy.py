@@ -275,7 +275,7 @@ class Proxy:
 from functools import wraps
 
 
-def proxy_wrapper(fn) -> None:
+def proxy_wrapper(fn) -> Callable:
     """Wraps problematic functions (torch functions sometimes).
     Checks if any of its args are proxies. If so we return a proxy of the function.
     Otherwise just run the function.
@@ -289,7 +289,6 @@ def proxy_wrapper(fn) -> None:
 
     @wraps(fn)
     def patched(*args, **kwargs):
-        arguments = list(args) + list(kwargs.values())
 
         node = None
 
@@ -298,7 +297,7 @@ def proxy_wrapper(fn) -> None:
 
             node = proxy.node
 
-        util.apply(list(args) + list(kwargs.values()), get_node, Proxy)
+        util.apply((args, kwargs), get_node, Proxy)
 
         if node is not None:
             return node.add(target=fn, args=args, kwargs=kwargs)
