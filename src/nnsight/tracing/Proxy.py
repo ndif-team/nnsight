@@ -235,7 +235,7 @@ class Proxy:
         return self.node.add(target=operator.gt, args=[self.node, other])
 
     def __le__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(target=operator.eq, args=[self.node, other])
+        return self.node.add(target=operator.le, args=[self.node, other])
 
     def __ge__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.add(target=operator.ge, args=[self.node, other])
@@ -275,7 +275,7 @@ class Proxy:
 from functools import wraps
 
 
-def proxy_wrapper(fn) -> None:
+def proxy_wrapper(fn) -> Callable:
     """Wraps problematic functions (torch functions sometimes).
     Checks if any of its args are proxies. If so we return a proxy of the function.
     Otherwise just run the function.
