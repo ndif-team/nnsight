@@ -235,7 +235,7 @@ class Proxy:
         return self.node.add(target=operator.gt, args=[self.node, other])
 
     def __le__(self, other: Union[Proxy, Any]) -> Self:
-        return self.node.add(target=operator.eq, args=[self.node, other])
+        return self.node.add(target=operator.le, args=[self.node, other])
 
     def __ge__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.add(target=operator.ge, args=[self.node, other])
