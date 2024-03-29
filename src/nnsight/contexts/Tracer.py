@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import inspect
 import weakref
+
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Optional
+
 
 from .. import pydantics, util
 from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import (AccumulatorMixin, Backend, IteratorMixin, LocalMixin,
-                       RemoteMixin)
+from .backends import AccumulatorMixin, Backend, IteratorMixin, LocalMixin, RemoteMixin
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
@@ -60,7 +61,7 @@ class Tracer(
 
         self._kwargs = kwargs
 
-        self._invoker: Invoker = None
+        self._invoker: Optional[Invoker] = None
 
         self._batch_size: int = 0
         self._batch_start: int = 0
@@ -87,7 +88,7 @@ class Tracer(
 
         self._backend(self)
 
-    def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
+    def invoke(self, *inputs: Any, **kwargs) -> Invoker:
         """Create an Invoker context dor a given input.
 
         Raises:

@@ -33,6 +33,13 @@ def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
     if data_type == dict:
         return {key: apply(value, fn, cls) for key, value in data.items()}
 
+    if data_type == slice:
+        return slice(
+            apply(data.start, fn, cls),
+            apply(data.stop, fn, cls),
+            apply(data.step, fn, cls),
+        )
+
     return data
 
 
@@ -46,9 +53,9 @@ def fetch_attr(object: object, target: str) -> Any:
     Returns:
         Any: Fetched attribute.
     """
-    if target == '':
+    if target == "":
         return object
-    
+
     target_atoms = target.split(".")
 
     for atom in target_atoms:
