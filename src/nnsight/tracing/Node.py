@@ -179,7 +179,7 @@ class Node:
             if not node.done():
 
                 self.dependencies.append(node)
-                node.listeners.append(self)
+                node.listeners.append(weakref.proxy(self))
 
             return node
 

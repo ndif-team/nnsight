@@ -77,13 +77,12 @@ class NNsight:
             # Also do .to('meta') because why not.
             with accelerate.init_empty_weights(include_buffers=True):
                 self._model = self._load(self._model_key, *args, **kwargs).to("meta")
+                
+        self._envoy = Envoy(self._model)
 
         if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
-            self.dispatch_model()
-
-        else:
-            self._envoy = Envoy(self._model)
+            self.dispatch_model()            
 
         logger.info(f"Initialized `{self._model_key}`")
 
@@ -321,15 +320,13 @@ class NNsight:
         return output
 
     def dispatch_model(self, *args, **kwargs) -> None:
-        """Dispatch ._model to have real parameters  using .load(...)."""
+        """Dispatch ._model to have real parameters  using ._load(...)."""
 
         logger.info(f"Dispatching `{self._model_key}`...")
 
-        self._model = self._load(
-            self._model_key, *self._args, *args, **kwargs, **self._kwargs
-        )
+        self._model = self._load(self._model_key, *self._args, *args, **kwargs, **self._kwargs)
 
-        self._envoy = Envoy(self._model)
+        self._envoy._update(self._model)
 
         self._dispatched = True
 
@@ -394,9 +391,7 @@ class NNsight:
         """
         device = next(self._model.parameters()).device
 
-        prepared_inputs = util.apply(
-            prepared_inputs, lambda x: x.to(device), torch.Tensor
-        )
+        prepared_inputs = util.apply(prepared_inputs, lambda x: x.to(device), torch.Tensor)
 
         return self._model(
             *prepared_inputs,
