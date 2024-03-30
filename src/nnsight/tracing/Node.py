@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -46,19 +45,10 @@ class Node:
             values (Any): Prepared values.
         """
 
-        def slice_to_value(arg: slice):
-            return slice(
-                Node.prepare_proxy_values(arg.start),
-                Node.prepare_proxy_values(arg.stop),
-                Node.prepare_proxy_values(arg.step),
-            )
-
         # Convert proxies to their proxy_value.
         values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
         # Convert nodes to their proxy_value.
         values = util.apply(values, lambda x: x.proxy_value, Node)
-        # Slices may have proxies as part of their attributes so convert those to their proxy_values.
-        values = util.apply(values, slice_to_value, slice)
 
         if device is None:
 
@@ -134,6 +124,7 @@ class Node:
         """Preprocess Node.args and Node.kwargs."""
 
         max_rank = None
+        bridge = None
         max_graph = self.graph
 
         if self.attached() and protocols.BridgeProtocol.has_bridge(self.graph):
@@ -141,41 +132,39 @@ class Node:
             bridge = protocols.BridgeProtocol.get_bridge(self.graph)
             max_rank = bridge.rank(self.graph)
 
-        else:
-
-            bridge = None
-
-        def preprocess_arg(arg: Any):
+        def find_latest_graph(node: Union[Node, Proxy]):
 
             nonlocal bridge
             nonlocal max_rank
             nonlocal max_graph
 
-            if isinstance(arg, Proxy):
+            if isinstance(node, Proxy):
 
-                arg = arg.node
+                node = node.node
 
-            if isinstance(arg, Node):
+            graph = node.graph
+            rank = bridge.rank(graph)
 
-                if bridge is not None:
+            if rank > max_rank:
 
-                    graph = arg.graph
-                    rank = bridge.rank(graph)
+                max_rank = rank
+                max_graph = graph
 
-                    if rank > max_rank:
+            return node
 
-                        max_rank = rank
-                        max_graph = graph
+        if bridge is not None:
 
-            return arg
-
-        self.args, self.kwargs = util.apply(
-            (self.args, self.kwargs), preprocess_arg, (Proxy, Node)
-        )
+            self.args, self.kwargs = util.apply(
+                (self.args, self.kwargs), find_latest_graph, (Proxy, Node)
+            )
 
         self.graph = max_graph
 
-        def preprocess_arg2(node: Node):
+        def preprocess_node(node: Union[Node, Proxy]):
+
+            if isinstance(node, Proxy):
+
+                node = node.node
 
             if self.graph is not node.graph:
 
@@ -195,7 +184,7 @@ class Node:
             return node
 
         self.args, self.kwargs = util.apply(
-            (self.args, self.kwargs), preprocess_arg2, Node
+            (self.args, self.kwargs), preprocess_node, (Node, Proxy)
         )
 
     @property

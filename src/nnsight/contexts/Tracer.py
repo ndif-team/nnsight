@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import inspect
 import weakref
-
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Optional
-
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 from .. import pydantics, util
 from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import AccumulatorMixin, Backend, IteratorMixin, LocalMixin, RemoteMixin
+from .backends import (AccumulatorMixin, Backend, IteratorMixin, LocalMixin,
+                       RemoteMixin)
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
@@ -84,6 +83,8 @@ class Tracer(
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
+            self._graph.alive = False
+            self._graph = None
             raise exc_val
 
         self._backend(self)

@@ -42,23 +42,21 @@ class Accumulator(Collection, RemoteMixin):
         self.model = model
 
         Collection.__init__(self, AccumulatorBackend(self), self)
-        
-        self.backend = backend
-        
-        
-    def __enter__(self) -> Accumulator:
 
+        self.backend = backend
+
+    def __enter__(self) -> Accumulator:
 
         return self
 
-
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if isinstance(exc_val, BaseException):
-            raise exc_val
-        
-        self.backend(self)
 
         self.model._accumulator = None
+
+        if isinstance(exc_val, BaseException):
+            raise exc_val
+
+        self.backend(self)
 
     def iter(self, iterable) -> Iterator:
 
