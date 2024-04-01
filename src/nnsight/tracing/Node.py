@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import weakref
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 
@@ -133,12 +134,12 @@ class Node:
         # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
         util.apply(
             self.args,
-            lambda x: x.listeners.append(self) if not x.done() else None,
+            lambda x: x.listeners.append(weakref.proxy(self)) if not x.done() else None,
             Node,
         )
         util.apply(
             self.kwargs,
-            lambda x: x.listeners.append(self) if not x.done() else None,
+            lambda x: x.listeners.append(weakref.proxy(self)) if not x.done() else None,
             Node,
         )
 
@@ -290,7 +291,7 @@ class Node:
 
             tensor: torch.Tensor = args[0]
             backward_idx: int = args[1]
-            
+
             hook = None
 
             def grad(value):
@@ -307,7 +308,7 @@ class Node:
                         value = self.graph.get_swap(value)
 
                     backward_idx = -1
-                    
+
                     hook.remove()
 
                     return value

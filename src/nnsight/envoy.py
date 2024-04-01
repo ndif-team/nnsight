@@ -51,6 +51,23 @@ class Envoy:
 
             self._add_envoy(module, name)
 
+    def _update(self, module: torch.nn.Module) -> None:
+        """Updates the ._model attribute using a new model of the same architecture.
+        Used when loading the real weights (dispatching) and need to replace the underlying modules.
+        """
+
+        self._module = module
+
+        self._hook_handle.remove()
+
+        self._hook_handle = self._module.register_forward_hook(
+            self._hook, with_kwargs=True
+        )
+
+        for i, module in enumerate(self._module.children()):
+
+            self._sub_envoys[i]._update(module)
+
     def _add_envoy(self, module: torch.nn.Module, name: str):
 
         envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
