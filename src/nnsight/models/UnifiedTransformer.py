@@ -97,6 +97,9 @@ class UnifiedTransformer(LanguageModel):
 
             if "attention_mask" in prepared_inputs:
                 batched_inputs["attention_mask"] = []
+        
+        else:
+            batched_inputs = batched_inputs[0]
 
         batched_inputs["input"].extend(prepared_inputs["input"])
 
