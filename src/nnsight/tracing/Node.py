@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -179,7 +180,13 @@ class Node:
             if not node.done():
 
                 self.dependencies.append(node)
+                # Weakref so no reference loop
                 node.listeners.append(weakref.proxy(self))
+
+            # Otherwise just get the value if its already done.
+            else:
+
+                node = node.value
 
             return node
 
