@@ -5,7 +5,6 @@ import warnings
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 import torch
-from torch._guards import detect_fake_mode
 
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProxy
@@ -128,6 +127,16 @@ class Envoy:
             for envoy in self._sub_envoys:
                 envoy._set_tracer(tracer, propagate=True)
 
+    def _scanning(self) -> bool:
+
+        try:
+
+            return self._tracer._invoker.scanning
+
+        except:
+
+            return False
+
     def _reset_proxies(self, propagate: bool = True) -> None:
         """Sets proxies to None.
 
@@ -177,7 +186,7 @@ class Envoy:
         self, module: torch.nn.Module, input: Any, input_kwargs: Dict, output: Any
     ):
 
-        if detect_fake_mode(input):
+        if self._scanning():
 
             self._reset_proxies(propagate=False)
 
