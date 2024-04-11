@@ -77,15 +77,7 @@ nnsight
             </div>
         </div>
     </section>
-
-    <section class="d-flex align-items-center mid-section d-none d-md-block">
-      <div class="px-4 text-center">
-        <div class="col-lg-10 mx-auto">
-          <p class="lead mb-4">Direct access to model internals, from one to one hundred billion parameters. Intervene on activations or gradients in transformers, train optimizations methods, perform out of order module applications, cross prompt interventions, and so much more.</p>
-        </div>
-      </div>
-    </section>
-
+    
     <section class="d-flex align-items-center d-none d-md-block" style="height: 60vh;">
         <div class="container">
             <div class="row align-items-end pb-3 border-bottom mb-5">
