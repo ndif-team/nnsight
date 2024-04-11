@@ -5,7 +5,7 @@ import weakref
 from typing import Any, Callable, Dict, List, Type, Union
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensorMode
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
@@ -26,6 +26,7 @@ class Graph:
     Attributes:
         validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
+        tracing (bool): If currently tracing operations
         nodes (Dict[str, Node]): Mapping of node name to node.
         name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
             Used so names are unique.
@@ -44,6 +45,8 @@ class Graph:
 
         self.proxy_class = proxy_class
         self.validate = validate
+
+        self.tracing = True
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
@@ -138,17 +141,12 @@ class Graph:
                 allow_non_fake_inputs=True,
                 shape_env=ShapeEnv(assume_static_by_default=True),
             ) as fake_mode:
-
-                try:
-
+                with FakeCopyMode(fake_mode):
+                    
                     value = target(
                         *Node.prepare_proxy_values(_args),
                         **Node.prepare_proxy_values(_kwargs),
                     )
-
-                except RuntimeError:
-
-                    value = None
 
         target_name = target if isinstance(target, str) else target.__name__
 
@@ -158,17 +156,13 @@ class Graph:
         if name is None:
             name = f"{target_name}_{self.name_idx[target_name]}"
 
-        stack = inspect.stack()
-        proxy_frame = stack[2]
-
         node = Node(
             name=name,
             graph=weakref.proxy(self),
             value=value,
             target=target,
             args=args,
-            kwargs=kwargs,
-            meta={"line": proxy_frame.lineno, "file": proxy_frame.filename},
+            kwargs=kwargs
         )
 
         self.name_idx[target_name] += 1

@@ -6,12 +6,17 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import accelerate
 import torch
 from transformers import AutoConfig, AutoModel
+from typing_extensions import Self
 
 from .. import util
 from ..contexts.Runner import Runner
 from ..envoy import Envoy
-from ..intervention import (HookHandler, InterventionHandler,
-                            InterventionProxy, intervene)
+from ..intervention import (
+    HookHandler,
+    InterventionHandler,
+    InterventionProxy,
+    intervene,
+)
 from ..logger import logger
 from ..tracing.Graph import Graph
 
@@ -69,19 +74,18 @@ class NNsight:
             # Also do .to('meta') because why not.
             with accelerate.init_empty_weights(include_buffers=True):
                 self._model = self._load(self._model_key, *args, **kwargs).to("meta")
+                
+        self._envoy = Envoy(self._model)
 
         if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
-            self.dispatch_model()
-
-        else:
-            self._envoy = Envoy(self._model)
+            self.dispatch_model()            
 
         logger.info(f"Initialized `{self._model_key}`")
 
     def trace(
         self,
-        *inputs: Tuple[Any],
+        *inputs: Any,
         trace: bool = True,
         invoker_args: Dict[str, Any] = None,
         scan: bool = True,
@@ -93,7 +97,7 @@ class NNsight:
         This can be as simple as accessing and saving activations for inspection, or as complicated as transforming the activations and gradients in a forward pass over multiple inputs.
 
         Args:
-            inputs (Tuple[Any])
+            inputs (tuple[Any])
             trace (bool, optional): If to open a tracing context. Otherwise immediately run the model and return the raw output. Defaults to True.
             invoker_args (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
             kwargs (Dict[str, Any]): Keyword arguments passed to Runner/Tracer initialization, and then downstream to the model's ._execute(...) method.
@@ -262,19 +266,28 @@ class NNsight:
         return output
 
     def dispatch_model(self, *args, **kwargs) -> None:
-        """Dispatch ._model to have real parameters  using .load(...)."""
+        """Dispatch ._model to have real parameters  using ._load(...)."""
 
         logger.info(f"Dispatching `{self._model_key}`...")
 
-        self._model = self._load(
-            self._model_key, *self._args, *args, **kwargs, **self._kwargs
-        )
+        self._model = self._load(self._model_key, *self._args, *args, **kwargs, **self._kwargs)
 
-        self._envoy = Envoy(self._model)
+        self._envoy._update(self._model)
 
         self._dispatched = True
 
         logger.info(f"Dispatched `{self._model_key}`")
+
+    def to(self, *args, **kwargs) -> Self:
+        """Override torch.nn.Module.to so this returns the NNSight model, not the underlying module when doing: model = model.to(...)
+
+        Returns:
+            Envoy: Envoy.
+        """
+
+        self._model = self._model.to(*args, **kwargs)
+
+        return self
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
@@ -282,7 +295,7 @@ class NNsight:
         Returns:
             str: Representation.
         """
-        return repr(self._model)
+        return repr(self._envoy)
 
     def __getattr__(self, key: Any) -> Union[Envoy, InterventionProxy, Any]:
         """Wrapper of ._envoy's attributes to access module's inputs and outputs.
@@ -314,43 +327,41 @@ class NNsight:
 
         return accelerate.load_checkpoint_and_dispatch(self._model, repo_id, **kwargs)
 
-    def _execute(self, *prepared_inputs: Tuple[Any], **kwargs) -> Any:
+    def _execute(self, *prepared_inputs: Any, **kwargs) -> Any:
         """Virtual method to run the underlying ._model with some inputs.
 
         Default implementation util.applies moving all tensors to the device of the first parameter in ._model and passes the values into the model.
 
         Args:
-            prepared_inputs (Tuple[Any]): Prepared inputs.
+            prepared_inputs (tuple[Any]): Prepared inputs.
         """
         device = next(self._model.parameters()).device
 
-        prepared_inputs = util.apply(
-            prepared_inputs, lambda x: x.to(device), torch.Tensor
-        )
+        prepared_inputs = util.apply(prepared_inputs, lambda x: x.to(device), torch.Tensor)
 
         return self._model(
             *prepared_inputs,
             **kwargs,
         )
 
-    def _prepare_inputs(self, *inputs: Tuple[Any], **kwargs) -> Tuple[Tuple[Any], int]:
+    def _prepare_inputs(self, *inputs: Any, **kwargs) -> Tuple[Tuple[Any], int]:
         """Virtual method to prepare inputs before batching and execution and return batch size of prepared_inputs.
 
         Default implementation just returns inputs and length of first input.
 
         Args:
-            inputs (Tuple[Any]): Inputs to prepare for batching and execution.
+            inputs (tuple[Any]): Inputs to prepare for batching and execution.
             int: Batch size of prepared_inputs.
 
         Returns:
-            Tuple[Tuple[Any], int]: Prepared inputs, batch size of inputs.
+            Tuple[tuple[Any], int]: Prepared inputs, batch size of inputs.
         """
         return inputs, len(inputs[0])
 
     def _batch_inputs(
         self,
         batched_inputs: Optional[Any],
-        *prepared_inputs: Tuple[Any],
+        *prepared_inputs: Any,
     ) -> Any:
         """Virtual method to batch together results from _prepare_inputs.
 
@@ -358,7 +369,7 @@ class NNsight:
 
         Args:
             batched_inputs (Any): Current state of batched_inputs. Initially None.
-            prepared_inputs (Tuple[Any]): Most recent result from _prepare_inputs.
+            prepared_inputs (tuple[Any]): Most recent result from _prepare_inputs.
 
         Returns:
             Any: Batched inputs.

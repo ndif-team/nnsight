@@ -53,7 +53,7 @@ class Proxy:
 
     def __str__(self) -> str:
 
-        if self.node.is_graph_dereferenced():
+        if not self.node.is_tracing():
 
             return str(self.value)
 
@@ -63,7 +63,7 @@ class Proxy:
 
     def __repr__(self) -> str:
 
-        if self.node.is_graph_dereferenced():
+        if not self.node.is_tracing():
 
             return repr(self.value)
 
@@ -129,6 +129,12 @@ class Proxy:
     def __invert__(self) -> Self:
         return self.node.add(
             target=operator.invert,
+            args=[self.node],
+        )
+
+    def __neg__(self) -> Self:
+        return self.node.add(
+            target=operator.neg,
             args=[self.node],
         )
 
@@ -216,11 +222,29 @@ class Proxy:
             args=[other, self.node],
         )
 
+    def __eq__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.eq, args=[self.node, other])
+
+    def __ne__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.ne, args=[self.node, other])
+
+    def __lt__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.lt, args=[self.node, other])
+
+    def __gt__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.gt, args=[self.node, other])
+
+    def __le__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.le, args=[self.node, other])
+
+    def __ge__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(target=operator.ge, args=[self.node, other])
+
+    def __index__(self) -> Self:
+        return self.node.add(target=operator.index, args=[self.node])
+
     def __bool__(self) -> bool:
         return self.node.proxy_value.__bool__()
-
-    def __index__(self) -> int:
-        return self.node.proxy_value.__index__()
 
     def __instancecheck__(self, __instance: Any) -> bool:
         return self.node.proxy_value.__instancecheck__(__instance)
@@ -251,7 +275,7 @@ class Proxy:
 from functools import wraps
 
 
-def proxy_wrapper(fn) -> None:
+def proxy_wrapper(fn) -> Callable:
     """Wraps problematic functions (torch functions sometimes).
     Checks if any of its args are proxies. If so we return a proxy of the function.
     Otherwise just run the function.
@@ -265,7 +289,6 @@ def proxy_wrapper(fn) -> None:
 
     @wraps(fn)
     def patched(*args, **kwargs):
-        arguments = list(args) + list(kwargs.values())
 
         node = None
 
@@ -274,7 +297,7 @@ def proxy_wrapper(fn) -> None:
 
             node = proxy.node
 
-        util.apply(list(args) + list(kwargs.values()), get_node, Proxy)
+        util.apply((args, kwargs), get_node, Proxy)
 
         if node is not None:
             return node.add(target=fn, args=args, kwargs=kwargs)

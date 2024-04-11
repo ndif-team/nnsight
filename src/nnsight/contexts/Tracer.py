@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
 
 from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
@@ -15,13 +16,14 @@ class Tracer:
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
-        model (nnsight.models.NNsightModel.NNsight): nnsight Model object that ths context manager traces and executes.
-        graph (nnsight.tracing.Graph.Graph): Graph which traces operations performed on the input and output of modules' Envoys are added and later executed.
-        args (List[Any]): Positional arguments to be passed to function that executes the model.
-        kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
-        batch_size (int): Batch size of the most recent input. Used by Envoy to create input/output proxies.
-        batch_start (int): Batch start of the most recent input. Used by Envoy to create input/output proxies.
-        batched_input Any: Batched version of all inputs involved in this Tracer.
+        _model (nnsight.models.NNsightModel.NNsight): nnsight Model object that ths context manager traces and executes.
+        _graph (nnsight.tracing.Graph.Graph): Graph which traces operations performed on the input and output of modules' Envoys are added and later executed.
+        _args (List[Any]): Positional arguments to be passed to function that executes the model.
+        _kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
+        _batch_size (int): Batch size of the most recent input. Used by Envoy to create input/output proxies.
+        _batch_start (int): Batch start of the most recent input. Used by Envoy to create input/output proxies.
+        _batched_input (Any): Batched version of all inputs involved in this Tracer.
+        _invoker (Invoker): Currently open Invoker.
     """
 
     def __init__(
@@ -35,11 +37,11 @@ class Tracer:
 
         self._kwargs = kwargs
 
-        self._graph = Graph(
+        self._graph: Graph = Graph(
             self._model._envoy, proxy_class=model.proxy_class, validate=validate
         )
 
-        self._invoker: Invoker = None
+        self._invoker: Optional[Invoker] = None
 
         self._batch_size: int = 0
         self._batch_start: int = 0
@@ -63,7 +65,7 @@ class Tracer:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
-        
+
         output = self._model.interleave(
             self._model._execute,
             self._graph,
@@ -71,9 +73,10 @@ class Tracer:
             **self._kwargs,
         )
 
+        self._graph.tracing = False
         self._graph = None
 
-    def invoke(self, *inputs: Tuple[Any], **kwargs) -> Invoker:
+    def invoke(self, *inputs: Any, **kwargs) -> Invoker:
         """Create an Invoker context dor a given input.
 
         Raises:
@@ -98,13 +101,21 @@ class Tracer:
 
         self._model._envoy.next(increment=increment, propagate=True)
 
-    def apply(self, target: Callable, *args, **kwargs) -> InterventionProxy:
+    def apply(
+        self, target: Callable, validate: bool = False, *args, **kwargs
+    ) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
 
         Args:
             target (Callable): Function to apply
+            validate (bool): If to try and run this operation in FakeMode to test it out and scan it.
 
         Returns:
             InterventionProxy: Proxy of applying that function.
         """
-        return self._graph.add(target=target, args=args, kwargs=kwargs)
+        return self._graph.add(
+            target=target,
+            value=inspect._empty if validate else None,
+            args=args,
+            kwargs=kwargs,
+        )

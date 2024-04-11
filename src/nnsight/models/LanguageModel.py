@@ -9,9 +9,9 @@ from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
 from transformers.models.auto import modeling_auto
 
 from ..intervention import InterventionProxy
+from ..util import WrapperModule
 from . import NNsight
 from .mixins import GenerationMixin
-from ..util import WrapperModule
 
 
 class TokenIndexer:
@@ -124,6 +124,7 @@ class LanguageModel(GenerationMixin, NNsight):
 
     def __init__(
         self,
+        model_key: Union[str, torch.nn.Module],
         *args,
         tokenizer: Optional[PreTrainedTokenizer] = None,
         automodel: Type[AutoModel] = AutoModelForCausalLM,
@@ -136,9 +137,13 @@ class LanguageModel(GenerationMixin, NNsight):
             if not isinstance(automodel, str)
             else getattr(modeling_auto, automodel)
         )
+        
+        if isinstance(model_key, torch.nn.Module):
+            
+            setattr(model_key, 'generator', WrapperModule())
 
-        super().__init__(*args, **kwargs)
-
+        super().__init__(model_key, *args, **kwargs)
+        
     def _load(self, repo_id: str, **kwargs) -> PreTrainedModel:
 
         config = AutoConfig.from_pretrained(repo_id, **kwargs)
@@ -153,7 +158,7 @@ class LanguageModel(GenerationMixin, NNsight):
         if self._model is None:
 
             model = self.automodel.from_config(config, trust_remote_code=True)
-
+            
             setattr(model, 'generator', WrapperModule())
 
             return model

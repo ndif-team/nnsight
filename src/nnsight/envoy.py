@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import warnings
 from typing import Any, Dict, Iterator, List, Optional, Union
 
@@ -46,29 +47,42 @@ class Envoy:
             self._hook, with_kwargs=True
         )
 
-        if isinstance(module, torch.nn.ModuleList):
-            for i, module in enumerate(self._module):
+        for name, module in self._module.named_children():
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{i}")
+            self._add_envoy(module, name)
 
-                self._sub_envoys.append(envoy)
+    def _update(self, module: torch.nn.Module) -> None:
+        """Updates the ._model attribute using a new model of the same architecture.
+        Used when loading the real weights (dispatching) and need to replace the underlying modules.
+        """
+
+        self._module = module
+
+        self._hook_handle.remove()
+
+        self._hook_handle = self._module.register_forward_hook(
+            self._hook, with_kwargs=True
+        )
+
+        for i, module in enumerate(self._module.children()):
+
+            self._sub_envoys[i]._update(module)
+
+    def _add_envoy(self, module: torch.nn.Module, name: str):
+
+        envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
+
+        self._sub_envoys.append(envoy)
+
+        # If the module already has a sub-module named 'input' or 'output',
+        # mount the proxy access to 'nns_input' or 'nns_output instead.
+        if hasattr(Envoy, name):
+
+            self._handle_overloaded_mount(envoy, name)
 
         else:
-            for name, module in self._module.named_children():
 
-                envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
-
-                self._sub_envoys.append(envoy)
-
-                # If the module already has a sub-module named 'input' or 'output',
-                # mount the proxy access to 'nns_input' or 'nns_output instead.
-                if hasattr(Envoy, name):
-
-                    self._handle_overloaded_mount(envoy, name)
-
-                else:
-
-                    setattr(self, name, envoy)
+            setattr(self, name, envoy)
 
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
 
@@ -235,12 +249,15 @@ class Envoy:
         child_lines = []
         for attribute_name, attribute in self.__dict__.items():
 
+            if attribute_name == "_tracer":
+                continue
+
             if isinstance(attribute, Envoy):
 
                 mod_str = repr(attribute)
                 mod_str = torch.nn.modules.module._addindent(mod_str, 2)
                 child_lines.append("(" + attribute_name + "): " + mod_str)
-                
+
         lines = extra_lines + child_lines
 
         main_str = self._module._get_name() + "("
@@ -306,7 +323,15 @@ class Envoy:
 
         module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
 
-        torch.set_default_device(next(self._module.parameters()).device)
+        try:
+
+            device = next(self._module.parameters()).device
+
+        except:
+
+            device = torch.device("cpu")
+
+        torch.set_default_device(device)
 
         proxy = module_proxy.forward(*args, **kwargs)
 
@@ -336,7 +361,7 @@ class Envoy:
                 return self._output
 
             if len(self._fake_outputs) == 0:
-                fake_output = None
+                fake_output = inspect._empty
             elif self._call_iter >= len(self._fake_outputs):
                 # TODO warning?
                 fake_output = self._fake_outputs[-1]
@@ -389,7 +414,7 @@ class Envoy:
                 return self._input
 
             if len(self._fake_inputs) == 0:
-                fake_input = None
+                fake_input = inspect._empty
             elif self._call_iter >= len(self._fake_inputs):
                 # TODO warning?
                 fake_input = self._fake_inputs[-1]
