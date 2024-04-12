@@ -37,6 +37,8 @@ class Invoker(AbstractContextManager):
         self.inputs = inputs
         self.scan = scan
         self.kwargs = kwargs
+        
+        self.scanning = False
 
     def __enter__(self) -> Invoker:
         """Enters a new invocation context with a given input.
@@ -56,6 +58,8 @@ class Invoker(AbstractContextManager):
 
         if self.scan:
             self.tracer._model._envoy._clear()
+            
+            self.scanning = True
 
             with FakeTensorMode(
                 allow_non_fake_inputs=True,
@@ -66,6 +70,9 @@ class Invoker(AbstractContextManager):
                         *copy.deepcopy(self.inputs),
                         **copy.deepcopy(self.tracer._kwargs),
                     )
+                    
+            self.scanning = False
+            
         else:
             self.tracer._model._envoy._reset()
 

@@ -128,14 +128,9 @@ Tutorials
 
 
 .. toctree::
+   :glob:
    :maxdepth: 1
 
-   notebooks/tutorials/walkthrough.ipynb
-   notebooks/tutorials/ioi_patching.ipynb
-   notebooks/tutorials/attribution_patching.ipynb
-   notebooks/tutorials/logit_lens.ipynb
-   notebooks/tutorials/future_lens.ipynb
-   notebooks/tutorials/function_vectors.ipynb
-   notebooks/tutorials/sae.ipynb
+   notebooks/tutorials/*
 
 
