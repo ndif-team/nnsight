@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 import torch
 
@@ -206,6 +206,24 @@ class Envoy:
                 envoy.next(increment=increment, propagate=True)
 
         return self
+
+    def envoys(self, include_fn: Callable = None, envoys: List = None) -> List[Envoy]:
+
+        if envoys is None:
+            envoys = list()
+
+        included = True
+
+        if include_fn is not None:
+            included = include_fn(self)
+
+        if included:
+            envoys.append(self)
+
+        for sub_envoy in self._sub_envoys:
+            sub_envoy.envoys(include_fn=include_fn, envoys=envoys)
+
+        return envoys
 
     def _repr_module_list(self):
 
