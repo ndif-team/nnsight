@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
-from torch._guards import detect_fake_mode
 
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProtocol, InterventionProxy
@@ -129,6 +128,16 @@ class Envoy:
             for envoy in self._sub_envoys:
                 envoy._set_tracer(tracer, propagate=True)
 
+    def _scanning(self) -> bool:
+
+        try:
+
+            return self._tracer._invoker.scanning
+
+        except:
+
+            return False
+
     def _reset_proxies(self, propagate: bool = True) -> None:
         """Sets proxies to None.
 
@@ -178,7 +187,7 @@ class Envoy:
         self, module: torch.nn.Module, input: Any, input_kwargs: Dict, output: Any
     ):
 
-        if detect_fake_mode(input):
+        if self._scanning():
 
             self._reset_proxies(propagate=False)
 
@@ -198,6 +207,50 @@ class Envoy:
                 envoy.next(increment=increment, propagate=True)
 
         return self
+
+    def modules(
+        self, include_fn: Callable = None, names: bool = False, envoys: List = None
+    ) -> List[Envoy]:
+        """Returns all Envoys in the Envoy tree.
+
+        Args:
+            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+            names (bool, optional): If to include the name/module_path of returned Envoys along with the Envoy itself. Defaults to False.
+
+        Returns:
+            List[Envoy]: Included Envoys
+        """
+
+        if envoys is None:
+            envoys = list()
+
+        included = True
+
+        if include_fn is not None:
+            included = include_fn(self)
+
+        if included:
+            if names:
+                envoys.append((self._module_path, self))
+            else:
+                envoys.append(self)
+
+        for sub_envoy in self._sub_envoys:
+            sub_envoy.modules(include_fn=include_fn, envoys=envoys)
+
+        return envoys
+
+    def named_modules(self, *args, **kwargs) -> List[Tuple[str, Envoy]]:
+        """Returns all Envoys in the Envoy tree along with their name/module_path.
+
+        Args:
+            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+
+        Returns:
+            List[Tuple[str, Envoy]]: Included Envoys and their names/module_paths.
+        """
+
+        return self.modules(*args, **kwargs, names=True)
 
     def _repr_module_list(self):
 

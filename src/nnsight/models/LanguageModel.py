@@ -213,7 +213,7 @@ class LanguageModel(GenerationMixin, NNsight):
         ],
         labels: Any = None,
         **kwargs,
-    ) -> Tuple[BatchEncoding:, int]:
+    ) -> Tuple[BatchEncoding, int]:
         if isinstance(inputs, dict):
 
             new_inputs = dict()
