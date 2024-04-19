@@ -151,7 +151,7 @@ class LanguageModel(GenerationMixin, NNsight):
         if self.tokenizer is None:
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, config=config, padding_side="left"
+                repo_id, config=config, padding_side="left", **kwargs
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
