@@ -1,7 +1,7 @@
 Getting Started
 ===============
 
-**NNsight** (/ɛn.saɪt/) is a package for the interpreting and manipulating the internals of deep learning models. If you like the package, please consider giving it a star on `GitHub <https://github.com>`_.
+**NNsight** (/ɛn.saɪt/) is a package for the interpreting and manipulating the internals of deep learning models.
 
 .. _installation:
 
@@ -14,12 +14,7 @@ To get started with NNsight, install it with ``pip``.
 
    pip install nnsight
 
-Source Code
------------
-
-Please give the project a star on :ndif:`Github` if you like the package.
-
-NNsight is open-source and you can read and clone the full source at https://github.com/ndif-team/nnsight.
+NNsight is open-source and you can read and clone the full source at https://github.com/ndif-team/nnsight.  Please give the project a star on :ndif:`Github` if you like the package.
 
 First Steps
 -----------
