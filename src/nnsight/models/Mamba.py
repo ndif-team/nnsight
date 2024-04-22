@@ -35,11 +35,17 @@ class Mamba(LanguageModel):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         if self._model is None:
+            
+            model = MambaLMHeadModel(config, device="meta", dtype=None, **kwargs)
+            
+            setattr(model, 'generator', WrapperModule())
 
-            return MambaLMHeadModel(config, device="meta", dtype=None, **kwargs)
+            return model
 
         model = MambaLMHeadModel(config, device=device, **kwargs)
         model.load_state_dict(load_state_dict_hf(repo_id, device=device, **kwargs))
+        
+        setattr(model, 'generator', WrapperModule())
 
         return model
     
@@ -127,9 +133,7 @@ class Mamba(LanguageModel):
                 **kwargs,
             )
 
-        if self._envoy._output != None:
-
-            self._envoy._output.node.value = output
+        self._model.generator(output)
 
         return output
 
