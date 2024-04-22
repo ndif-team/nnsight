@@ -31,8 +31,8 @@ for key, value in getmembers(einops.einops, isfunction):
     DEFAULT_PATCHER.add(Patch(einops.einops, proxy_wrapper(value), key))
 
 DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
+# DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
+# DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
 
 from torch._subclasses.fake_tensor import FakeTensor
 
