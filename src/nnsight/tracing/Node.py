@@ -239,31 +239,25 @@ class Node:
             Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
         """
 
-        # Turn nodes into their value
         def _value(node: Node):
             return node.value
 
-        args = util.apply(self.args, _value, Node)
-        kwargs = util.apply(self.kwargs, _value, Node)
+        args, kwargs = util.apply((self.args, self.kwargs), _value, Node)
 
         device = None
 
-        def _device(value):
+        def _device(value: torch.Tensor):
             nonlocal device
-            device = value.device
 
-        all_args = list(args) + list(kwargs.values())
+            if device is None:
+                device = value.device
 
-        util.apply(list(reversed(all_args)), _device, torch.Tensor)
-        # TODO
-        # util.apply(list(reversed(all_args)), _device, torch.nn.Module)
+        util.apply((args, kwargs), _device, torch.Tensor)
 
-        # Move tensors to device
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        args = util.apply(args, _to, torch.Tensor)
-        kwargs = util.apply(kwargs, _to, torch.Tensor)
+        util.apply((args, kwargs), _to, torch.Tensor)
 
         return args, kwargs
 
