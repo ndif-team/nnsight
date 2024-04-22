@@ -299,7 +299,7 @@ def proxy_wrapper(fn) -> Callable:
         util.apply((args, kwargs), get_node, Proxy)
 
         if node is not None:
-            return node.add(target=fn, args=args, kwargs=kwargs)
+            return node.create(target=fn, args=args, kwargs=kwargs)
 
         else:
             return fn(*args, **kwargs)
