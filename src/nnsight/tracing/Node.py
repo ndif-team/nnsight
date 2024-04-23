@@ -321,7 +321,6 @@ class Node:
             Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
         """
 
-        # Turn nodes into their value
         def _value(node: Node):
             return node.value
 
