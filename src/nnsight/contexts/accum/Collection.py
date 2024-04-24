@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Union
+import weakref
 
 from typing_extensions import Self
 
@@ -17,7 +18,7 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorM
     def __init__(self, backend: Backend, accumulator: Accumulator = None) -> None:
 
         self.backend = backend
-        self.accumulator = accumulator
+        self.accumulator: Accumulator = weakref.proxy(accumulator)
 
         self.collection: List[Union[Collection, Tracer]] = []
         
@@ -45,8 +46,8 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorM
 
         accumulator.collector_stack.pop()
 
-    def iterator_backend_execute(self, last_iter: bool = False):
+    def iterator_backend_execute(self, release: bool = False):
 
         for executable in self.collection:
 
-            executable.iterator_backend_execute(last_iter=last_iter)
+            executable.iterator_backend_execute(release=release)

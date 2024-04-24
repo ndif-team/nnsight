@@ -1,4 +1,5 @@
 import inspect
+import weakref
 from typing import TYPE_CHECKING, Any, Dict, List
 
 import torch
@@ -390,7 +391,7 @@ class BridgeProtocol(Protocol):
             bridge (Bridge): Bridge.
         """
 
-        graph.attachments[cls.attachment_name] = bridge
+        graph.attachments[cls.attachment_name] = weakref.proxy(bridge)
 
     @classmethod
     def get_bridge(cls, graph: "Graph") -> "Bridge":

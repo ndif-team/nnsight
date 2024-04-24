@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 from ...tracing import protocols
 from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
-from ..backends import AccumulatorBackend, Backend, RemoteMixin
+from ..backends import AccumulatorBackend, Backend
 from .Collection import Collection
 from .Iterator import Iterator
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from ...models.NNsightModel import NNsight
 
 
-class Accumulator(Collection, RemoteMixin):
+class Accumulator(Collection):
     """An Accumulator is a root Collection that handles adding new Graphs and new Collections while accumulating.
 
     Attributes:
@@ -66,6 +66,16 @@ class Accumulator(Collection, RemoteMixin):
         return Iterator(iterable, backend, self)
 
     ### BACKENDS ########
+    
+    def local_backend_execute(self) -> Dict[int, Graph]:
+        
+        super().local_backend_execute()
+        
+        local_result = self.bridge.id_to_graph
+        
+        self.bridge = None
+        
+        return local_result
 
     def remote_backend_get_model_key(self):
 
@@ -73,13 +83,13 @@ class Accumulator(Collection, RemoteMixin):
 
         return self.model._remote_model_key()
 
-    def remote_backend_create_result_value(self):
+    def remote_backend_create_result_value(self, local_result: Dict[int, Graph]):
 
         from ...pydantics.Response import ResultModel
 
         return {
             id: ResultModel.from_graph(graph)
-            for id, graph in self.bridge.id_to_graph.items()
+            for id, graph in local_result.items()
         }
 
     def remote_backend_handle_result_value(self, value: Dict[int, Dict[str, Any]]):
@@ -92,3 +102,5 @@ class Accumulator(Collection, RemoteMixin):
                 graph.nodes[node_name]._value = node_value
                 
             graph.alive = False
+            
+        self.bridge = None

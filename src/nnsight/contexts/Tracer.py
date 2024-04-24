@@ -131,7 +131,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
 
     ##### BACKENDS ###############################
 
-    def local_backend_execute(self):
+    def local_backend_execute(self) -> Graph:
 
         self._graph.compile()
 
@@ -158,8 +158,13 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
             *_batched_input,
             **self._kwargs,
         )
+        
+        graph = self._graph
 
-        self._graph.alive = False
+        self._graph.alive = False 
+        self._graph = None
+        
+        return graph
 
     def remote_backend_get_model_key(self):
 
@@ -167,11 +172,11 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
 
         return self._model._remote_model_key()
 
-    def remote_backend_create_result_value(self):
+    def remote_backend_create_result_value(self, local_result: Graph):
 
         from ..pydantics.Response import ResultModel
 
-        return ResultModel.from_graph(self._graph)
+        return ResultModel.from_graph(local_result)
 
     def remote_backend_handle_result_value(self, value: Dict[str, Any]):
 
@@ -179,6 +184,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
             self._graph.nodes[node_name]._value = node_value
 
         self._graph.alive = False
+        self._graph = None
 
     def accumulator_backend_handle(self, accumulator: "Accumulator") -> None:
 
@@ -187,11 +193,13 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
         protocols.BridgeProtocol.set_bridge(self._graph, accumulator.bridge)
 
         accumulator.bridge.add(self._graph)
+        
+        self._graph = weakref.proxy(self._graph)
 
-    def iterator_backend_execute(self, last_iter: bool = False) -> None:
+    def iterator_backend_execute(self, release: bool = False) -> None:
+        
+        graph = self.local_backend_execute()
 
-        self.local_backend_execute()
+        if not release:
 
-        if not last_iter:
-
-            self._graph.alive = True
+            self._graph = graph

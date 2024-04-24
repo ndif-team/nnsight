@@ -136,7 +136,7 @@ class Iterator(Collection):
 
         self.accumulator.graph.compile()
 
-        self.accumulator.bridge.release = False
+        self.accumulator.bridge.locks += 1
 
         last_idx = len(self.data) - 1
 
@@ -146,8 +146,8 @@ class Iterator(Collection):
 
             if last_iter:
 
-                self.accumulator.bridge.release = True
+                self.accumulator.bridge.locks -= 1
 
             IteratorItemProtocol.set(self.accumulator.graph, item, self.iter_idx)
 
-            self.iterator_backend_execute(last_iter=last_iter)
+            self.iterator_backend_execute(release=self.accumulator.bridge.release)

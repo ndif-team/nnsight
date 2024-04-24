@@ -1,5 +1,5 @@
 class IteratorMixin:
     
-    def iterator_backend_execute(self, last_iter:bool = False):
+    def iterator_backend_execute(self, release:bool = False):
         
         raise NotImplementedError()

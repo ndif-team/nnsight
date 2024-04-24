@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+import weakref
 
 import accelerate
 import torch
@@ -259,9 +260,11 @@ class NNsight:
 
             backend = RemoteBackend(backend)
 
-        self._accumulator = Accumulator(backend, self)
+        accumulator = Accumulator(backend, self)
+        
+        self._accumulator = weakref.proxy(accumulator)
 
-        return self._accumulator
+        return accumulator
 
     def interleave(
         self,
