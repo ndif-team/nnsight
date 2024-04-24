@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 class ApiConfigModel(BaseModel):
     HOST: str
+    SSL: bool
     APIKEY: Optional[str]
 
 

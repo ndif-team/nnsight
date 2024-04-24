@@ -90,3 +90,5 @@ class Accumulator(Collection, RemoteMixin):
 
             for node_name, node_value in saves.items():
                 graph.nodes[node_name]._value = node_value
+                
+            graph.alive = False
