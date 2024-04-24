@@ -5,26 +5,21 @@ import weakref
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from .. import pydantics, util
+from .. import util
 from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import (AccumulatorMixin, Backend, IteratorMixin,
-                       RemoteMixin)
+from .backends import AccumulatorMixin, Backend, IteratorMixin, RemoteMixin
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
-    from ..models.NNsightModel import NNsight
     from ..models.mixins import RemoteableMixin
-    from ..pydantics.Request import RequestModel
-    from ..pydantics.Response import ResultModel
+    from ..models.NNsightModel import NNsight
     from .accum.Accumulator import Accumulator
 
 
-class Tracer(
-    AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixin
-):
+class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -165,28 +160,25 @@ class Tracer(
         )
 
         self._graph.alive = False
-        self._graph = None
 
     def remote_backend_get_model_key(self):
-        
-        self._model : "RemoteableMixin"
-        
+
+        self._model: "RemoteableMixin"
+
         return self._model._remote_model_key()
-    
+
     def remote_backend_create_result_value(self):
-        
+
         from ..pydantics.Response import ResultModel
-                
+
         return ResultModel.from_graph(self._graph)
 
     def remote_backend_handle_result_value(self, value: Dict[str, Any]):
-                
+
         for node_name, node_value in value.items():
             self._graph.nodes[node_name]._value = node_value
-                  
-        self._graph.alive = False
-        self._graph = None
 
+        self._graph.alive = False
 
     def accumulator_backend_handle(self, accumulator: "Accumulator") -> None:
 
@@ -195,14 +187,11 @@ class Tracer(
         protocols.BridgeProtocol.set_bridge(self._graph, accumulator.bridge)
 
         accumulator.bridge.add(self._graph)
-        
-    def iterator_backend_execute(self, last_iter: bool = False) -> None:
 
-        graph = self._graph
+    def iterator_backend_execute(self, last_iter: bool = False) -> None:
 
         self.local_backend_execute()
 
         if not last_iter:
 
-            self._graph = graph
             self._graph.alive = True
