@@ -14,7 +14,7 @@ from ..tracing.Graph import Graph
 
 class ResultModel(BaseModel):
     id: str
-    saves: List[Dict[str, Any]] = None
+    value: Any = None
 
     @classmethod
     def from_graph(cls, graph: Graph) -> Dict[str, Any]:
@@ -26,7 +26,7 @@ class ResultModel(BaseModel):
         }
 
         return saves
-
+ 
 
 class ResponseModel(BaseModel):
     class JobStatus(Enum):

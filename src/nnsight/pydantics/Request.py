@@ -15,17 +15,16 @@ if TYPE_CHECKING:
 
 
 class RequestModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
 
     object: ObjectTypes
-    repo_id: str
+    model_key: str
 
     id: str = None
     session_id: str = None
     received: datetime = None
 
-    def compile(self, model: NNsight) -> Union["LocalMixin", "RemoteMixin"]:
+    def compile(self, model: NNsight) -> "RemoteMixin":
 
-        obj = self.object.compile(model)
-
-        return obj
+        return self.object.compile(model)

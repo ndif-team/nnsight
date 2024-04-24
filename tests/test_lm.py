@@ -21,7 +21,7 @@ def MSG_prompt():
 
 def _test_serialize(tracer: Tracer):
 
-    request = tracer.remote_backend_create_request()
+    request =  RequestModel(object=tracer, model_key=tracer.remote_backend_get_model_key())
     request_json = request.model_dump(
         mode="json", exclude=["session_id", "received", "id"]
     )

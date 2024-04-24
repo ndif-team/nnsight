@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import requests
 import socketio
@@ -11,11 +11,17 @@ from tqdm import tqdm
 from ... import CONFIG, pydantics
 from ...logger import logger
 from . import Backend
+from .LocalBackend import LocalBackend, LocalMixin
+
+if TYPE_CHECKING:
+
+    from ...pydantics.Request import RequestModel
+    from ...pydantics.Response import ResponseModel, ResultModel
 
 
 def handle_response(handle_result: Callable, event: str, data: Any) -> bool:
     # Load the data into the ResponseModel pydantic class.
-    response = pydantics.ResponseModel(**data)
+    response: "ResponseModel" = pydantics.ResponseModel(**data)
 
     # Print response for user ( should be logger.info and have an info handler print to stdout)
     print(str(response))
@@ -49,12 +55,14 @@ def handle_response(handle_result: Callable, event: str, data: Any) -> bool:
         result_bytes.seek(0)
 
         # Decode bytes with pickle and then into pydantic object.
-        result = pydantics.ResultModel(**torch.load(result_bytes, map_location="cpu"))
+        result: "ResultModel" = pydantics.Response.ResultModel(
+            **torch.load(result_bytes, map_location="cpu")
+        )
 
         # Close bytes
         result_bytes.close()
 
-        handle_result(result)
+        handle_result(result.value)
 
         return True
     # Or if there was some error.
@@ -64,7 +72,7 @@ def handle_response(handle_result: Callable, event: str, data: Any) -> bool:
     return False
 
 
-def blocking_request(url: str, request: pydantics.Request.RequestModel, handle_result: Callable):
+def blocking_request(url: str, request: "RequestModel", handle_result: Callable):
     # Create a socketio connection to the server.
     with socketio.SimpleClient(logger=logger, reconnection_attempts=10) as sio:
         # Connect
@@ -100,25 +108,22 @@ def blocking_request(url: str, request: pydantics.Request.RequestModel, handle_r
                 break
 
 
-from . import Backend
+class RemoteMixin(LocalMixin):
 
-
-class RemoteMixin:
-
-    def remote_backend_create_request(self) -> pydantics.Request.RequestModel:
-
-        raise NotImplementedError()
-    
-    def remote_backend_create_result(self,) -> pydantics.Response.ResultModel:
+    def remote_backend_get_model_key(self) -> str:
 
         raise NotImplementedError()
 
-    def remote_backend_handle_result(self, result: pydantics.ResultModel) -> None:
+    def remote_backend_create_result_value(self) -> Any:
+
+        raise NotImplementedError()
+
+    def remote_backend_handle_result_value(self, value: Any) -> None:
 
         raise NotImplementedError()
 
 
-class RemoteBackend(Backend):
+class RemoteBackend(LocalBackend):
 
     def __init__(self, url: str = None) -> None:
 
@@ -126,8 +131,8 @@ class RemoteBackend(Backend):
 
     def __call__(self, obj: RemoteMixin):
 
-        request = obj.remote_backend_create_request()
-        
-        breakpoint()
+        model_key = obj.remote_backend_get_model_key()
 
-        blocking_request(self.url, request, obj.remote_backend_handle_result)
+        request = pydantics.Request.RequestModel(object=obj, model_key=model_key)
+
+        blocking_request(self.url, request, obj.remote_backend_handle_result_value)

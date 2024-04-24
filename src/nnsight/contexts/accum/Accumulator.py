@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
 from ...tracing import protocols
 from ...tracing.Bridge import Bridge
@@ -10,6 +10,7 @@ from .Collection import Collection
 from .Iterator import Iterator
 
 if TYPE_CHECKING:
+    from ...models.mixins import RemoteableMixin
     from ...models.NNsightModel import NNsight
 
 
@@ -66,11 +67,29 @@ class Accumulator(Collection, RemoteMixin):
 
     ### BACKENDS ########
 
-    def remote_backend_create_request(self):
+    def remote_backend_get_model_key(self):
 
-        from ...pydantics.Request import RequestModel
+        self.model: "RemoteableMixin"
 
-        return RequestModel(object=self, repo_id=self.model._model_key)
+        return self.model._remote_model_key()
 
-    def remote_backend_handle_result(self, result: ResultModel) -> None:
-        return super().remote_backend_handle_result(result)
+    def remote_backend_create_result_value(self):
+
+        from ...pydantics.Response import ResultModel
+
+        return {
+            id: ResultModel.from_graph(graph)
+            for id, graph in self.bridge.id_to_graph.items()
+        }
+
+    def remote_backend_handle_result_value(self, value: Dict[int, Dict[str, Any]]):
+
+        for graph_id, saves in value.items():
+
+            graph = self.bridge.id_to_graph[graph_id]
+
+            for node_name, node_value in saves.items():
+                graph.nodes[node_name]._value = node_value
+
+            graph.alive = False
+            del self.bridge.id_to_graph[graph_id]
