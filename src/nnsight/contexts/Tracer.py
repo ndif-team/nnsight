@@ -172,7 +172,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
 
         return self._model._remote_model_key()
 
-    def remote_backend_create_result_value(self, local_result: Graph):
+    def remote_backend_postprocess_result(self, local_result: Graph):
 
         from ..pydantics.Response import ResultModel
 

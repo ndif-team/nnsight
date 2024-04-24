@@ -118,7 +118,7 @@ class RemoteMixin(LocalMixin):
 
         raise NotImplementedError()
 
-    def remote_backend_create_result_value(self, local_result: Any) -> Any:
+    def remote_backend_postprocess_result(self, local_result: Any) -> Any:
 
         raise NotImplementedError()
 
