@@ -95,9 +95,11 @@ class IteratorModel(CollectionModel):
 
         iterator = Iterator(data, None, accumulator=accumulator)
 
-        collection = super().compile(model, accumulator)
+        iterator.collection = [
+            value.compile(model, accumulator) for value in self.collection
+        ]
 
-        iterator.collection = collection.collection
+        iterator.accumulator_backend_handle(accumulator)
 
         return iterator
 
@@ -115,9 +117,11 @@ class AccumulatorModel(CollectionModel):
 
         accumulator = Accumulator(None, model, graph=graph)
 
-        collection = super().compile(model, accumulator)
+        accumulator.collection = [
+            value.compile(model, accumulator) for value in self.collection
+        ]
 
-        accumulator.collection = collection.collection
+        accumulator.accumulator_backend_handle(accumulator)
 
         return accumulator
 
