@@ -6,7 +6,7 @@ from types import MethodDescriptorType
 from typing import Dict, List, Literal, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, Strict, field_validator
 from pydantic.functional_validators import AfterValidator
 from typing_extensions import Annotated
 
@@ -90,6 +90,7 @@ class SliceModel(BaseModel):
     step: ValueTypes
 
     def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> slice:
+
         return slice(
             self.start.compile(graph, nodes),
             self.stop.compile(graph, nodes),
@@ -178,7 +179,7 @@ SliceType = Annotated[
 ListType = Annotated[list, AfterValidator(lambda value: ListModel(values=value))]
 
 TupleType = Annotated[
-    tuple, AfterValidator(lambda value: TupleModel(values=list(value)))
+    tuple, Strict(), AfterValidator(lambda value: TupleModel(values=list(value)))
 ]
 
 DictType = Annotated[dict, AfterValidator(lambda value: DictModel(values=value))]
@@ -209,8 +210,8 @@ ValueTypes = Union[
             SliceModel,
             TensorModel,
             PrimitiveModel,
-            ListModel,
             TupleModel,
+            ListModel,
             DictModel,
         ],
         Field(discriminator="type_name"),
@@ -220,8 +221,8 @@ ValueTypes = Union[
         SliceType,
         TensorType,
         PrimitiveType,
-        ListType,
         TupleType,
+        ListType,
         DictType,
     ],
 ]
