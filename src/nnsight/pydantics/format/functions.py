@@ -5,9 +5,8 @@ from inspect import (getmembers, isbuiltin, isfunction, ismethod,
 import einops
 import torch
 
-from ... import util
-from ...contexts.accum.Iterator import IteratorItemProtocol
-from ...intervention import InterventionProtocol
+from ... import intervention, util
+from ...contexts.accum import Iterator
 from ...tracing import protocols
 from ...tracing.Proxy import Proxy
 
@@ -81,5 +80,17 @@ FUNCTIONS_WHITELIST.update(
         if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
     }
 )
-FUNCTIONS_WHITELIST[get_function_name(InterventionProtocol)] = InterventionProtocol
-FUNCTIONS_WHITELIST[get_function_name(IteratorItemProtocol)] = IteratorItemProtocol
+FUNCTIONS_WHITELIST.update(
+    {
+        get_function_name(protocol): protocol
+        for key, protocol in getmembers(Iterator)
+        if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
+    }
+)
+FUNCTIONS_WHITELIST.update(
+    {
+        get_function_name(protocol): protocol
+        for key, protocol in getmembers(intervention)
+        if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
+    }
+)

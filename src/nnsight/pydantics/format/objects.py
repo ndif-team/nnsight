@@ -148,7 +148,7 @@ AccumulatorType = Annotated[
     ),
 ]
 
-
+# Register all objects
 ObjectTypes = Union[
     Annotated[
         Union[

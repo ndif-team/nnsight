@@ -201,6 +201,7 @@ NodeType = Annotated[
     ),
 ]
 
+# Register all values
 ValueTypes = Union[
     Annotated[
         Union[
