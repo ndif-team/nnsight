@@ -53,7 +53,7 @@ class InterventionProxy(Proxy):
         """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
 
         Returns:
-            InterventionProxy: Save proxy.
+            InterventionProxy: Proxy.
         """
 
         # Add a 'lock' node with the save proxy as an argument to ensure the values are never deleted.
@@ -61,6 +61,17 @@ class InterventionProxy(Proxy):
         # dependency for the save proxy.
 
         protocols.LockProtocol.add(self.node)
+
+        return self
+    
+    def stop(self) -> InterventionProxy:
+        """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed..
+
+        Returns:
+            InterventionProxy: Proxy.
+        """
+
+        protocols.EarlyStopProtocol.add(self.node)
 
         return self
 

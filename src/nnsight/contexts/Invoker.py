@@ -68,16 +68,18 @@ class Invoker(AbstractContextManager):
         if self.tracer._model._accumulator is not None:
 
             def check_for_nodes(proxy: Proxy):
+                
+                if not proxy.node.done():
 
-                nonlocal preserved_inputs
+                    nonlocal preserved_inputs
 
-                preserved_inputs = self.inputs
+                    preserved_inputs = self.inputs
 
-                node = proxy.node
+                    node = proxy.node
 
-                return protocols.LockProtocol.add(
-                    protocols.BridgeProtocol.add(node, self.tracer._graph).node
-                ).node
+                    return protocols.LockProtocol.add(
+                        protocols.BridgeProtocol.add(node, self.tracer._graph).node
+                    ).node
 
             inputs = util.apply(self.inputs, check_for_nodes, Proxy)
 

@@ -227,6 +227,17 @@ class Envoy:
 
         return self
 
+    def to(self, *args, **kwargs) -> Envoy:
+        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
+
+        Returns:
+            Envoy: Envoy.
+        """
+
+        self._module = self._module.to(*args, **kwargs)
+
+        return self
+
     def modules(
         self, include_fn: Callable = None, names: bool = False, envoys: List = None
     ) -> List[Envoy]:

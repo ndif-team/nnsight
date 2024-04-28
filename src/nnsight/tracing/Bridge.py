@@ -1,4 +1,3 @@
-import weakref
 from collections import OrderedDict
 from typing import Any, Dict, List, Tuple, Union
 

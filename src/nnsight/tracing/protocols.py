@@ -20,8 +20,6 @@ class Protocol:
     Unlike normal `Node` target execution, these have access to the `Node` itself and therefore the `Graph`, enabling more powerful functionality than with just functions and methods.
     """
 
-    name: str
-
     @classmethod
     def add(cls, *args, **kwargs) -> "InterventionProxy":
         """Class method to be implemented in order to add a Node of this Protocol to a Graph."""
@@ -422,3 +420,27 @@ class BridgeProtocol(Protocol):
         """
 
         return cls.attachment_name in graph.attachments
+    
+    
+class EarlyStopException(Exception):
+    pass
+
+class EarlyStopProtocol(Protocol):
+    """Protocol to stop the execution of a model early.
+    """
+    
+    @classmethod
+    def add(cls, node: "Node"):
+        return node.create(
+            target=cls,
+            proxy_value=None,
+            args=[node],
+        )
+
+        
+        
+    @classmethod
+    def execute(cls, node: "Node") -> None:
+        
+        raise EarlyStopException()
+
