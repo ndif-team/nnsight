@@ -28,6 +28,7 @@ class Invoker(AbstractContextManager):
             When making interventions, you made get shape errors if scan is false as it validates operations based on shapes so
             for looped calls where shapes are consistent, you may want to have scan=True for the first loop. Defaults to True.
         kwargs (Dict[str,Any]): Keyword arguments passed to the model's _prepare_inputs method.
+        scanning (bool): If currently scanning.
     """
 
     def __init__(

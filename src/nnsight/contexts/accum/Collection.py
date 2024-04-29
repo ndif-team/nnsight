@@ -14,18 +14,26 @@ if TYPE_CHECKING:
 
 
 class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorMixin):
+    """A Collection is a collection of objects to execute.
+
+    Attributes:
+    
+        backend (Backend): Backend to execute this Collection on __exit__.
+        accumulator (Accumulator): Current Accumulator object.
+        collection (List[Union[LocalMixin, IteratorMixin]]): 
+    """
 
     def __init__(self, backend: Backend, accumulator: Accumulator = None) -> None:
 
         self.backend = backend
         self.accumulator: Accumulator = weakref.proxy(accumulator)
-
-        self.collection: List[Union[Collection, Tracer]] = []
+        self.collection: List[Union[LocalMixin, IteratorMixin]] = []
         
-        
+        # Add self to current Collection.
         if len(self.accumulator.collector_stack) > 0:
             self.accumulator.collector_stack[-1].collection.append(self)
 
+        # Add self to stack of Collections.
         self.accumulator.collector_stack.append(self)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

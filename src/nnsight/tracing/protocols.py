@@ -420,15 +420,15 @@ class BridgeProtocol(Protocol):
         """
 
         return cls.attachment_name in graph.attachments
-    
-    
+
+
 class EarlyStopException(Exception):
     pass
 
+
 class EarlyStopProtocol(Protocol):
-    """Protocol to stop the execution of a model early.
-    """
-    
+    """Protocol to stop the execution of a model early."""
+
     @classmethod
     def add(cls, node: "Node"):
         return node.create(
@@ -437,10 +437,9 @@ class EarlyStopProtocol(Protocol):
             args=[node],
         )
 
-        
-        
     @classmethod
     def execute(cls, node: "Node") -> None:
-        
-        raise EarlyStopException()
 
+        node.set_value(True)
+
+        raise EarlyStopException()

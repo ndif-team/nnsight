@@ -36,7 +36,8 @@ def handle_response(handle_result: Callable, url: str, event: str, data: Any) ->
 
         # Get result from result url using job id.
         with requests.get(
-            url=f"http{'s' if CONFIG.API.SSL else ''}://{url}/result/{response.id}", stream=True
+            url=f"http{'s' if CONFIG.API.SSL else ''}://{url}/result/{response.id}",
+            stream=True,
         ) as stream:
             # Total size of incoming data.
             total_size = float(stream.headers["Content-length"])
@@ -113,21 +114,50 @@ def blocking_request(url: str, request: "RequestModel", handle_result: Callable)
 
 
 class RemoteMixin(LocalMixin):
+    """To be inherited by objects that want to be able to be executed by the RemoteBackend."""
 
     def remote_backend_get_model_key(self) -> str:
+        """Should return the model_key used to specify which model to run on the remote service.
+
+        Returns:
+            str: Model key.
+        """
 
         raise NotImplementedError()
 
     def remote_backend_postprocess_result(self, local_result: Any) -> Any:
+        """Should handle postprocessing the result from local_backend_execute.
+
+        For example moving tensors to cpu/detaching/etc.
+
+        Args:
+            local_result (Any): Local execution result.
+
+        Returns:
+            Any: Post processed local execution result.
+        """
 
         raise NotImplementedError()
 
     def remote_backend_handle_result_value(self, value: Any) -> None:
+        """Should handle postprocessed result from remote_backend_postprocess_result on return from remote service.
+
+        Args:
+            value (Any): Result.
+        """
 
         raise NotImplementedError()
 
 
 class RemoteBackend(LocalBackend):
+    """Backend to execute a context object via a remote service.
+
+    Context object must inherit from RemoteMixin and implement its methods.
+
+    Attributes:
+
+        url (str): Remote host url. Defaults to that set in CONFIG.API.HOST.
+    """
 
     def __init__(self, url: str = None) -> None:
 
@@ -135,10 +165,13 @@ class RemoteBackend(LocalBackend):
 
     def __call__(self, obj: RemoteMixin):
 
+        # Get model key.
         model_key = obj.remote_backend_get_model_key()
 
         from ...pydantics.Request import RequestModel
 
+        # Create request using pydantic to parse the object itself.
         request = RequestModel(object=obj, model_key=model_key)
 
+        # Do blocking request.
         blocking_request(self.url, request, obj.remote_backend_handle_result_value)
