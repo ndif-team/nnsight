@@ -53,7 +53,7 @@ class InterventionProxy(Proxy):
         """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
 
         Returns:
-            InterventionProxy: Save proxy.
+            InterventionProxy: Proxy.
         """
 
         # Add a 'lock' node with the save proxy as an argument to ensure the values are never deleted.
@@ -61,6 +61,17 @@ class InterventionProxy(Proxy):
         # dependency for the save proxy.
 
         protocols.LockProtocol.add(self.node)
+
+        return self
+    
+    def stop(self) -> InterventionProxy:
+        """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed..
+
+        Returns:
+            InterventionProxy: Proxy.
+        """
+
+        protocols.EarlyStopProtocol.add(self.node)
 
         return self
 
@@ -147,8 +158,8 @@ class InterventionProxy(Proxy):
 
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
         if self.node.proxy_value is inspect._empty:
-                        
-            return super().__getattr__('shape')
+
+            return super().__getattr__("shape")
 
         return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
@@ -166,8 +177,8 @@ class InterventionProxy(Proxy):
 
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
         if self.node.proxy_value is inspect._empty:
-            
-            return super().__getattr__('device')
+
+            return super().__getattr__("device")
 
         return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
 
@@ -185,8 +196,8 @@ class InterventionProxy(Proxy):
 
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
         if self.node.proxy_value is inspect._empty:
-            
-            return super().__getattr__('dtype')
+
+            return super().__getattr__("dtype")
 
         return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
@@ -338,8 +349,8 @@ class InterventionProtocol(Protocol):
         Forms the current module_path key in the form of <module path>.<output/input>
         Checks the graphs InterventionProtocol attachment attribute for this key.
         If exists, value is a list of node names to iterate through.
-        Node args for argument type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
-        Checks and updates the counter for the given argument node. If counter is not ready yet continue.
+        Node args for intervention type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
+        Checks and updates the counter for the given intervention node. If counter is not ready yet continue.
         Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
         only batch indexed tensors relevant to this intervention node. Sets the value of a node
         using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
@@ -357,25 +368,25 @@ class InterventionProtocol(Protocol):
             Any: The activations, potentially modified by the intervention graph.
         """
 
-        # Key to module activation argument nodes has format: <module path>.<output/input>
+        # Key to module activation intervention nodes has format: <module path>.<output/input>
         module_path = f"{module_path}.{key}"
 
-        arguments = cls.get_interventions(intervention_handler.graph)
+        interventions = cls.get_interventions(intervention_handler.graph)
 
-        if module_path in arguments:
-            argument_node_names = arguments[module_path]
+        if module_path in interventions:
+            intervention_node_names = interventions[module_path]
 
-            # Multiple argument nodes can have same module_path if there are multiple invocations.
-            for argument_node_name in argument_node_names:
+            # Multiple intervention nodes can have same module_path if there are multiple invocations.
+            for intervention_node_name in intervention_node_names:
 
-                node = intervention_handler.graph.nodes[argument_node_name]
+                node = intervention_handler.graph.nodes[intervention_node_name]
 
-                # Args for argument nodes are (module_path, batch_size, batch_start, call_iter).
+                # Args for intervention nodes are (module_path, batch_size, batch_start, call_iter).
                 _, batch_size, batch_start, call_iter = node.args
 
-                # Updates the count of argument node calls.
+                # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
-                if call_iter != intervention_handler.count(argument_node_name):
+                if call_iter != intervention_handler.count(intervention_node_name):
 
                     continue
 
@@ -397,7 +408,7 @@ class InterventionProtocol(Protocol):
                         return acts.narrow(0, batch_start, batch_size)
 
                     return acts
-                
+
                 value = util.apply(
                     activations,
                     narrow,
@@ -510,6 +521,10 @@ class HookHandler(AbstractContextManager):
 
 
 class InterventionHandler:
+    """Object passed to InterventionProtocol.intervene to store information about the current interleaving execution run.
+
+    Like the Intervention Graph, the total batch size that is being executed, and a counter for how many times an Intervention node has been attempted to be executed.
+    """
 
     def __init__(self, graph: Graph, total_batch_size: int) -> None:
 
@@ -517,7 +532,15 @@ class InterventionHandler:
         self.total_batch_size = total_batch_size
         self.call_counter: Dict[str, int] = {}
 
-    def count(self, name: str):
+    def count(self, name: str) -> int:
+        """Increments the count of times a given Intervention Node has tried to be executed and returns the count.
+
+        Args:
+            name (str): Name of intervention node to return count for.
+
+        Returns:
+            int: Count.
+        """
 
         if name not in self.call_counter:
 

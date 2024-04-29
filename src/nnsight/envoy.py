@@ -68,7 +68,13 @@ class Envoy:
 
             self._sub_envoys[i]._update(module)
 
-    def _add_envoy(self, module: torch.nn.Module, name: str):
+    def _add_envoy(self, module: torch.nn.Module, name: str) -> None:
+        """Adds a new Envoy for a given torch module under this Envoy.
+
+        Args:
+            module (torch.nn.Module): Module to create Envoy for.
+            name (str): name of envoy/attribute.
+        """
 
         envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
 
@@ -84,7 +90,15 @@ class Envoy:
 
             setattr(self, name, envoy)
 
-    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
+    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
+        """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
+
+        Directly edits the underlying class to accomplish this.
+
+        Args:
+            envoy (Envoy): Envoy to handle.
+            mount_point (str): Overloaded attribute name.
+        """
 
         warnings.warn(
             f"Module of type `{type(self._module)}` has pre-defined a `{mount_point}` attribute. nnsight access for `{mount_point}` will be mounted at `.nns_{mount_point}` instead of `.{mount_point}` for this module only."
@@ -129,6 +143,11 @@ class Envoy:
                 envoy._set_tracer(tracer, propagate=True)
 
     def _scanning(self) -> bool:
+        """Whether or not in scanning mode. Checks the current Tracer's Invoker.
+
+        Returns:
+            bool: _description_
+        """
 
         try:
 
@@ -205,6 +224,17 @@ class Envoy:
         if propagate:
             for envoy in self._sub_envoys:
                 envoy.next(increment=increment, propagate=True)
+
+        return self
+
+    def to(self, *args, **kwargs) -> Envoy:
+        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
+
+        Returns:
+            Envoy: Envoy.
+        """
+
+        self._module = self._module.to(*args, **kwargs)
 
         return self
 

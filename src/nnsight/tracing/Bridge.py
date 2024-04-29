@@ -1,6 +1,5 @@
 from collections import OrderedDict
 from typing import Any, Dict, List, Tuple, Union
-import weakref
 
 from .Graph import Graph
 
@@ -8,6 +7,10 @@ from .Graph import Graph
 class Bridge:
     """A Bridge object collects and tracks multiple Graphs in order to facilitate interaction between them.
     The order in which Graphs added matters as Graphs can only get values from previous Graphs/
+
+    Attributes:
+        id_to_graph (Dict[int, Graph]): Mapping of graph id to Graph.
+        locks (int): Count of how many entities are depending on ties between graphs not to be released.
     """
 
     def __init__(self) -> None:
@@ -16,10 +19,10 @@ class Bridge:
         self.id_to_graph: Dict[int, Graph] = OrderedDict()
 
         self.locks = 0
-        
-    @property 
+
+    @property
     def release(self) -> bool:
-        
+
         return not self.locks
 
     def add(self, graph: Graph) -> None:

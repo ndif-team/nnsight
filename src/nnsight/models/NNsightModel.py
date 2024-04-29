@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import gc
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import weakref
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
@@ -11,12 +11,15 @@ from typing_extensions import Self
 
 from .. import util
 from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import (AccumulatorBackend, Backend, LocalBackend,
-                                 RemoteBackend)
+from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
-from ..intervention import (HookHandler, InterventionHandler,
-                            InterventionProtocol, InterventionProxy)
+from ..intervention import (
+    HookHandler,
+    InterventionHandler,
+    InterventionProtocol,
+    InterventionProxy,
+)
 from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
@@ -238,7 +241,7 @@ class NNsight:
         """Create an accumulation context using an Accumulator.
 
         Args:
-            backend (Backend): Backend for this Tracer object.
+            backend (Backend): Backend for this Accumulator object.
             remote (bool): Use RemoteBackend with default url.
 
         Returns:
@@ -261,7 +264,7 @@ class NNsight:
             backend = RemoteBackend(backend)
 
         accumulator = Accumulator(backend, self)
-        
+
         self._accumulator = weakref.proxy(accumulator)
 
         return accumulator
@@ -272,7 +275,7 @@ class NNsight:
         intervention_graph: Graph,
         *inputs: List[Any],
         **kwargs,
-    ) -> Any:
+    ) -> None:
         """Runs some function with some inputs and some graph with the appropriate contexts for this model.
 
         Loads and dispatched ._model if not already done so.
@@ -289,9 +292,6 @@ class NNsight:
             fn (Callable): Function or method to run.
             intervention_graph (Graph): Intervention graph to interleave with model's computation graph.
             inputs (List[Any]): Inputs to give to function.
-
-        Returns:
-            Any: Output of model.
         """
 
         # Loads and dispatched ._model if not already done so.
@@ -316,11 +316,13 @@ class NNsight:
                 activations, module_path, "output", intervention_handler
             ),
         ):
-            output = fn(*inputs, **kwargs)
+            try:
+                fn(*inputs, **kwargs)
+            except protocols.EarlyStopException:
+                # TODO: Log.
+                pass
 
         logger.info(f"Completed `{self._model_key}`")
-
-        return output
 
     def dispatch_model(self, *args, **kwargs) -> None:
         """Dispatch ._model to have real parameters  using ._load(...)."""
@@ -336,17 +338,6 @@ class NNsight:
         self._dispatched = True
 
         logger.info(f"Dispatched `{self._model_key}`")
-
-    def to(self, *args, **kwargs) -> Self:
-        """Override torch.nn.Module.to so this returns the NNSight model, not the underlying module when doing: model = model.to(...)
-
-        Returns:
-            Envoy: Envoy.
-        """
-
-        self._model = self._model.to(*args, **kwargs)
-
-        return self
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
