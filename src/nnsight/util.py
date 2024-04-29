@@ -7,6 +7,7 @@ from typing import Any, Callable, Collection, Type
 
 import torch
 
+#TODO Have an Exception you can raise to stop apply early
 
 def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
     """Applies some function to all members of a collection of a give type (or types)
