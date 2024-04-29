@@ -20,7 +20,7 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorM
     
         backend (Backend): Backend to execute this Collection on __exit__.
         accumulator (Accumulator): Current Accumulator object.
-        collection (List[Union[LocalMixin, IteratorMixin]]): 
+        collection (List[Union[LocalMixin, IteratorMixin]]): List of all collected objects to be executed.
     """
 
     def __init__(self, backend: Backend, accumulator: Accumulator = None) -> None:
