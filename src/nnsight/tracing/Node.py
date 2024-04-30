@@ -32,7 +32,7 @@ class Node:
     """
 
     @staticmethod
-    def prepare_proxy_values(values):
+    def prepare_proxy_values(values, device: torch.device = None):
         """Prepare arguments for validating a node's target.
         Converts Proxies and Nodes to their proxy_value and moves tensors to 'meta' device.
 
@@ -55,12 +55,6 @@ class Node:
         values = util.apply(values, lambda x: x.proxy_value, Node)
         # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
-
-        device = (
-            torch._GLOBAL_DEVICE_CONTEXT.device
-            if torch._GLOBAL_DEVICE_CONTEXT is not None
-            else None
-        )
 
         if device is None:
 
