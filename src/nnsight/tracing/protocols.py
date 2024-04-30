@@ -69,13 +69,13 @@ class ApplyModuleProtocol(Protocol):
         if graph.validate:
 
             # If the module has parameters, get its device to move input tensors to.
+            module: torch.nn.Module = util.fetch_attr(
+            cls.get_module(graph), module_path
+        )
+
             try:
-
-                module = cls.get_module(graph)
                 device = next(module.parameters()).device
-
             except:
-
                 device = None
 
             # Enter FakeMode for proxy_value computing.
@@ -85,9 +85,7 @@ class ApplyModuleProtocol(Protocol):
             ) as fake_mode:
                 with FakeCopyMode(fake_mode):
 
-                    value = cls.call_module(
-                        graph,
-                        module_path,
+                    value = module.forward(
                         *Node.prepare_proxy_values(args, device=device),
                         **Node.prepare_proxy_values(kwargs, device=device),
                     )
