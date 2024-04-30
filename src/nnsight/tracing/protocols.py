@@ -108,30 +108,22 @@ class ApplyModuleProtocol(Protocol):
             node (Node): ApplyModule Node.
         """
 
-        args, kwargs = node.prepare_inputs()
+        module: torch.nn.Module = util.fetch_attr(
+            cls.get_module(node.graph), node.args[0]
+        )
+
+        try:
+            device = next(module.parameters()).device
+        except:
+            device = None
+
+        args, kwargs = node.prepare_inputs(device=device)
 
         module_path, *args = args
 
-        output = cls.call_module(node.graph, module_path, *args, **kwargs)
+        output = module.forward(*args, **kwargs)
 
         node.set_value(output)
-
-    @classmethod
-    def call_module(cls, graph: "Graph", module_path: str, *args, **kwargs) -> Any:
-        """Given a Graph (with the nnsight root module attached) and module_path, get the root module from the Graph,
-        get the submodule using the module_path, and call its .forward() method using the given args.
-
-        Args:
-            graph (Graph): Graph.
-            module_path (str): Module path (model.module1.module2 etc).
-
-        Returns:
-            Any: Output of module's .forward() call.
-        """
-
-        module: torch.nn.Module = util.fetch_attr(cls.get_module(graph), module_path)
-
-        return module.forward(*args, **kwargs)
 
     @classmethod
     def set_module(cls, graph: "Graph", module: torch.nn.Module) -> None:
@@ -393,7 +385,7 @@ class BridgeProtocol(Protocol):
 
     @classmethod
     def get_bridge(cls, graph: "Graph") -> "Bridge":
-        """Gets Brudge object from a Graph. Assumes Bridge has been set as an attachment on this Graph via BridgeProtocol.set_bridge().
+        """Gets Bridge object from a Graph. Assumes Bridge has been set as an attachment on this Graph via BridgeProtocol.set_bridge().
 
         Args:
             graph (Graph): Graph.

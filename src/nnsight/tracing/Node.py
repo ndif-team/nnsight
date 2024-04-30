@@ -143,13 +143,15 @@ class Node:
 
                 node = node.node
 
-            graph = node.graph
-            rank = bridge.rank(graph)
+            if not node.done():
 
-            if rank > max_rank:
+                graph = node.graph
+                rank = bridge.rank(graph)
 
-                max_rank = rank
-                max_graph = graph
+                if rank > max_rank:
+
+                    max_rank = rank
+                    max_graph = graph
 
             return node
 
@@ -169,12 +171,16 @@ class Node:
 
             if self.graph is not node.graph:
 
-                if self.attached() and protocols.BridgeProtocol.has_bridge(node.graph):
+                if (
+                    self.attached()
+                    and node.attached()
+                    and protocols.BridgeProtocol.has_bridge(node.graph)
+                ):
 
                     node = protocols.BridgeProtocol.add(node, self.graph).node
 
                 else:
-                    # TODO error
+                    # TODO error?
                     pass
 
             if not node.done():
@@ -313,7 +319,7 @@ class Node:
         """
         return self.remaining_listeners == 0
 
-    def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
+    def prepare_inputs(self, device: torch.device = None) -> Tuple[List[Any], Dict[str, Any]]:
         """Prepare arguments for executing this node's target.
         Converts Nodes in args and kwargs to their value and moves tensors to correct device.
 
@@ -325,16 +331,16 @@ class Node:
             return node.value
 
         args, kwargs = util.apply((self.args, self.kwargs), _value, Node)
+        
+        if device is None:
 
-        device = None
+            def _device(value: torch.Tensor):
+                nonlocal device
 
-        def _device(value: torch.Tensor):
-            nonlocal device
+                if device is None:
+                    device = value.device
 
-            if device is None:
-                device = value.device
-
-        util.apply((args, kwargs), _device, torch.Tensor)
+            util.apply((args, kwargs), _device, torch.Tensor)
 
         def _to(value: torch.Tensor):
             return value.to(device)
