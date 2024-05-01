@@ -319,7 +319,9 @@ class Node:
         """
         return self.remaining_listeners == 0
 
-    def prepare_inputs(self, device: torch.device = None) -> Tuple[List[Any], Dict[str, Any]]:
+    def prepare_inputs(
+        self, device: torch.device = None
+    ) -> Tuple[List[Any], Dict[str, Any]]:
         """Prepare arguments for executing this node's target.
         Converts Nodes in args and kwargs to their value and moves tensors to correct device.
 
@@ -331,7 +333,7 @@ class Node:
             return node.value
 
         args, kwargs = util.apply((self.args, self.kwargs), _value, Node)
-        
+
         if device is None:
 
             def _device(value: torch.Tensor):
@@ -345,7 +347,7 @@ class Node:
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        util.apply((args, kwargs), _to, torch.Tensor)
+        args, kwargs = util.apply((args, kwargs), _to, torch.Tensor)
 
         return args, kwargs
 
