@@ -25,16 +25,10 @@ class UnifiedTransformer(LanguageModel):
 
     Calls to generate pass arguments downstream to :func:`GenerationMixin.generate`
 
-    Attributes:
-        config (HookedTransformerConfig): HookedTransformer config file.
-        tokenizer (PreTrainedTokenizer): Tokenizer for LMs.
-        meta_model (HookedTransformer): Meta version of underlying auto model.
-        local_model (HookedTransformer): Local version of underlying HookedTransformer.
-
     """
 
     def __init__(
-        self, model: str, device: str, *args, processing: bool = True, **kwargs
+        self, model: str, *args, processing: bool = True, **kwargs
     ) -> None:
         if processing:
             hooked_model = HookedTransformer.from_pretrained(model, *args, **kwargs)

@@ -32,7 +32,7 @@ class Node:
     """
 
     @staticmethod
-    def prepare_proxy_values(values):
+    def prepare_proxy_values(values, device: torch.device = None):
         """Prepare arguments for validating a node's target.
         Converts Proxies and Nodes to their proxy_value and moves tensors to 'meta' device.
 
@@ -55,12 +55,6 @@ class Node:
         values = util.apply(values, lambda x: x.proxy_value, Node)
         # Slices may have proxies as part of their attributes so convert those to their proxy_values
         values = util.apply(values, slice_to_value, slice)
-
-        device = (
-            torch._GLOBAL_DEVICE_CONTEXT.device
-            if torch._GLOBAL_DEVICE_CONTEXT is not None
-            else None
-        )
 
         if device is None:
 
@@ -239,31 +233,25 @@ class Node:
             Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
         """
 
-        # Turn nodes into their value
         def _value(node: Node):
             return node.value
 
-        args = util.apply(self.args, _value, Node)
-        kwargs = util.apply(self.kwargs, _value, Node)
+        args, kwargs = util.apply((self.args, self.kwargs), _value, Node)
 
         device = None
 
-        def _device(value):
+        def _device(value: torch.Tensor):
             nonlocal device
-            device = value.device
 
-        all_args = list(args) + list(kwargs.values())
+            if device is None:
+                device = value.device
 
-        util.apply(list(reversed(all_args)), _device, torch.Tensor)
-        # TODO
-        # util.apply(list(reversed(all_args)), _device, torch.nn.Module)
+        util.apply((args, kwargs), _device, torch.Tensor)
 
-        # Move tensors to device
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        args = util.apply(args, _to, torch.Tensor)
-        kwargs = util.apply(kwargs, _to, torch.Tensor)
+        util.apply((args, kwargs), _to, torch.Tensor)
 
         return args, kwargs
 
