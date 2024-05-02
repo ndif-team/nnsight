@@ -20,7 +20,6 @@ extensions = [
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = []
 fixed_sidebar = True
 
 # HTML Output Options
@@ -66,7 +65,6 @@ html_theme_options = {
     ],
     "show_prev_next": False,
     "pygment_dark_style": "monokai",
-    "pygment_light_style": "solarized-light"
 }
 
 extlinks = {'ndif': ('https://%s.com/ndif-team/nnsight',

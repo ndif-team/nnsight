@@ -1,0 +1,115 @@
+<section class="d-flex align-items-center hero">
+    <div class="container">
+        <div class="row g-5">
+            <div class="col-md-6">
+                <h1 class="display-2 fw-bold lh-1 mb-3">Interpretable Neural Networks</h1>
+                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+                <div class="d-grid gap-2 d-md-flex">
+                    <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Start</a>
+                    <a href="documentation" role="button" class="btn btn-outline-secondary secondary btn-md px-4">Docs</a>
+                    <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
+                </div>
+            </div>
+
+            <!-- Add 'text-center' class here -->
+            <div class="col-md-6 d-none d-md-block text-center">
+                <img src="_static/images/nnsight_logo.svg" class="img-fluid transparent hero-image" alt="NNsight Logo" loading="lazy">
+            </div>
+        </div>
+    </div>
+</section>
+
+
+<section class="d-flex align-items-center">
+
+    <div class="container">
+
+        <div class="row g-5 align-items-center" style="height: 50vh">
+
+            <div class="col-md-6">
+
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">nnsight</span> <span class="kn">import</span> <span class="n">NNsight</span><span class="p">,</span> <span class="n">LanguageModel</span>
+
+<span class="n">net</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="n">OrderedDict</span><span class="p">([</span>
+    <span class="p">(</span><span class="s1">&#39;layer1&#39;</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">input_size</span><span class="p">,</span> <span class="n">hidden_dims</span><span class="p">)),</span>
+    <span class="p">(</span><span class="s1">&#39;layer2&#39;</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">hidden_dims</span><span class="p">,</span> <span class="n">output_size</span><span class="p">)),</span>
+<span class="p">]))</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">NNsight</span><span class="p">(</span><span class="n">net</span><span class="p">)</span>
+
+<span class="c1"># or</span>
+
+<span class="n">transformer</span> <span class="o">=</span> <span class="n">LanguageModel</span><span class="p">(</span><span class="s1">&#39;openai-community/gpt2&#39;</span><span class="p">)</span>
+</pre></div>
+
+            </div>
+
+            <div class="col-md-6">
+                <h1 class="display-6 fw-bold lh-1 mb-3">Wrap Any Pytorch model</h1>
+                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+            </div>
+
+
+        </div>
+        <div class="row g-5 align-items-center" style="height: 50vh">
+
+            <div class="col-md-6">
+                <h1 class="display-6 fw-bold lh-1 mb-3">Access Any Hidden State</h1>
+                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+            </div>
+
+            <div class="col-md-6">
+
+<div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="s1">&#39;Who invented neural networks?&#39;</span><span class="p">):</span>
+
+<span class="n">hidden_state_output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer1</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+<span class="n">hidden_state_input</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer2</span><span class="o">.</span><span class="n">input</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+<span class="n">output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">hidden_state_output</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">hidden_state_input</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+</pre></div>
+
+            </div>
+
+
+
+        </div>
+        <div class="row g-5 align-items-center" style="height: 50vh">
+
+
+            
+
+            <div class="col-md-6">
+
+<div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">()</span> <span class="k">as</span> <span class="n">tracer</span><span class="p">:</span>
+
+    <span class="k">with</span> <span class="n">tracer</span><span class="o">.</span><span class="n">invoke</span><span class="p">(</span><span class="s1">&#39;The Eiffel Tower is in the city of&#39;</span><span class="p">):</span>
+
+        <span class="n">model</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">h</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">mlp</span><span class="o">.</span><span class="n">output</span><span class="p">[</span><span class="mi">0</span><span class="p">][:]</span> <span class="o">=</span> <span class="mi">0</span>
+
+        <span class="n">intervention</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">lm_head</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+    <span class="k">with</span> <span class="n">tracer</span><span class="o">.</span><span class="n">invoke</span><span class="p">(</span><span class="s1">&#39;The Eiffel Tower is in the city of&#39;</span><span class="p">):</span>
+
+        <span class="n">original</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">lm_head</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+</pre></div>
+
+            </div>
+
+            <div class="col-md-6">
+                <h1 class="display-6 fw-bold lh-1 mb-3">Develop Complex Interventions</h1>
+                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+            </div>
+
+        </div>
+        
+    </div>
+
+</section>
+
+

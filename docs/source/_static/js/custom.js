@@ -62,41 +62,6 @@ var observer = new MutationObserver(function(mutations) {
 observer.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
 
 
-
-document.addEventListener('DOMContentLoaded', (event) => {
-  var listItems = document.querySelectorAll('#list-tab .list-group-item');
-  listItems.forEach(function (listItem) {
-    listItem.addEventListener('click', function (e) {
-      e.preventDefault();
-      var tabPaneId = this.getAttribute('href');
-
-      // Remove active class from all list items
-      listItems.forEach(function (item) {
-        item.classList.remove('active');
-      });
-
-      // Add active class to the clicked list item
-      this.classList.add('active');
-
-      // Hide all tab panes
-      var tabPanes = document.querySelectorAll('.tab-content .tab-pane');
-      tabPanes.forEach(function (tabPane) {
-        tabPane.classList.remove('show');
-        tabPane.classList.remove('active');
-      });
-
-      // Show the clicked tab pane
-      var activeTabPane = document.querySelector(tabPaneId);
-      activeTabPane.classList.add('active');
-
-      // We need to manually add 'show' class after a slight delay to trigger fade effect
-      setTimeout(function () {
-        activeTabPane.classList.add('show');
-      }, 150); // Adjust delay as needed
-    });
-  });
-});
-
 document.addEventListener("DOMContentLoaded", function() {
   fetch("https://ndif.dev/ping")
     .then(response => response.json())
