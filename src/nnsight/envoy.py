@@ -5,9 +5,13 @@ import warnings
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProxy
+from .tracing.Node import Node
+from .tracing.Proxy import Proxy
 
 
 class Envoy:
@@ -376,25 +380,38 @@ class Envoy:
 
         module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
 
-        try:
+        proxy = module_proxy.forward
 
-            device = next(self._module.parameters()).device
+        proxy_value = inspect._empty
 
-        except:
+        if self._tracer._graph.validate:
 
-            device = torch.device("cpu")
+            try:
 
-        torch.set_default_device(device)
+                device = next(self._module.parameters()).device
 
-        proxy = module_proxy.forward(*args, **kwargs)
+            except:
 
-        torch._GLOBAL_DEVICE_CONTEXT.__exit__(None, None, None)
+                device = None
 
-        torch._GLOBAL_DEVICE_CONTEXT = None
+            # Enter FakeMode for proxy_value computing.
+            with FakeTensorMode(
+                allow_non_fake_inputs=True,
+                shape_env=ShapeEnv(assume_static_by_default=True),
+            ) as fake_mode:
+                with FakeCopyMode(fake_mode):
 
-        return proxy
+                    proxy_value = self._module.forward(
+                        *Node.prepare_proxy_values(args, device=device),
+                        **Node.prepare_proxy_values(kwargs, device=device),
+                    )
 
-    torch.set_default_device
+        return self._tracer._graph.add(
+            Proxy.proxy_call,
+            value=proxy_value,
+            args=[proxy] + list(args),
+            kwargs=kwargs,
+        )
 
     @property
     def output(self) -> InterventionProxy:
