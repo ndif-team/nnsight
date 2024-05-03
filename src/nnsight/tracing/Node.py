@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -32,50 +31,6 @@ class Node:
         dependencies (List[Node]): Nodes that this node depends on.
         value (Any): Actual value to be populated during execution.
     """
-
-    @staticmethod
-    def prepare_proxy_values(values: Any, device: torch.device = None):
-        """Prepare arguments for validating a node's target.
-        Converts Proxies and Nodes to their proxy_value and moves tensors to given device.
-
-        Args:
-            values (Any): Values to prepare.
-            device (torch.device): Device to try and move all tensors to. If None, moves all tensors to device of first tensor if its on 'meta'.
-
-        Returns:
-            values (Any): Prepared values.
-        """
-
-        # Convert proxies to their proxy_value.
-        values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
-        # Convert nodes to their proxy_value.
-        values = util.apply(values, lambda x: x.proxy_value, Node)
-
-        if device is None:
-
-            # Arguments might be tensors created outside of scanning. Also the model might be a 'meta' pre-dispatched version of the model.
-            # That means the tensors as args and the model are different devices but we dont want to have to have the users move tensors to 'meta'
-            # So only when theres a FakeTensor with device meta, we move other tensors also to meta.
-
-            def get_device(tensor: torch.Tensor):
-
-                nonlocal device
-
-                if (
-                    device is None
-                    and isinstance(tensor, FakeTensor)
-                    and tensor.device.type == "meta"
-                ):
-
-                    device = tensor.device.type
-
-            util.apply(values, get_device, torch.Tensor)
-
-        if device is not None:
-
-            values = util.apply(values, lambda x: x.to(device), torch.Tensor)
-
-        return values
 
     def __init__(
         self,
@@ -319,20 +274,28 @@ class Node:
         """
         return self.remaining_listeners == 0
 
+    @classmethod
     def prepare_inputs(
-        self, device: torch.device = None
-    ) -> Tuple[List[Any], Dict[str, Any]]:
+        cls, inputs: Any, device: torch.device = None, proxy: bool = False
+    ) -> Any:
         """Prepare arguments for executing this node's target.
         Converts Nodes in args and kwargs to their value and moves tensors to correct device.
 
         Returns:
-            Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
+            Any: Prepared inputs.
         """
 
-        def _value(node: Node):
+        def _value(node: Proxy | Node):
+
+            if isinstance(node, Proxy):
+                node = node.node
+
+            if proxy:
+                return node.proxy_value
+
             return node.value
 
-        args, kwargs = util.apply((self.args, self.kwargs), _value, Node)
+        inputs = util.apply(inputs, _value, (Node, Proxy))
 
         if device is None:
 
@@ -342,14 +305,14 @@ class Node:
                 if device is None:
                     device = value.device
 
-            util.apply((args, kwargs), _device, torch.Tensor)
+            util.apply(inputs, _device, torch.Tensor)
 
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        args, kwargs = util.apply((args, kwargs), _to, torch.Tensor)
+        inputs = util.apply(inputs, _to, torch.Tensor)
 
-        return args, kwargs
+        return inputs
 
     def execute(self) -> None:
         """Actually executes this node.
@@ -366,7 +329,7 @@ class Node:
         else:
 
             # Prepare arguments.
-            args, kwargs = self.prepare_inputs()
+            args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
 
             # Call the target to get value.
             output = self.target(*args, **kwargs)

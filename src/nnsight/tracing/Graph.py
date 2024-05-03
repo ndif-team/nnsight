@@ -76,8 +76,6 @@ class Graph:
 
         # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.
         if self.validate and node.proxy_value is inspect._empty:
-            _args = node.args if node.args is not None else []
-            _kwargs = node.kwargs if node.kwargs is not None else {}
 
             # Enter FakeMode.
             with FakeTensorMode(
@@ -86,9 +84,13 @@ class Graph:
             ) as fake_mode:
                 with FakeCopyMode(fake_mode):
 
+                    proxy_args, proxy_kwargs = Node.prepare_inputs(
+                        (node.args, node.kwargs), proxy=True
+                    )
+
                     node.proxy_value = node.target(
-                        *Node.prepare_proxy_values(_args),
-                        **Node.prepare_proxy_values(_kwargs),
+                        *proxy_args,
+                        **proxy_kwargs,
                     )
 
         # Get name of target.

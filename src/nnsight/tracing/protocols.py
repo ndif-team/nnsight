@@ -67,13 +67,13 @@ class ApplyModuleProtocol(Protocol):
 
         # If the Graph is validating, we need to compute the proxy_value for this node.
         if graph.validate:
-            
+
             from .Node import Node
 
             # If the module has parameters, get its device to move input tensors to.
             module: torch.nn.Module = util.fetch_attr(
-            cls.get_module(graph), module_path
-        )
+                cls.get_module(graph), module_path
+            )
 
             try:
                 device = next(module.parameters()).device
@@ -87,9 +87,13 @@ class ApplyModuleProtocol(Protocol):
             ) as fake_mode:
                 with FakeCopyMode(fake_mode):
 
+                    proxy_args, proxy_kwargs = Node.prepare_inputs(
+                        (args, kwargs), device=device, proxy=True
+                    )
+
                     value = module.forward(
-                        *Node.prepare_proxy_values(args, device=device),
-                        **Node.prepare_proxy_values(kwargs, device=device),
+                        *proxy_args,
+                        **proxy_kwargs,
                     )
 
         # Create and attach Node.
@@ -117,7 +121,7 @@ class ApplyModuleProtocol(Protocol):
         except:
             device = None
 
-        args, kwargs = node.prepare_inputs(device=device)
+        args, kwargs = node.prepare_inputs((node.args, node.kwargs), device=device)
 
         module_path, *args = args
 
@@ -198,7 +202,7 @@ class GradProtocol(Protocol):
     @classmethod
     def execute(cls, node: "Node") -> None:
 
-        args, kwargs = node.prepare_inputs()
+        args, kwargs = node.prepare_inputs((node.args, node.kwargs))
 
         # First arg is the Tensor to add hook to.
         tensor: torch.Tensor = args[0]
