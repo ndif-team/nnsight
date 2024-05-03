@@ -233,7 +233,7 @@ class Node:
     def create(
         self,
         target: Union[Callable, str],
-        proxy_value: Any = None,
+        proxy_value: Any = inspect._empty,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
         name: str = None,

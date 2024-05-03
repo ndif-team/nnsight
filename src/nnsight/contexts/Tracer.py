@@ -38,7 +38,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
         backend: Backend,
         model: "NNsight",
         graph: Graph = None,
-        validate: bool = False,
+        validate: bool = True,
         **kwargs,
     ) -> None:
 

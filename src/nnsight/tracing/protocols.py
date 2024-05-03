@@ -67,6 +67,8 @@ class ApplyModuleProtocol(Protocol):
 
         # If the Graph is validating, we need to compute the proxy_value for this node.
         if graph.validate:
+            
+            from .Node import Node
 
             # If the module has parameters, get its device to move input tensors to.
             module: torch.nn.Module = util.fetch_attr(
