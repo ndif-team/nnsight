@@ -3,6 +3,14 @@
 
 .. raw:: html
 
+   <script>
+   document.addEventListener('DOMContentLoaded', (event) => {
+      document.querySelectorAll('h5.card-title').forEach(el => {
+      el.style.margin = '0';
+      });
+   });
+   </script>
+
    <style>
       .toctree-wrapper {
          display: none !important;
@@ -22,8 +30,8 @@ Tutorials
 
    .. grid-item-card:: 
       :link: notebooks/tutorials/walkthrough.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
@@ -32,15 +40,15 @@ Tutorials
                <i class="fa-solid fa-person-walking fa-2x"></i>
             </div> 
             <div>
-               <h5 class="code-surface card-title">Walkthrough</h5>
-               <p class="code-surface card-text">Learn the basics</p>
+               <h5 class="card-title">Walkthrough</h5>
+               <p class="card-text">Learn the basics</p>
             </div>
          </div>
 
    .. grid-item-card:: 
       :link: notebooks/tutorials/ioi_patching.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
@@ -49,15 +57,15 @@ Tutorials
                <i class="fa-solid fa-code-pull-request fa-2x"></i>
             </div> 
             <div>
-               <h5 class="code-surface card-title">Activation Patching</h5>
-               <p class="code-surface card-text">Causal intervention</p>
+               <h5 class="card-title">Activation Patching</h5>
+               <p class="card-text">Causal intervention</p>
             </div>
          </div>
 
    .. grid-item-card:: 
       :link: notebooks/tutorials/attribution_patching.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
@@ -66,15 +74,15 @@ Tutorials
                <i class="fa-solid fa-diagram-project fa-2x"></i>
             </div> 
             <div>
-               <h5 class="code-surface card-title">Attribution Patching</h5>
-               <p class="code-surface card-text">Approximate patching</p>
+               <h5 class="card-title">Attribution Patching</h5>
+               <p class="card-text">Approximate patching</p>
             </div>
          </div>
 
    .. grid-item-card:: 
       :link: notebooks/tutorials/logit_lens.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
@@ -83,15 +91,15 @@ Tutorials
                <i class="fa-solid fa-arrow-down-a-z fa-2x"></i>
             </div> 
             <div>
-               <h5 class="code-surface card-title">Logit Lens</h5>
-               <p class="code-surface card-text">Decode activations</p>
+               <h5 class="card-title">Logit Lens</h5>
+               <p class="card-text">Decode activations</p>
             </div>
          </div>
 
    .. grid-item-card:: 
       :link: notebooks/tutorials/future_lens.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
@@ -100,15 +108,15 @@ Tutorials
                <i class="fa-solid fa-eye fa-2x"></i>
             </div> 
             <div>
-               <h5 class="code-surface card-title">Future Lens</h5>
-               <p class="code-surface card-text">Probe future tokens</p>
+               <h5 class="card-title">Future Lens</h5>
+               <p class="card-text">Probe future tokens</p>
             </div>
          </div>
 
    .. grid-item-card:: 
       :link: notebooks/tutorials/function_vectors.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
@@ -117,15 +125,15 @@ Tutorials
                <i class="fa-solid fa-rocket fa-2x"></i>
             </div> 
             <div>
-               <h5 class="code-surface card-title">Function Vectors</h5>
-               <p class="code-surface card-text">Lambdas</p>
+               <h5 class="card-title">Function Vectors</h5>
+               <p class="card-text">Lambdas</p>
             </div>
          </div>
 
    .. grid-item-card:: 
       :link: notebooks/tutorials/sae.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
@@ -134,8 +142,8 @@ Tutorials
                <i class="fa-solid fa-book-open fa-2x"></i>
             </div> 
             <div>
-               <h5 class="code-surface card-title">Dictionary Learning</h5>
-               <p class="code-surface card-text">Sparse autoencoders</p>
+               <h5 class="card-title">Dictionary Learning</h5>
+               <p class="card-text">Sparse autoencoders</p>
             </div>
          </div>
 

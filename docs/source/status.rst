@@ -182,12 +182,6 @@
 Status
 ======
 
-
-
-.. toctree::
-   :maxdepth: 1
-   :hidden:
-
 .. card::
     :class-body: status-container
     :shadow: none

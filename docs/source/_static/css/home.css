@@ -26,12 +26,3 @@
 .transparent {
     background: transparent !important;
 }
-
-.end {
-    background-color: var(--pst-color-surface);
-    height: 50vh;
-}
-
-.fill-button {
-    height: 100% !important;
-}

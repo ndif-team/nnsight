@@ -18,10 +18,16 @@ html[data-theme="dark"] {
 
 html[data-theme="light"] {
     --output-bg-color: #d8ebfb;
+    --pst-color-primary: #4385be;
+    --pst-color-secondary: #ce5d97;
+    --pst-color-primary-highlight: #ce5d97;
 }
 
-/* Editing the default width for pydata content */
 
+/* Notebook h1 section heading styles */
+.nb-heading {
+    margin-top: 2.5rem;
+}
 
 /* Remove the shadow on the pydata navbar */
 .bd-header {
@@ -29,19 +35,17 @@ html[data-theme="light"] {
 }
 
 /* Hide the theme version note at the bottom of the page */
-
 .theme-version {
     visibility: hidden;
 }
 
 /* code cell output */
-
 .output_area {
     background-color: var(--output-bg-color);
     margin-left: 10px !important;
 }
 
-
+/* Coloring, mostly for buttons */
 .primary {
     background-color : var(--pst-color-primary) !important;
     border-color : var(--pst-color-primary) !important;

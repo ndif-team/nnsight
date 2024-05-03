@@ -1,34 +1,35 @@
+<!-- Styles which override PyData site-wide themeing for the front page. -->
 <style>
     .bd-main .bd-content .bd-article-container {
-    max-width: 100%;  /* default is 60em */
-  }
+        max-width: 100%;  /* default is 60em */
+    }
 
-.bd-article-container {
-    padding-left: 0px !important;
-    padding-right: 0px !important;
-    padding-bottom: 0px !important;
-}
+    .bd-article-container {
+        padding-left: 0px !important;
+        padding-right: 0px !important;
+        padding-bottom: 0px !important;
+    }
 
-.bd-page-width {
-    max-width: 100%;  /* default is 88rem */
-  }
+    .bd-page-width {
+        max-width: 100%;  /* default is 88rem */
+    }
 
-.bd-header__inner {
-    max-width: 88rem !important;
-}
+    .bd-header__inner {
+        max-width: 88rem !important;
+    }
 
-.bd-footer__inner {
-    max-width: 88rem !important;
-}
+    .bd-footer__inner {
+        max-width: 88rem !important;
+    }
 
-.bd-footer {
-    background: var(--pst-color-background) !important;
-}
+    .bd-footer {
+        background: var(--pst-color-background) !important;
+    }
 </style>
 
 <div class="fixed-background"></div>
 
-<section class="hero col-lg-9 container">
+<section class="hero col-lg-8 container">
     <div class="row g-5 h-100 align-items-center">
         <div class="col-md-6">
             <h1 class="display-2 fw-bold lh-1 mb-3">Interpretable Neural Networks</h1>
@@ -39,8 +40,6 @@
                 <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
             </div>
         </div>
-
-        <!-- Add 'text-center' class here -->
         <div class="col-md-6 d-none d-md-block text-center">
             <img src="_static/images/nnsight_logo.svg" class="img-fluid transparent hero-image" alt="NNsight Logo" loading="lazy">
         </div>
@@ -71,22 +70,19 @@
 
             <div class="col-md-6">
                 <div style="width: 75%; margin: auto;">
-                    <h1 class="display-6 fw-bold lh-1 mb-3">Wrap Any PyTorch Model</h1>
-                    <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
-                    <a href="start">Learn More →</a>
+                    <h3 class="fw-bold lh-1 mb-3">Wrap Any PyTorch Model</h3>
+                    <p class="lead" id="myElement">The NNsight class object wraps a given PyTorch model, enabling tracing capabilities.</p>
+                    <a href="start">Get Started →</a>
                 </div>
             </div>
-            
-
-
         </div>
         <div class="row g-5 align-items-center" style="height: 50vh">
 
             <div class="col-md-6">
                 <div style="width: 75%; margin: auto;">
-                <h1 class="display-6 fw-bold lh-1 mb-3">Access Hidden States</h1>
-                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
-                <a href="start">Learn More →</a>
+                <h3 class="fw-bold lh-1 mb-3">Access Hidden States</h3>
+                <p class="lead" id="myElement">Easily expose Module inputs and outputs.</p>
+                <a href="notebooks/tutorials/walkthrough">Walkthrough →</a>
             </div>
             </div>
 
@@ -105,17 +101,10 @@
 </pre></div>
 
             </div>
-
-
-
         </div>
         <div class="row g-5 align-items-center" style="height: 50vh">
-
-
-            
-
+            <!-- CODE BLOCK NUMBER THREE -->
             <div class="col-md-6 d-none d-md-block">
-
 <div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">()</span> <span class="k">as</span> <span class="n">tracer</span><span class="p">:</span>
 
     <span class="k">with</span> <span class="n">tracer</span><span class="o">.</span><span class="n">invoke</span><span class="p">(</span><span class="s1">&#39;The Eiffel Tower is in the city of&#39;</span><span class="p">):</span>
@@ -130,25 +119,23 @@
 
 <span class="nb">print</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
 </pre></div>
-</div>
-
+            </div>
+            <!-- END OF CODE BLOCK NUMBER THREE -->
             <div class="col-md-6">
                 <div style="width: 75%; margin:auto;">
-                <h1 class="display-6 fw-bold lh-1 mb-3">Develop Complex Interventions</h1>
-                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
-                <a href="start">Learn More →</a>
+                    <h3 class="fw-bold lh-1 mb-3">Develop Complex Interventions</h3>
+                    <p class="lead" id="myElement">Edit Module outputs and measure effects.</p>
+                    <a href="tutorials">Tutorials →</a>
+                </div>
             </div>
-            </div>
-
         </div>
-        
-
 </section>
 </div>
 
 
 <script>
 
+    // Fix navbar to top of page
     var navbar = document.querySelector('.navbar');
 
     if (navbar) {
@@ -157,6 +144,7 @@
         console.log(".navbar element does not exist.");
     }
 
+    // Remove article padding so content background is flush with sides
     var article = document.querySelector('.bd-article');
 
     if (article) {
@@ -166,5 +154,4 @@
         console.log(".article element does not exist.");
     }
 
-    
 </script>

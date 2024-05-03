@@ -15,6 +15,9 @@ Features
       .toctree-wrapper {
          display: none !important;
       }
+      h5 {
+         margin-top: 0 !important;
+      }
    </style>
 
 .. grid:: 1 1 2 2
