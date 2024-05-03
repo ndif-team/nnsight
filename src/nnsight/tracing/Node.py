@@ -224,36 +224,45 @@ class Node:
         """
         return self.remaining_listeners == 0
 
-    def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
+    @classmethod
+    def prepare_inputs(
+        cls, inputs: Any, device: torch.device = None, proxy: bool = False
+    ) -> Any:
         """Prepare arguments for executing this node's target.
         Converts Nodes in args and kwargs to their value and moves tensors to correct device.
-
-
         Returns:
-            Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
+            Any: Prepared inputs.
         """
 
-        def _value(node: Node):
+        def _value(node: Proxy | Node):
+
+            if isinstance(node, Proxy):
+                node = node.node
+
+            if proxy:
+                return node.proxy_value
+
             return node.value
 
-        args, kwargs = util.apply((self.args, self.kwargs), _value, Node)
+        inputs = util.apply(inputs, _value, (Node, Proxy))
 
-        device = None
+        if device is None:
 
-        def _device(value: torch.Tensor):
-            nonlocal device
+            def _device(value: torch.Tensor):
 
-            if device is None:
-                device = value.device
+                nonlocal device
 
-        util.apply((args, kwargs), _device, torch.Tensor)
+                if device is None:
+                    device = value.device
+
+            util.apply(inputs, _device, torch.Tensor)
 
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        util.apply((args, kwargs), _to, torch.Tensor)
+        inputs = util.apply(inputs, _to, torch.Tensor)
 
-        return args, kwargs
+        return inputs
 
     def execute(self) -> None:
         """Actually executes this node.
@@ -262,7 +271,7 @@ class Node:
         """
 
         # Prepare arguments.
-        args, kwargs = self.prepare_inputs()
+        args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
 
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":
