@@ -13,17 +13,15 @@ html[data-theme="dark"] {
     --pst-color-heading-color: #CECDC3;
     --pst-color-border: #1C1B1A;
     --pst-color-panel-background: #1C1B1A;
+    --output-bg-color: #343331;
+}
+
+html[data-theme="light"] {
+    --output-bg-color: #d8ebfb;
 }
 
 /* Editing the default width for pydata content */
 
-.bd-main .bd-content .bd-article-container {
-    max-width: 90%;  /* default is 60em */
-}
-
-.bd-page-width {
-    max-width: 80vw !important;
-}
 
 /* Remove the shadow on the pydata navbar */
 .bd-header {
@@ -39,6 +37,25 @@ html[data-theme="dark"] {
 /* code cell output */
 
 .output_area {
-    background-color: #d8ebfb;
+    background-color: var(--output-bg-color);
     margin-left: 10px !important;
+}
+
+
+.primary {
+    background-color : var(--pst-color-primary) !important;
+    border-color : var(--pst-color-primary) !important;
+    color: var(--pst-color-background) !important;
+}
+
+.secondary {
+    background-color : transparent !important;
+    border-color : #878580 !important;
+    color: #878580 !important;
+}
+
+.secondary:hover {
+    background-color : transparent !important;
+    border-color : var(--pst-color-on-surface) !important;
+    color: var(--pst-color-on-surface) !important;
 }

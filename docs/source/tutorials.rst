@@ -28,7 +28,9 @@ Tutorials
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <img src="../_static/images/tutorials/walkthrough.webp" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-person-walking fa-2x"></i>
+            </div> 
             <div>
                <h5 class="code-surface card-title">Walkthrough</h5>
                <p class="code-surface card-text">Learn the basics</p>
@@ -43,7 +45,9 @@ Tutorials
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <img src="../_static/images/tutorials/activation_patching.webp" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-code-pull-request fa-2x"></i>
+            </div> 
             <div>
                <h5 class="code-surface card-title">Activation Patching</h5>
                <p class="code-surface card-text">Causal intervention</p>
@@ -58,7 +62,9 @@ Tutorials
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <img src="../_static/images/tutorials/attribution_patching.webp" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-diagram-project fa-2x"></i>
+            </div> 
             <div>
                <h5 class="code-surface card-title">Attribution Patching</h5>
                <p class="code-surface card-text">Approximate patching</p>
@@ -73,7 +79,9 @@ Tutorials
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <img src="../_static/images/tutorials/logit_lens.webp" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-arrow-down-a-z fa-2x"></i>
+            </div> 
             <div>
                <h5 class="code-surface card-title">Logit Lens</h5>
                <p class="code-surface card-text">Decode activations</p>
@@ -88,7 +96,9 @@ Tutorials
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <img src="../_static/images/tutorials/future_lens.webp" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-eye fa-2x"></i>
+            </div> 
             <div>
                <h5 class="code-surface card-title">Future Lens</h5>
                <p class="code-surface card-text">Probe future tokens</p>
@@ -103,7 +113,9 @@ Tutorials
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <img src="../_static/images/tutorials/function_vectors.webp" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-rocket fa-2x"></i>
+            </div> 
             <div>
                <h5 class="code-surface card-title">Function Vectors</h5>
                <p class="code-surface card-text">Lambdas</p>
@@ -118,7 +130,9 @@ Tutorials
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <img src="../_static/images/tutorials/dictionary_learning.webp" class="img-fluid" style="max-width: 50px; margin-right: 20px;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-book-open fa-2x"></i>
+            </div> 
             <div>
                <h5 class="code-surface card-title">Dictionary Learning</h5>
                <p class="code-surface card-text">Sparse autoencoders</p>

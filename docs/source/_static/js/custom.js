@@ -22,12 +22,13 @@ function initVanta() {
       }
       
       const darkMode = document.documentElement.dataset.theme === 'dark';
-      const color = darkMode ? 0xCECDC3 : 0x100F0F; // Example dark mode color
-      const color2 = darkMode ? 0xCECDC3 : 0x100F0F; // Adjust color2 for dark mode as needed
-      const backgroundColor = darkMode ? 0x100F0F : 0xFFFCF0; // Adjust background color for dark mode
+      const color = darkMode ? 0xCECDC3 : 0x000000; // Example dark mode color
+      const color2 = darkMode ? 0xCECDC3 : 0x000000; // Adjust color2 for dark mode as needed
+      const backgroundColor = darkMode ? 0x100F0F : 0xFFFFFF; // Adjust background color for dark mode
+      const size = darkMode ? 0.50 : 1.00; // Adjust size for dark mode as needed
 
       vantaEffect = VANTA.DOTS({
-        el: "#canvas",
+        el: ".fixed-background",
         mouseControls: false,
         touchControls: false,
         gyroControls: false,
@@ -38,7 +39,7 @@ function initVanta() {
         color: color,
         color2: color2,
         backgroundColor: backgroundColor,
-        size: 0.50,
+        size: size,
         spacing: 10.00,
         showLines: false
       });

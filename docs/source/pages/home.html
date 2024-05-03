@@ -1,33 +1,59 @@
-<section class="d-flex align-items-center hero">
-    <div class="container">
-        <div class="row g-5">
-            <div class="col-md-6">
-                <h1 class="display-2 fw-bold lh-1 mb-3">Interpretable Neural Networks</h1>
-                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
-                <div class="d-grid gap-2 d-md-flex">
-                    <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Start</a>
-                    <a href="documentation" role="button" class="btn btn-outline-secondary secondary btn-md px-4">Docs</a>
-                    <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
-                </div>
-            </div>
+<style>
+    .bd-main .bd-content .bd-article-container {
+    max-width: 100%;  /* default is 60em */
+  }
 
-            <!-- Add 'text-center' class here -->
-            <div class="col-md-6 d-none d-md-block text-center">
-                <img src="_static/images/nnsight_logo.svg" class="img-fluid transparent hero-image" alt="NNsight Logo" loading="lazy">
+.bd-article-container {
+    padding-left: 0px !important;
+    padding-right: 0px !important;
+    padding-bottom: 0px !important;
+}
+
+.bd-page-width {
+    max-width: 100%;  /* default is 88rem */
+  }
+
+.bd-header__inner {
+    max-width: 88rem !important;
+}
+
+.bd-footer__inner {
+    max-width: 88rem !important;
+}
+
+.bd-footer {
+    background: var(--pst-color-background) !important;
+}
+</style>
+
+<div class="fixed-background"></div>
+
+<section class="hero col-lg-9 container">
+    <div class="row g-5 h-100 align-items-center">
+        <div class="col-md-6">
+            <h1 class="display-2 fw-bold lh-1 mb-3">Interpretable Neural Networks</h1>
+            <p class="lead">NNsight is a package for interpreting and manipulating the internals of models.</p>
+            <div class="d-grid gap-2 d-md-flex">
+                <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Start</a>
+                <a href="documentation" role="button" class="btn btn-outline-secondary secondary btn-md px-4">Docs</a>
+                <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
             </div>
+        </div>
+
+        <!-- Add 'text-center' class here -->
+        <div class="col-md-6 d-none d-md-block text-center">
+            <img src="_static/images/nnsight_logo.svg" class="img-fluid transparent hero-image" alt="NNsight Logo" loading="lazy">
         </div>
     </div>
 </section>
 
+<div class="surface pb-5">
+<section class="col-lg-8 container pb-5">
 
-<section class="d-flex align-items-center">
-
-    <div class="container">
 
         <div class="row g-5 align-items-center" style="height: 50vh">
 
-            <div class="col-md-6">
-
+            <div class="col-md-6 d-none d-md-block">
 <div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">nnsight</span> <span class="kn">import</span> <span class="n">NNsight</span><span class="p">,</span> <span class="n">LanguageModel</span>
 
 <span class="n">net</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="n">OrderedDict</span><span class="p">([</span>
@@ -41,31 +67,37 @@
 
 <span class="n">transformer</span> <span class="o">=</span> <span class="n">LanguageModel</span><span class="p">(</span><span class="s1">&#39;openai-community/gpt2&#39;</span><span class="p">)</span>
 </pre></div>
-
             </div>
 
             <div class="col-md-6">
-                <h1 class="display-6 fw-bold lh-1 mb-3">Wrap Any Pytorch model</h1>
-                <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+                <div style="width: 75%; margin: auto;">
+                    <h1 class="display-6 fw-bold lh-1 mb-3">Wrap Any PyTorch Model</h1>
+                    <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+                    <a href="start">Learn More →</a>
+                </div>
             </div>
+            
 
 
         </div>
         <div class="row g-5 align-items-center" style="height: 50vh">
 
             <div class="col-md-6">
-                <h1 class="display-6 fw-bold lh-1 mb-3">Access Any Hidden State</h1>
+                <div style="width: 75%; margin: auto;">
+                <h1 class="display-6 fw-bold lh-1 mb-3">Access Hidden States</h1>
                 <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+                <a href="start">Learn More →</a>
+            </div>
             </div>
 
-            <div class="col-md-6">
+            <div class="col-md-6 d-none d-md-block">
 
 <div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="s1">&#39;Who invented neural networks?&#39;</span><span class="p">):</span>
 
-<span class="n">hidden_state_output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer1</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
-<span class="n">hidden_state_input</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer2</span><span class="o">.</span><span class="n">input</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+    <span class="n">hidden_state_output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer1</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+    <span class="n">hidden_state_input</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer2</span><span class="o">.</span><span class="n">input</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
 
-<span class="n">output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
 
 <span class="nb">print</span><span class="p">(</span><span class="n">hidden_state_output</span><span class="p">)</span>
 <span class="nb">print</span><span class="p">(</span><span class="n">hidden_state_input</span><span class="p">)</span>
@@ -82,7 +114,7 @@
 
             
 
-            <div class="col-md-6">
+            <div class="col-md-6 d-none d-md-block">
 
 <div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">()</span> <span class="k">as</span> <span class="n">tracer</span><span class="p">:</span>
 
@@ -98,18 +130,41 @@
 
 <span class="nb">print</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
 </pre></div>
-
-            </div>
+</div>
 
             <div class="col-md-6">
+                <div style="width: 75%; margin:auto;">
                 <h1 class="display-6 fw-bold lh-1 mb-3">Develop Complex Interventions</h1>
                 <p class="lead" id="myElement">NNsight is a package for interpreting and manipulating the internals of models.</p>
+                <a href="start">Learn More →</a>
+            </div>
             </div>
 
         </div>
         
-    </div>
 
 </section>
+</div>
 
 
+<script>
+
+    var navbar = document.querySelector('.navbar');
+
+    if (navbar) {
+        navbar.style.position = 'fixed';
+    } else {
+        console.log(".navbar element does not exist.");
+    }
+
+    var article = document.querySelector('.bd-article');
+
+    if (article) {
+        article.style.paddingTop = '0';
+        article.style.paddingLeft = '0';
+    } else {
+        console.log(".article element does not exist.");
+    }
+
+    
+</script>

@@ -29,7 +29,7 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-wrench fa-2x"></i>
             </div> 
             <div>
@@ -47,7 +47,7 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-code-pull-request fa-2x"></i>
             </div> 
             <div>
@@ -65,7 +65,7 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-glasses fa-2x"></i>
             </div> 
             <div>
@@ -83,7 +83,7 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-cubes fa-2x"></i>
             </div> 
             <div>
@@ -101,11 +101,11 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-shuffle fa-2x"></i>
             </div>
             <div>
-               <h5 class="card-title">Cross Prompt Intervention</h5>
+               <h5 class="card-title">Cross Prompts</h5>
                <p class="card-text">Edit in one pass</p>
             </div>
          </div>
@@ -119,7 +119,7 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-gears fa-2x"></i>
             </div> 
             <div>
@@ -137,11 +137,11 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-backward fa-2x"></i>
             </div> 
             <div>
-               <h5 class="card-title">Working With Gradients</h5>
+               <h5 class="card-title">Gradients</h5>
                <p class="card-text">Intervene on gradients</p>
             </div>
          </div>
@@ -155,7 +155,7 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-solid fa-satellite-dish fa-2x"></i>
             </div> 
             <div>
@@ -172,7 +172,7 @@ Features
       .. raw:: html
 
          <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 20px; height: 100%;">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
                <i class="fa-regular fa-object-ungroup fa-2x"></i>
             </div> 
             <div>

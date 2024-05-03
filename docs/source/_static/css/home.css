@@ -1,8 +1,37 @@
 .hero {
-    height: 80vh !important;
-    width: 100% !important;
+    height: 100vh !important;
 }
 
 .hero-image {
     width: 25vw !important;
+}
+
+.fixed-background {
+    background-attachment: fixed;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+    left: 0 !important;
+    top: 0 !important;
+    position: fixed !important;
+    height: 100vh;
+    width: 100%;
+    z-index: -1;
+}
+
+.surface {
+    background-color: var(--pst-color-background);
+}
+
+.transparent {
+    background: transparent !important;
+}
+
+.end {
+    background-color: var(--pst-color-surface);
+    height: 50vh;
+}
+
+.fill-button {
+    height: 100% !important;
 }
