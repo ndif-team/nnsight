@@ -50,17 +50,16 @@ Printing out the wrapped module returns its structure:
       (lm_head): Linear(in_features=768, out_features=50257, bias=False)
     )
 
-The primary method of interacting and running the model  ``.forward(...)``, ``.invoke(...)``, and ``.trace(...)``. All return context manager objects which, when entered, track operations performed on the inputs and outputs of modules.
+The primary method of interacting and running the model is ``.trace(...)``. This returns a context manager object which, when entered, track operations performed on the inputs and outputs of modules.
 
 
 
-The :func:`forward <nnsight.models.NNsightModel.NNsightModel.forward>` context is has the most explicit control of all levels of nnsight tracing and interleaving, creating a parent context where sub, input specific, contexts are spawned from.
+The :func:`forward <nnsight.models.NNsightModel.NNsightModel.trace>` context is has the most explicit control of all levels of nnsight tracing and interleaving, creating a parent context where sub, input specific, contexts are spawned from.
 
 .. code-block:: python
 
-    with model.forward() as runner:
-        with runner.invoke("The Eiffel Tower is in the city of") as invoker:
-            logits = model.lm_head.output.save()
+    with model.trace("The Eiffel Tower is in the city of") as runner:
+        logits = model.lm_head.output.save()
 
     print(logits.value)
 
