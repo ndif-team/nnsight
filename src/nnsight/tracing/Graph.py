@@ -142,10 +142,14 @@ class Graph:
                 shape_env=ShapeEnv(assume_static_by_default=True),
             ) as fake_mode:
                 with FakeCopyMode(fake_mode):
-                    
+
+                    proxy_args, proxy_kwargs = Node.prepare_inputs(
+                        (_args, _kwargs), proxy=True
+                    )
+
                     value = target(
-                        *Node.prepare_proxy_values(_args),
-                        **Node.prepare_proxy_values(_kwargs),
+                        *proxy_args,
+                        **proxy_kwargs,
                     )
 
         target_name = target if isinstance(target, str) else target.__name__
@@ -162,7 +166,7 @@ class Graph:
             value=value,
             target=target,
             args=args,
-            kwargs=kwargs
+            kwargs=kwargs,
         )
 
         self.name_idx[target_name] += 1

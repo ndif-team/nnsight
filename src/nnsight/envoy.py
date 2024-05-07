@@ -401,9 +401,13 @@ class Envoy:
             ) as fake_mode:
                 with FakeCopyMode(fake_mode):
 
+                    proxy_args, proxy_kwargs = Node.prepare_inputs(
+                        (args, kwargs), proxy=True
+                    )
+
                     proxy_value = self._module.forward(
-                        *Node.prepare_proxy_values(args, device=device),
-                        **Node.prepare_proxy_values(kwargs, device=device),
+                        *proxy_args,
+                        **proxy_kwargs,
                     )
 
         return self._tracer._graph.add(
