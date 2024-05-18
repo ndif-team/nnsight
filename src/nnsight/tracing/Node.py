@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -30,57 +29,6 @@ class Node:
         dependencies (List[Node]): Nodes that this node depends on.
         value (Any): Actual value to be populated during execution.
     """
-
-    @staticmethod
-    def prepare_proxy_values(values, device: torch.device = None):
-        """Prepare arguments for validating a node's target.
-        Converts Proxies and Nodes to their proxy_value and moves tensors to 'meta' device.
-
-        Args:
-            values (Any): Values to prepare.
-        Returns:
-            values (Any): Prepared values.
-        """
-
-        def slice_to_value(arg: slice):
-            return slice(
-                Node.prepare_proxy_values(arg.start),
-                Node.prepare_proxy_values(arg.stop),
-                Node.prepare_proxy_values(arg.step),
-            )
-
-        # Convert proxies to their proxy_value
-        values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
-        # Convert nodes to their proxy_value
-        values = util.apply(values, lambda x: x.proxy_value, Node)
-        # Slices may have proxies as part of their attributes so convert those to their proxy_values
-        values = util.apply(values, slice_to_value, slice)
-
-        if device is None:
-
-            # Arguments might be tensors created outside of scanning. Also the model might be a 'meta' pre-dispatched version of the model.
-            # That means the tensors as args and the model are different devices but we dont want to have to have the users move tensors to 'meta'
-            # So only when theres a FakeTensor with device meta, we move other tensors also to meta.
-
-            def get_device(tensor: torch.Tensor):
-
-                nonlocal device
-
-                if (
-                    device is None
-                    and isinstance(tensor, FakeTensor)
-                    and tensor.device.type == "meta"
-                ):
-
-                    device = tensor.device.type
-
-            util.apply(values, get_device, torch.Tensor)
-
-        if device is not None:
-
-            values = util.apply(values, lambda x: x.to(device), torch.Tensor)
-
-        return values
 
     def __init__(
         self,
@@ -237,6 +185,8 @@ class Node:
         Returns:
             Any: Prepared inputs.
         """
+        
+        inputs = util.apply(inputs, lambda x : x, object)
 
         def _value(node: Proxy | Node):
 
@@ -248,7 +198,7 @@ class Node:
 
             return node.value
 
-        inputs = util.apply(inputs, _value, (Node, Proxy))
+        inputs = util.apply(inputs, _value, (Node, Proxy), inplace=not proxy)
 
         if device is None:
 
@@ -264,7 +214,7 @@ class Node:
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        inputs = util.apply(inputs, _to, torch.Tensor)
+        inputs = util.apply(inputs, _to, torch.Tensor, inplace=not proxy)
 
         return inputs
 

@@ -102,7 +102,7 @@ class Tracer:
         self._model._envoy.next(increment=increment, propagate=True)
 
     def apply(
-        self, target: Callable, validate: bool = False, *args, **kwargs
+        self, target: Callable, *args, validate: bool = False, **kwargs, 
     ) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
 

@@ -8,7 +8,7 @@ from typing import Any, Callable, Collection, Type
 import torch
 
 
-def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
+def apply(data: Collection, fn: Callable, cls: Type, inplace:bool=False) -> Collection:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
@@ -25,19 +25,27 @@ def apply(data: Collection, fn: Callable, cls: Type) -> Collection:
     data_type = type(data)
 
     if data_type == list:
-        return [apply(_data, fn, cls) for _data in data]
+        if inplace:
+            for idx, _data in enumerate(data):
+                data[idx] = apply(_data, fn, cls, inplace=inplace)
+            return data
+        return [apply(_data, fn, cls, inplace=inplace) for _data in data]
 
     if data_type == tuple:
-        return tuple([apply(_data, fn, cls) for _data in data])
+        return tuple([apply(_data, fn, cls, inplace=inplace) for _data in data])
 
     if data_type == dict:
-        return {key: apply(value, fn, cls) for key, value in data.items()}
+        if inplace:
+            for key, value in data.items():
+                data[key] = apply(value, fn, cls, inplace=inplace)
+            return data
+        return {key: apply(value, fn, cls, inplace=inplace) for key, value in data.items()}
 
     if data_type == slice:
         return slice(
-            apply(data.start, fn, cls),
-            apply(data.stop, fn, cls),
-            apply(data.step, fn, cls),
+            apply(data.start, fn, cls, inplace=inplace),
+            apply(data.stop, fn, cls, inplace=inplace),
+            apply(data.step, fn, cls, inplace=inplace),
         )
 
     return data
