@@ -6,3 +6,4 @@ sphinx-design
 nbsphinx
 plotly
 ipython
+graphviz

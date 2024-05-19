@@ -43,6 +43,9 @@ class Runner(Tracer):
         if self.remote:
             self.run_server()
 
+            if self._visualize:
+                self._graph.vis(**self._visualize)
+
             self._graph.tracing = False
             self._graph = None
         else:

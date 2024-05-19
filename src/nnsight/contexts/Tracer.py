@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Optional, Dict
 
 from ..intervention import InterventionProxy
 from ..tracing.Graph import Graph
@@ -18,6 +18,7 @@ class Tracer:
     Attributes:
         _model (nnsight.models.NNsightModel.NNsight): nnsight Model object that ths context manager traces and executes.
         _graph (nnsight.tracing.Graph.Graph): Graph which traces operations performed on the input and output of modules' Envoys are added and later executed.
+        _visualize (Optional[Dict]): If specified, represents the parameters to save a graphical visualization of the Intervention Graph (_graph) generated during context.
         _args (List[Any]): Positional arguments to be passed to function that executes the model.
         _kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
         _batch_size (int): Batch size of the most recent input. Used by Envoy to create input/output proxies.
@@ -29,11 +30,14 @@ class Tracer:
     def __init__(
         self,
         model: "NNsight",
+        visualize: Optional[Dict] = None,
         validate: bool = True,
         **kwargs,
     ) -> None:
 
         self._model = model
+
+        self._visualize = visualize
 
         self._kwargs = kwargs
 
@@ -72,6 +76,9 @@ class Tracer:
             *self._batched_input,
             **self._kwargs,
         )
+
+        if self._visualize:
+            self._graph.vis(**self._visualize)
 
         self._graph.tracing = False
         self._graph = None
