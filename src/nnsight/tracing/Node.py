@@ -284,6 +284,8 @@ class Node:
         Returns:
             Any: Prepared inputs.
         """
+        
+        inputs = util.apply(inputs, lambda x : x, object)
 
         def _value(node: Proxy | Node):
 
@@ -295,7 +297,7 @@ class Node:
 
             return node.value
 
-        inputs = util.apply(inputs, _value, (Node, Proxy))
+        inputs = util.apply(inputs, _value, (Node, Proxy), inplace=not proxy)
 
         if device is None:
 
@@ -310,7 +312,7 @@ class Node:
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        inputs = util.apply(inputs, _to, torch.Tensor)
+        inputs = util.apply(inputs, _to, torch.Tensor, inplace=not proxy)
 
         return inputs
 
