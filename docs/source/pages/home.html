@@ -30,14 +30,15 @@
 <div class="fixed-background"></div>
 
 <section class="hero col-lg-8 container">
-    <div class="row g-5 h-100 align-items-center">
+    <div class="row h-100 align-items-center">
         <div class="col-md-6">
-            <h1 class="display-2 fw-bold lh-1 mb-3">Interpretable Neural Networks</h1>
-            <p class="lead">NNsight is a package for interpreting and manipulating the internals of models.</p>
+            <h1 class="display-5 fw-bold lh-1 mb-3">Interpretable Neural Networks</h1>
+            <p class="lead">NNsight (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of models.</p>
             <div class="d-grid gap-2 d-md-flex">
                 <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Start</a>
                 <a href="documentation" role="button" class="btn btn-outline-secondary secondary btn-md px-4">Docs</a>
                 <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
+                <a href="about" role="button" class="btn btn-outline-secondary btn-md secondary px-4">About</a>
             </div>
         </div>
         <div class="col-md-6 d-none d-md-block text-center">
@@ -52,7 +53,15 @@
 
         <div class="row g-5 align-items-center" style="height: 50vh">
 
-            <div class="col-md-6 d-none d-md-block">
+            <div class="col-md-5">
+                <div style="width: 100%; margin: auto;">
+                    <h3 class="fw-bold lh-1 mb-3 mt-0">Wrap Any PyTorch Model</h3>
+                    <p class="lead" id="myElement">The NNsight class object wraps a given PyTorch model, enabling tracing capabilities.</p>
+                    <a href="start">Get Started →</a>
+                </div>
+            </div>
+
+            <div class="col-md-7 d-none d-md-block">
 <div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">nnsight</span> <span class="kn">import</span> <span class="n">NNsight</span><span class="p">,</span> <span class="n">LanguageModel</span>
 
 <span class="n">net</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="n">OrderedDict</span><span class="p">([</span>
@@ -68,25 +77,18 @@
 </pre></div>
             </div>
 
-            <div class="col-md-6">
-                <div style="width: 75%; margin: auto;">
-                    <h3 class="fw-bold lh-1 mb-3 mt-0">Wrap Any PyTorch Model</h3>
-                    <p class="lead" id="myElement">The NNsight class object wraps a given PyTorch model, enabling tracing capabilities.</p>
-                    <a href="start">Get Started →</a>
-                </div>
-            </div>
         </div>
         <div class="row g-5 align-items-center" style="height: 50vh">
 
-            <div class="col-md-6">
-                <div style="width: 75%; margin: auto;">
+            <div class="col-md-5">
+                <div style="width: 100%; margin: auto;">
                 <h3 class="fw-bold lh-1 mb-3 mt-0">Access Hidden States</h3>
                 <p class="lead" id="myElement">Easily expose Module inputs and outputs.</p>
                 <a href="notebooks/tutorials/walkthrough">Walkthrough →</a>
             </div>
             </div>
 
-            <div class="col-md-6 d-none d-md-block">
+            <div class="col-md-7 d-none d-md-block">
 
 <div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="s1">&#39;Who invented neural networks?&#39;</span><span class="p">):</span>
 
@@ -103,8 +105,15 @@
             </div>
         </div>
         <div class="row g-5 align-items-center" style="height: 50vh">
+            <div class="col-md-5">
+                <div style="width: 100%; margin:auto;">
+                    <h3 class="fw-bold lh-1 mb-3 mt-0">Develop Complex Interventions</h3>
+                    <p class="lead" id="myElement">Edit Module outputs and measure effects.</p>
+                    <a href="tutorials">Tutorials →</a>
+                </div>
+            </div>
             <!-- CODE BLOCK NUMBER THREE -->
-            <div class="col-md-6 d-none d-md-block">
+            <div class="col-md-7 d-none d-md-block">
 <div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">()</span> <span class="k">as</span> <span class="n">tracer</span><span class="p">:</span>
 
     <span class="k">with</span> <span class="n">tracer</span><span class="o">.</span><span class="n">invoke</span><span class="p">(</span><span class="s1">&#39;The Eiffel Tower is in the city of&#39;</span><span class="p">):</span>
@@ -121,13 +130,6 @@
 </pre></div>
             </div>
             <!-- END OF CODE BLOCK NUMBER THREE -->
-            <div class="col-md-6">
-                <div style="width: 75%; margin:auto;">
-                    <h3 class="fw-bold lh-1 mb-3 mt-0">Develop Complex Interventions</h3>
-                    <p class="lead" id="myElement">Edit Module outputs and measure effects.</p>
-                    <a href="tutorials">Tutorials →</a>
-                </div>
-            </div>
         </div>
 </section>
 </div>
