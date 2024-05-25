@@ -49,7 +49,7 @@ class Envoy:
 
         for name, module in self._module.named_children():
 
-            self._add_envoy(module, name)
+            setattr(self, name, module)
 
     def _update(self, module: torch.nn.Module) -> None:
         """Updates the ._model attribute using a new model of the same architecture.
@@ -88,7 +88,7 @@ class Envoy:
 
         else:
 
-            setattr(self, name, envoy)
+            super().__setattr__(name, envoy)
 
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
         """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
@@ -397,6 +397,20 @@ class Envoy:
         """
 
         return getattr(self._module, key)
+
+    def __setattr__(self, key: Any, value: Any) -> None:
+        """Overload setattr to create and set an Envoy when trying to set a torch Module.
+        """
+
+        if key != "_module" and isinstance(value, torch.nn.Module):
+
+            setattr(self._module, key, value)
+
+            self._add_envoy(value, key)
+
+        else:
+
+            super().__setattr__(key, value)
 
     def __call__(self, *args: List[Any], **kwargs: Dict[str, Any]) -> InterventionProxy:
         """Creates a proxy to call the underlying module's forward method with some inputs.

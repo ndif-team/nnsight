@@ -41,6 +41,12 @@ FUNCTIONS_WHITELIST.update(
 )
 FUNCTIONS_WHITELIST.update(
     {
+        get_function_name(value): value
+        for key, value in getmembers(torch._C._nn, isfunction)
+    }
+)
+FUNCTIONS_WHITELIST.update(
+    {
         get_function_name(value, module_name="Tensor"): value
         for key, value in getmembers(
             torch.Tensor, lambda x: ismethoddescriptor(x) or isfunction(x)

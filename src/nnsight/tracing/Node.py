@@ -47,6 +47,8 @@ class Node:
             args = list()
         if kwargs is None:
             kwargs = dict()
+            
+        args = list(args)
 
         # Node.graph is a weak reference to avoid reference loops.
         graph = weakref.proxy(graph) if graph is not None else None
