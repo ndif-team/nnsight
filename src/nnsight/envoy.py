@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any, Callable, Dict, Iterator, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProxy
+from .tracing.Node import Node
+from .tracing.Proxy import Proxy
 
 
 class Envoy:
@@ -207,7 +211,18 @@ class Envoy:
 
         return self
 
-    def envoys(self, include_fn: Callable = None, envoys: List = None) -> List[Envoy]:
+    def modules(
+        self, include_fn: Callable = None, names: bool = False, envoys: List = None
+    ) -> List[Envoy]:
+        """Returns all Envoys in the Envoy tree.
+
+        Args:
+            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+            names (bool, optional): If to include the name/module_path of returned Envoys along with the Envoy itself. Defaults to False.
+
+        Returns:
+            List[Envoy]: Included Envoys
+        """
 
         if envoys is None:
             envoys = list()
@@ -218,12 +233,27 @@ class Envoy:
             included = include_fn(self)
 
         if included:
-            envoys.append(self)
+            if names:
+                envoys.append((self._module_path, self))
+            else:
+                envoys.append(self)
 
         for sub_envoy in self._sub_envoys:
-            sub_envoy.envoys(include_fn=include_fn, envoys=envoys)
+            sub_envoy.modules(include_fn=include_fn, envoys=envoys)
 
         return envoys
+
+    def named_modules(self, *args, **kwargs) -> List[Tuple[str, Envoy]]:
+        """Returns all Envoys in the Envoy tree along with their name/module_path.
+
+        Args:
+            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+
+        Returns:
+            List[Tuple[str, Envoy]]: Included Envoys and their names/module_paths.
+        """
+
+        return self.modules(*args, **kwargs, names=True)
 
     def _repr_module_list(self):
 
@@ -350,25 +380,42 @@ class Envoy:
 
         module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
 
-        try:
+        proxy = module_proxy.forward
 
-            device = next(self._module.parameters()).device
+        proxy_value = inspect._empty
 
-        except:
+        if self._tracer._graph.validate:
 
-            device = torch.device("cpu")
+            try:
 
-        torch.set_default_device(device)
+                device = next(self._module.parameters()).device
 
-        proxy = module_proxy.forward(*args, **kwargs)
+            except:
 
-        torch._GLOBAL_DEVICE_CONTEXT.__exit__(None, None, None)
+                device = None
 
-        torch._GLOBAL_DEVICE_CONTEXT = None
+            # Enter FakeMode for proxy_value computing.
+            with FakeTensorMode(
+                allow_non_fake_inputs=True,
+                shape_env=ShapeEnv(assume_static_by_default=True),
+            ) as fake_mode:
+                with FakeCopyMode(fake_mode):
 
-        return proxy
+                    proxy_args, proxy_kwargs = Node.prepare_inputs(
+                        (args, kwargs), proxy=True
+                    )
 
-    torch.set_default_device
+                    proxy_value = self._module.forward(
+                        *proxy_args,
+                        **proxy_kwargs,
+                    )
+
+        return self._tracer._graph.add(
+            Proxy.proxy_call,
+            value=proxy_value,
+            args=[proxy] + list(args),
+            kwargs=kwargs,
+        )
 
     @property
     def output(self) -> InterventionProxy:

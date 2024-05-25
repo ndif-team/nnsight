@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -30,63 +29,6 @@ class Node:
         dependencies (List[Node]): Nodes that this node depends on.
         value (Any): Actual value to be populated during execution.
     """
-
-    @staticmethod
-    def prepare_proxy_values(values):
-        """Prepare arguments for validating a node's target.
-        Converts Proxies and Nodes to their proxy_value and moves tensors to 'meta' device.
-
-        Args:
-            values (Any): Values to prepare.
-        Returns:
-            values (Any): Prepared values.
-        """
-
-        def slice_to_value(arg: slice):
-            return slice(
-                Node.prepare_proxy_values(arg.start),
-                Node.prepare_proxy_values(arg.stop),
-                Node.prepare_proxy_values(arg.step),
-            )
-
-        # Convert proxies to their proxy_value
-        values = util.apply(values, lambda x: x.node.proxy_value, Proxy)
-        # Convert nodes to their proxy_value
-        values = util.apply(values, lambda x: x.proxy_value, Node)
-        # Slices may have proxies as part of their attributes so convert those to their proxy_values
-        values = util.apply(values, slice_to_value, slice)
-
-        device = (
-            torch._GLOBAL_DEVICE_CONTEXT.device
-            if torch._GLOBAL_DEVICE_CONTEXT is not None
-            else None
-        )
-
-        if device is None:
-
-            # Arguments might be tensors created outside of scanning. Also the model might be a 'meta' pre-dispatched version of the model.
-            # That means the tensors as args and the model are different devices but we dont want to have to have the users move tensors to 'meta'
-            # So only when theres a FakeTensor with device meta, we move other tensors also to meta.
-
-            def get_device(tensor: torch.Tensor):
-
-                nonlocal device
-
-                if (
-                    device is None
-                    and isinstance(tensor, FakeTensor)
-                    and tensor.device.type == "meta"
-                ):
-
-                    device = tensor.device.type
-
-            util.apply(values, get_device, torch.Tensor)
-
-        if device is not None:
-
-            values = util.apply(values, lambda x: x.to(device), torch.Tensor)
-
-        return values
 
     def __init__(
         self,
@@ -234,42 +176,47 @@ class Node:
         """
         return self.remaining_listeners == 0
 
-    def prepare_inputs(self) -> Tuple[List[Any], Dict[str, Any]]:
+    @classmethod
+    def prepare_inputs(
+        cls, inputs: Any, device: torch.device = None, proxy: bool = False
+    ) -> Any:
         """Prepare arguments for executing this node's target.
         Converts Nodes in args and kwargs to their value and moves tensors to correct device.
-
-
         Returns:
-            Tuple[List[Any], Dict[str, Any]]: Prepared args and kwargs
+            Any: Prepared inputs.
         """
+        
+        inputs = util.apply(inputs, lambda x : x, object)
 
-        # Turn nodes into their value
-        def _value(node: Node):
+        def _value(node: Proxy | Node):
+
+            if isinstance(node, Proxy):
+                node = node.node
+
+            if proxy:
+                return node.proxy_value
+
             return node.value
 
-        args = util.apply(self.args, _value, Node)
-        kwargs = util.apply(self.kwargs, _value, Node)
+        inputs = util.apply(inputs, _value, (Node, Proxy), inplace=not proxy)
 
-        device = None
+        if device is None:
 
-        def _device(value):
-            nonlocal device
-            device = value.device
+            def _device(value: torch.Tensor):
 
-        all_args = list(args) + list(kwargs.values())
+                nonlocal device
 
-        util.apply(list(reversed(all_args)), _device, torch.Tensor)
-        # TODO
-        # util.apply(list(reversed(all_args)), _device, torch.nn.Module)
+                if device is None:
+                    device = value.device
 
-        # Move tensors to device
+            util.apply(inputs, _device, torch.Tensor)
+
         def _to(value: torch.Tensor):
             return value.to(device)
 
-        args = util.apply(args, _to, torch.Tensor)
-        kwargs = util.apply(kwargs, _to, torch.Tensor)
+        inputs = util.apply(inputs, _to, torch.Tensor, inplace=not proxy)
 
-        return args, kwargs
+        return inputs
 
     def execute(self) -> None:
         """Actually executes this node.
@@ -278,7 +225,7 @@ class Node:
         """
 
         # Prepare arguments.
-        args, kwargs = self.prepare_inputs()
+        args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
 
         # We se a nodes target to 'null' if we don't want it to be executed and therefore never done
         if self.target == "null":

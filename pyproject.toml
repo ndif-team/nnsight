@@ -31,7 +31,7 @@ dependencies = [
     "einops"
     ]
 [project.urls]
-"Homepage" = "https://github.com/JadenFiotto-Kaufman/nnsight"
+"Homepage" = "https://github.com/ndif-team/nnsight"
 
 [tool.setuptools]
 include-package-data = true

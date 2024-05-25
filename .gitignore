@@ -7,3 +7,4 @@ public/
 __pycache__/
 .DS_STORE
 config.yaml
+.nfs*
