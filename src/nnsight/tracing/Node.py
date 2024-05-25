@@ -45,6 +45,8 @@ class Node:
             args = list()
         if kwargs is None:
             kwargs = dict()
+            
+        args = list(args)
 
         self.name = name
         self.graph: "Graph" = graph
