@@ -143,15 +143,18 @@ class LanguageModel(GenerationMixin, NNsight):
             setattr(model_key, 'generator', WrapperModule())
 
         super().__init__(model_key, *args, **kwargs)
-        
-    def _load(self, repo_id: str, **kwargs) -> PreTrainedModel:
+
+    def _load(
+        self, repo_id: str, tokenizer_kwargs: Optional[Dict[str, Any]] = None, **kwargs
+    ) -> PreTrainedModel:
 
         config = AutoConfig.from_pretrained(repo_id, **kwargs)
 
         if self.tokenizer is None:
-
+            if tokenizer_kwargs is None:
+                tokenizer_kwargs = {}
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, config=config, padding_side="left", **kwargs
+                repo_id, config=config, padding_side="left", **tokenizer_kwargs
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
