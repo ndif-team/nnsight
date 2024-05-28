@@ -23,12 +23,14 @@ logger.disabled = not CONFIG.APP.LOGGING
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
 
-from inspect import getmembers, isfunction
+from inspect import getmembers, isfunction, isbuiltin
 
 import einops
-
+import math
 for key, value in getmembers(einops.einops, isfunction):
     DEFAULT_PATCHER.add(Patch(einops.einops, proxy_wrapper(value), key))
+for key, value in getmembers(math, isbuiltin):
+    DEFAULT_PATCHER.add(Patch(math, proxy_wrapper(value), key))
 
 # TODO THis does not work. Because of accelerate also patching? because they are overloaded?
 #DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))

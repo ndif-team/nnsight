@@ -221,6 +221,12 @@ class Proxy:
             target=operator.truediv,
             args=[other, self.node],
         )
+        
+    def __floordiv__(self, other: Union[Proxy, Any]) -> Self:
+        return self.node.add(
+            target=operator.floordiv,
+            args=[self.node, other],
+        )
 
     def __eq__(self, other: Union[Proxy, Any]) -> Self:
         return self.node.add(target=operator.eq, args=[self.node, other])
