@@ -9,7 +9,7 @@ import torch
 from tqdm import tqdm
 
 from ... import CONFIG
-from ...logger import logger
+from ...logger import logger, remote_logger
 from .LocalBackend import LocalBackend, LocalMixin
 
 if TYPE_CHECKING:
@@ -24,8 +24,8 @@ def handle_response(handle_result: Callable, url: str, event: str, data: Any) ->
     # Load the data into the ResponseModel pydantic class.
     response = ResponseModel(**data)
 
-    # Print response for user ( should be logger.info and have an info handler print to stdout)
-    print(str(response))
+    # Log response for user
+    remote_logger.info(str(response))
 
     # If the status of the response is completed, update the local nodes that the user specified to save.
     # Then disconnect and continue.
@@ -106,7 +106,7 @@ def blocking_request(url: str, request: "RequestModel", handle_result: Callable)
 
             raise Exception(response.reason)
 
-        print(response)
+        remote_logger.info(response)
 
         while True:
             if handle_response(handle_result, url, *sio.receive()):
