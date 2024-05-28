@@ -66,7 +66,10 @@ class Node:
         self.dependencies: List[Node] = list()
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
+=======
+>>>>>>> main
         # Resolve values from completed tracer/runner contexts
         self.args = util.apply(self.args, lambda x: x.value if x.done() else x, Node)
         self.kwargs = util.apply(self.kwargs, lambda x: x.value if x.done() else x, Node)
