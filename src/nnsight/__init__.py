@@ -11,7 +11,7 @@ PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
-from .logger import logger
+from .logger import logger, remote_logger
 from .models.NNsightModel import NNsight
 from .models.LanguageModel import LanguageModel
 
@@ -19,16 +19,19 @@ from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper
 
 logger.disabled = not CONFIG.APP.LOGGING
+remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
 
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
 
-from inspect import getmembers, isfunction
+from inspect import getmembers, isfunction, isbuiltin
 
 import einops
-
+import math
 for key, value in getmembers(einops.einops, isfunction):
     DEFAULT_PATCHER.add(Patch(einops.einops, proxy_wrapper(value), key))
+for key, value in getmembers(math, isbuiltin):
+    DEFAULT_PATCHER.add(Patch(math, proxy_wrapper(value), key))
 
 # TODO THis does not work. Because of accelerate also patching? because they are overloaded?
 #DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))

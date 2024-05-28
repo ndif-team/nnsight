@@ -65,6 +65,38 @@ class Node:
         self.listeners: List[Node] = list()
         self.dependencies: List[Node] = list()
 
+<<<<<<< HEAD
+=======
+        # Resolve values from completed tracer/runner contexts
+        self.args = util.apply(self.args, lambda x: x.value if x.done() else x, Node)
+        self.kwargs = util.apply(self.kwargs, lambda x: x.value if x.done() else x, Node)
+
+        # Add all arguments that are nodes to nodes dependencies
+        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
+        util.apply(
+            self.args,
+            lambda x: self.dependencies.append(x) if not x.done() else None,
+            Node,
+        )
+        util.apply(
+            self.kwargs,
+            lambda x: self.dependencies.append(x) if not x.done() else None,
+            Node,
+        )
+        # Add node to all arguments that are nodes' listeners
+        # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
+        util.apply(
+            self.args,
+            lambda x: x.listeners.append(weakref.proxy(self)) if not x.done() else None,
+            Node,
+        )
+        util.apply(
+            self.kwargs,
+            lambda x: x.listeners.append(weakref.proxy(self)) if not x.done() else None,
+            Node,
+        )
+
+>>>>>>> main
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
 
