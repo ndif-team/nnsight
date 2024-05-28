@@ -11,6 +11,7 @@ class ApiConfigModel(BaseModel):
 
 class AppConfigModel(BaseModel):
     LOGGING: bool
+    REMOTE_LOGGING: bool
 
 
 class ConfigModel(BaseModel):

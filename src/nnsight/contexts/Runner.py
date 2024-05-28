@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from .. import CONFIG, pydantics
-from ..logger import logger
+from ..logger import logger, remote_logger
 from .Tracer import Tracer
 
 
@@ -66,8 +66,8 @@ class Runner(Tracer):
         # Load the data into the ResponseModel pydantic class.
         response = pydantics.ResponseModel(**data)
 
-        # Print response for user ( should be logger.info and have an info handler print to stdout)
-        print(str(response))
+        # Log response for user 
+        remote_logger.info(str(response))
 
         # If the status of the response is completed, update the local nodes that the user specified to save.
         # Then disconnect and continue.
@@ -145,7 +145,7 @@ class Runner(Tracer):
 
                 raise Exception(response.reason)
 
-            print(response)
+            remote_logger.info(response)
 
             while True:
                 if self.handle_response(*sio.receive()):
