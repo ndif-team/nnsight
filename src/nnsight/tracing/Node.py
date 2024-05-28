@@ -5,7 +5,6 @@ import weakref
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensor
 
 from .. import util
 from ..logger import logger
