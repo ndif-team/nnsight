@@ -39,3 +39,17 @@ def test_tiny(tiny_model: NNsight, tiny_input: torch.Tensor):
         hs = tiny_model.layer2.output.save()
 
     assert isinstance(hs.value, torch.Tensor)
+
+
+def test_grad_setting(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input):
+        l1_grad = tiny_model.layer1.output.grad.clone().save()
+
+        tiny_model.layer1.output.grad = tiny_model.layer1.output.grad.clone() * 2
+
+        l1_grad_double = tiny_model.layer1.output.grad.save()
+
+        loss = tiny_model.output.sum()
+        loss.backward()
+
+    assert torch.equal(l1_grad.value * 2, l1_grad_double.value)
