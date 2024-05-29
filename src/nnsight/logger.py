@@ -22,3 +22,13 @@ logging_handler.setLevel(logging.INFO)
 logger = logging.getLogger("nnsight")
 logger.addHandler(logging_handler)
 logger.setLevel(logging.INFO)
+
+# set up a std out logger
+remote_logger = logging.getLogger("nnsight_remote")
+remote_handler = logging.StreamHandler()
+remote_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(processName)-10s %(name)s %(levelname)-8s %(message)s")
+)
+remote_handler.setLevel(logging.INFO)
+remote_logger.addHandler(remote_handler)
+remote_logger.setLevel(logging.INFO)
