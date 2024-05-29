@@ -11,12 +11,8 @@ from typing_extensions import Self
 from .. import util
 from ..contexts.Runner import Runner
 from ..envoy import Envoy
-from ..intervention import (
-    HookHandler,
-    InterventionHandler,
-    InterventionProxy,
-    intervene,
-)
+from ..intervention import (HookHandler, InterventionHandler,
+                            InterventionProxy, intervene)
 from ..logger import logger
 from ..tracing.Graph import Graph
 
@@ -80,7 +76,7 @@ class NNsight:
         if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
-
+                    
         logger.info(f"Initialized `{self._model_key}`")
 
     def trace(
@@ -302,8 +298,8 @@ class NNsight:
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
-        if key != "_model" and isinstance(value, torch.nn.Module):
-
+        if key not in ('_model', '_model_key') and isinstance(value, torch.nn.Module):
+            
             setattr(self._envoy, key, value)
 
         else:
