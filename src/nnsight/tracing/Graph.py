@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import Any, Callable, Dict, List, Type, Union
+from typing import Any, Callable, Dict, List, Type, Union, Optional
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -187,7 +187,15 @@ class Graph:
         # TODO
         pass
 
-    def vis(self, filename: str = "graph", format: str = "png"):
+    def vis(self, filename: str = "graph", directory: Optional[str] = None, format: str = "png"):
+        """ Generates and saves a graphical visualization of the Intervention Graph using the graphviz library. 
+
+        Args:
+            filename (str): Name of the Intervention Graph. Defaults to "graph".
+            format (str): Image format of the graphic. Defaults to "png".
+            directory (Optional[str]): Directory path to save the graphic in. If None saves content to the current directory.
+        """
+
         import graphviz
 
         def style(value: Any) -> Dict[str, Any]:
@@ -269,7 +277,7 @@ class Graph:
 
                 graph.edge(name, node.name)
 
-        graph.render(filename=filename, format=format)
+        graph.render(filename=filename, format=format, directory=directory)
 
     def __str__(self) -> str:
         result = ""
