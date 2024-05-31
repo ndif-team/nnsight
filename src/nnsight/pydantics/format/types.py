@@ -86,6 +86,14 @@ class SliceModel(BaseModel):
             self.step.compile(graph, nodes),
         )
 
+class EllipsisModel(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    type_name: Literal["ELLIPSIS"] = "ELLIPSIS"
+    
+    def compile(self, graph: Graph, nodes: Dict[str, NodeModel]) -> type(...): # It will be better to use EllipsisType, but it requires python>=3.10
+        return ...
+
+
 
 class ListModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -165,6 +173,14 @@ SliceType = Annotated[
     ),
 ]
 
+EllipsisType = Annotated[
+    type(...), # It will be better to use EllipsisType, but it requires python>=3.10
+    AfterValidator(
+        lambda value: EllipsisModel()
+    ),
+]
+
+
 ListType = Annotated[list, AfterValidator(lambda value: ListModel(values=value))]
 
 TupleType = Annotated[
@@ -201,6 +217,7 @@ ValueTypes = Union[
             ListModel,
             TupleModel,
             DictModel,
+            EllipsisModel
         ],
         Field(discriminator="type_name"),
     ],
@@ -212,5 +229,6 @@ ValueTypes = Union[
         ListType,
         TupleType,
         DictType,
+        EllipsisType
     ],
 ]
