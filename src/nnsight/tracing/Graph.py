@@ -9,6 +9,8 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .Node import Node
 from .Proxy import Proxy
+from .protocols import Protocol, LockProtocol
+from ..util import apply
 
 
 class Graph:
@@ -109,6 +111,44 @@ class Graph:
 
         # Add Node.
         self.nodes[node.name] = node
+
+    def copy(self):
+
+        new_graph = Graph(validate=False, proxy_class=self.proxy_class)
+
+        def compile(graph, old_node):
+            if old_node.name in graph.nodes:
+                return graph.nodes[old_node.name]
+
+            # Skip saving node to new graph if it's a .save()
+            if old_node.target is LockProtocol:
+                return
+
+            node = graph.create(
+                target=old_node.target,
+                name=old_node.name,
+                proxy_value=None,
+                args=apply(
+                    old_node.args, 
+                    lambda x: compile(graph, x), Node
+                ),
+                kwargs=apply(
+                    old_node.kwargs, 
+                    lambda x: compile(graph, x), Node
+                )
+            ).node
+
+            if isinstance(node.target, type) and issubclass(
+                node.target, Protocol
+            ):
+                node.target.compile(node)
+
+            return node
+
+        for node in self.nodes.values():
+            compile(new_graph, node)
+
+        return new_graph
 
     def vis(self, filename: str = "graph", format: str = "png"):
         import graphviz

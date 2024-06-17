@@ -11,7 +11,7 @@ from typing_extensions import Self
 
 from .. import util
 from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend
+from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend, EditBackend, EditMixin
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (
@@ -23,9 +23,10 @@ from ..intervention import (
 from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
+from ..editing import Edit, apply_edits
 
 
-class NNsight:
+class NNsight(EditMixin):
     """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
 
     Class Attributes:
@@ -64,6 +65,7 @@ class NNsight:
 
         self._model: torch.nn.Module = None
         self._accumulator: Accumulator = None
+        self._default_graph: Graph = None
 
         logger.info(f"Initializing `{self._model_key}`...")
 
@@ -205,7 +207,11 @@ class NNsight:
             backend = RemoteBackend(backend)
 
         # Create Tracer object.
-        tracer = Tracer(backend, self, **kwargs)
+        if self._default_graph:
+            graph = self._default_graph.copy()
+            tracer = Tracer(backend, self, graph=graph, **kwargs)
+        else:
+            tracer = Tracer(backend, self, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -234,6 +240,20 @@ class NNsight:
             raise ValueError("Can't execute on no inputs!")
 
         return tracer
+
+    def alter(
+        self,
+        *inputs: Any,
+        edits: List[Edit] = [],
+        **kwargs: Dict[str, Any],
+    ):
+        apply_edits(edits)
+
+        return self.trace(
+            *inputs, 
+            **kwargs, 
+            backend=EditBackend()
+        )
 
     def accumulate(
         self, backend: Union[Backend, str] = None, remote: bool = False

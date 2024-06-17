@@ -165,6 +165,10 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
         self._graph = None
         
         return graph
+    
+    def edit_backend_execute(self) -> Graph:
+        
+        self._model._default_graph = self._graph
 
     def remote_backend_get_model_key(self):
 

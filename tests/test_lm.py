@@ -256,3 +256,40 @@ def test_multi_grad(gpt2: nnsight.LanguageModel):
         _test_serialize(tracer)
 
     assert not torch.all(hidden_states_grad1.eq(hidden_states_grad2))
+
+
+def test_editing(gpt2: nnsight.LanguageModel):
+    from nnsight.editing import Edit
+    from nnsight.util import WrapperModule
+
+    class ComplexModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.one = WrapperModule()
+
+        def forward(self, x):
+            return self.one(x)
+    
+    l0 = gpt2.transformer.h[0]
+    edit = Edit(l0, "attachment", ComplexModule())
+
+    # Get values pre editing
+    with gpt2.trace(MSG_prompt):
+        original = l0.output[0].clone().save()
+        l0.output[0][:] *= 0.
+        original_output = gpt2.output.logits.save()
+    
+    with gpt2.alter("test", edits=[edit]):
+        acts = l0.output[0]
+        l0.output[0][:] = l0.attachment(acts, hook=True)
+
+    with gpt2.trace(MSG_prompt):
+        one = l0.attachment.one.output.clone().save()
+        l0.attachment.output *= 0.
+        edited_output = gpt2.output.logits.save()
+
+    # Check that submodule in attached model 
+    # is equal to original output.
+    assert torch.equal(original, one)
+    # Check that edits propagate from attached module
+    assert torch.equal(original_output, edited_output)

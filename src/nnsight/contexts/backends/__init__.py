@@ -17,3 +17,4 @@ from .AccumulatorBackend import AccumulatorBackend, AccumulatorMixin
 from .IteratorBackend import IteratorMixin
 from .LocalBackend import LocalBackend, LocalMixin
 from .RemoteBackend import RemoteBackend, RemoteMixin
+from .EditBackend import EditBackend, EditMixin
