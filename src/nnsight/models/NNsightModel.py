@@ -247,6 +247,12 @@ class NNsight(EditMixin):
         edits: List[Edit] = [],
         **kwargs: Dict[str, Any],
     ):
+        """Create a trace context with an edit backend and apply a list of edits.
+
+        The edit backend sets a default graph on the NNsight model which is 
+        run on future trace calls.
+        """
+
         apply_edits(edits)
 
         return self.trace(

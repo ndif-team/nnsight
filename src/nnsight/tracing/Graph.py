@@ -113,7 +113,9 @@ class Graph:
         self.nodes[node.name] = node
 
     def copy(self):
-
+        """Copy constructs a new Graph and then recursively 
+        creates new Nodes on the graph.
+        """
         new_graph = Graph(validate=False, proxy_class=self.proxy_class)
 
         def compile(graph, old_node):
