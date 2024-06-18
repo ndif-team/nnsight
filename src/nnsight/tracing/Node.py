@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 
@@ -285,8 +286,8 @@ class Node:
         Returns:
             Any: Prepared inputs.
         """
-        
-        inputs = util.apply(inputs, lambda x : x, object)
+
+        inputs = util.apply(inputs, lambda x: x, inspect._empty)
 
         def _value(node: Proxy | Node):
 
