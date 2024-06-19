@@ -1,15 +1,18 @@
 """Module for utility functions and classes used throughout the package."""
 
-import time
+import importlib
 import types
 from functools import wraps
 from typing import Any, Callable, Collection, Type
 
 import torch
 
-#TODO Have an Exception you can raise to stop apply early
+# TODO Have an Exception you can raise to stop apply early
 
-def apply(data: Collection, fn: Callable, cls: Type, inplace:bool=False) -> Collection:
+
+def apply(
+    data: Collection, fn: Callable, cls: Type, inplace: bool = False
+) -> Collection:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
@@ -40,7 +43,9 @@ def apply(data: Collection, fn: Callable, cls: Type, inplace:bool=False) -> Coll
             for key, value in data.items():
                 data[key] = apply(value, fn, cls, inplace=inplace)
             return data
-        return {key: apply(value, fn, cls, inplace=inplace) for key, value in data.items()}
+        return {
+            key: apply(value, fn, cls, inplace=inplace) for key, value in data.items()
+        }
 
     if data_type == slice:
         return slice(
@@ -103,16 +108,17 @@ def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
     return object
 
 
-def meta_deepcopy(self: torch.nn.parameter.Parameter, memo):
-    if id(self) in memo:
-        return memo[id(self)]
-    else:
-        result = type(self)(
-            torch.empty_like(self.data, dtype=self.data.dtype, device="meta"),
-            self.requires_grad,
-        )
-        memo[id(self)] = result
-        return result
+def to_import_path(type: type) -> str:
+
+    return f"{type.__module__}.{type.__name__}"
+
+
+def from_import_path(import_path: str) -> type:
+
+    *import_path, classname = import_path.split(".")
+    import_path = ".".join(import_path)
+
+    return getattr(importlib.import_module(import_path), classname)
 
 
 class WrapperModule(torch.nn.Module):
