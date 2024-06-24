@@ -45,17 +45,14 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
 
         self._model = model
 
-        default = isinstance(backend, EditBackend)
-
         self._graph = (
-            Graph(
-                proxy_class=model.proxy_class, 
-                validate=validate,
-                default=default,
-            )
+            Graph(proxy_class=model.proxy_class, validate=validate)
             if graph is None
             else graph
         )
+
+        if isinstance(backend, EditBackend):
+            self._graph.attachments["default"] = True
 
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
 
