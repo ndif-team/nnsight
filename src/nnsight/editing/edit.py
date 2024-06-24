@@ -52,6 +52,9 @@ class Edit():
             self.attachment
         )
 
+    def __repr__(self) -> str:
+        return f"Edit(base={self.base}, name={self.name}, attachment={self.attachment})"
+
 def apply_edits(edits: List[Edit]):
     """Applies a list of edits, adding each attachment to its respective base module.
 

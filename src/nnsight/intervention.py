@@ -405,6 +405,7 @@ class InterventionProtocol(Protocol):
                     if (
                         batch_size != intervention_handler.total_batch_size
                         and intervention_handler.total_batch_size == acts.shape[0]
+                        and batch_size != -1
                     ):
                         narrowed = True
                         return acts.narrow(0, batch_start, batch_size)

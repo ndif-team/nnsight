@@ -11,6 +11,7 @@ from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
 from .backends import AccumulatorMixin, Backend, IteratorMixin, RemoteMixin
+from .backends.EditBackend import EditBackend
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
@@ -44,8 +45,14 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
 
         self._model = model
 
+        default = isinstance(backend, EditBackend)
+
         self._graph = (
-            Graph(proxy_class=model.proxy_class, validate=validate)
+            Graph(
+                proxy_class=model.proxy_class, 
+                validate=validate,
+                default=default,
+            )
             if graph is None
             else graph
         )

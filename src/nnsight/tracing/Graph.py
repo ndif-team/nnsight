@@ -32,6 +32,7 @@ class Graph:
         proxy_class: Type[Proxy] = Proxy,
         validate: bool = True,
         graph_id: int = None,
+        default: bool = False,
     ) -> None:
 
         self.id = graph_id or id(self)
@@ -40,6 +41,7 @@ class Graph:
         self.validate = validate
 
         self.alive = True
+        self.default = default
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
@@ -108,6 +110,12 @@ class Graph:
 
         # Increment name_idx for name.
         self.name_idx[name] += 1
+
+        # Set batch arg to -1
+        if getattr(node.target, "attachment_name", False) == "nnsight_module_nodes":
+            if self.default:
+                # Arg 1 corresponds to batch_size
+                node.args[1] = -1
 
         # Add Node.
         self.nodes[node.name] = node
