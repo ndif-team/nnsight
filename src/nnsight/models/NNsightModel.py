@@ -253,6 +253,10 @@ class NNsight(EditMixin):
         run on future trace calls.
         """
 
+        # Dispatch before editing else edits are cleared
+        if not self._dispatched:
+            self.dispatch_model()
+        
         apply_edits(edits)
 
         return self.trace(

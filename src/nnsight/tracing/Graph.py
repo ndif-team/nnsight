@@ -109,12 +109,6 @@ class Graph:
         # Increment name_idx for name.
         self.name_idx[name] += 1
 
-        if (
-            "InterventionProtocol" in node.name
-            and self.attachments.get("default", False)
-        ):
-            node.args[1] = -1
-            
         # Add Node.
         self.nodes[node.name] = node
 

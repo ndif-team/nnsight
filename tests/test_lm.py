@@ -293,3 +293,32 @@ def test_editing(gpt2: nnsight.LanguageModel):
     assert torch.equal(original, one)
     # Check that edits propagate from attached module
     assert torch.equal(original_output, edited_output)
+
+
+def test_batched_editing(gpt2: nnsight.LanguageModel):
+    from nnsight.editing import Edit
+    from nnsight.util import WrapperModule
+
+    class ComplexModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.one = WrapperModule()
+
+        def forward(self, x):
+            return self.one(x)
+    
+    l0 = gpt2.transformer.h[0]
+    edit = Edit(l0, "attachment", ComplexModule())
+
+    batch = ["a", "b"]
+    single = "a"
+    
+    with gpt2.alter(single, edits=[edit]):
+        acts = l0.output[0]
+        l0.output[0][:] = l0.attachment(acts, hook=True)
+
+    with gpt2.trace(batch):
+        edited = l0.attachment.output.save()
+
+    # Check that the batch size does not narrow
+    assert edited.shape[0] == 2

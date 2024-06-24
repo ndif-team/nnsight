@@ -51,9 +51,6 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
             else graph
         )
 
-        if isinstance(backend, EditBackend):
-            self._graph.attachments["default"] = True
-
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
 
         self._backend = backend
