@@ -100,6 +100,8 @@ class InterventionProxy(Proxy):
         """
         protocols.SwapProtocol.add(self.grad.node, value)
 
+        self.__dict__["_grad"] = None
+
     def __call__(self, *args, **kwargs) -> Self:
 
         # We don't want to call backward on fake tensors.
@@ -140,7 +142,7 @@ class InterventionProxy(Proxy):
 
         # We catch setting .grad as that is a special Protocol vs. setting attributes generally.
         if key == "grad":
-            getattr(self.__class__, key).fset(self, value)
+            return getattr(self.__class__, key).fset(self, value)
 
         return super().__setattr__(key, value)
 

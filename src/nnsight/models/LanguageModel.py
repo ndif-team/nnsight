@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import json
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
-from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
-                          AutoTokenizer, BatchEncoding, PreTrainedModel,
-                          PreTrainedTokenizer)
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.models.auto import modeling_auto
+from typing_extensions import Self
 
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
@@ -149,7 +157,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         self, repo_id: str, tokenizer_kwargs: Optional[Dict[str, Any]] = None, **kwargs
     ) -> PreTrainedModel:
 
-        config = kwargs.pop("config", None) or AutoConfig.from_pretrained(repo_id, **kwargs)
+        config = kwargs.pop("config", None) or AutoConfig.from_pretrained(
+            repo_id, **kwargs
+        )
 
         if self.tokenizer is None:
             if tokenizer_kwargs is None:
@@ -159,7 +169,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                 warnings.warn(
                     "NNsight LanguageModel requires padding_side='left' for tokenizers, setting it to 'left'"
                 )
-                
+
             self.tokenizer = AutoTokenizer.from_pretrained(
                 repo_id, config=config, padding_side="left", **tokenizer_kwargs
             )
@@ -311,5 +321,16 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         return output
 
-    def _remote_model_key(self) -> str:
-        return self._model_key
+    def _remoteable_model_key(self) -> str:
+        return json.dumps(
+            {"repo_id": self._model_key, "torch_dtype": str(self._model.dtype)}
+        )
+
+    @classmethod
+    def _remoteable_from_model_key(cls, model_key: str, **kwargs) -> Self:
+
+        kwargs = {**json.loads(model_key), **kwargs}
+
+        repo_id = kwargs.pop("repo_id")
+
+        return LanguageModel(repo_id, **kwargs)
