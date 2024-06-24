@@ -76,7 +76,7 @@ class NNsight:
         if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
-
+                    
         logger.info(f"Initialized `{self._model_key}`")
 
     def trace(
@@ -294,6 +294,17 @@ class NNsight:
             str: Representation.
         """
         return repr(self._envoy)
+
+    def __setattr__(self, key: Any, value: Any) -> None:
+        """Overload setattr to create and set an Envoy when trying to set a torch Module."""
+
+        if key not in ('_model', '_model_key') and isinstance(value, torch.nn.Module):
+            
+            setattr(self._envoy, key, value)
+
+        else:
+
+            super().__setattr__(key, value)
 
     def __getattr__(self, key: Any) -> Union[Envoy, InterventionProxy, Any]:
         """Wrapper of ._envoy's attributes to access module's inputs and outputs.

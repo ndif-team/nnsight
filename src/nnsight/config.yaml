@@ -1,5 +1,6 @@
 API:
-  APIKEY: GZj3dV4aWltBJAQ6qsHL
+  APIKEY: null
   HOST: ndif.dev
 APP:
   LOGGING: false
+  REMOTE_LOGGING: true

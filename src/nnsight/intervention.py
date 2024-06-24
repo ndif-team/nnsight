@@ -107,6 +107,8 @@ class InterventionProxy(Proxy):
         """
         self.node.add(target="swap", args=[self.grad.node, value], value=True)
 
+        self.__dict__["_grad"] = None
+
     def __call__(self, *args, **kwargs) -> Self:
 
         # We don't want to call backward on fake tensors
@@ -148,7 +150,7 @@ class InterventionProxy(Proxy):
     ) -> None:
 
         if key == "grad":
-            getattr(self.__class__, key).fset(self, value)
+            return getattr(self.__class__, key).fset(self, value)
 
         return super().__setattr__(key, value)
 

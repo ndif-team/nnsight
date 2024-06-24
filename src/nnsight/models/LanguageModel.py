@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
@@ -143,15 +144,24 @@ class LanguageModel(GenerationMixin, NNsight):
             setattr(model_key, 'generator', WrapperModule())
 
         super().__init__(model_key, *args, **kwargs)
-        
-    def _load(self, repo_id: str, **kwargs) -> PreTrainedModel:
 
-        config = AutoConfig.from_pretrained(repo_id, **kwargs)
+    def _load(
+        self, repo_id: str, tokenizer_kwargs: Optional[Dict[str, Any]] = None, **kwargs
+    ) -> PreTrainedModel:
+
+        config = kwargs.pop("config", None) or AutoConfig.from_pretrained(repo_id, **kwargs)
 
         if self.tokenizer is None:
-
+            if tokenizer_kwargs is None:
+                tokenizer_kwargs = {}
+            kwarg_pad = tokenizer_kwargs.pop("padding_side", None)
+            if kwarg_pad is not None and kwarg_pad != "left":
+                warnings.warn(
+                    "NNsight LanguageModel requires padding_side='left' for tokenizers, setting it to 'left'"
+                )
+                
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, config=config, padding_side="left"
+                repo_id, config=config, padding_side="left", **tokenizer_kwargs
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -162,7 +172,7 @@ class LanguageModel(GenerationMixin, NNsight):
             setattr(model, 'generator', WrapperModule())
 
             return model
-        
+
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
         setattr(model, 'generator', WrapperModule())
