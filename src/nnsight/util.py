@@ -131,3 +131,35 @@ class WrapperModule(torch.nn.Module):
             args = args[0]
 
         return args
+
+def wrap_object_as_module(obj):
+    class_name = obj.__class__.__name__
+
+    class WrappedModule(torch.nn.Module):
+        def __init__(self, wrapped_obj):
+            super().__init__()
+            self.obj = wrapped_obj
+            
+            for name in dir(self.obj):
+                if not name.startswith("_"):
+                    method = getattr(self.obj, name)
+                    if callable(method):
+                        wrapped_method = self._wrap_method(method)
+                        setattr(self, name, wrapped_method)
+
+        def _wrap_method(self, method):
+            method_module = torch.nn.Module()
+            def forward(*args, **kwargs):
+                return method(*args, **kwargs)
+            method_module.forward = forward
+            return method_module
+
+        def forward(self, method_name, *args, **kwargs):
+            method = getattr(self, method_name, None)
+            if isinstance(method, torch.nn.Module):
+                return method(*args, **kwargs)
+            if callable(method):
+                return method(*args, **kwargs)
+            raise AttributeError(f"'{class_name}' object has no attribute '{method_name}'")
+
+    return WrappedModule(obj)

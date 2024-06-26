@@ -18,7 +18,7 @@ from transformers.models.auto import modeling_auto
 from typing_extensions import Self
 
 from ..intervention import InterventionProxy
-from ..util import WrapperModule
+from ..util import WrapperModule, wrap_object_as_module
 from . import NNsight
 from .mixins import GenerationMixin, RemoteableMixin
 
@@ -139,7 +139,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         automodel: Type[AutoModel] = AutoModelForCausalLM,
         **kwargs,
     ) -> None:
-        self.tokenizer: PreTrainedTokenizer = tokenizer
+        self._tokenizer: PreTrainedTokenizer = tokenizer
         self._model: PreTrainedModel = None
         self.automodel = (
             automodel
@@ -150,6 +150,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         if isinstance(model_key, torch.nn.Module):
 
             setattr(model_key, "generator", WrapperModule())
+            setattr(model_key, "tokenizer", wrap_object_as_module(self._tokenizer))
 
         super().__init__(model_key, *args, **kwargs)
 
@@ -161,7 +162,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             repo_id, **kwargs
         )
 
-        if self.tokenizer is None:
+        if self._tokenizer is None:
             if tokenizer_kwargs is None:
                 tokenizer_kwargs = {}
             kwarg_pad = tokenizer_kwargs.pop("padding_side", None)
@@ -170,22 +171,24 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                     "NNsight LanguageModel requires padding_side='left' for tokenizers, setting it to 'left'"
                 )
 
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            self._tokenizer = AutoTokenizer.from_pretrained(
                 repo_id, config=config, padding_side="left", **tokenizer_kwargs
             )
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self._tokenizer.pad_token = self._tokenizer.eos_token
 
         if self._model is None:
 
             model = self.automodel.from_config(config, trust_remote_code=True)
 
             setattr(model, "generator", WrapperModule())
+            setattr(model, "tokenizer", wrap_object_as_module(self._tokenizer))
 
             return model
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
         setattr(model, "generator", WrapperModule())
+        setattr(model, "tokenizer", wrap_object_as_module(self._tokenizer))
 
         return model
 
@@ -215,9 +218,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         if not isinstance(inputs[0], str):
             inputs = [{"input_ids": ids} for ids in inputs]
-            return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
+            return self._tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
-        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
+        return self._tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
 
     def _prepare_inputs(
         self,
