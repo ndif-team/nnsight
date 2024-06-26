@@ -323,7 +323,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {"repo_id": self._model_key, "torch_dtype": str(self._model.dtype)}
+            {"repo_id": self._model_key}# , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod

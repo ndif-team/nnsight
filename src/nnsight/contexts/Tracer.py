@@ -170,7 +170,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
 
         self._model: "RemoteableMixin"
 
-        return self._model._remote_model_key()
+        return self._model.to_model_key()
 
     def remote_backend_postprocess_result(self, local_result: Graph):
 
