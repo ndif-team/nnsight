@@ -11,6 +11,7 @@ from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
 from .backends import AccumulatorMixin, Backend, IteratorMixin, RemoteMixin
+from .backends.EditBackend import EditBackend
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
@@ -165,6 +166,10 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
         self._graph = None
         
         return graph
+    
+    def edit_backend_execute(self) -> Graph:
+        
+        self._model._default_graph = self._graph
 
     def remote_backend_get_model_key(self):
 

@@ -50,7 +50,7 @@ class ApplyModuleProtocol(Protocol):
 
     @classmethod
     def add(
-        cls, graph: "Graph", module_path: str, *args, **kwargs
+        cls, graph: "Graph", module_path: str, *args, hook=False, **kwargs
     ) -> "InterventionProxy":
         """Creates and adds an ApplyModuleProtocol to the Graph.
         Assumes the attachment has already been added via ApplyModuleProtocol.set_module().
@@ -96,6 +96,8 @@ class ApplyModuleProtocol(Protocol):
                         **proxy_kwargs,
                     )
 
+        kwargs["hook"] = hook
+
         # Create and attach Node.
         return graph.create(
             target=cls,
@@ -125,7 +127,12 @@ class ApplyModuleProtocol(Protocol):
 
         module_path, *args = args
 
-        output = module.forward(*args, **kwargs)
+        hook = kwargs.pop("hook")
+
+        if hook:
+            output = module(*args, **kwargs)
+        else:
+            output = module.forward(*args, **kwargs)
 
         node.set_value(output)
 
