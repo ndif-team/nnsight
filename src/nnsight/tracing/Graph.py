@@ -54,9 +54,10 @@ class Graph:
         for node in self.nodes.values():
             node.reset()
 
-        # Compile nodes individually.
-        for node in self.nodes.values():
-            node.compile()
+        root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
+
+        for node in root_nodes:
+            node.execute()
 
     def create(self, *args, **kwargs) -> Proxy:
         """Creates a Node directly on this Graph and returns its Proxy.

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -47,7 +46,7 @@ class Node:
             args = list()
         if kwargs is None:
             kwargs = dict()
-            
+
         args = list(args)
 
         # Node.graph is a weak reference to avoid reference loops.
@@ -219,8 +218,8 @@ class Node:
             # So it doesn't get destroyed.
             node.remaining_listeners = 1
 
-            # Compile Node (execute if Node.Fulfilled())
-            node.compile()
+            # Execute Node
+            node.execute()
 
             # Get value.
             value = node.value
@@ -244,13 +243,6 @@ class Node:
 
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.dependencies)
-
-    def compile(self) -> None:
-        """If fulfilled and not done, execute the node."""
-
-        if self.fulfilled() and not self.done():
-
-            self.execute()
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
