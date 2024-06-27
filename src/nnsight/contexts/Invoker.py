@@ -66,7 +66,7 @@ class Invoker(AbstractContextManager):
         # Therefore we first: Check to see if there are any Proxies.
         # If there are, preserve the raw inputs with Proxies converted to a Locked Bridge protocol.
         # Set self.inputs to be the proxy_value so we can prepare_inputs, get the batch size, and scan.
-        if self.tracer._model._accumulator is not None:
+        if self.tracer._model._session is not None:
 
             def check_for_nodes(proxy: Proxy):
                 

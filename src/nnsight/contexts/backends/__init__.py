@@ -13,7 +13,7 @@ class Backend:
         raise NotImplementedError()
 
 
-from .AccumulatorBackend import AccumulatorBackend, AccumulatorMixin
+from .AccumulatorBackend import SessionBackend, SessionMixin
 from .IteratorBackend import IteratorMixin
 from .LocalBackend import LocalBackend, LocalMixin
 from .RemoteBackend import RemoteBackend, RemoteMixin

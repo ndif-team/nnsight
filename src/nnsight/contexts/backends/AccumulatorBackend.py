@@ -3,36 +3,36 @@ from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Union
 from . import Backend
 
 if TYPE_CHECKING:
-    from ..accum.Accumulator import Accumulator
+    from ..session.Session import Session
 
 
-class AccumulatorMixin:
-    """To be inherited by objects that want to be able to be executed by the AccumulatorBackend."""
+class SessionMixin:
+    """To be inherited by objects that want to be able to be executed by the SessionBackend."""
 
-    def accumulator_backend_handle(self, accumulator: "Accumulator") -> None:
-        """Should add self to the current accumulator in some capacity.
+    def session_backend_handle(self, session: "Session") -> None:
+        """Should add self to the current session in some capacity.
 
         Args:
-            accumulator (Accumulator): Current Accumulator.
+            session (Session): Current Session.
         """
 
         raise NotImplementedError()
 
 
-class AccumulatorBackend(Backend):
+class SessionBackend(Backend):
     """Backend to accumulate multiple context object to be executed collectively.
 
-    Context object must inherit from AccumulatorMixin and implement its methods.
+    Context object must inherit from SessionMixin and implement its methods.
 
     Attributes:
 
-        accumulator (Accumulator): Current Accumulator object.
+        session (Session): Current Session object.
     """
 
-    def __init__(self, accumulator: "Accumulator") -> None:
+    def __init__(self, session: "Session") -> None:
 
-        self.accumulator = accumulator
+        self.session = session
 
-    def __call__(self, obj: AccumulatorMixin):
+    def __call__(self, obj: SessionMixin):
 
-        obj.accumulator_backend_handle(self.accumulator)
+        obj.session_backend_handle(self.session)

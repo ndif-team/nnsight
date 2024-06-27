@@ -6,7 +6,7 @@ import einops
 import torch
 
 from ... import intervention, util
-from ...contexts.accum import Iterator
+from ...contexts.session import Iterator
 from ...tracing import protocols
 from ...tracing.Proxy import Proxy
 

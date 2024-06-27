@@ -10,16 +10,16 @@ from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import AccumulatorMixin, Backend, IteratorMixin, RemoteMixin
+from .backends import SessionMixin, Backend, IteratorMixin, RemoteMixin
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
     from ..models.mixins import RemoteableMixin
     from ..models.NNsightModel import NNsight
-    from .accum.Accumulator import Accumulator
+    from .session.Session import Session
 
 
-class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixin):
+class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -186,7 +186,7 @@ class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixi
         self._graph.alive = False
         self._graph = None
 
-    def accumulator_backend_handle(self, accumulator: "Accumulator") -> None:
+    def session_backend_handle(self, accumulator: "Session") -> None:
 
         accumulator.collector_stack[-1].collection.append(self)
 

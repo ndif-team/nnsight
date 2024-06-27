@@ -6,14 +6,14 @@ import weakref
 
 from typing_extensions import Self
 
-from ..backends import AccumulatorMixin, Backend, IteratorMixin, LocalMixin
+from ..backends import SessionMixin, Backend, IteratorMixin, LocalMixin
 from ..Tracer import Tracer
 
 if TYPE_CHECKING:
-    from .Accumulator import Accumulator
+    from .Session import Session
 
 
-class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorMixin):
+class Collection(AbstractContextManager, LocalMixin, SessionMixin, IteratorMixin):
     """A Collection is a collection of objects to execute.
 
     Attributes:
@@ -23,10 +23,10 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorM
         collection (List[Union[LocalMixin, IteratorMixin]]): List of all collected objects to be executed.
     """
 
-    def __init__(self, backend: Backend, accumulator: Accumulator = None) -> None:
+    def __init__(self, backend: Backend, accumulator: Session = None) -> None:
 
         self.backend = backend
-        self.accumulator: Accumulator = weakref.proxy(accumulator)
+        self.accumulator: Session = weakref.proxy(accumulator)
         self.collection: List[Union[LocalMixin, IteratorMixin]] = []
         
         # Add self to current Collection.
@@ -50,7 +50,7 @@ class Collection(AbstractContextManager, LocalMixin, AccumulatorMixin, IteratorM
 
             executable.local_backend_execute()
 
-    def accumulator_backend_handle(self, accumulator: Accumulator):
+    def session_backend_handle(self, accumulator: Session):
 
         accumulator.collector_stack.pop()
 
