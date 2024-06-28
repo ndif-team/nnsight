@@ -186,6 +186,12 @@ class NNsight:
 
         # If in a session, use SessionBackend.
         if self._session is not None:
+            tracer_graph = Graph(proxy_class=self.proxy_class)
+            if "validate" in kwargs.keys():
+                tracer_graph.validate = kwargs["validate"]
+
+            protocols.BridgeProtocol.set_bridge(tracer_graph, self._session.bridge)
+            self._session.bridge.add(tracer_graph)
 
             backend = SessionBackend(self._session)
 
@@ -205,7 +211,7 @@ class NNsight:
             backend = RemoteBackend(backend)
 
         # Create Tracer object.
-        tracer = Tracer(backend, self, **kwargs)
+        tracer = Tracer(backend, self, tracer_graph, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:

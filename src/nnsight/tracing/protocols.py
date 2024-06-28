@@ -20,6 +20,8 @@ class Protocol:
     Unlike normal `Node` target execution, these have access to the `Node` itself and therefore the `Graph`, enabling more powerful functionality than with just functions and methods.
     """
 
+    redirect: bool = True
+
     @classmethod
     def add(cls, *args, **kwargs) -> "InterventionProxy":
         """Class method to be implemented in order to add a Node of this Protocol to a Graph."""
@@ -156,6 +158,8 @@ class ApplyModuleProtocol(Protocol):
 
 class LockProtocol(Protocol):
     """Simple Protocol who's .execute() method does nothing. This means not calling .set_value() on the Node, therefore  the Node won't be destroyed."""
+
+    redirect: bool = False
 
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":

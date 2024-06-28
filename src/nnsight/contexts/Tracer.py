@@ -190,9 +190,7 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
 
         accumulator.collector_stack[-1].collection.append(self)
 
-        protocols.BridgeProtocol.set_bridge(self._graph, accumulator.bridge)
-
-        accumulator.bridge.add(self._graph)
+        accumulator.bridge.pop_graph()
         
         self._graph = weakref.proxy(self._graph)
 
