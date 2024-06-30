@@ -240,7 +240,7 @@ class Envoy:
                 envoys.append(self)
 
         for sub_envoy in self._sub_envoys:
-            sub_envoy.modules(include_fn=include_fn, envoys=envoys)
+            sub_envoy.modules(include_fn=include_fn, names=names, envoys=envoys)
 
         return envoys
 
