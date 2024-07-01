@@ -185,6 +185,7 @@ class NNsight:
         # TODO raise error/warning if trying to use one backend with another condition satisfied?
 
         # If in a session, use SessionBackend.
+        tracer_graph: Optional[Graph] = None
         if self._session is not None:
             tracer_graph = Graph(proxy_class=self.proxy_class)
             if "validate" in kwargs.keys():

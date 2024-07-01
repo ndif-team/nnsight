@@ -80,6 +80,7 @@ class Node:
     def preprocess(self) -> None:
         """Preprocess Node.args and Node.kwargs."""
 
+        bridge = None
         if self.attached() and protocols.BridgeProtocol.has_bridge(self.graph):
 
             bridge = protocols.BridgeProtocol.get_bridge(self.graph)
