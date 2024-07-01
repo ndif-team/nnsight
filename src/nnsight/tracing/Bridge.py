@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
 
 from .Graph import Graph
 
@@ -17,6 +17,8 @@ class Bridge:
 
         # Mapping fro Graph if to Graph.
         self.id_to_graph: Dict[int, Graph] = OrderedDict()
+        # Stack to keep track of most inner current graph
+        self._graph_stack: List[Graph] = list()
 
         self.locks = 0
 
@@ -33,6 +35,24 @@ class Bridge:
         """
 
         self.id_to_graph[graph.id] = graph
+        self._graph_stack.append(graph)
+
+    def peek_graph(self) -> Optional[Graph]:
+        """ Gets the current hierarchical Graph in the Bridge.
+
+        Returns:
+            Graph: Graph of current context.
+        
+        """
+
+        if len(self._graph_stack) > 0:
+            return self._graph_stack[-1]
+
+    def pop_graph(self) -> None:
+        """ Pops the last Graph in the graph stack. """
+
+        if len(self._graph_stack) > 0:
+            self._graph_stack.pop()
 
     def get_graph(self, id: int) -> Graph:
         """Returns graph from Bridge given the Graph's id.
