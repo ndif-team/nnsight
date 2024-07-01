@@ -125,6 +125,18 @@ Tutorials
             </div>
          </div>
 
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/boundless_DAS.ipynb
+      :class-card: code-surface
+      :class-body: code-surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div>
+               <h5 class="code-surface card-title">Boundless DAS</h5>
+            </div>
+         </div>
 
 
 .. toctree::

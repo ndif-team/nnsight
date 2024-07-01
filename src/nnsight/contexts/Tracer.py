@@ -82,6 +82,8 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
             self._graph.alive = False
             self._graph = None
             raise exc_val
+        if self._batched_input is None:
+            raise ValueError("No input was provided to the tracing context.")
 
         self._backend(self)
 
