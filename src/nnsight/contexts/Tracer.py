@@ -65,6 +65,8 @@ class Tracer:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
             raise exc_val
+        if self._batched_input is None:
+            raise ValueError("No input was provided to the tracing context.")
 
         output = self._model.interleave(
             self._model._execute,
