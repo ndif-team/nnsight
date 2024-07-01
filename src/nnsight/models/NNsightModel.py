@@ -351,7 +351,7 @@ class NNsight:
         return self
 
     def __repr__(self) -> str:
-        """Wrapper of ._model's representation as the NNsight model's representation.
+        """Wrapper of ._enovy's representation as the NNsight model's representation.
 
         Returns:
             str: Representation.
