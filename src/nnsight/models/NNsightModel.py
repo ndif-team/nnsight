@@ -300,6 +300,9 @@ class NNsight:
 
         if key not in ('_model', '_model_key') and isinstance(value, torch.nn.Module):
             
+            if self._envoy._tracer is None:
+                setattr(self._model, key, value)
+                
             setattr(self._envoy, key, value)
 
         else:
@@ -312,6 +315,9 @@ class NNsight:
         Returns:
             Any: Attribute.
         """
+        if self._envoy._tracer is None:
+            return getattr(self._model, key)
+        
         return getattr(self._envoy, key)
 
     ### NNsight VIRTUAL METHODS BELOW #####################################
