@@ -235,7 +235,7 @@ class Envoy:
 
         if included:
             if names:
-                envoys.append((self._module_path, self))
+                envoys.append((self._module_path.lstrip("."), self))
             else:
                 envoys.append(self)
 
