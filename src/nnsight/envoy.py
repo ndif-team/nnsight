@@ -323,9 +323,6 @@ class Envoy:
 
         if isinstance(self._module, torch.nn.ModuleList):
             return self._repr_module_list()
-        
-        if "WrappedModule" in self._module.__class__.__name__:
-            return "WrappedModule()"
 
         extra_lines = []
         extra_repr = self._module.extra_repr()

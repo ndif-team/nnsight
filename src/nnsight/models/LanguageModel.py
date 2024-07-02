@@ -150,7 +150,10 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         if isinstance(model_key, torch.nn.Module):
 
             setattr(model_key, "generator", WrapperModule())
-            setattr(model_key, "tokenizer", wrap_object_as_module(self._tokenizer))
+            setattr(model_key, "tokenizer", wrap_object_as_module(
+                self._tokenizer,
+                methods=["encode", "decode"]
+            ))
 
         super().__init__(model_key, *args, **kwargs)
 
@@ -181,14 +184,20 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             model = self.automodel.from_config(config, trust_remote_code=True)
 
             setattr(model, "generator", WrapperModule())
-            setattr(model, "tokenizer", wrap_object_as_module(self._tokenizer))
+            setattr(model, "tokenizer", wrap_object_as_module(
+                self._tokenizer,
+                methods=["encode", "decode"]
+            ))
 
             return model
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
         setattr(model, "generator", WrapperModule())
-        setattr(model, "tokenizer", wrap_object_as_module(self._tokenizer))
+        setattr(model, "tokenizer", wrap_object_as_module(
+            self._tokenizer,
+            methods=["encode", "decode"]
+        ))
 
         return model
 
