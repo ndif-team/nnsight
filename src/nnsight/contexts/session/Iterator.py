@@ -39,8 +39,6 @@ class IteratorItemProtocol(protocols.Protocol):
     @classmethod
     def set(cls, graph: Graph, value: Any, iter_idx: int) -> None:
         
-        print("ITEM:", value)
-
         graph.nodes[f"{cls.__name__}_{iter_idx}"].set_value(value)
 
 
