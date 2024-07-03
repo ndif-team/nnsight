@@ -203,3 +203,10 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
         if not release:
 
             self._graph = graph
+
+    def visual(self, **kwargs) -> None:
+        """
+        Helper method to save a visualization of the current state of the intervention graph.
+        """
+
+        self._graph.vis(**kwargs)

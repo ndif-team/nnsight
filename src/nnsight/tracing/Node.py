@@ -13,6 +13,7 @@ from .Proxy import Proxy
 
 if TYPE_CHECKING:
     from .Graph import Graph
+    from graphviz import Digraph
 
 
 class Node:
@@ -366,6 +367,57 @@ class Node:
         logger.info(f"=> DEL({self.name})")
 
         self._value = inspect._empty
+
+    def visualize(
+            self, 
+            graph_viz: "Digraph", 
+            arg_value_count: int, 
+            is_arg: bool
+            ) -> Tuple[str, int]:
+        """ Visualizes this node by adding it to Digraph visual object. Can handle adding dependency arguments as well as edges between them.
+
+        Args:
+            graph_viz (Digraph): Visualization graph object.
+            arg_value_count (int): Total count of non-Node arguments in the Digraph so far.
+            is_arg (bool): If True, node will add itself to the graph without looping over its dependencies. 
+                           Nodes are responsible for visualizing their arguments only when they are called to visualize directly from the main loop in Graph.viz()
+        
+        Returns:
+            str: Node name.
+            int: Count of value argument added to the Digraph so far.
+        """
+        
+        # Visualization of protocol nodes is delegated to their respective classes
+        if isinstance(self.target, type) and issubclass(self.target, protocols.Protocol):
+            arg_value_count = self.target.visualize(self, 
+                                                    graph_viz, 
+                                                    arg_value_count=arg_value_count, 
+                                                    is_arg=is_arg)
+        else:
+            # Adding current node
+            graph_viz.node(self.name, 
+                           label=self.target.__name__, 
+                           **{"color": "black", "shape": "ellipse"})
+
+            if not is_arg:
+                base_arg_style = {"color": "gray", "shape": "box"}
+                for i, arg in enumerate(self.args):
+                    name, arg_value_count = util.add_arg_to_viz(graph_viz, 
+                                                                arg, 
+                                                                arg_value_count, 
+                                                                base_arg_style)
+                    
+                    graph_viz.edge(name, self.name)
+
+                for key, arg in self.kwargs.items():
+                    name, arg_value_count = util.add_arg_to_viz(graph_viz, 
+                                                                arg, 
+                                                                arg_value_count, 
+                                                                base_arg_style, 
+                                                                key)
+                    graph_viz.edge(name, self.name)
+        
+        return self.name, arg_value_count
 
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)

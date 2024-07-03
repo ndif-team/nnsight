@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 from contextlib import AbstractContextManager
 from typing import Any, Callable, Collection, Dict, List, Tuple, Union
+from collections import defaultdict
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -210,6 +211,9 @@ class InterventionProtocol(Protocol):
     """
 
     attachment_name = "nnsight_module_nodes"
+    styles: Dict[str, any] = {"node": {"color": "green4", "shape": "ellipse"},
+                              "arg": defaultdict(lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}),
+                              "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(

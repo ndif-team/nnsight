@@ -3,9 +3,12 @@
 import importlib
 import types
 from functools import wraps
-from typing import Any, Callable, Collection, Type
+from typing import Any, Callable, Collection, Type, Dict, Tuple, Optional, Union
 
 import torch
+from graphviz import Digraph
+
+from .tracing.Node import Node
 
 # TODO Have an Exception you can raise to stop apply early
 
@@ -119,6 +122,48 @@ def from_import_path(import_path: str) -> type:
     import_path = ".".join(import_path)
 
     return getattr(importlib.import_module(import_path), classname)
+
+def add_arg_to_viz(
+        graph_viz: "Digraph", 
+        value: Union[Node, any], 
+        value_count: int, 
+        style: Dict[str, any], 
+        kname: Optional[str]=None
+    ) -> Tuple[str, int]:
+    """ Adds the argument of a Node (dependencies) to the graph visualization. 
+        Handles adding arguments that are nodes themselves by calling Node.visualize() with the flag is_arg set to true.
+
+    Args:
+        graph_viz (Digraph): Visualization graph object.
+        value (Union[Node, any]): Node argument could be a Node itself or some other value. 
+        value_count (int): Total number of non-Node type of arguments so far.
+        style (Dict[str, any]): Style properties for the node display of this argument.
+        kname Optional[str]: Label key word.
+
+    Returns:
+        str: Name of argument node added to the Digraph.
+        int: Total count of value arguments added to the Digraph so far.
+    """
+
+    if isinstance(value, Node):
+        name, value_count = value.visualize(graph_viz, value_count, is_arg=True)
+    else:
+        name = str(value_count)
+        if isinstance(value, torch.Tensor):
+            label = "Tensor"
+        elif isinstance(value, str):
+            label = f'"{value}"'
+        else:
+            label = str(value)
+
+        if kname is not None:
+            label = f"{kname}={label}"
+
+        graph_viz.node(name, label=label, **style)
+
+        value_count += 1
+
+    return name, value_count
 
 
 class WrapperModule(torch.nn.Module):

@@ -1,6 +1,7 @@
 import inspect
 import weakref
 from typing import TYPE_CHECKING, Any, Dict, List
+from collections import defaultdict
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
     from .Bridge import Bridge
     from .Graph import Graph
     from .Node import Node
+    from graphviz import Digraph
 
 
 class Protocol:
@@ -39,6 +41,52 @@ class Protocol:
     def compile(cls, node: "Node") -> None:
         pass
 
+    @classmethod
+    def visualize(
+        cls, 
+        node: "Node", 
+        graph_viz: "Digraph", 
+        arg_value_count: int, 
+        is_arg: bool
+    ) -> int:
+        """ Visualizes this node protocol by adding it to Digraph visual object. 
+            Can handle adding dependency arguments as well as edges between them.
+            Styles visual nodes and edges according to rules defined within each Protocol class per argument in 'styles'.
+            Currently supported rules include:
+                - Add key label to argument name display.
+                - Style edge with argument.
+
+        Args:
+            node (Node): Protocol Node.
+            graph_viz (Digraph): Visualization graph object.
+            arg_value_count (int): Total count of non-Node arguments in the Digraph so far.
+            is_arg (bool): If True, node will add itself to the graph without looping over its dependencies. 
+                           Nodes are responsible for visualizing their arguments only when they are called to visualize directly from the main loop in Graph.viz()
+
+        Returns:
+            int: Total count of non-Node arguments in the Digraph so far.
+        """
+
+        graph_viz.node(node.name, label=cls.__name__, **cls.styles["node"])
+
+        if not is_arg:
+            for i, arg in enumerate(node.args):
+                name, arg_value_count = util.add_arg_to_viz(graph_viz, 
+                                                            arg, 
+                                                            arg_value_count, 
+                                                            {"color": "gray", "shape": "box"}, 
+                                                            cls.styles["arg"][i])
+                graph_viz.edge(name, node.name, style=cls.styles["edge"][i])
+
+            for key, arg in node.kwargs.items():
+                name, arg_value_count = util.add_arg_to_viz(graph_viz, 
+                                                            arg, 
+                                                            arg_value_count, 
+                                                            {"color": "gray", "shape": "box"}, 
+                                                            key)
+                graph_viz.edge(name, node.name, style=cls.styles["edge"][key])
+
+        return arg_value_count
 
 class ApplyModuleProtocol(Protocol):
     """Protocol that references some root model, and calls its .forward() method given some input.
@@ -47,6 +95,9 @@ class ApplyModuleProtocol(Protocol):
     """
 
     attachment_name = "nnsight_root_module"
+    styles: Dict[str, any] = {"node": {"color": "blue", "shape": "ellipse"},
+                              "arg": defaultdict(lambda: None),
+                              "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(
@@ -157,6 +208,10 @@ class ApplyModuleProtocol(Protocol):
 class LockProtocol(Protocol):
     """Simple Protocol who's .execute() method does nothing. This means not calling .set_value() on the Node, therefore  the Node won't be destroyed."""
 
+    styles: Dict[str, any] = {"node": {"color": "red", "shape": "ellipse"},
+                          "arg": defaultdict(lambda: None),
+                          "edge": defaultdict(lambda: "solid")}
+
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
 
@@ -186,6 +241,9 @@ class GradProtocol(Protocol):
     """
 
     attachment_name = "nnsight_backward_idx"
+    styles: Dict[str, any] = {"node": {"color": "green4", "shape": "ellipse"},
+                          "arg": defaultdict(lambda: None),
+                          "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
@@ -263,6 +321,9 @@ class SwapProtocol(Protocol):
     """Protocol which adds an attachment to the Graph which can store some value. Used to replace ('swap') a value with another value."""
 
     attachment_name = "nnsight_swap"
+    styles: Dict[str, any] = {"node": {"color": "brown", "shape": "ellipse"},
+                          "arg": defaultdict(lambda: None),
+                          "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(cls, node: "Node", value: Any) -> "InterventionProxy":
@@ -336,6 +397,9 @@ class BridgeProtocol(Protocol):
     """
 
     attachment_name = "nnsight_bridge"
+    styles: Dict[str, any] = {"node": {"color": "brown", "shape": "diamond"},
+                   "arg": defaultdict(lambda: None, {0: "id"}),
+                   "edge": defaultdict(lambda: "solid", {0: "dashed"})}
 
     @classmethod
     def add(cls, from_node: "Node", to_graph: "Graph") -> "InterventionProxy":
@@ -424,6 +488,10 @@ class EarlyStopException(Exception):
 
 class EarlyStopProtocol(Protocol):
     """Protocol to stop the execution of a model early."""
+
+    styles: Dict[str, any] = {"node": {"color": "red", "shape": "diamond"},
+                          "arg": defaultdict(lambda: None),
+                          "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(cls, node: "Node"):

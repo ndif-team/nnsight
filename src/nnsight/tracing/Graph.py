@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, List, Type, Union
+from typing import Dict, Type, Optional
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+import graphviz
 
 from .Node import Node
 from .Proxy import Proxy
@@ -111,89 +112,25 @@ class Graph:
         # Add Node.
         self.nodes[node.name] = node
 
-    def vis(self, filename: str = "graph", format: str = "png"):
-        import graphviz
+    def vis(self, title: str = "graph", path: Optional[str] = None, format: str = "png"):
+        """ Generates and saves a graphical visualization of the Intervention Graph using the graphviz library. 
+        Args:
+            title (str): Name of the Intervention Graph. Defaults to "graph".
+            path (Optional[str]): Directory path to save the graphic in. If None saves content to the current directory.
+            format (str): Image format of the graphic. Defaults to "png".
+        """
 
-        def style(value: Any) -> Dict[str, Any]:
-            style = {}
-
-            if isinstance(value, Node):
-                if value.target == "null":
-                    style["color"] = "red"
-
-                elif value.target == "argument":
-                    style["color"] = "green"
-
-                elif value.target == "module":
-                    style["color"] = "green4"
-
-                else:
-                    style["color"] = "black"
-            else:
-                style["color"] = "grey"
-                style["shape"] = "box"
-
-            return style
-
-        arg_name_idx = 0
-
-        def add_node(value: Any, graph: graphviz.Digraph, kname: str = None) -> str:
-            nonlocal arg_name_idx
-
-            if isinstance(value, Node):
-                name = value.name
-                label = (
-                    value.target
-                    if isinstance(value.target, str)
-                    else value.target.__name__
-                )
-            else:
-                if isinstance(value, torch.Tensor):
-                    name = str(arg_name_idx)
-                    label = "Tensor"
-                elif isinstance(value, str):
-                    name = str(arg_name_idx)
-                    label = f'"{value}"'
-                else:
-                    name = str(arg_name_idx)
-                    label = str(value)
-
-                arg_name_idx += 1
-
-            if kname is not None:
-                label = f"{kname}={label}"
-
-            if f"\t{name}" not in graph.body:
-                graph.node(name, label=label, **style(value))
-
-            return name
+        arg_value_count = 0
 
         graph = graphviz.Digraph("round-table", comment="The Round Table")
 
+        # Adding title
+        graph.attr(label=title, fontsize='20', labelloc='t', labeljust='c')
+
         for node in self.nodes.values():
-            add_node(node, graph)
+            arg_value_count = node.visualize(graph, arg_value_count, is_arg=False)[1]        
 
-            for i, arg in enumerate(node.args):
-                kname = None
-
-                if node.target == "argument":
-                    if i == 0:
-                        kname = "key"
-                    elif i == 1:
-                        kname = "batch_size"
-                    elif i == 2:
-                        kname = "batch_start"
-
-                name = add_node(arg, graph, kname=kname)
-
-                graph.edge(name, node.name)
-
-            for kname, arg in node.kwargs.items():
-                name = add_node(arg, graph, kname=kname)
-
-                graph.edge(name, node.name)
-
-        graph.render(filename=filename, format=format)
+        graph.render(filename=title, directory=path, format=format)
 
     def __str__(self) -> str:
         result = ""

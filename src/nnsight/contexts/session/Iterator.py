@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, Dict, Tuple
+from collections import defaultdict
 
 from ... import util
 from ...tracing import protocols
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
 class IteratorItemProtocol(protocols.Protocol):
 
     attachment_name = "nnsight_iter_idx"
+    styles: Dict[str, any] = {"node": {"color": "blue", "shape": "ellipse"},
+                              "arg": defaultdict(lambda: None),
+                              "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(cls, graph: Graph, value: Any) -> "Proxy":
