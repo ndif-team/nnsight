@@ -23,7 +23,6 @@ from ..intervention import (
 from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
-from ..editing import Edit, apply_edits
 
 
 class NNsight():
