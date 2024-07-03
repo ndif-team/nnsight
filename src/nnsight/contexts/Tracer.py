@@ -11,7 +11,7 @@ from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
 from .backends import AccumulatorMixin, Backend, IteratorMixin, RemoteMixin
-from .backends.EditBackend import EditBackend
+from .backends.EditBackend import EditBackend, EditMixin
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .accum.Accumulator import Accumulator
 
 
-class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixin):
+class Tracer(AbstractContextManager, RemoteMixin, AccumulatorMixin, IteratorMixin, EditMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:

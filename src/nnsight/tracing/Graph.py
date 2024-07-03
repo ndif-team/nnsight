@@ -122,10 +122,6 @@ class Graph:
             if old_node.name in graph.nodes:
                 return graph.nodes[old_node.name]
 
-            # Skip saving node to new graph if it's a .save()
-            if old_node.target is LockProtocol:
-                return
-
             node = graph.create(
                 target=old_node.target,
                 name=old_node.name,

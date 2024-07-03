@@ -11,7 +11,7 @@ from typing_extensions import Self
 
 from .. import util
 from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend, EditBackend, EditMixin
+from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend, EditBackend
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (
@@ -26,7 +26,7 @@ from ..tracing.Graph import Graph
 from ..editing import Edit, apply_edits
 
 
-class NNsight(EditMixin):
+class NNsight():
     """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
 
     Class Attributes:
@@ -244,7 +244,6 @@ class NNsight(EditMixin):
     def alter(
         self,
         *inputs: Any,
-        edits: List[Edit] = [],
         **kwargs: Dict[str, Any],
     ):
         """Create a trace context with an edit backend and apply a list of edits.
@@ -252,12 +251,6 @@ class NNsight(EditMixin):
         The edit backend sets a default graph on the NNsight model which is 
         run on future trace calls.
         """
-
-        # Dispatch before editing else edits are cleared
-        if not self._dispatched:
-            self.dispatch_model()
-        
-        apply_edits(edits)
 
         return self.trace(
             *inputs, 
