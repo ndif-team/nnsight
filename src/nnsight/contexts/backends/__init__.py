@@ -13,7 +13,6 @@ class Backend:
         raise NotImplementedError()
 
 
-from .SessionBackend import SessionBackend, SessionMixin
-from .IteratorBackend import IteratorMixin
+from .BridgeBackend import BridgeBackend, BridgeMixin
 from .LocalBackend import LocalBackend, LocalMixin
 from .RemoteBackend import RemoteBackend, RemoteMixin

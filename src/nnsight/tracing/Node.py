@@ -68,7 +68,7 @@ class Node:
         self.preprocess()
 
         # Node.graph is a weak reference to avoid reference loops.
-        graph = weakref.proxy(graph) if graph is not None else None
+        self.graph = weakref.proxy(self.graph) if self.graph is not None else None
 
         self.name: str = name
 
@@ -97,7 +97,7 @@ class Node:
 
                 node = node.node
 
-            if self.graph is not node.graph:
+            if self.graph.id != node.graph.id:
 
                 if (
                     self.attached()

@@ -1,40 +1,41 @@
 from __future__ import annotations
 
+import weakref
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, List, Tuple, Union
-import weakref
 
 from typing_extensions import Self
 
-from ..backends import SessionMixin, Backend, IteratorMixin, LocalMixin
-from ..Tracer import Tracer
+from ...tracing import protocols
+from ...tracing.Bridge import Bridge
+from ...tracing.Graph import Graph
+from ..backends import Backend, BridgeMixin, LocalMixin
 
-if TYPE_CHECKING:
-    from .Session import Session
 
-
-class Collection(AbstractContextManager, LocalMixin, SessionMixin, IteratorMixin):
+class Collection(AbstractContextManager, LocalMixin, BridgeMixin):
     """A Collection is a collection of objects to execute.
 
     Attributes:
-    
+
+        graph (Graph): __desc__
         backend (Backend): Backend to execute this Collection on __exit__.
-        accumulator (Accumulator): Current Accumulator object.
-        collection (List[Union[LocalMixin, IteratorMixin]]): List of all collected objects to be executed.
     """
 
-    def __init__(self, backend: Backend, accumulator: Session = None) -> None:
+    def __init__(
+        self,
+        backend: Backend,
+        bridge: Bridge,
+        graph: Graph = None,
+        validate: bool = False,
+    ) -> None:
+
+        self.graph = Graph(validate=validate) if graph is None else graph
+
+        if bridge is not None:
+
+            bridge.add(self.graph)
 
         self.backend = backend
-        self.accumulator: Session = weakref.proxy(accumulator)
-        self.collection: List[Union[LocalMixin, IteratorMixin]] = []
-        
-        # Add self to current Collection.
-        if len(self.accumulator.collector_stack) > 0:
-            self.accumulator.collector_stack[-1].collection.append(self)
-
-        # Add self to stack of Collections.
-        self.accumulator.collector_stack.append(self)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
@@ -46,16 +47,20 @@ class Collection(AbstractContextManager, LocalMixin, SessionMixin, IteratorMixin
 
     def local_backend_execute(self) -> None:
 
-        for executable in self.collection:
+        self.graph.compile()
 
-            executable.local_backend_execute()
+        graph = self.graph
+        graph.alive = False
 
-    def session_backend_handle(self, accumulator: Session):
+        if not isinstance(graph, weakref.ProxyType):
+            self.graph = weakref.proxy(graph)
 
-        accumulator.collector_stack.pop()
+        return graph
 
-    def iterator_backend_execute(self, release: bool = False):
+    def bridge_backend_handle(self, bridge: Bridge) -> None:
 
-        for executable in self.collection:
+        bridge.pop_graph()
 
-            executable.iterator_backend_execute(release=release)
+        protocols.LocalBackendExecuteProtocol.add(self, bridge.peek_graph())
+
+        self.graph = weakref.proxy(self.graph)

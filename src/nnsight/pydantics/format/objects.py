@@ -57,7 +57,7 @@ class TracerModel(BaseModel):
 
         if accumulator is not None:
 
-            tracer.session_backend_handle(accumulator)
+            tracer.bridge_backend_handle(accumulator)
 
         return tracer
 
@@ -77,7 +77,7 @@ class CollectionModel(BaseModel):
             value.compile(model, accumulator) for value in self.collection
         ]
 
-        collection.session_backend_handle(accumulator)
+        collection.bridge_backend_handle(accumulator)
 
         return collection
 
@@ -99,7 +99,7 @@ class IteratorModel(CollectionModel):
             value.compile(model, accumulator) for value in self.collection
         ]
 
-        iterator.session_backend_handle(accumulator)
+        iterator.bridge_backend_handle(accumulator)
 
         return iterator
 
@@ -121,7 +121,7 @@ class AccumulatorModel(CollectionModel):
             value.compile(model, accumulator) for value in self.collection
         ]
 
-        accumulator.session_backend_handle(accumulator)
+        accumulator.bridge_backend_handle(accumulator)
 
         return accumulator
 

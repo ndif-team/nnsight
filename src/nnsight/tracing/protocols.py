@@ -6,9 +6,12 @@ import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
+from nnsight.tracing.Node import Node
+
 from .. import util
 
 if TYPE_CHECKING:
+    from ..contexts.backends.LocalBackend import LocalMixin
     from ..intervention import InterventionProxy
     from .Bridge import Bridge
     from .Graph import Graph
@@ -443,3 +446,20 @@ class EarlyStopProtocol(Protocol):
         node.set_value(True)
 
         raise EarlyStopException()
+
+
+class LocalBackendExecuteProtocol(Protocol):
+
+    @classmethod
+    def add(cls, object: "LocalMixin", graph: "Graph"):
+
+        return graph.create(target=cls, proxy_value=None, args=[object])
+
+    @classmethod
+    def execute(cls, node: Node):
+
+        object: "LocalMixin" = node.args[0]
+
+        object.local_backend_execute()
+
+        node.set_value(None)
