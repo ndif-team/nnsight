@@ -16,30 +16,22 @@ if TYPE_CHECKING:
 
 class IteratorItemProtocol(protocols.Protocol):
 
-    attachment_name = "nnsight_iter_idx"
-
     @classmethod
     def add(cls, graph: Graph, value: Any) -> "Proxy":
 
-        return graph.create(target=cls, proxy_value=value)
+        return graph.create(target=cls, proxy_value=value, args=[None])
 
     @classmethod
-    def idx(cls, graph: Graph) -> int:
+    def set(cls, graph: Graph, value: Any) -> None:
 
-        if not cls.attachment_name in graph.attachments:
-
-            graph.attachments[cls.attachment_name] = 0
-
-        else:
-
-            graph.attachments[cls.attachment_name] += 1
-
-        return graph.attachments[cls.attachment_name]
+        graph.nodes[f"{cls.__name__}_0"].args[0] = value
 
     @classmethod
-    def set(cls, graph: Graph, value: Any, iter_idx: int) -> None:
-        
-        graph.nodes[f"{cls.__name__}_{iter_idx}"].set_value(value)
+    def execute(cls, node: protocols.Node):
+
+        value = node.prepare_inputs(node.args[0])
+
+        node.set_value(value)
 
 
 class StatDefaultProtocol(protocols.Protocol):
@@ -117,7 +109,6 @@ class Iterator(Collection):
         super().__init__(*args, **kwargs)
 
         self.data = data
-        self.iter_idx = IteratorItemProtocol.idx(self.graph)
 
     def __enter__(self) -> Tuple[int, Iterator]:
 
@@ -149,6 +140,6 @@ class Iterator(Collection):
 
                 bridge.locks -= 1
 
-            IteratorItemProtocol.set(self.graph, item, self.iter_idx)
+            IteratorItemProtocol.set(self.graph, item)
 
             super().local_backend_execute()

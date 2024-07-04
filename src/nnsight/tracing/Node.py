@@ -85,9 +85,12 @@ class Node:
             bridge = protocols.BridgeProtocol.get_bridge(self.graph)
 
             # Protocol nodes don't redirect execution to the current context's graph by default
-            redirect_execution = (self.target.redirect 
-                                    if isinstance(self.target, type) and issubclass(self.target, protocols.Protocol)  
-                                    else True)
+            redirect_execution = (
+                self.target.redirect
+                if isinstance(self.target, type)
+                and issubclass(self.target, protocols.Protocol)
+                else True
+            )
             if redirect_execution:
                 self.graph = bridge.peek_graph()
 
@@ -97,19 +100,9 @@ class Node:
 
                 node = node.node
 
-            if self.graph.id != node.graph.id:
+            if self.attached() and self.graph.id != node.graph.id:
 
-                if (
-                    self.attached()
-                    and node.attached()
-                    and protocols.BridgeProtocol.has_bridge(node.graph)
-                ):
-
-                    node = protocols.BridgeProtocol.add(node, self.graph).node
-
-                else:
-                    # TODO error?
-                    pass
+                node = protocols.BridgeProtocol.add(node, self.graph).node
 
             if not node.done():
 
