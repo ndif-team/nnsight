@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+import weakref
 
 from ...tracing import protocols
 from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
-from ..backends import SessionBackend, Backend
+from ..backends import BridgeBackend, Backend
 from .Collection import Collection
 from .Iterator import Iterator
 
@@ -38,11 +39,8 @@ class Session(Collection):
 
         self.bridge.add(self.graph)
 
-        self.collector_stack: List[Collection] = list()
 
         self.model = model
-
-        Collection.__init__(self, SessionBackend(self), self)
 
         self.backend = backend
 
@@ -60,10 +58,12 @@ class Session(Collection):
         self.backend(self)
 
     def iter(self, iterable) -> Iterator:
+        
+        bridge = weakref.proxy(self.bridge)
 
-        backend = SessionBackend(self)
+        backend = BridgeBackend(bridge)
 
-        return Iterator(iterable, backend, self)
+        return Iterator(iterable, backend, bridge)
 
     ### BACKENDS ########
     
@@ -72,16 +72,16 @@ class Session(Collection):
         super().local_backend_execute()
         
         local_result = self.bridge.id_to_graph
-        
-        self.bridge = None
+                
+        self.bridge = weakref.proxy(self.bridge)
         
         return local_result
 
-    def remote_backend_get_model_key(self):
+    def remote_backend_get_model_key(self) -> str:
 
         self.model: "RemoteableMixin"
 
-        return self.model._remote_model_key()
+        return self.model.to_model_key()
 
     def remote_backend_postprocess_result(self, local_result: Dict[int, Graph]):
 
@@ -103,4 +103,4 @@ class Session(Collection):
                 
             graph.alive = False
             
-        self.bridge = None
+        self.bridge = weakref.proxy(self.bridge)
