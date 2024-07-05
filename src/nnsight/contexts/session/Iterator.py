@@ -14,26 +14,6 @@ if TYPE_CHECKING:
     from ...tracing.Proxy import Proxy
 
 
-class IteratorItemProtocol(protocols.Protocol):
-
-    @classmethod
-    def add(cls, graph: Graph, value: Any) -> "Proxy":
-
-        return graph.create(target=cls, proxy_value=value, args=[None])
-
-    @classmethod
-    def set(cls, graph: Graph, value: Any) -> None:
-
-        graph.nodes[f"{cls.__name__}_0"].args[0] = value
-
-    @classmethod
-    def execute(cls, node: protocols.Node):
-
-        value = node.prepare_inputs(node.args[0])
-
-        node.set_value(value)
-
-
 class StatDefaultProtocol(protocols.Protocol):
 
     @classmethod
@@ -114,7 +94,7 @@ class Iterator(Collection):
 
         super().__enter__()
 
-        iter_item_proxy = IteratorItemProtocol.add(self.graph, next(iter(self.data)))
+        iter_item_proxy = protocols.ValueProtocol.add(self.graph, next(iter(self.data)))
 
         return iter_item_proxy, self
 
@@ -140,6 +120,8 @@ class Iterator(Collection):
 
                 bridge.locks -= 1
 
-            IteratorItemProtocol.set(self.graph, item)
+            protocols.ValueProtocol.set(
+                self.graph.nodes[f"{protocols.ValueProtocol.__name__}_0"], item
+            )
 
             super().local_backend_execute()

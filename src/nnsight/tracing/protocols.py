@@ -433,7 +433,7 @@ class EarlyStopProtocol(Protocol):
     """Protocol to stop the execution of a model early."""
 
     @classmethod
-    def add(cls, node: "Node"):
+    def add(cls, node: "Node") -> "InterventionProxy":
         return node.create(
             target=cls,
             proxy_value=None,
@@ -451,15 +451,35 @@ class EarlyStopProtocol(Protocol):
 class LocalBackendExecuteProtocol(Protocol):
 
     @classmethod
-    def add(cls, object: "LocalMixin", graph: "Graph"):
+    def add(cls, object: "LocalMixin", graph: "Graph") -> "InterventionProxy":
 
         return graph.create(target=cls, proxy_value=None, args=[object])
 
     @classmethod
-    def execute(cls, node: Node):
+    def execute(cls, node: Node) -> None:
 
         object: "LocalMixin" = node.args[0]
 
         object.local_backend_execute()
 
         node.set_value(None)
+
+
+class ValueProtocol(Protocol):
+
+    @classmethod
+    def add(cls, graph: "Graph", default: Any = None) -> "InterventionProxy":
+
+        return graph.create(target=cls, proxy_value=default, args=[default])
+
+    @classmethod
+    def execute(cls, node: Node) -> None:
+
+        value = Node.prepare_inputs(node.args[0])
+
+        node.set_value(value)
+
+    @classmethod
+    def set(cls, node: Node, value: Any) -> None:
+
+        node.args[0] = value

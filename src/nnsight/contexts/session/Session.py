@@ -77,7 +77,7 @@ class Session(Collection):
         
         return local_result
 
-    def remote_backend_get_model_key(self):
+    def remote_backend_get_model_key(self) -> str:
 
         self.model: "RemoteableMixin"
 
