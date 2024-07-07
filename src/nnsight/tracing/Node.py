@@ -280,23 +280,29 @@ class Node:
         Lets protocol execute if target is str.
         Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
+        
+        try:
 
-        if isinstance(self.target, type) and issubclass(
-            self.target, protocols.Protocol
-        ):
+            if isinstance(self.target, type) and issubclass(
+                self.target, protocols.Protocol
+            ):
 
-            self.target.execute(self)
+                self.target.execute(self)
 
-        else:
+            else:
 
-            # Prepare arguments.
-            args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
+                # Prepare arguments.
+                args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
 
-            # Call the target to get value.
-            output = self.target(*args, **kwargs)
+                # Call the target to get value.
+                output = self.target(*args, **kwargs)
 
-            # Set value.
-            self.set_value(output)
+                # Set value.
+                self.set_value(output)
+                
+        except Exception as e:
+            
+            raise Exception(f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'") from e
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
