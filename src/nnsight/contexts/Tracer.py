@@ -185,7 +185,7 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin):
 
     def remote_backend_postprocess_result(self, local_result: Graph):
 
-        from ..pydantics.Response import ResultModel
+        from ..schema.Response import ResultModel
 
         return ResultModel.from_graph(local_result)
 

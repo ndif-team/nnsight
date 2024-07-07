@@ -75,7 +75,7 @@ class Session(Collection, RemoteMixin):
 
     def remote_backend_postprocess_result(self, local_result: Dict[int, Graph]):
 
-        from ...pydantics.Response import ResultModel
+        from ...schema.Response import ResultModel
 
         return {id: ResultModel.from_graph(graph) for id, graph in local_result.items()}
 

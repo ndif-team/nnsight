@@ -14,12 +14,12 @@ from .LocalBackend import LocalBackend, LocalMixin
 
 if TYPE_CHECKING:
 
-    from ...pydantics.Request import RequestModel
+    from ...schema.Request import RequestModel
 
 
 def handle_response(handle_result: Callable, url: str, event: str, data: Any) -> bool:
 
-    from ...pydantics.Response import ResponseModel, ResultModel
+    from ...schema.Response import ResponseModel, ResultModel
 
     # Load the data into the ResponseModel pydantic class.
     response = ResponseModel(**data)
@@ -76,7 +76,7 @@ def handle_response(handle_result: Callable, url: str, event: str, data: Any) ->
 
 def blocking_request(url: str, request: "RequestModel", handle_result: Callable):
 
-    from ...pydantics.Response import ResponseModel
+    from ...schema.Response import ResponseModel
 
     # Create a socketio connection to the server.
     with socketio.SimpleClient(logger=logger, reconnection_attempts=10) as sio:
@@ -168,7 +168,7 @@ class RemoteBackend(LocalBackend):
         # Get model key.
         model_key = obj.remote_backend_get_model_key()
 
-        from ...pydantics.Request import RequestModel
+        from ...schema.Request import RequestModel
 
         # Create request using pydantic to parse the object itself.
         request = RequestModel(object=obj, model_key=model_key)

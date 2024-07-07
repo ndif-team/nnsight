@@ -3,7 +3,7 @@ import torch
 
 import nnsight
 from nnsight.contexts.Tracer import Tracer
-from nnsight.pydantics.Request import RequestModel
+from nnsight.schema.Request import RequestModel
 from nnsight.tracing.Graph import Graph
 
 
