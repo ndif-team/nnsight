@@ -519,6 +519,10 @@ class EarlyStopProtocol(Protocol):
 
 class LocalBackendExecuteProtocol(Protocol):
 
+    styles: Dict[str, any] = {"node": {"color": "green4", "shape": "diamond"},
+                          "arg": defaultdict(lambda: None),
+                          "edge": defaultdict(lambda: "solid")}
+
     @classmethod
     def add(cls, object: "LocalMixin", graph: "Graph") -> "InterventionProxy":
 
@@ -535,6 +539,10 @@ class LocalBackendExecuteProtocol(Protocol):
 
 
 class ValueProtocol(Protocol):
+
+    styles: Dict[str, any] = {"node": {"color": "blue", "shape": "ellipse"},
+                          "arg": defaultdict(lambda: None),
+                          "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(cls, graph: "Graph", default: Any = None) -> "InterventionProxy":
