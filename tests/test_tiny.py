@@ -53,3 +53,28 @@ def test_grad_setting(tiny_model: NNsight, tiny_input: torch.Tensor):
         loss.backward()
 
     assert torch.equal(l1_grad.value * 2, l1_grad_double.value)
+
+
+def test_external_proxy_intervention_executed_locally(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.session() as sesh:
+        with tiny_model.trace(tiny_input) as tracer_1:
+            l1_out = tiny_model.layer1.output.save()
+
+        with tiny_model.trace(tiny_input) as tracer_2:
+            l1_out[:, 2] = 5
+
+        assert list(tracer_2._graph.nodes.keys()) == ['BridgeProtocol_0', 'setitem_0']
+    
+    assert l1_out[:, 2] == 5
+
+def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input):
+        l1_out = tiny_model.layer1.output.save()
+        l2_out = tiny_model.layer2.output.save()
+        tiny_model.layer1.output.stop()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+
+    with pytest.raises(ValueError):
+        l2_out.value
+    
