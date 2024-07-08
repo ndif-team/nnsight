@@ -11,7 +11,7 @@ from typing_extensions import Self
 
 from .. import util
 from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend
+from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend, EditBackend
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (

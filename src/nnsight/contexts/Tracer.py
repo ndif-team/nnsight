@@ -10,8 +10,7 @@ from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import AccumulatorMixin, Backend, IteratorMixin, RemoteMixin
-from .backends.EditBackend import EditBackend, EditMixin
+from .backends import AccumulatorMixin, Backend, IteratorMixin, RemoteMixin, EditMixin
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
