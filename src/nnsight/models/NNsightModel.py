@@ -11,7 +11,7 @@ from typing_extensions import Self
 
 from .. import util
 from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend, EditBackend
+from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (
@@ -25,7 +25,7 @@ from ..tracing import protocols
 from ..tracing.Graph import Graph
 
 
-class NNsight():
+class NNsight:
     """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
 
     Class Attributes:
