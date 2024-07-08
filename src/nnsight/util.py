@@ -3,12 +3,13 @@
 import importlib
 import types
 from functools import wraps
-from typing import Any, Callable, Collection, Type, Dict, Tuple, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Collection, Type, Dict, Tuple, Optional, Union
 
 import torch
 from graphviz import Digraph
 
-from .tracing.Node import Node
+if TYPE_CHECKING:
+    from .tracing.Node import Node
 
 # TODO Have an Exception you can raise to stop apply early
 
@@ -125,7 +126,8 @@ def from_import_path(import_path: str) -> type:
 
 def add_arg_to_viz(
         graph_viz: "Digraph", 
-        value: Union[Node, any], 
+        value: Union["Node", any], 
+        cls: Type,
         value_count: int, 
         style: Dict[str, any], 
         kname: Optional[str]=None
@@ -135,7 +137,8 @@ def add_arg_to_viz(
 
     Args:
         graph_viz (Digraph): Visualization graph object.
-        value (Union[Node, any]): Node argument could be a Node itself or some other value. 
+        value (Union[Node, any]): Node argument could be a Node itself or some other value.
+        cls (Type): Node class type. 
         value_count (int): Total number of non-Node type of arguments so far.
         style (Dict[str, any]): Style properties for the node display of this argument.
         kname Optional[str]: Label key word.
@@ -145,7 +148,7 @@ def add_arg_to_viz(
         int: Total count of value arguments added to the Digraph so far.
     """
 
-    if isinstance(value, Node):
+    if isinstance(value, cls):
         name, value_count = value.visualize(graph_viz, value_count, is_arg=True)
     else:
         name = str(value_count)

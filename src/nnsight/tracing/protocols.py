@@ -77,7 +77,8 @@ class Protocol:
         if not is_arg:
             for i, arg in enumerate(node.args):
                 name, arg_value_count = util.add_arg_to_viz(graph_viz, 
-                                                            arg, 
+                                                            arg,
+                                                            Node, 
                                                             arg_value_count, 
                                                             {"color": "gray", "shape": "box"}, 
                                                             cls.styles["arg"][i])
@@ -86,6 +87,7 @@ class Protocol:
             for key, arg in node.kwargs.items():
                 name, arg_value_count = util.add_arg_to_viz(graph_viz, 
                                                             arg, 
+                                                            Node,
                                                             arg_value_count, 
                                                             {"color": "gray", "shape": "box"}, 
                                                             key)

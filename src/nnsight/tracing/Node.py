@@ -375,6 +375,7 @@ class Node:
                 for i, arg in enumerate(self.args):
                     name, arg_value_count = util.add_arg_to_viz(graph_viz, 
                                                                 arg, 
+                                                                Node,
                                                                 arg_value_count, 
                                                                 base_arg_style)
                     
@@ -383,6 +384,7 @@ class Node:
                 for key, arg in self.kwargs.items():
                     name, arg_value_count = util.add_arg_to_viz(graph_viz, 
                                                                 arg, 
+                                                                Node,
                                                                 arg_value_count, 
                                                                 base_arg_style, 
                                                                 key)
