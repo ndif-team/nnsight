@@ -253,6 +253,7 @@ class NNsight:
 
         return self.trace(
             *inputs, 
+            validate=kwargs.pop("validate", False),
             **kwargs, 
             backend=EditBackend()
         )
