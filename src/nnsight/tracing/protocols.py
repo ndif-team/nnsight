@@ -7,9 +7,12 @@ import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
+from nnsight.tracing.Node import Node
+
 from .. import util
 
 if TYPE_CHECKING:
+    from ..contexts.backends.LocalBackend import LocalMixin
     from ..intervention import InterventionProxy
     from .Bridge import Bridge
     from .Graph import Graph
@@ -21,6 +24,8 @@ class Protocol:
     """A `Protocol` represents some complex action a user might want to create a `Node` and `Proxy` for as well as add to a `Graph`.
     Unlike normal `Node` target execution, these have access to the `Node` itself and therefore the `Graph`, enabling more powerful functionality than with just functions and methods.
     """
+
+    redirect: bool = True
 
     @classmethod
     def add(cls, *args, **kwargs) -> "InterventionProxy":
@@ -211,6 +216,7 @@ class LockProtocol(Protocol):
     styles: Dict[str, any] = {"node": {"color": "red", "shape": "ellipse"},
                           "arg": defaultdict(lambda: None),
                           "edge": defaultdict(lambda: "solid")}
+    redirect: bool = False
 
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
@@ -494,7 +500,7 @@ class EarlyStopProtocol(Protocol):
                           "edge": defaultdict(lambda: "solid")}
 
     @classmethod
-    def add(cls, node: "Node"):
+    def add(cls, node: "Node") -> "InterventionProxy":
         return node.create(
             target=cls,
             proxy_value=None,
@@ -507,3 +513,40 @@ class EarlyStopProtocol(Protocol):
         node.set_value(True)
 
         raise EarlyStopException()
+
+
+class LocalBackendExecuteProtocol(Protocol):
+
+    @classmethod
+    def add(cls, object: "LocalMixin", graph: "Graph") -> "InterventionProxy":
+
+        return graph.create(target=cls, proxy_value=None, args=[object])
+
+    @classmethod
+    def execute(cls, node: Node) -> None:
+
+        object: "LocalMixin" = node.args[0]
+
+        object.local_backend_execute()
+
+        node.set_value(None)
+
+
+class ValueProtocol(Protocol):
+
+    @classmethod
+    def add(cls, graph: "Graph", default: Any = None) -> "InterventionProxy":
+
+        return graph.create(target=cls, proxy_value=default, args=[default])
+
+    @classmethod
+    def execute(cls, node: Node) -> None:
+
+        value = Node.prepare_inputs(node.args[0])
+
+        node.set_value(value)
+
+    @classmethod
+    def set(cls, node: Node, value: Any) -> None:
+
+        node.args[0] = value

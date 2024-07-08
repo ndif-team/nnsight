@@ -50,9 +50,6 @@ class Node:
 
         args = list(args)
 
-        # Node.graph is a weak reference to avoid reference loops.
-        graph = weakref.proxy(graph) if graph is not None else None
-
         self.graph: "Graph" = graph
         self.proxy_value = proxy_value
         self.target = target
@@ -71,6 +68,9 @@ class Node:
         # Preprocess args.
         self.preprocess()
 
+        # Node.graph is a weak reference to avoid reference loops.
+        self.graph = weakref.proxy(self.graph) if self.graph is not None else None
+
         self.name: str = name
 
         # If theres an alive Graph, add it.
@@ -81,44 +81,19 @@ class Node:
     def preprocess(self) -> None:
         """Preprocess Node.args and Node.kwargs."""
 
-        max_rank = None
-        bridge = None
-        max_graph = self.graph
-
         if self.attached() and protocols.BridgeProtocol.has_bridge(self.graph):
 
             bridge = protocols.BridgeProtocol.get_bridge(self.graph)
-            max_rank = bridge.rank(self.graph)
 
-        def find_latest_graph(node: Union[Node, Proxy]):
-
-            nonlocal bridge
-            nonlocal max_rank
-            nonlocal max_graph
-
-            if isinstance(node, Proxy):
-
-                node = node.node
-
-            if not node.done():
-
-                graph = node.graph
-                rank = bridge.rank(graph)
-
-                if rank > max_rank:
-
-                    max_rank = rank
-                    max_graph = graph
-
-            return node
-
-        if bridge is not None:
-
-            self.args, self.kwargs = util.apply(
-                (self.args, self.kwargs), find_latest_graph, (Proxy, Node)
+            # Protocol nodes don't redirect execution to the current context's graph by default
+            redirect_execution = (
+                self.target.redirect
+                if isinstance(self.target, type)
+                and issubclass(self.target, protocols.Protocol)
+                else True
             )
-
-        self.graph = max_graph
+            if redirect_execution:
+                self.graph = bridge.peek_graph()
 
         def preprocess_node(node: Union[Node, Proxy]):
 
@@ -126,19 +101,9 @@ class Node:
 
                 node = node.node
 
-            if self.graph is not node.graph:
+            if self.attached() and self.graph.id != node.graph.id:
 
-                if (
-                    self.attached()
-                    and node.attached()
-                    and protocols.BridgeProtocol.has_bridge(node.graph)
-                ):
-
-                    node = protocols.BridgeProtocol.add(node, self.graph).node
-
-                else:
-                    # TODO error?
-                    pass
+                node = protocols.BridgeProtocol.add(node, self.graph).node
 
             if not node.done():
 
@@ -316,23 +281,29 @@ class Node:
         Lets protocol execute if target is str.
         Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
+        
+        try:
 
-        if isinstance(self.target, type) and issubclass(
-            self.target, protocols.Protocol
-        ):
+            if isinstance(self.target, type) and issubclass(
+                self.target, protocols.Protocol
+            ):
 
-            self.target.execute(self)
+                self.target.execute(self)
 
-        else:
+            else:
 
-            # Prepare arguments.
-            args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
+                # Prepare arguments.
+                args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
 
-            # Call the target to get value.
-            output = self.target(*args, **kwargs)
+                # Call the target to get value.
+                output = self.target(*args, **kwargs)
 
-            # Set value.
-            self.set_value(output)
+                # Set value.
+                self.set_value(output)
+                
+        except Exception as e:
+            
+            raise Exception(f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'") from e
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.

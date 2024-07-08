@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING, Any, Iterable, Dict, Tuple
 from collections import defaultdict
 
@@ -12,38 +13,6 @@ if TYPE_CHECKING:
     from ...intervention import InterventionProxy
     from ...tracing.Node import Node
     from ...tracing.Proxy import Proxy
-
-
-class IteratorItemProtocol(protocols.Protocol):
-
-    attachment_name = "nnsight_iter_idx"
-    styles: Dict[str, any] = {"node": {"color": "blue", "shape": "ellipse"},
-                              "arg": defaultdict(lambda: None),
-                              "edge": defaultdict(lambda: "solid")}
-
-    @classmethod
-    def add(cls, graph: Graph, value: Any) -> "Proxy":
-
-        return graph.create(target=cls, proxy_value=value)
-
-    @classmethod
-    def idx(cls, graph: Graph) -> int:
-
-        if not cls.attachment_name in graph.attachments:
-
-            graph.attachments[cls.attachment_name] = 0
-
-        else:
-
-            graph.attachments[cls.attachment_name] += 1
-
-        return graph.attachments[cls.attachment_name]
-
-    @classmethod
-    def set(cls, graph: Graph, value: Any, iter_idx: int) -> None:
-
-        graph.nodes[f"{cls.__name__}_{iter_idx}"].set_value(value)
-
 
 class StatDefaultProtocol(protocols.Protocol):
 
@@ -84,7 +53,9 @@ class StatUpdateProtocol(protocols.Protocol):
             default_node_name
         ]
 
-        default_node._value = util.apply(update_value, lambda x: x.value, type(default_node))
+        default_node._value = util.apply(
+            update_value, lambda x: x.value, type(default_node)
+        )
 
         if bridge.release:
 
@@ -118,15 +89,12 @@ class Iterator(Collection):
         super().__init__(*args, **kwargs)
 
         self.data = data
-        self.iter_idx = IteratorItemProtocol.idx(self.accumulator.graph)
 
     def __enter__(self) -> Tuple[int, Iterator]:
 
         super().__enter__()
 
-        iter_item_proxy = IteratorItemProtocol.add(
-            self.accumulator.graph, next(iter(self.data))
-        )
+        iter_item_proxy = protocols.ValueProtocol.add(self.graph, next(iter(self.data)))
 
         return iter_item_proxy, self
 
@@ -138,9 +106,9 @@ class Iterator(Collection):
 
     def local_backend_execute(self) -> None:
 
-        self.accumulator.graph.compile()
+        bridge = protocols.BridgeProtocol.get_bridge(self.graph)
 
-        self.accumulator.bridge.locks += 1
+        bridge.locks += 1
 
         last_idx = len(self.data) - 1
 
@@ -150,8 +118,10 @@ class Iterator(Collection):
 
             if last_iter:
 
-                self.accumulator.bridge.locks -= 1
+                bridge.locks -= 1
 
-            IteratorItemProtocol.set(self.accumulator.graph, item, self.iter_idx)
+            protocols.ValueProtocol.set(
+                self.graph.nodes[f"{protocols.ValueProtocol.__name__}_0"], item
+            )
 
-            self.iterator_backend_execute(release=self.accumulator.bridge.release)
+            super().local_backend_execute()

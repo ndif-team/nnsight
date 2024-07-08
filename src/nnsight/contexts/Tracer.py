@@ -8,18 +8,18 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from .. import util
 from ..intervention import InterventionProxy
 from ..tracing import protocols
+from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import SessionMixin, Backend, IteratorMixin, RemoteMixin
+from .backends import Backend, RemoteMixin, BridgeMixin
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
     from ..models.mixins import RemoteableMixin
     from ..models.NNsightModel import NNsight
-    from .session.Session import Session
 
 
-class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
+class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -38,6 +38,7 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
         backend: Backend,
         model: "NNsight",
         graph: Graph = None,
+        bridge:Bridge = None, 
         validate: bool = True,
         **kwargs,
     ) -> None:
@@ -49,8 +50,12 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
             if graph is None
             else graph
         )
-
+        
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
+
+        if bridge is not None:
+            
+            bridge.add(self._graph)
 
         self._backend = backend
 
@@ -82,6 +87,8 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
             self._graph.alive = False
             self._graph = None
             raise exc_val
+        if self._batched_input is None:
+            raise ValueError("No input was provided to the tracing context.")
 
         self._backend(self)
 
@@ -111,7 +118,11 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
         self._model._envoy.next(increment=increment, propagate=True)
 
     def apply(
-        self, target: Callable, *args, validate: bool = False, **kwargs, 
+        self,
+        target: Callable,
+        *args,
+        validate: bool = False,
+        **kwargs,
     ) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
 
@@ -122,9 +133,9 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
         Returns:
             InterventionProxy: Proxy of applying that function.
         """
-        return self._graph.add(
+        return self._graph.create(
             target=target,
-            value=inspect._empty if validate else None,
+            proxy_value=inspect._empty if validate else None,
             args=args,
             kwargs=kwargs,
         )
@@ -158,12 +169,13 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
             *_batched_input,
             **self._kwargs,
         )
-        
-        graph = self._graph
 
-        self._graph.alive = False 
-        self._graph = None
+        graph = self._graph
+        graph.alive = False
         
+        if not isinstance(graph, weakref.ProxyType):
+            self._graph = weakref.proxy(graph)
+
         return graph
 
     def remote_backend_get_model_key(self):
@@ -174,7 +186,7 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
 
     def remote_backend_postprocess_result(self, local_result: Graph):
 
-        from ..pydantics.Response import ResultModel
+        from ..schema.Response import ResultModel
 
         return ResultModel.from_graph(local_result)
 
@@ -183,26 +195,21 @@ class Tracer(AbstractContextManager, RemoteMixin, SessionMixin, IteratorMixin):
         for node_name, node_value in value.items():
             self._graph.nodes[node_name]._value = node_value
 
-        self._graph.alive = False
-        self._graph = None
+        graph = self._graph
+        graph.alive = False
+        
+        if not isinstance(graph, weakref.ProxyType):
+            self._graph = weakref.proxy(graph)
 
-    def session_backend_handle(self, accumulator: "Session") -> None:
+        return graph
 
-        accumulator.collector_stack[-1].collection.append(self)
+    def bridge_backend_handle(self, bridge: Bridge) -> None:
 
-        protocols.BridgeProtocol.set_bridge(self._graph, accumulator.bridge)
-
-        accumulator.bridge.add(self._graph)
+        bridge.pop_graph()
+        
+        protocols.LocalBackendExecuteProtocol.add(self, bridge.peek_graph())
         
         self._graph = weakref.proxy(self._graph)
-
-    def iterator_backend_execute(self, release: bool = False) -> None:
-        
-        graph = self.local_backend_execute()
-
-        if not release:
-
-            self._graph = graph
 
     def visual(self, **kwargs) -> None:
         """

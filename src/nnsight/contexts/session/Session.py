@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
 from ...tracing import protocols
 from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
-from ..backends import SessionBackend, Backend
+from ..backends import Backend, BridgeBackend, RemoteMixin
 from .Collection import Collection
 from .Iterator import Iterator
 
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from ...models.NNsightModel import NNsight
 
 
-class Session(Collection):
+class Session(Collection, RemoteMixin):
     """A Session is a root Collection that handles adding new Graphs and new Collections while in the session.
 
     Attributes:
@@ -25,30 +26,13 @@ class Session(Collection):
         collector_stack (List[Collection]): Stack of all Collections added during the session to keep track of which Collection to add a Tracer to when calling model.trace().
     """
 
-    def __init__(self, backend: Backend, model: "NNsight", graph: Graph = None) -> None:
+    def __init__(self, backend: Backend, model: "NNsight", *args, bridge:Bridge=None,  **kwargs) -> None:
 
-        self.bridge = Bridge()
-        self.graph = (
-            Graph(proxy_class=model.proxy_class, validate=False)
-            if graph is None
-            else graph
-        )
+        self.bridge = Bridge() if bridge is None else bridge
 
-        protocols.BridgeProtocol.set_bridge(self.graph, self.bridge)
-
-        self.bridge.add(self.graph)
-
-        self.collector_stack: List[Collection] = list()
+        Collection.__init__(self, backend, self.bridge, *args, **kwargs)
 
         self.model = model
-
-        Collection.__init__(self, SessionBackend(self), self)
-
-        self.backend = backend
-
-    def __enter__(self) -> Session:
-
-        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
@@ -61,36 +45,35 @@ class Session(Collection):
 
     def iter(self, iterable) -> Iterator:
 
-        backend = SessionBackend(self)
+        bridge = weakref.proxy(self.bridge)
 
-        return Iterator(iterable, backend, self)
+        backend = BridgeBackend(bridge)
+
+        return Iterator(iterable, backend, bridge)
 
     ### BACKENDS ########
-    
+
     def local_backend_execute(self) -> Dict[int, Graph]:
-        
+
         super().local_backend_execute()
-        
+
         local_result = self.bridge.id_to_graph
-        
-        self.bridge = None
-        
+
+        self.bridge = weakref.proxy(self.bridge)
+
         return local_result
 
-    def remote_backend_get_model_key(self):
+    def remote_backend_get_model_key(self) -> str:
 
         self.model: "RemoteableMixin"
 
-        return self.model._remote_model_key()
+        return self.model.to_model_key()
 
     def remote_backend_postprocess_result(self, local_result: Dict[int, Graph]):
 
-        from ...pydantics.Response import ResultModel
+        from ...schema.Response import ResultModel
 
-        return {
-            id: ResultModel.from_graph(graph)
-            for id, graph in local_result.items()
-        }
+        return {id: ResultModel.from_graph(graph) for id, graph in local_result.items()}
 
     def remote_backend_handle_result_value(self, value: Dict[int, Dict[str, Any]]):
 
@@ -100,7 +83,7 @@ class Session(Collection):
 
             for node_name, node_value in saves.items():
                 graph.nodes[node_name]._value = node_value
-                
+
             graph.alive = False
-            
-        self.bridge = None
+
+        self.bridge = weakref.proxy(self.bridge)

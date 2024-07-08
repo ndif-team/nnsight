@@ -10,8 +10,9 @@ from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
 from .. import util
+from ..contexts.backends import Backend, BridgeBackend, LocalBackend, RemoteBackend
+from ..contexts.session.Collection import Collection
 from ..contexts.session.Session import Session
-from ..contexts.backends import SessionBackend, Backend, LocalBackend, RemoteBackend
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (
@@ -22,6 +23,7 @@ from ..intervention import (
 )
 from ..logger import logger
 from ..tracing import protocols
+from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 
 
@@ -183,11 +185,14 @@ class NNsight:
         """
 
         # TODO raise error/warning if trying to use one backend with another condition satisfied?
+        
+        bridge = None
 
-        # If in a session, use SessionBackend.
         if self._session is not None:
 
-            backend = SessionBackend(self._session)
+            backend = BridgeBackend(weakref.proxy(self._session.bridge))
+            
+            bridge = self._session.bridge
 
         # If remote, use RemoteBackend with default url.
         elif remote:
@@ -205,8 +210,8 @@ class NNsight:
             backend = RemoteBackend(backend)
 
         # Create Tracer object.
-        tracer = Tracer(backend, self, **kwargs)
-
+        tracer = Tracer(backend, self, bridge=bridge, **kwargs)
+        
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
 
@@ -265,7 +270,7 @@ class NNsight:
 
         session = Session(backend, self)
 
-        self._session = weakref.proxy(session)
+        self._session = session
 
         return session
 
