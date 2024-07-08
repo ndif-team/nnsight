@@ -10,7 +10,7 @@ from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
 from .. import util
-from ..contexts.backends import Backend, BridgeBackend, LocalBackend, RemoteBackend
+from ..contexts.backends import Backend, BridgeBackend, LocalBackend, RemoteBackend, EditBackend
 from ..contexts.session.Collection import Collection
 from ..contexts.session.Session import Session
 from ..contexts.Tracer import Tracer
@@ -66,6 +66,7 @@ class NNsight:
 
         self._model: torch.nn.Module = None
         self._session: Session = None
+        self._default_graph: Graph = None
 
         logger.info(f"Initializing `{self._model_key}`...")
 
@@ -210,8 +211,12 @@ class NNsight:
             backend = RemoteBackend(backend)
 
         # Create Tracer object.
-        tracer = Tracer(backend, self, bridge=bridge, **kwargs)
-        
+        if self._default_graph:
+            graph = self._default_graph.copy()
+            tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
+        else:
+            tracer = Tracer(backend, self, bridge=bridge, **kwargs)
+
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
 
@@ -239,6 +244,24 @@ class NNsight:
             raise ValueError("Can't execute on no inputs!")
 
         return tracer
+
+    def edit(
+        self,
+        *inputs: Any,
+        **kwargs: Dict[str, Any],
+    ):
+        """Create a trace context with an edit backend and apply a list of edits.
+
+        The edit backend sets a default graph on the NNsight model which is 
+        run on future trace calls.
+        """
+
+        return self.trace(
+            *inputs, 
+            validate=kwargs.pop("validate", False),
+            **kwargs, 
+            backend=EditBackend()
+        )
 
     def session(
         self, backend: Union[Backend, str] = None, remote: bool = False

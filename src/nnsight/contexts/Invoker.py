@@ -4,10 +4,12 @@ import copy
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple
 
+import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
+from ..patching import Patch, Patcher
 from ..tracing import protocols
 from ..tracing.Node import Node
 from ..tracing.Proxy import Proxy
@@ -43,7 +45,7 @@ class Invoker(AbstractContextManager):
         self.inputs = inputs
         self.scan = scan
         self.kwargs = kwargs
-        
+
         self.scanning = False
 
     def __enter__(self) -> Invoker:
@@ -69,7 +71,7 @@ class Invoker(AbstractContextManager):
         if self.tracer._model._session is not None:
 
             def check_for_nodes(proxy: Proxy):
-                
+
                 if not proxy.node.done():
 
                     nonlocal preserved_inputs
@@ -98,21 +100,27 @@ class Invoker(AbstractContextManager):
 
         if self.scan:
             self.tracer._model._envoy._clear()
-            
+
             self.scanning = True
 
-            with FakeTensorMode(
-                allow_non_fake_inputs=True,
-                shape_env=ShapeEnv(assume_static_by_default=True),
-            ) as fake_mode:
-                with FakeCopyMode(fake_mode):
-                    self.tracer._model._execute(
-                        *copy.deepcopy(self.inputs),
-                        **copy.deepcopy(self.tracer._kwargs),
-                    )
-                    
+            with Patcher() as patcher:
+
+                # Some logic (like gpt-j rotary embeddings) gets "poisoned" by FakeTensors.
+                # This does not happen when `torch.jit.is_tracing() returns True.`
+                patcher.add(Patch(torch.jit, lambda: True, "is_tracing"))
+
+                with FakeTensorMode(
+                    allow_non_fake_inputs=True,
+                    shape_env=ShapeEnv(assume_static_by_default=True),
+                ) as fake_mode:
+                    with FakeCopyMode(fake_mode):
+                        self.tracer._model._execute(
+                            *copy.deepcopy(self.inputs),
+                            **copy.deepcopy(self.tracer._kwargs),
+                        )
+
             self.scanning = False
-            
+
         else:
             self.tracer._model._envoy._reset()
 

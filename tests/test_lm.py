@@ -256,3 +256,67 @@ def test_multi_grad(gpt2: nnsight.LanguageModel):
         _test_serialize(tracer)
 
     assert not torch.all(hidden_states_grad1.eq(hidden_states_grad2))
+
+
+def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    from nnsight.util import WrapperModule
+
+    class ComplexModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.one = WrapperModule()
+
+        def forward(self, x):
+            return self.one(x)
+    
+    l0 = gpt2.transformer.h[0]
+    l0.attachment = ComplexModule()
+
+    # Get values pre editing
+    with gpt2.trace(MSG_prompt):
+        original = l0.output[0].clone().save()
+        l0.output[0][:] *= 0.
+        original_output = gpt2.output.logits.save()
+    
+    with gpt2.edit("test"):
+        acts = l0.output[0]
+        l0.output[0][:] = l0.attachment(acts, hook=True)
+
+    with gpt2.trace(MSG_prompt):
+        one = l0.attachment.one.output.clone().save()
+        l0.attachment.output *= 0.
+        edited_output = gpt2.output.logits.save()
+
+    # Check that submodule in attached model 
+    # is equal to original output.
+    assert torch.equal(original, one)
+    # Check that edits propagate from attached module
+    assert torch.equal(original_output, edited_output)
+
+
+def test_batched_editing(gpt2: nnsight.LanguageModel):
+    from nnsight.util import WrapperModule
+
+    class ComplexModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.one = WrapperModule()
+
+        def forward(self, x):
+            return self.one(x)
+
+    l0 = gpt2.transformer.h[0]
+    l0.attachment = ComplexModule()
+
+    batch = ["a", "b"]
+    single = "a"
+
+    with gpt2.edit(single):
+        acts = l0.output[0]
+        l0.output[0][:] = l0.attachment(acts, hook=True)
+
+    with gpt2.trace(batch):
+        edited = l0.attachment.output.save()
+
+    # Check that the batch size does not narrow
+    assert edited.shape[0] == 2
