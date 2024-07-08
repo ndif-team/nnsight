@@ -5,7 +5,7 @@ from typing import Dict, Union
 import yaml
 import torch
 from .patching import *
-from .pydantics.Config import ConfigModel
+from .schema.Config import ConfigModel
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:

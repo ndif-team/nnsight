@@ -10,8 +10,9 @@ from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
 from .. import util
-from ..contexts.accum.Accumulator import Accumulator
-from ..contexts.backends import AccumulatorBackend, Backend, LocalBackend, RemoteBackend, EditBackend
+from ..contexts.backends import Backend, BridgeBackend, LocalBackend, RemoteBackend, EditBackend
+from ..contexts.session.Collection import Collection
+from ..contexts.session.Session import Session
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
 from ..intervention import (
@@ -22,6 +23,7 @@ from ..intervention import (
 )
 from ..logger import logger
 from ..tracing import protocols
+from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 
 
@@ -40,7 +42,7 @@ class NNsight:
         _custom_model (bool): If the value passed to repoid_path_model was a custom model.
         _model (torch.nn.Module): Underlying torch module.
         _envoy (Envoy): Envoy for underlying model.
-        _accumulator (Accumulator): Accumulator object if accumulating.
+        _session (Session): Session object if in a session.
     """
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
@@ -63,7 +65,7 @@ class NNsight:
         self._custom_model = False
 
         self._model: torch.nn.Module = None
-        self._accumulator: Accumulator = None
+        self._session: Session = None
         self._default_graph: Graph = None
 
         logger.info(f"Initializing `{self._model_key}`...")
@@ -184,11 +186,14 @@ class NNsight:
         """
 
         # TODO raise error/warning if trying to use one backend with another condition satisfied?
+        
+        bridge = None
 
-        # If accumulating, use AccumulatorBackend.
-        if self._accumulator is not None:
+        if self._session is not None:
 
-            backend = AccumulatorBackend(self._accumulator)
+            backend = BridgeBackend(weakref.proxy(self._session.bridge))
+            
+            bridge = self._session.bridge
 
         # If remote, use RemoteBackend with default url.
         elif remote:
@@ -208,9 +213,9 @@ class NNsight:
         # Create Tracer object.
         if self._default_graph:
             graph = self._default_graph.copy()
-            tracer = Tracer(backend, self, graph=graph, **kwargs)
+            tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
         else:
-            tracer = Tracer(backend, self, **kwargs)
+            tracer = Tracer(backend, self, bridge=bridge, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -258,17 +263,17 @@ class NNsight:
             backend=EditBackend()
         )
 
-    def accumulate(
+    def session(
         self, backend: Union[Backend, str] = None, remote: bool = False
-    ) -> Accumulator:
-        """Create an accumulation context using an Accumulator.
+    ) -> Session:
+        """Create a session context using a Session.
 
         Args:
-            backend (Backend): Backend for this Accumulator object.
+            backend (Backend): Backend for this Session object.
             remote (bool): Use RemoteBackend with default url.
 
         Returns:
-            Accumulator: Accumulator.
+            Session: Session.
         """
 
         # If remote, use RemoteBackend with default url.
@@ -286,11 +291,11 @@ class NNsight:
 
             backend = RemoteBackend(backend)
 
-        accumulator = Accumulator(backend, self)
+        session = Session(backend, self)
 
-        self._accumulator = weakref.proxy(accumulator)
+        self._session = session
 
-        return accumulator
+        return session
 
     def interleave(
         self,

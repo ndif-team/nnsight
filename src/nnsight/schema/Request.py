@@ -6,11 +6,9 @@ from typing import TYPE_CHECKING, Dict, List, Union
 from pydantic import BaseModel, ConfigDict
 
 from .. import NNsight
-from .format.objects import *
 from .format.types import *
 
 if TYPE_CHECKING:
-    from ..contexts.backends.LocalBackend import LocalMixin
     from ..contexts.backends.RemoteBackend import RemoteMixin
 
 
@@ -18,13 +16,15 @@ class RequestModel(BaseModel):
     
     model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
 
-    object: ObjectTypes
+    object: Union[SessionType, TracerType, SessionModel, TracerModel]
     model_key: str
 
     id: str = None
     session_id: str = None
     received: datetime = None
 
-    def compile(self, model: NNsight) -> "RemoteMixin":
+    def deserialize(self, model: NNsight) -> "RemoteMixin":
+        
+        handler = DeserializeHandler(model=model)
 
-        return self.object.compile(model)
+        return self.object.deserialize(handler)
