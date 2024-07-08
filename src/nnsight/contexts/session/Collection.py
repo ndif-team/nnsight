@@ -36,6 +36,9 @@ class Collection(AbstractContextManager, LocalMixin, BridgeMixin):
             bridge.add(self.graph)
 
         self.backend = backend
+        
+    def __enter__(self) -> Self:
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):

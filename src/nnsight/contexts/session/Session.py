@@ -26,17 +26,13 @@ class Session(Collection, RemoteMixin):
         collector_stack (List[Collection]): Stack of all Collections added during the session to keep track of which Collection to add a Tracer to when calling model.trace().
     """
 
-    def __init__(self, backend: Backend, model: "NNsight", *args, **kwargs) -> None:
+    def __init__(self, backend: Backend, model: "NNsight", *args, bridge:Bridge=None,  **kwargs) -> None:
 
-        self.bridge = Bridge()
+        self.bridge = Bridge() if bridge is None else bridge
 
         Collection.__init__(self, backend, self.bridge, *args, **kwargs)
 
         self.model = model
-
-    def __enter__(self) -> Session:
-
-        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 

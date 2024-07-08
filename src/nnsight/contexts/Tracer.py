@@ -38,6 +38,7 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin):
         backend: Backend,
         model: "NNsight",
         graph: Graph = None,
+        bridge:Bridge = None, 
         validate: bool = True,
         **kwargs,
     ) -> None:
@@ -52,9 +53,9 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin):
         
         protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
 
-        if model._session is not None:
+        if bridge is not None:
             
-            model._session.bridge.add(self._graph)
+            bridge.add(self._graph)
 
         self._backend = backend
 

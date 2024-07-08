@@ -27,7 +27,7 @@ def _test_serialize(tracer: Tracer):
     )
 
     request2 = RequestModel(**request_json)
-    tracer = request2.compile(tracer._model)
+    tracer = request2.deserialize(tracer._model)
 
     assert isinstance(tracer._graph, Graph)
 

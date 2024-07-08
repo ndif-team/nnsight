@@ -72,6 +72,7 @@ FUNCTIONS_WHITELIST.update(
 ### nnsight functions
 FUNCTIONS_WHITELIST.update(
     {
+        get_function_name(print): print,
         get_function_name(setattr): setattr,
         get_function_name(util.fetch_attr): util.fetch_attr,
         get_function_name(Proxy.proxy_call): Proxy.proxy_call,
