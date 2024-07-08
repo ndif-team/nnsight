@@ -66,4 +66,15 @@ def test_external_proxy_intervention_executed_locally(tiny_model: NNsight, tiny_
         assert list(tracer_2._graph.nodes.keys()) == ['BridgeProtocol_0', 'setitem_0']
     
     assert l1_out[:, 2] == 5
+
+def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input):
+        l1_out = tiny_model.layer1.output.save()
+        l2_out = tiny_model.layer2.output.save()
+        tiny_model.layer1.output.stop()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+
+    with pytest.raises(ValueError):
+        l2_out.value
     
