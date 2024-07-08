@@ -71,6 +71,7 @@ class Node:
         self.graph = weakref.proxy(self.graph) if self.graph is not None else None
 
         self.name: str = name
+        self.passthrough: bool= kwargs.pop("passthrough", False)
 
         # If theres an alive Graph, add it.
         if self.attached():

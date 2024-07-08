@@ -412,7 +412,7 @@ class Envoy:
 
             super().__setattr__(key, value)
 
-    def __call__(self, *args: List[Any], hook=False, **kwargs: Dict[str, Any]) -> InterventionProxy:
+    def __call__(self, *args: List[Any], hook=False, passthrough=False, **kwargs: Dict[str, Any]) -> InterventionProxy:
         """Creates a proxy to call the underlying module's forward method with some inputs.
 
         Returns:
@@ -422,8 +422,9 @@ class Envoy:
         if isinstance(self._tracer._backend, EditBackend):
             hook = True
 
+        print(passthrough)
         return protocols.ApplyModuleProtocol.add(
-            self._tracer._graph, self._module_path, *args, hook=hook, **kwargs
+            self._tracer._graph, self._module_path, *args, hook=hook, passthrough=passthrough, **kwargs
         )
 
     @property

@@ -55,7 +55,7 @@ class ApplyModuleProtocol(Protocol):
 
     @classmethod
     def add(
-        cls, graph: "Graph", module_path: str, *args, hook=False, **kwargs
+        cls, graph: "Graph", module_path: str, *args, hook=False, passthrough=False, **kwargs
     ) -> "InterventionProxy":
         """Creates and adds an ApplyModuleProtocol to the Graph.
         Assumes the attachment has already been added via ApplyModuleProtocol.set_module().
@@ -70,8 +70,10 @@ class ApplyModuleProtocol(Protocol):
 
         value = inspect._empty
 
+        print(passthrough)
+
         # If the Graph is validating, we need to compute the proxy_value for this node.
-        if graph.validate:
+        if graph.validate and not passthrough:
 
             from .Node import Node
 
@@ -102,6 +104,7 @@ class ApplyModuleProtocol(Protocol):
                     )
 
         kwargs["hook"] = hook
+        kwargs["passthrough"] = passthrough
 
         # Create and attach Node.
         return graph.create(

@@ -77,8 +77,14 @@ class Graph:
             node (Node): Node to add.
         """
 
+        print(node.target, node.passthrough)
+
         # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.
-        if self.validate and node.proxy_value is inspect._empty:
+        if (
+            self.validate 
+            and node.proxy_value is inspect._empty
+            and not node.passthrough
+        ):
 
             # Enter FakeMode.
             with FakeTensorMode(
