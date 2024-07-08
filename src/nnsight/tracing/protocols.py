@@ -249,7 +249,7 @@ class GradProtocol(Protocol):
     """
 
     attachment_name = "nnsight_backward_idx"
-    styles: Dict[str, any] = {"node": {"color": "green4", "shape": "ellipse"},
+    styles: Dict[str, any] = {"node": {"color": "green4", "shape": "box"},
                           "arg": defaultdict(lambda: None),
                           "edge": defaultdict(lambda: "solid")}
 
@@ -540,7 +540,7 @@ class LocalBackendExecuteProtocol(Protocol):
 
 class ValueProtocol(Protocol):
 
-    styles: Dict[str, any] = {"node": {"color": "blue", "shape": "ellipse"},
+    styles: Dict[str, any] = {"node": {"color": "blue", "shape": "box"},
                           "arg": defaultdict(lambda: None),
                           "edge": defaultdict(lambda: "solid")}
 
