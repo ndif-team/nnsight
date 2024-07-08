@@ -245,7 +245,7 @@ class NNsight:
 
         return tracer
 
-    def alter(
+    def edit(
         self,
         *inputs: Any,
         **kwargs: Dict[str, Any],

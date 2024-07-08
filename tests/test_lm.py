@@ -258,7 +258,7 @@ def test_multi_grad(gpt2: nnsight.LanguageModel):
     assert not torch.all(hidden_states_grad1.eq(hidden_states_grad2))
 
 
-def test_editing(gpt2: nnsight.LanguageModel):
+def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     from nnsight.util import WrapperModule
 
     class ComplexModule(torch.nn.Module):
@@ -278,7 +278,7 @@ def test_editing(gpt2: nnsight.LanguageModel):
         l0.output[0][:] *= 0.
         original_output = gpt2.output.logits.save()
     
-    with gpt2.alter("test"):
+    with gpt2.edit("test"):
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 
@@ -311,7 +311,7 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
     batch = ["a", "b"]
     single = "a"
 
-    with gpt2.alter(single):
+    with gpt2.edit(single):
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 
