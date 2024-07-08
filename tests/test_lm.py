@@ -259,7 +259,6 @@ def test_multi_grad(gpt2: nnsight.LanguageModel):
 
 
 def test_editing(gpt2: nnsight.LanguageModel):
-    from nnsight.editing import Edit
     from nnsight.util import WrapperModule
 
     class ComplexModule(torch.nn.Module):
@@ -271,7 +270,7 @@ def test_editing(gpt2: nnsight.LanguageModel):
             return self.one(x)
     
     l0 = gpt2.transformer.h[0]
-    edit = Edit(l0, "attachment", ComplexModule())
+    l0.attachment = ComplexModule()
 
     # Get values pre editing
     with gpt2.trace(MSG_prompt):
@@ -279,7 +278,7 @@ def test_editing(gpt2: nnsight.LanguageModel):
         l0.output[0][:] *= 0.
         original_output = gpt2.output.logits.save()
     
-    with gpt2.alter("test", edits=[edit]):
+    with gpt2.alter("test"):
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 
@@ -296,7 +295,6 @@ def test_editing(gpt2: nnsight.LanguageModel):
 
 
 def test_batched_editing(gpt2: nnsight.LanguageModel):
-    from nnsight.editing import Edit
     from nnsight.util import WrapperModule
 
     class ComplexModule(torch.nn.Module):
@@ -306,14 +304,14 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
 
         def forward(self, x):
             return self.one(x)
-    
+
     l0 = gpt2.transformer.h[0]
-    edit = Edit(l0, "attachment", ComplexModule())
+    l0.attachment = ComplexModule()
 
     batch = ["a", "b"]
     single = "a"
-    
-    with gpt2.alter(single, edits=[edit]):
+
+    with gpt2.alter(single):
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 

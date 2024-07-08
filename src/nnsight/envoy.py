@@ -420,6 +420,9 @@ class Envoy:
             InterventionProxy: Module call proxy.
         """
 
+        if isinstance(self._tracer._backend, EditBackend):
+            hook = True
+
         return protocols.ApplyModuleProtocol.add(
             self._tracer._graph, self._module_path, *args, hook=hook, **kwargs
         )
