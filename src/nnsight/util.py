@@ -3,7 +3,7 @@
 import importlib
 import types
 from functools import wraps
-from typing import Any, Callable, Collection, Type
+from typing import Any, Callable, Collection, Type, List
 
 import torch
 
@@ -131,3 +131,26 @@ class WrapperModule(torch.nn.Module):
             args = args[0]
 
         return args
+
+def wrap_object_as_module(obj, methods=List[str]):
+    class WrappedModule(torch.nn.Module):
+        def __init__(self, wrapped_obj):
+            super().__init__()
+            self.obj = wrapped_obj
+            
+            for name in dir(self.obj):
+                if name in methods:
+                    method = getattr(self.obj, name)
+                    wrapped_method = self._wrap_method(method)
+                    setattr(self, name, wrapped_method)
+
+
+        def _wrap_method(self, method):
+            method_module = torch.nn.Module()
+            method_module.forward = method
+            return method_module
+        
+        def forward(self, *args, **kwargs):
+            return self.obj(*args, **kwargs)
+        
+    return WrappedModule(obj)
