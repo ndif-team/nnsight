@@ -16,3 +16,4 @@ class Backend:
 from .BridgeBackend import BridgeBackend, BridgeMixin
 from .LocalBackend import LocalBackend, LocalMixin
 from .RemoteBackend import RemoteBackend, RemoteMixin
+from .EditBackend import EditBackend, EditMixin
