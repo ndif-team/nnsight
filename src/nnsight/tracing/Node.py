@@ -303,7 +303,7 @@ class Node:
                 
         except Exception as e:
             
-            raise Exception(f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'") from e
+            raise type(e)(f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'") from e
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
