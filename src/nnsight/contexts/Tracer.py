@@ -8,7 +8,7 @@ from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import Backend, BridgeMixin, RemoteMixin
+from .backends import Backend, BridgeMixin, RemoteMixin, EditMixin
 from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
 
 
-class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin):
+class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -150,6 +150,10 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin):
             self.graph = weakref.proxy(graph)
 
         return graph
+    
+    def edit_backend_execute(self) -> Graph:
+        
+        self._model._default_graph = self._graph
 
     def remote_backend_get_model_key(self):
 
