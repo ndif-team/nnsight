@@ -6,25 +6,12 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Tuple
 from ... import util
 from ...tracing import protocols
 from ...tracing.Graph import Graph
-from .Collection import Collection
+from ..GraphBasedContext import GraphBasedContext
 
 if TYPE_CHECKING:
     from ...intervention import InterventionProxy
     from ...tracing.Node import Node
     from ...tracing.Proxy import Proxy
-
-
-class StatDefaultProtocol(protocols.Protocol):
-
-    @classmethod
-    def add(cls, graph: Graph, default_value: Any):
-
-        return graph.create(target=cls, proxy_value=default_value, args=[default_value])
-
-    @classmethod
-    def execute(cls, node: protocols.Node):
-
-        node.set_value(node.args[0])
 
 
 class StatUpdateProtocol(protocols.Protocol):
@@ -73,7 +60,7 @@ class Stat:
 
         # TODO error if already called.
 
-        self.proxy = StatDefaultProtocol.add(self.graph, value)
+        self.proxy = protocols.ValueProtocol.add(self.graph, value)
 
         return self.proxy
 
@@ -82,13 +69,13 @@ class Stat:
         return StatUpdateProtocol.add(self.graph, self.proxy.node, value)
 
 
-class Iterator(Collection):
+class Iterator(GraphBasedContext):
 
     def __init__(self, data: Iterable, *args, **kwargs) -> None:
 
-        super().__init__(*args, **kwargs)
-
         self.data = data
+
+        super().__init__(*args, **kwargs)
 
     def __enter__(self) -> Tuple[int, Iterator]:
 
@@ -100,7 +87,7 @@ class Iterator(Collection):
 
     def stat(self) -> Stat:
 
-        return Stat(self.accumulator.graph)
+        return Stat(self.graph)
 
     ### BACKENDS ########
 

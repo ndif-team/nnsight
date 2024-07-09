@@ -11,7 +11,6 @@ from typing_extensions import Self
 
 from .. import util
 from ..contexts.backends import Backend, BridgeBackend, LocalBackend, RemoteBackend
-from ..contexts.session.Collection import Collection
 from ..contexts.session.Session import Session
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
@@ -23,7 +22,6 @@ from ..intervention import (
 )
 from ..logger import logger
 from ..tracing import protocols
-from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 
 

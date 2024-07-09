@@ -233,7 +233,9 @@ class TracerModel(BaseModel):
 
         graph = self.graph.deserialize(handler)
 
-        tracer = Tracer(None, handler.model, bridge=handler.bridge, graph=graph, **kwargs)
+        tracer = Tracer(
+            None, handler.model, bridge=handler.bridge, graph=graph, **kwargs
+        )
         tracer._batched_input = batched_input
 
         return tracer
@@ -251,10 +253,10 @@ class IteratorModel(BaseModel):
     def deserialize(self, handler: DeserializeHandler) -> Iterator:
 
         data = [value.deserialize(handler) for value in self.data]
-        
+
         graph = self.graph.deserialize(handler)
 
-        iterator = Iterator(data, None, handler.bridge, graph=graph)
+        iterator = Iterator(data, None, bridge=handler.bridge, graph=graph)
 
         return iterator
 
@@ -336,7 +338,7 @@ TracerType = Annotated[
     Tracer,
     AfterValidator(
         lambda value: TracerModel(
-            kwargs=value._kwargs, batched_input=value._batched_input, graph=value._graph
+            kwargs=value._kwargs, batched_input=value._batched_input, graph=value.graph
         )
     ),
 ]

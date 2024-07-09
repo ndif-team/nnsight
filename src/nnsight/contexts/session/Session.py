@@ -3,11 +3,10 @@ from __future__ import annotations
 import weakref
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
-from ...tracing import protocols
 from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
 from ..backends import Backend, BridgeBackend, RemoteMixin
-from .Collection import Collection
+from ..GraphBasedContext import GraphBasedContext
 from .Iterator import Iterator
 
 if TYPE_CHECKING:
@@ -15,7 +14,7 @@ if TYPE_CHECKING:
     from ...models.NNsightModel import NNsight
 
 
-class Session(Collection, RemoteMixin):
+class Session(GraphBasedContext, RemoteMixin):
     """A Session is a root Collection that handles adding new Graphs and new Collections while in the session.
 
     Attributes:
@@ -23,16 +22,17 @@ class Session(Collection, RemoteMixin):
         graph (Graph): Root Graph where operations and values meant for access by all subsequent Graphs should be stored and referenced.
         model (NNsight): NNsight model.
         backend (Backend): Backend for this context object.
-        collector_stack (List[Collection]): Stack of all Collections added during the session to keep track of which Collection to add a Tracer to when calling model.trace().
     """
 
-    def __init__(self, backend: Backend, model: "NNsight", *args, bridge:Bridge=None,  **kwargs) -> None:
+    def __init__(
+        self, backend: Backend, model: "NNsight", *args, bridge: Bridge = None, **kwargs
+    ) -> None:
 
         self.bridge = Bridge() if bridge is None else bridge
 
-        Collection.__init__(self, backend, self.bridge, *args, **kwargs)
-
         self.model = model
+
+        GraphBasedContext.__init__(self, backend, bridge=self.bridge, *args, **kwargs)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
@@ -49,7 +49,7 @@ class Session(Collection, RemoteMixin):
 
         backend = BridgeBackend(bridge)
 
-        return Iterator(iterable, backend, bridge)
+        return Iterator(iterable, backend, bridge=bridge)
 
     ### BACKENDS ########
 

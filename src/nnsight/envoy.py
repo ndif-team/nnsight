@@ -151,7 +151,7 @@ class Envoy:
 
         try:
 
-            return self._tracer._invoker.scanning
+            return self._tracer.invoker.scanning
 
         except:
 
@@ -420,7 +420,7 @@ class Envoy:
         """
 
         return protocols.ApplyModuleProtocol.add(
-            self._tracer._graph, self._module_path, *args, **kwargs
+            self._tracer.graph, self._module_path, *args, **kwargs
         )
 
     @property
@@ -451,7 +451,7 @@ class Envoy:
             module_path = f"{self._module_path}.output"
 
             self._output = InterventionProtocol.add(
-                self._tracer._graph,
+                self._tracer.graph,
                 fake_output,
                 args=[
                     module_path,
@@ -504,7 +504,7 @@ class Envoy:
             module_path = f"{self._module_path}.input"
 
             self._input = InterventionProtocol.add(
-                self._tracer._graph,
+                self._tracer.graph,
                 fake_input,
                 args=[
                     module_path,

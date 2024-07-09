@@ -60,7 +60,7 @@ class Invoker(AbstractContextManager):
             Invoker: Invoker.
         """
 
-        self.tracer._invoker = self
+        self.tracer.invoker = self
 
         preserved_inputs = None
 
@@ -68,7 +68,7 @@ class Invoker(AbstractContextManager):
         # Therefore we first: Check to see if there are any Proxies.
         # If there are, preserve the raw inputs with Proxies converted to a Locked Bridge protocol.
         # Set self.inputs to be the proxy_value so we can prepare_inputs, get the batch size, and scan.
-        if self.tracer._model._session is not None:
+        if self.tracer.model._session is not None:
 
             def check_for_nodes(proxy: Proxy):
 
@@ -81,7 +81,7 @@ class Invoker(AbstractContextManager):
                     node = proxy.node
 
                     return protocols.LockProtocol.add(
-                        protocols.BridgeProtocol.add(node, self.tracer._graph).node
+                        protocols.BridgeProtocol.add(node, self.tracer.graph).node
                     ).node
 
             inputs = util.apply(self.inputs, check_for_nodes, Proxy)
@@ -94,12 +94,12 @@ class Invoker(AbstractContextManager):
                     self.inputs, lambda x: x.node.proxy_value, Proxy
                 )
 
-        self.inputs, batch_size = self.tracer._model._prepare_inputs(
+        self.inputs, batch_size = self.tracer.model._prepare_inputs(
             *self.inputs, **self.kwargs
         )
 
         if self.scan:
-            self.tracer._model._envoy._clear()
+            self.tracer.model._envoy._clear()
 
             self.scanning = True
 
@@ -114,7 +114,7 @@ class Invoker(AbstractContextManager):
                     shape_env=ShapeEnv(assume_static_by_default=True),
                 ) as fake_mode:
                     with FakeCopyMode(fake_mode):
-                        self.tracer._model._execute(
+                        self.tracer.model._execute(
                             *copy.deepcopy(self.inputs),
                             **copy.deepcopy(self.tracer._kwargs),
                         )
@@ -122,7 +122,7 @@ class Invoker(AbstractContextManager):
             self.scanning = False
 
         else:
-            self.tracer._model._envoy._reset()
+            self.tracer.model._envoy._reset()
 
         self.tracer._batch_start += self.tracer._batch_size
         self.tracer._batch_size = batch_size
@@ -130,7 +130,7 @@ class Invoker(AbstractContextManager):
         # If there were no Proxies in the input, batch together the input.
         if preserved_inputs is None:
 
-            self.tracer._batched_input = self.tracer._model._batch_inputs(
+            self.tracer._batched_input = self.tracer.model._batch_inputs(
                 self.tracer._batched_input,
                 *self.inputs,
             )
@@ -150,7 +150,7 @@ class Invoker(AbstractContextManager):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
-        self.tracer._invoker = None
+        self.tracer.invoker = None
 
         if isinstance(exc_val, BaseException):
             raise exc_val
