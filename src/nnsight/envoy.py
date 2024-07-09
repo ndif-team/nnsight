@@ -420,7 +420,7 @@ class Envoy:
             InterventionProxy: Module call proxy.
         """
 
-        if isinstance(self._tracer._backend, EditBackend):
+        if isinstance(self._tracer.backend, EditBackend):
             hook = True
 
         return protocols.ApplyModuleProtocol.add(
@@ -454,7 +454,7 @@ class Envoy:
 
             module_path = f"{self._module_path}.output"
 
-            if isinstance(self._tracer._backend, EditBackend):
+            if isinstance(self._tracer.backend, EditBackend):
                 batch_size = -1
             else:
                 batch_size = self._tracer._batch_size
@@ -512,7 +512,7 @@ class Envoy:
 
             module_path = f"{self._module_path}.input"
 
-            if isinstance(self._tracer._backend, EditBackend):
+            if isinstance(self._tracer.backend, EditBackend):
                 batch_size = -1
             else:
                 batch_size = self._tracer._batch_size

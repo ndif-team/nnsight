@@ -209,7 +209,7 @@ class NNsight:
             backend = RemoteBackend(backend)
 
         # Create Tracer object.
-        if self._default_graph:
+        if self._default_graph is not None:
             graph = self._default_graph.copy()
             tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
         else:

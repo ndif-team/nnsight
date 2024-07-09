@@ -153,7 +153,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
     
     def edit_backend_execute(self) -> Graph:
         
-        self._model._default_graph = self._graph
+        self.model._default_graph = self.graph
 
     def remote_backend_get_model_key(self):
 
