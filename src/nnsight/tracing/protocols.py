@@ -1,6 +1,6 @@
 import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -343,6 +343,9 @@ class SwapProtocol(Protocol):
 
         return value
 
+class BridgeException(Exception):
+    def __init__(self):
+        super.__init__("Must define a Session context to make use of the Bridge")
 
 class BridgeProtocol(Protocol):
     """Protocol to connect two Graphs by grabbing a value from one and injecting it into another.
@@ -413,8 +416,7 @@ class BridgeProtocol(Protocol):
         """
 
         if not cls.has_bridge(graph):
-            # TODO error
-            pass
+            raise BridgeException()
 
         return graph.attachments[cls.attachment_name]
 
