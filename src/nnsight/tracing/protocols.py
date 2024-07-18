@@ -492,3 +492,57 @@ class ValueProtocol(Protocol):
     def set(cls, node: Node, value: Any) -> None:
 
         node.args[0] = value
+
+
+class UpdateProtocol(Protocol):
+    """ Protocol to update the value of an InterventionProxy node.
+
+    .. codeb-block:: python
+        with model.trace(input) as tracer:
+            num = tracer.apply(int, 0)
+            num.update(5)
+    """
+
+    @classmethod
+    def add(cls, graph: "Graph", node: "Node", new_value: Union[Node, Any]) -> "InterventionProxy":
+        """ Creates an UpdateProtocol node.
+
+        Args:
+            graph (Graph): Graph to create the protocol node on.
+            node (Node): Original node.
+            new_value (Union[Node, Any]): The update value.
+        
+        Returns:
+            InterventionProxy: proxy.
+        """
+
+        return graph.create(
+            target=cls,
+            proxy_value=node.proxy_value,
+            args=[
+                node.graph.id,
+                node.name,
+                new_value,
+            ],
+        )
+    
+    @classmethod
+    def execute(cls, node: "Node") -> None:
+        """ Sets the value of the original node to the new value.
+            If the original is defined outside the context, it uses the bridge to get the node.
+        
+        Args:
+            node (Node): UpdateProtocol node.
+        """
+
+        proxy_node_graph_id, proxy_node_name, new_value = node.args
+
+        if BridgeProtocol.has_bridge(node.graph):
+            bridge = BridgeProtocol.get_bridge(node.graph)
+            original_node: "Node" = bridge.id_to_graph[proxy_node_graph_id].nodes[proxy_node_name]
+        else:
+            original_node = node.graph.nodes[proxy_node_name]
+
+        original_node._value = util.apply(
+            new_value, lambda x: x.value, type(original_node)
+        )
