@@ -77,4 +77,13 @@ def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 
     with pytest.raises(ValueError):
         l2_out.value
+
+def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.session() as session:
+        val = session.apply(int, 0)
+        with tiny_model.trace(tiny_input):
+            tiny_model.layer1.output[:] = val # fetches the val proxy using the bridge protocol
+            l1_out = tiny_model.layer1.output.save()
+
+    assert torch.all(l1_out.value == 0).item()
     
