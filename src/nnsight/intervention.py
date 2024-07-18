@@ -501,7 +501,7 @@ class HookHandler(AbstractContextManager):
                     return self.input_hook((input, kwargs), module_path)
 
                 self.handles.append(
-                    module.register_forward_pre_hook(input_hook, with_kwargs=True)
+                    module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
                 )
 
             elif hook_type == "output":
@@ -509,7 +509,7 @@ class HookHandler(AbstractContextManager):
                 def output_hook(module, input, output, module_path=module_path):
                     return self.output_hook(output, module_path)
 
-                self.handles.append(module.register_forward_hook(output_hook))
+                self.handles.append(module.register_forward_hook(output_hook, prepend=True))
 
         return self
 
