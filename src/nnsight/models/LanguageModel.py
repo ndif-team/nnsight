@@ -8,6 +8,7 @@ from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
                           AutoTokenizer, BatchEncoding, PreTrainedModel,
                           PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
+from transformers.models.llama.configuration_llama import LlamaConfig
 
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
@@ -150,6 +151,9 @@ class LanguageModel(GenerationMixin, NNsight):
     ) -> PreTrainedModel:
 
         config = kwargs.pop("config", None) or AutoConfig.from_pretrained(repo_id, **kwargs)
+    
+        
+
 
         if self.tokenizer is None:
             if tokenizer_kwargs is None:
@@ -166,12 +170,20 @@ class LanguageModel(GenerationMixin, NNsight):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         if self._model is None:
+            
+                    
+            if isinstance(config, LlamaConfig) and  "rope_type" in config.rope_scaling:
+                config.rope_scaling['rope_type'] = "default"
 
             model = self.automodel.from_config(config, trust_remote_code=True)
             
             setattr(model, 'generator', WrapperModule())
 
             return model
+        
+        if isinstance(config, LlamaConfig) and  "rope_type" in config.rope_scaling:
+            config.rope_scaling['rope_type'] = "llama3"
+
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
