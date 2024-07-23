@@ -86,4 +86,14 @@ def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
             l1_out = tiny_model.layer1.output.save()
 
     assert torch.all(l1_out.value == 0).item()
+
+def test_update_protocol(tiny_model: NNsight):
+    with tiny_model.session() as session:
+        sum = session.apply(int, 0).save()
+        with session.iter([0, 1, 2]) as (item, iterator):
+            sum.update(sum + item)
+
+        sum.update(sum + 4)
+
+    assert sum.value == 7
     
