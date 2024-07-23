@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
@@ -45,8 +46,6 @@ class Node:
             args = list()
         if kwargs is None:
             kwargs = dict()
-            
-        args = list(args)
 
         self.name = name
         self.graph: "Graph" = graph
@@ -64,7 +63,9 @@ class Node:
 
         # Resolve values from completed tracer/runner contexts
         self.args = util.apply(self.args, lambda x: x.value if x.done() else x, Node)
-        self.kwargs = util.apply(self.kwargs, lambda x: x.value if x.done() else x, Node)
+        self.kwargs = util.apply(
+            self.kwargs, lambda x: x.value if x.done() else x, Node
+        )
 
         # Add all arguments that are nodes to nodes dependencies
         # (unless the arg is already .done(), for when you want to apply things to proxies after model execution?)
@@ -187,8 +188,8 @@ class Node:
         Returns:
             Any: Prepared inputs.
         """
-        
-        inputs = util.apply(inputs, lambda x : x, object)
+
+        inputs = util.apply(inputs, lambda x: x, inspect._empty)
 
         def _value(node: Proxy | Node):
 
