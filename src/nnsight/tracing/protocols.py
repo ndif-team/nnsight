@@ -520,8 +520,7 @@ class UpdateProtocol(Protocol):
             target=cls,
             proxy_value=node.proxy_value,
             args=[
-                node.graph.id,
-                node.name,
+                node,
                 new_value,
             ],
         )
@@ -535,14 +534,11 @@ class UpdateProtocol(Protocol):
             node (Node): UpdateProtocol node.
         """
 
-        proxy_node_graph_id, proxy_node_name, new_value = node.args
+        value_node, new_value = node.args
 
-        if BridgeProtocol.has_bridge(node.graph):
-            bridge = BridgeProtocol.get_bridge(node.graph)
-            original_node: "Node" = bridge.id_to_graph[proxy_node_graph_id].nodes[proxy_node_name]
-        else:
-            original_node = node.graph.nodes[proxy_node_name]
+        if value_node.target == BridgeProtocol:
+            bridge = BridgeProtocol.get_bridge(value_node.graph)
+            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
+            value_node = lock_node.args[0]
 
-        original_node._value = util.apply(
-            new_value, lambda x: x.value, type(original_node)
-        )
+        value_node._value = Node.prepare_inputs(new_value)
