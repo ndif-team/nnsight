@@ -357,11 +357,13 @@ More examples can be found at [nnsight.net](https://www.nnsight.net)
 If you use `nnsight` in your research, please cite using the following
 
 ```bibtex
-@software{nnsight,
-author = {Jaden Fiotto-Kaufman},
-license = {MIT},
-title = {{nnsight: The package for interpreting and manipulating the internals of deep learned models.
-}},
-url = {https://github.com/JadenFiotto-Kaufman/nnsight}
+@article{fiottokaufman2024nnsightndifdemocratizingaccess,
+      title={NNsight and NDIF: Democratizing Access to Foundation Model Internals}, 
+      author={Jaden Fiotto-Kaufman and Alexander R Loftus and Eric Todd and Jannik Brinkmann and Caden Juang and Koyena Pal and Can Rager and Aaron Mueller and Samuel Marks and Arnab Sen Sharma and Francesca Lucchetti and Michael Ripa and Adam Belfki and Nikhil Prakash and Sumeet Multani and Carla Brodley and Arjun Guha and Jonathan Bell and Byron Wallace and David Bau},
+      year={2024},
+      eprint={2407.14561},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2407.14561}, 
 }
 ``````
