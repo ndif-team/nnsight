@@ -541,4 +541,9 @@ class UpdateProtocol(Protocol):
             lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
             value_node = lock_node.args[0]
 
-        value_node._value = Node.prepare_inputs(new_value)
+        new_value = Node.prepare_inputs(new_value)
+
+        value_node._value = new_value
+
+        node.set_value(new_value)
+

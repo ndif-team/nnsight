@@ -83,6 +83,11 @@ class InterventionProxy(Proxy):
 
         Returns:
             InterventionProxy: Proxy.
+
+        .. codeb-block:: python
+            with model.trace(input) as tracer:
+                num = tracer.apply(int, 0)
+                num.update(5)
         """
 
         return protocols.UpdateProtocol.add(self.node.graph, self.node, value)
