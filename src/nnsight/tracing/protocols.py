@@ -1,12 +1,13 @@
 import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Union, Optional
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from nnsight.tracing.Node import Node
+from ..contexts.Conditional import ConditionalManager
 
 from .. import util
 
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from .Bridge import Bridge
     from .Graph import Graph
     from .Node import Node
+    from ..contexts.Conditional import Conditional
 
 
 class Protocol:
@@ -490,3 +492,154 @@ class ValueProtocol(Protocol):
     def set(cls, node: Node, value: Any) -> None:
 
         node.args[0] = value
+
+class ConditionalProtocol(Protocol):
+    """ Protocol operating as a conditional statement. 
+    Uses the ConditionalManager attachment to handle all visited Conditional contexts within a single Intervention Graph.
+    Evaluates the condition value of the Conditional as a boolean; if the condition value is a torch.Tensor with non-boolean type data,
+    then the condition simply evalutes to True. If the data is of boolean type, then a `.all()` operation is called on the tensor to get a final value.
+
+    Example:
+
+        Setup:
+            .. code-block:: python
+                import torch
+                from collections import OrderedDict
+
+                input_size = 5
+                hidden_dims = 10
+                output_size = 2
+
+                model = nn.Sequential(OrderedDict([
+                    ('layer1', torch.nn.Linear(input_size, hidden_dims)),
+                    ('layer2', torch.nn.Linear(hidden_dims, output_size)),
+                ]))
+
+                input = torch.rand((1, input_size))    å
+
+        Ex 1: The .save() on the model output will only be executed if the condition passed to tracer.cond() is evaluated to True.    
+    
+        .. code-block:: python
+            x: int = 5
+            with model.trace(input) as trace:
+                with tracer.cond(x > 0):
+                    out = model.output.save()
+
+        Ex 2: The condition is on an InterventionProxy which creates in return an InterventionProxy
+
+        .. code-block:: python
+            with model.trace(input) as trace:
+                with tracer.cond(model.layer1.output[:, 0] > 0):
+                    out = model.output.save()
+    """
+
+    attachment_name = "nnsight_conditional_manager"
+
+    @classmethod
+    def add(cls, graph: "Graph", condition: Union["InterventionProxy", Any]) -> "InterventionProxy":
+        return graph.create(target=cls, proxy_value=True, args=[condition])
+    
+    @classmethod
+    def execute(cls, node: "Node", eval_cond: bool = True) -> None:
+        """ Evaluate the node condition to a boolean. 
+        If True, set the node value so that it's listeners can get executed.
+        Else, set the value of all it's listeners to remove their presence.
+        If a listener is another ConditionalProtocol node, equivalent to a nested Conditional context,
+        then execute it without evaluating it's condition, to reproduce the same effect.
+        
+        Args:
+            node (Node): ConditionalProtocol node.
+            eval_cond (bool): If true execute the node based on the evaluation of its stored condition.
+        """
+
+        if eval_cond:
+            cond_value = Node.prepare_inputs(node.args[0])
+            
+            # For tensors with boolean values, call `.all()` to get a single value
+            if isinstance(cond_value, torch.Tensor):
+                if cond_value.dtype == torch.bool:
+                    cond_bool = bool(cond_value.all())
+                    if cond_bool:
+                        # cond_value is True
+                        node.set_value(True)
+                        return
+                else:
+                    # cond_value is True
+                    node.set_value(True)
+                    return
+            # Otherwise, just get the boolean value of the cond_value
+            elif cond_value:
+                # cond_value is True
+                node.set_value(True)
+                return
+        
+        # If the condition value is ignore or evaluated to False
+        for listener in node.listeners:
+                # If the ConditionalProtocol node listener is not a nested ConditionalProtocol node
+                if not isinstance(listener.target, type) \
+                    or not issubclass(listener.target, ConditionalProtocol):
+                    listener.set_value(None)
+                else:
+                    # If the listener is a ConditionalProtocol node, execute it to set its listeners 
+                    # regardless of its condition value 
+                    listener.target.execute(listener, eval_cond=False)
+
+    @classmethod
+    def has_conditional(cls, graph: "Graph") -> bool:
+        """ Checks if the Intervention Graph has a ConditionalManager attached to it.
+
+        Args:
+            graph (Graph): Intervention Graph.
+        
+        Returns:
+            bool: If graph has a ConditionalManager attachement. 
+        """
+        return cls.attachment_name in graph.attachments.keys()
+    
+    @classmethod
+    def get_conditional(cls, graph: "Graph", cond_key: str) -> "Conditional":
+        """ Gets the Conditional context associated with the key in the ConditionalManager attachement of the Graph.
+        
+        Args:
+            graph (Graph): Intervention Graph.
+            cond_key (str): Dictionary key for the desired Conditional context.
+
+        Returns:
+            Conditional: Conditional context.
+        """
+        return graph.attachments[cls.attachment_name].get(cond_key)
+
+    @classmethod
+    def push_conditional(cls, graph: "Graph", conditional: "Conditional") -> None:
+        """ Adds a Conditional context to the graph.
+        
+        Args:
+            graph (Graph): Intervention Graph.
+            conditional (Conditional): Newly entered Conditional context to be add to the Intervention Graph.
+        """
+
+        # All Conditional contexts associated with a graph are stored and managed by the ConditionalManager.
+        # Create a ConditionalManager attachement to the graph if this is the Conditional context to be entered.
+        if cls.attachment_name not in graph.attachments.keys():
+            graph.attachments[cls.attachment_name] = ConditionalManager()
+        
+        # Push the Conditional context to the ConditionalManager
+        graph.attachments[cls.attachment_name].push(conditional)
+
+    @classmethod
+    def pop_conditional(cls, graph: "Graph") -> None:
+        """ Pops latest Conditional context from the ConditionalManager attached to the graph.
+        
+        Args:
+            graph (Graph): Intervention Graph.
+        """
+        graph.attachments[cls.attachment_name].pop()
+
+    @classmethod
+    def peek_conditional(cls, graph: "Graph") -> "Conditional":
+        """ Gets the most recent Conditional context added to the graph.
+        
+        Returns:
+            Conditional: Current Conditional context.
+        """
+        return graph.attachments[cls.attachment_name].peek()

@@ -32,7 +32,7 @@ class Session(GraphBasedContext, RemoteMixin):
 
         self.model = model
 
-        GraphBasedContext.__init__(self, backend, bridge=self.bridge, *args, **kwargs)
+        GraphBasedContext.__init__(self, backend, bridge=self.bridge, proxy_class=model.proxy_class, *args, **kwargs)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 

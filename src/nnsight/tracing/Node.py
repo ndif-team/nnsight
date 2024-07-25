@@ -27,7 +27,8 @@ class Node:
         args (List[Any], optional): Positional arguments. Defaults to None.
         kwargs (Dict[str, Any], optional): Keyword arguments. Defaults to None.
         listeners (List[Node]): Nodes that depend on this node.
-        dependencies (List[Node]): Nodes that this node depends on.
+        arg_dependencies (List[Node]): Nodes that this node depends on.
+        cond_dependency (Optional[Node]): ConditionalProtocol node if this node was defined within a Conditional context.
         value (Any): Actual value to be populated during execution.
     """
 
@@ -59,7 +60,8 @@ class Node:
         self._value: Any = inspect._empty
 
         self.listeners: List[Node] = list()
-        self.dependencies: List[Node] = list()
+        self.arg_dependencies: List[Node] = list()
+        self.cond_dependency: Optional[Node] = None
 
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
@@ -94,6 +96,18 @@ class Node:
             if redirect_execution:
                 self.graph = bridge.peek_graph()
 
+        if (self.attached()
+            and protocols.ConditionalProtocol.has_conditional(self.graph)
+            and self.target.__name__ != "InterventionProtocol"): 
+
+            conditional = protocols.ConditionalProtocol.peek_conditional(self.graph)
+
+            # only the top dependency needs to add the Conditional as a dependency
+            # if none of the dependent are dependent on the Conditional, then add it
+            if conditional and all([(conditional.proxy.node not in arg.args if isinstance(arg, Node) else True) for arg in self.args]):
+                self.cond_dependency = conditional.proxy.node
+                conditional.proxy.node.listeners.append(weakref.proxy(self))
+
         def preprocess_node(node: Union[Node, Proxy]):
 
             if isinstance(node, Proxy):
@@ -106,7 +120,7 @@ class Node:
 
             if not node.done():
 
-                self.dependencies.append(node)
+                self.arg_dependencies.append(node)
                 # Weakref so no reference loop
                 node.listeners.append(weakref.proxy(self))
 
@@ -207,7 +221,7 @@ class Node:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = len(self.dependencies)
+        self.remaining_dependencies = len(self.arg_dependencies) + int(bool(self.cond_dependency))
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
@@ -322,7 +336,7 @@ class Node:
             if listener.fulfilled():
                 listener.execute()
 
-        for dependency in self.dependencies:
+        for dependency in self.arg_dependencies:
             dependency.remaining_listeners -= 1
 
             if dependency.redundant():
@@ -342,4 +356,4 @@ class Node:
         args = util.apply(self.args, lambda x: f"'{x}'", str)
         args = util.apply(args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]
-        return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} d:{len(self.dependencies)}]"
+        return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} a_d:{len(self.arg_dependencies)} c_d{bool(self.cond_dependency)}]"
