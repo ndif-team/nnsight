@@ -77,4 +77,131 @@ def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 
     with pytest.raises(ValueError):
         l2_out.value
+
+def test_true_conditional_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    x: int = 5
+    with tiny_model.trace(tiny_input) as tracer:
+        with tracer.cond(x > 0):
+            tiny_model.layer1.output[:] = 1
+            l1_out = tiny_model.layer1.output.save()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+    assert torch.all(l1_out.value == 1).item()
+
+def test_false_conditional_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    x: int = 5
+    with tiny_model.trace(tiny_input) as tracer:
+        with tracer.cond(x < 0):
+            tiny_model.layer1.output[:] = 1
+            l1_out = tiny_model.layer1.output.save()
+
+        # check that the condition does not persist outside the context
+        l2_out = tiny_model.layer2.output.save()
+
+    with pytest.raises(ValueError):
+        l1_out.value
+    assert isinstance(l2_out.value, torch.Tensor)
+
+def test_node_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
+    """ Test a Tensor a boolean value as a result of a boolean operation on an InterventionProxy """
+
+    with tiny_model.trace(tiny_input) as tracer:
+        out = tiny_model.layer1.output
+        out[:, 0] = 1
+        with tracer.cond(out[:, 0] != 1):
+            tiny_model.layer1.output[:] = 1
+            l1_out = tiny_model.layer1.output.save()
+
+    with pytest.raises(ValueError):
+        l1_out.value
+
+def test_tensor_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input) as tracer:
+        out = tiny_model.layer1.output
+        out[:, 0] = 1
+        with tracer.cond(out):
+            tiny_model.layer1.output[:] = 1
+            l1_out = tiny_model.layer1.output.save()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+    assert torch.all(l1_out.value == 1)
+
+def test_object_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input) as tracer:
+        full_list = tracer.apply(list, [0, 1, 2])
+        empty_list = tracer.apply(list)
+
+        with tracer.cond(full_list):
+            l1_out = tiny_model.layer1.output.save()
+
+        with tracer.cond(empty_list):
+            l2_out = tiny_model.layer2.output.save()
+
+        with tracer.cond(None):
+            out = tiny_model.output.save()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+    with pytest.raises(ValueError):
+        l2_out.value
+    with pytest.raises(ValueError):
+        out.value
+
+def test_multiple_dependent_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
+    """ Test that interventions defined within different Intervention contexts can be referenced if their conditions evaluated to True. """
+
+    x: int = 5
+    with tiny_model.trace(tiny_input) as tracer:
+        l1_out = tiny_model.layer1.output
+        l2_out = tiny_model.layer2.output.save()
+        with tracer.cond(x > 0):
+            l1_out[:] = 1
+
+        with tracer.cond(l1_out[:, 0] != 1):
+            tiny_model.layer2.output[:] = 2
+        
+        with tracer.cond(l1_out[:, 0] == 1):
+            tiny_model.layer2.output[:] = 3
+
+    assert torch.all(l2_out.value == 3).item()
+
+def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
+    x: int = 5
+    with tiny_model.trace(tiny_input) as tracer:
+        with tracer.cond(x > 0): # True
+            l1_out = tiny_model.layer1.output.save()
+
+            with tracer.cond(x > 0 ): # True
+                tiny_model.layer1.output[:] = 1
+
+            with tracer.cond(x < 0): # False
+                tiny_model.layer1.output[:] = 2
+
+        with tracer.cond(x < 0): # False
+            tiny_model.layer2.output[:] = 0
+
+            with tracer.cond(x > 0): # True
+                l2_out = tiny_model.layer2.output.save()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+    assert torch.all(l1_out.value == 1).item()
+    with pytest.raises(ValueError):
+        l2_out.value
+
+def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.session() as session:
+        x: int = 5
+        with session.cond(x > 0):
+            with tiny_model.trace(tiny_input):
+                output = tiny_model.output.save()
+
+    assert isinstance(output.value, torch.Tensor)
+
+def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.session() as session:
+        result = session.apply(list).save()
+        with session.iter([0, 1, 2]) as (item, iterator):
+            with iterator.cond(item % 2 == 0):
+                with tiny_model.trace(tiny_input):
+                    result.append(item)
     
+    assert result.value == [0, 2]
