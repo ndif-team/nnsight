@@ -27,6 +27,8 @@ def get_function_name(fn, module_name=None):
 
 
 FUNCTIONS_WHITELIST = {}
+
+### Torch functions
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(value): value

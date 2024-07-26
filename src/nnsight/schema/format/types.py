@@ -41,10 +41,20 @@ FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, type]
 PRIMITIVE = Union[int, float, str, bool, None]
 
 
-class NodeModel(BaseModel):
+class BaseNNsightModel(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    class Reference(BaseModel):
+    type_name: Literal["TYPE_NAME"]
+
+    def deserialize(self, handler: DeserializeHandler):
+        raise NotImplementedError()
+
+### Custom Pydantic types for all supported base types
+class NodeModel(BaseNNsightModel):
+
+    type_name: Literal["NODE"] = "NODE"
+
+    class Reference(BaseNNsightModel):
         type_name: Literal["NODE_REFERENCE"] = "NODE_REFERENCE"
 
         name: str
@@ -81,16 +91,17 @@ class NodeModel(BaseModel):
         return node
 
 
-class PrimitiveModel(BaseModel):
+class PrimitiveModel(BaseNNsightModel):
+
     type_name: Literal["PRIMITIVE"] = "PRIMITIVE"
+
     value: PRIMITIVE
 
     def deserialize(self, handler: DeserializeHandler) -> PRIMITIVE:
         return self.value
 
 
-class TensorModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class TensorModel(BaseNNsightModel):
 
     type_name: Literal["TENSOR"] = "TENSOR"
 
@@ -102,8 +113,7 @@ class TensorModel(BaseModel):
         return torch.tensor(self.values, dtype=dtype)
 
 
-class SliceModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class SliceModel(BaseNNsightModel):
 
     type_name: Literal["SLICE"] = "SLICE"
 
@@ -120,8 +130,8 @@ class SliceModel(BaseModel):
         )
 
 
-class EllipsisModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class EllipsisModel(BaseNNsightModel):
+
     type_name: Literal["ELLIPSIS"] = "ELLIPSIS"
 
     def deserialize(
@@ -132,8 +142,7 @@ class EllipsisModel(BaseModel):
         return ...
 
 
-class ListModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class ListModel(BaseNNsightModel):
 
     type_name: Literal["LIST"] = "LIST"
 
@@ -143,8 +152,7 @@ class ListModel(BaseModel):
         return [value.deserialize(handler) for value in self.values]
 
 
-class TupleModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class TupleModel(BaseNNsightModel):
 
     type_name: Literal["TUPLE"] = "TUPLE"
 
@@ -154,8 +162,7 @@ class TupleModel(BaseModel):
         return tuple([value.deserialize(handler) for value in self.values])
 
 
-class DictModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class DictModel(BaseNNsightModel):
 
     type_name: Literal["DICT"] = "DICT"
 
@@ -169,8 +176,7 @@ class FunctionWhitelistError(Exception):
     pass
 
 
-class FunctionModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class FunctionModel(BaseNNsightModel):
 
     type_name: Literal["FUNCTION"] = "FUNCTION"
 
@@ -190,8 +196,7 @@ class FunctionModel(BaseModel):
         return FUNCTIONS_WHITELIST[self.function_name]
 
 
-class GraphModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class GraphModel(BaseNNsightModel):
 
     type_name: Literal["GRAPH"] = "GRAPH"
 
@@ -211,13 +216,7 @@ class GraphModel(BaseModel):
         return graph
 
 
-GraphType = Annotated[
-    Graph, AfterValidator(lambda value: GraphModel(id=value.id, nodes=value.nodes))
-]
-
-
-class TracerModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class TracerModel(BaseNNsightModel):
 
     type_name: Literal["TRACER"] = "TRACER"
 
@@ -241,8 +240,7 @@ class TracerModel(BaseModel):
         return tracer
 
 
-class IteratorModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class IteratorModel(BaseNNsightModel):
 
     type_name: Literal["ITERATOR"] = "ITERATOR"
 
@@ -261,8 +259,7 @@ class IteratorModel(BaseModel):
         return iterator
 
 
-class SessionModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class SessionModel(BaseNNsightModel):
 
     type_name: Literal["SESSION"] = "SESSION"
 
@@ -282,6 +279,12 @@ class SessionModel(BaseModel):
 
         return session
 
+
+### Define Annotated types to convert objects to their custom Pydantic counterpart
+
+GraphType = Annotated[
+    Graph, AfterValidator(lambda value: GraphModel(id=value.id, nodes=value.nodes))
+]
 
 PrimitiveType = Annotated[
     PRIMITIVE, AfterValidator(lambda value: PrimitiveModel(value=value))
@@ -353,6 +356,7 @@ SessionType = Annotated[
     AfterValidator(lambda value: SessionModel(graph=value.graph)),
 ]
 
+### Register all custom Pydantic objects to convert objects to
 TOTYPES = Union[
     TracerModel,
     IteratorModel,
@@ -366,6 +370,7 @@ TOTYPES = Union[
     DictModel,
     EllipsisModel,
 ]
+### Register all Annotated types objects to convert objects from
 FROMTYPES = Union[
     TracerType,
     IteratorType,
@@ -380,7 +385,7 @@ FROMTYPES = Union[
     EllipsisType,
 ]
 
-# Register all values
+### Final registration
 ValueTypes = Union[
     Annotated[
         TOTYPES,
