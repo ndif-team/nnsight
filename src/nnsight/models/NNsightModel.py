@@ -78,9 +78,7 @@ class NNsight:
 
         # Otherwise load from _load(...).
         if not self._custom_model:
-            # accelerate.init_empty_weights makes all parameters loaded on the 'meta' device.
-            # Also do .to('meta') because why not.
-            with accelerate.init_empty_weights(include_buffers=True):
+            with torch.device('meta'):
                 self._model = self._load(self._model_key, *args, **kwargs).to("meta")
 
         self._envoy = Envoy(self._model)

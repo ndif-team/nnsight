@@ -14,8 +14,18 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
 )
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.models.auto import modeling_auto
 from typing_extensions import Self
+from transformers.models.llama.configuration_llama import LlamaConfig
 
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
@@ -177,11 +187,17 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         if self._model is None:
 
+            if isinstance(config, LlamaConfig) and isinstance(config.rope_scaling, dict) and "rope_type" in config.rope_scaling:
+                config.rope_scaling["rope_type"] = "default"
+
             model = self.automodel.from_config(config, trust_remote_code=True)
 
             setattr(model, "generator", WrapperModule())
 
             return model
+
+        if isinstance(config, LlamaConfig) and isinstance(config.rope_scaling, dict) and "rope_type" in config.rope_scaling:
+            config.rope_scaling["rope_type"] = "llama3"
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 

@@ -33,10 +33,9 @@ for key, value in getmembers(einops.einops, isfunction):
 for key, value in getmembers(math, isbuiltin):
     DEFAULT_PATCHER.add(Patch(math, proxy_wrapper(value), key))
 
-# TODO THis does not work. Because of accelerate also patching? because they are overloaded?
-#DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))
-# DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
-# DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
+DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))
+DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
+DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
 
 from torch._subclasses.fake_tensor import FakeTensor
 
