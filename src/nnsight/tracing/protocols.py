@@ -575,14 +575,14 @@ class ConditionalProtocol(Protocol):
         
         # If the condition value is ignore or evaluated to False
         for listener in node.listeners:
-                # If the ConditionalProtocol node listener is not a nested ConditionalProtocol node
-                if not isinstance(listener.target, type) \
-                    or not issubclass(listener.target, ConditionalProtocol):
-                    listener.set_value(None)
-                else:
-                    # If the listener is a ConditionalProtocol node, execute it to set its listeners 
-                    # regardless of its condition value 
-                    listener.target.execute(listener, eval_cond=False)
+            # excute nested conditional without evaluating
+            if listener.target == ConditionalProtocol:
+                listener.target.execute(listener, eval_cond=False)
+            else:
+                # decrease listener count for all dependencies of a node that will not be executed
+                for listener_arg in listener.arg_dependencies:
+                    listener_arg.remaining_listeners -= 1
+
 
     @classmethod
     def has_conditional(cls, graph: "Graph") -> bool:

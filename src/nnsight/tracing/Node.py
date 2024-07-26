@@ -96,18 +96,6 @@ class Node:
             if redirect_execution:
                 self.graph = bridge.peek_graph()
 
-        if (self.attached()
-            and protocols.ConditionalProtocol.has_conditional(self.graph)
-            and self.target.__name__ != "InterventionProtocol"): 
-
-            conditional = protocols.ConditionalProtocol.peek_conditional(self.graph)
-
-            # only the top dependency needs to add the Conditional as a dependency
-            # if none of the dependent are dependent on the Conditional, then add it
-            if conditional and all([(conditional.proxy.node not in arg.args if isinstance(arg, Node) else True) for arg in self.args]):
-                self.cond_dependency = conditional.proxy.node
-                conditional.proxy.node.listeners.append(weakref.proxy(self))
-
         def preprocess_node(node: Union[Node, Proxy]):
 
             if isinstance(node, Proxy):
@@ -134,6 +122,19 @@ class Node:
         self.args, self.kwargs = util.apply(
             (self.args, self.kwargs), preprocess_node, (Node, Proxy)
         )
+
+        if (self.attached()
+            and protocols.ConditionalProtocol.has_conditional(self.graph)
+            and self.target.__name__ != "InterventionProtocol"
+            and self.target.__name__ != "BridgeProtocol"): 
+
+            conditional = protocols.ConditionalProtocol.peek_conditional(self.graph)
+
+            # only the top dependency needs to add the Conditional as a dependency
+            # if none of the dependent are dependent on the Conditional, then add it
+            if conditional and all([(conditional.proxy.node != arg.cond_dependency if isinstance(arg, Node) else True) for arg in self.args]):
+                self.cond_dependency = conditional.proxy.node
+                conditional.proxy.node.listeners.append(weakref.proxy(self))
 
     @property
     def value(self) -> Any:
