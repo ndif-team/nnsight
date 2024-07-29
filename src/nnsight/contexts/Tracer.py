@@ -50,6 +50,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
             bridge=bridge,
             proxy_class=model.proxy_class,
             validate=validate,
+            sequential=False
         )
 
         protocols.ApplyModuleProtocol.set_module(self.graph, self.model)
@@ -119,7 +120,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         protocols.ApplyModuleProtocol.set_module(self.graph, self.model._model)
 
-        self.graph.compile()
+        self.graph.execute()
 
         _batched_input = self._batched_input
 

@@ -280,7 +280,7 @@ class Node:
         Lets protocol execute if target is str.
         Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
-        
+
         try:
 
             if isinstance(self.target, type) and issubclass(
@@ -299,10 +299,12 @@ class Node:
 
                 # Set value.
                 self.set_value(output)
-                
+
         except Exception as e:
-            
-            raise type(e)(f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'") from e
+
+            raise type(e)(
+                f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
+            ) from e
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
@@ -316,11 +318,13 @@ class Node:
 
         logger.info(f"=> SET({self.name})")
 
-        for listener in self.listeners:
-            listener.remaining_dependencies -= 1
+        if self.attached() and not self.graph.sequential:
 
-            if listener.fulfilled():
-                listener.execute()
+            for listener in self.listeners:
+                listener.remaining_dependencies -= 1
+
+                if listener.fulfilled():
+                    listener.execute()
 
         for dependency in self.dependencies:
             dependency.remaining_listeners -= 1

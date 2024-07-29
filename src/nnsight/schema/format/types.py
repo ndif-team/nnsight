@@ -201,17 +201,28 @@ class GraphModel(BaseNNsightModel):
     type_name: Literal["GRAPH"] = "GRAPH"
 
     id: int
+    sequential: bool
     nodes: Dict[str, Union["NodeModel", "NodeType"]]
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
 
-        graph = Graph(validate=False, graph_id=self.id)
+        graph = Graph(validate=False, sequential=self.sequential, graph_id=self.id)
 
         handler.graph = graph
         handler.nodes = self.nodes
+        
+        # To preserve order
+        nodes = {}
 
-        for node in self.nodes.values():
+        for node_name, node in self.nodes.items():
+            
             node.deserialize(handler)
+            
+            # To preserve order
+            nodes[node_name] = graph.nodes[node_name]
+            
+        # To preserve order  
+        graph.nodes = nodes
 
         return graph
 
@@ -283,7 +294,7 @@ class SessionModel(BaseNNsightModel):
 ### Define Annotated types to convert objects to their custom Pydantic counterpart
 
 GraphType = Annotated[
-    Graph, AfterValidator(lambda value: GraphModel(id=value.id, nodes=value.nodes))
+    Graph, AfterValidator(lambda value: GraphModel(id=value.id, sequential=value.sequential, nodes=value.nodes))
 ]
 
 PrimitiveType = Annotated[

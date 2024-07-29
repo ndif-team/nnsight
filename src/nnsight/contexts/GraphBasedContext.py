@@ -64,7 +64,7 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
 
     def local_backend_execute(self) -> None:
 
-        self.graph.compile()
+        self.graph.execute()
 
         graph = self.graph
         graph.alive = False
