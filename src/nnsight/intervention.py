@@ -75,6 +75,23 @@ class InterventionProxy(Proxy):
 
         return self
 
+    def update(self, value: Union[Node, Any]) -> InterventionProxy:
+        """ Updates the value of the Proxy via the creation of the UpdateProtocol node.
+
+        Args:
+            - value (Union[Node, Any]): New proxy value.
+
+        Returns:
+            InterventionProxy: Proxy.
+
+        .. codeb-block:: python
+            with model.trace(input) as tracer:
+                num = tracer.apply(int, 0)
+                num.update(5)
+        """
+
+        return protocols.UpdateProtocol.add(self.node, value)
+
     @property
     def grad(self) -> InterventionProxy:
         """
