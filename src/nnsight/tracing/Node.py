@@ -222,7 +222,7 @@ class Node:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = len(self.arg_dependencies) + int(bool(self.cond_dependency))
+        self.remaining_dependencies = len(self.arg_dependencies) + int(not(self.cond_dependency is None))
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
