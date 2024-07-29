@@ -90,7 +90,7 @@ class InterventionProxy(Proxy):
                 num.update(5)
         """
 
-        return protocols.UpdateProtocol.add(self.node.graph, self.node, value)
+        return protocols.UpdateProtocol.add(self.node, value)
 
     @property
     def grad(self) -> InterventionProxy:

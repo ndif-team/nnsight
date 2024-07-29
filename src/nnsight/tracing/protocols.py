@@ -504,11 +504,10 @@ class UpdateProtocol(Protocol):
     """
 
     @classmethod
-    def add(cls, graph: "Graph", node: "Node", new_value: Union[Node, Any]) -> "InterventionProxy":
+    def add(cls, node: "Node", new_value: Union[Node, Any]) -> "InterventionProxy":
         """ Creates an UpdateProtocol node.
 
         Args:
-            graph (Graph): Graph to create the protocol node on.
             node (Node): Original node.
             new_value (Union[Node, Any]): The update value.
         
@@ -516,7 +515,7 @@ class UpdateProtocol(Protocol):
             InterventionProxy: proxy.
         """
 
-        return graph.create(
+        return node.create(
             target=cls,
             proxy_value=node.proxy_value,
             args=[
