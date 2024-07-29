@@ -58,10 +58,9 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             of the conditional context.
         
         Args:
-            condition (Union[InterventionProxy, bool, Any]): Dependency of the Conditional Node should typically be an InterventionProxy holding a boolean or a stand alone boolean value.
-                                                             If the proxy value is a `torch.Tensor` of `dtype == torch.Boolean` then the condition value is the AND sum operation
-                                                             on all the booleans in the Tensor, if the data is of another type then the value is just True.
-                                                             For all other values, the condition value is simply evaluted with `bool()`.
+            condition (Union[InterventionProxy, bool, Any]): Dependency of the Conditional Node should typically be an 
+                InterventionProxy holding a boolean or a stand alone boolean value. It is evaluated by calling `bool()`.
+                                                        
                                                              
         Returns:
             Conditional: Conditional context object.

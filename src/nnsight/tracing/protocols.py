@@ -496,8 +496,7 @@ class ValueProtocol(Protocol):
 class ConditionalProtocol(Protocol):
     """ Protocol operating as a conditional statement. 
     Uses the ConditionalManager attachment to handle all visited Conditional contexts within a single Intervention Graph.
-    Evaluates the condition value of the Conditional as a boolean; if the condition value is a torch.Tensor with non-boolean type data,
-    then the condition simply evalutes to True. If the data is of boolean type, then a `.all()` operation is called on the tensor to get a final value.
+    Evaluates the condition value of the Conditional as a boolean.
 
     Example:
 
@@ -554,21 +553,7 @@ class ConditionalProtocol(Protocol):
 
         if eval_cond:
             cond_value = Node.prepare_inputs(node.args[0])
-            
-            # For tensors with boolean values, call `.all()` to get a single value
-            if isinstance(cond_value, torch.Tensor):
-                if cond_value.dtype == torch.bool:
-                    cond_bool = bool(cond_value.all())
-                    if cond_bool:
-                        # cond_value is True
-                        node.set_value(True)
-                        return
-                else:
-                    # cond_value is True
-                    node.set_value(True)
-                    return
-            # Otherwise, just get the boolean value of the cond_value
-            elif cond_value:
+            if cond_value:
                 # cond_value is True
                 node.set_value(True)
                 return
