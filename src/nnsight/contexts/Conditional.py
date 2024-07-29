@@ -67,17 +67,14 @@ class Conditional(AbstractContextManager):
     """
 
     def __init__(self, graph: "Graph", condition: Union["Node", Any]):
-       self._graph: "Graph" = graph
-       self._condition: Union["Node", Any] = condition
+       self.graph: "Graph" = graph
+       self.condition: Union["Node", Any] = condition
 
     def __enter__(self) -> Conditional:
 
-        self.proxy = protocols.ConditionalProtocol.add(self._graph, self._condition) 
-        
-        # push this conditional to the stack of the ConditionalManager
-        protocols.ConditionalProtocol.push_conditional(self._graph, self)
+        protocols.ConditionalProtocol.add(self) 
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        protocols.ConditionalProtocol.pop_conditional(self._graph)
+        protocols.ConditionalProtocol.pop_conditional(self.graph)

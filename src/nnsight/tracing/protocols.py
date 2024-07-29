@@ -535,8 +535,11 @@ class ConditionalProtocol(Protocol):
     attachment_name = "nnsight_conditional_manager"
 
     @classmethod
-    def add(cls, graph: "Graph", condition: Union["InterventionProxy", Any]) -> "InterventionProxy":
-        return graph.create(target=cls, proxy_value=True, args=[condition])
+    def add(cls, conditional: "Conditional") -> None:
+
+        conditional.proxy = conditional.graph.create(target=cls, proxy_value=True, args=[conditional.condition])
+
+        ConditionalProtocol.push_conditional(conditional.graph, conditional)
     
     @classmethod
     def execute(cls, node: "Node", eval_cond: bool = True) -> None:
