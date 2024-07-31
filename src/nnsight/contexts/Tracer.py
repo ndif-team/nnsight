@@ -25,9 +25,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         _graph (nnsight.tracing.Graph.Graph): Graph which traces operations performed on the input and output of modules' Envoys are added and later executed.
         _args (List[Any]): Positional arguments to be passed to function that executes the model.
         _kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
-        _batch_size (int): Batch size of the most recent input. Used by Envoy to create input/output proxies.
-        _batch_start (int): Batch start of the most recent input. Used by Envoy to create input/output proxies.
-        _batched_input (Any): Batched version of all inputs involved in this Tracer.
+        _invoker_inputs (List[Any]): Inputs for each invocation of this Tracer.
         _invoker (Invoker): Currently open Invoker.
     """
 
@@ -59,10 +57,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.invoker: Optional[Invoker] = None
 
-        self._batch_size: int = 0
-        self._batch_start: int = 0
-
-        self._batched_input: Any = None
+        self._invoker_inputs: List[Any] = []
 
         # Module Envoys need to know about the current Tracer to create the correct proxies.
         self.model._envoy._set_tracer(weakref.proxy(self))
@@ -84,7 +79,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
             self.graph = None
             raise exc_val
 
-        if self._batched_input is None:
+        if len(self._invoker_inputs) == 0:
             raise ValueError("No input was provided to the tracing context.")
 
         self.backend(self)
@@ -122,7 +117,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.graph.execute()
 
-        _batched_input = self._batched_input
+        invoker_inputs  = self._invoker_inputs
 
         # If ths graph has a Bridge, we need to check for Nodes in the input itself.
         if protocols.BridgeProtocol.has_bridge(self.graph):
@@ -135,12 +130,12 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
                 return value
 
-            _batched_input = util.apply(_batched_input, get_value, Node)
+            invoker_inputs = util.apply(invoker_inputs, get_value, Node)
 
         self.model.interleave(
             self.model._execute,
             self.graph,
-            *_batched_input,
+            *invoker_inputs,
             **self._kwargs,
         )
 

@@ -6,9 +6,9 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 
+from .contexts.backends import EditBackend
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProtocol, InterventionProxy
-from .contexts.backends import EditBackend
 from .tracing import protocols
 
 
@@ -400,8 +400,7 @@ class Envoy:
         return getattr(self._module, key)
 
     def __setattr__(self, key: Any, value: Any) -> None:
-        """Overload setattr to create and set an Envoy when trying to set a torch Module.
-        """
+        """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
         if key != "_module" and isinstance(value, torch.nn.Module):
 
@@ -413,7 +412,9 @@ class Envoy:
 
             super().__setattr__(key, value)
 
-    def __call__(self, *args: List[Any], hook=False, **kwargs: Dict[str, Any]) -> InterventionProxy:
+    def __call__(
+        self, *args: List[Any], hook=False, **kwargs: Dict[str, Any]
+    ) -> InterventionProxy:
         """Creates a proxy to call the underlying module's forward method with some inputs.
 
         Returns:
@@ -454,18 +455,12 @@ class Envoy:
 
             module_path = f"{self._module_path}.output"
 
-            if isinstance(self._tracer.backend, EditBackend):
-                batch_size = -1
-            else:
-                batch_size = self._tracer._batch_size
-
             self._output = InterventionProtocol.add(
                 self._tracer.graph,
                 fake_output,
                 args=[
                     module_path,
-                    batch_size,
-                    self._tracer._batch_start,
+                    len(self._tracer._invoker_inputs) - 1,
                     self._call_iter,
                 ],
             )
@@ -512,18 +507,12 @@ class Envoy:
 
             module_path = f"{self._module_path}.input"
 
-            if isinstance(self._tracer.backend, EditBackend):
-                batch_size = -1
-            else:
-                batch_size = self._tracer._batch_size
-
             self._input = InterventionProtocol.add(
                 self._tracer.graph,
                 fake_input,
                 args=[
                     module_path,
-                    batch_size,
-                    self._tracer._batch_start,
+                    len(self._tracer._invoker_inputs) - 1,
                     self._call_iter,
                 ],
             )

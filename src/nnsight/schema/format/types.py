@@ -49,6 +49,7 @@ class BaseNNsightModel(BaseModel):
     def deserialize(self, handler: DeserializeHandler):
         raise NotImplementedError()
 
+
 ### Custom Pydantic types for all supported base types
 class NodeModel(BaseNNsightModel):
 
@@ -210,18 +211,18 @@ class GraphModel(BaseNNsightModel):
 
         handler.graph = graph
         handler.nodes = self.nodes
-        
+
         # To preserve order
         nodes = {}
 
         for node_name, node in self.nodes.items():
-            
+
             node.deserialize(handler)
-            
+
             # To preserve order
             nodes[node_name] = graph.nodes[node_name]
-            
-        # To preserve order  
+
+        # To preserve order
         graph.nodes = nodes
 
         return graph
@@ -232,21 +233,23 @@ class TracerModel(BaseNNsightModel):
     type_name: Literal["TRACER"] = "TRACER"
 
     kwargs: Dict[str, ValueTypes]
-    batched_input: ValueTypes
+    invoker_inputs: List[ValueTypes]
     graph: Union[GraphModel, GraphType]
 
     def deserialize(self, handler: DeserializeHandler) -> Tracer:
 
         kwargs = {key: value.deserialize(handler) for key, value in self.kwargs.items()}
 
-        batched_input = self.batched_input.deserialize(handler)
+        invoker_inputs = [
+            invoker_input.deserialize(handler) for invoker_input in self.invoker_inputs
+        ]
 
         graph = self.graph.deserialize(handler)
 
         tracer = Tracer(
             None, handler.model, bridge=handler.bridge, graph=graph, **kwargs
         )
-        tracer._batched_input = batched_input
+        tracer._invoker_inputs = invoker_inputs
 
         return tracer
 
@@ -294,7 +297,12 @@ class SessionModel(BaseNNsightModel):
 ### Define Annotated types to convert objects to their custom Pydantic counterpart
 
 GraphType = Annotated[
-    Graph, AfterValidator(lambda value: GraphModel(id=value.id, sequential=value.sequential, nodes=value.nodes))
+    Graph,
+    AfterValidator(
+        lambda value: GraphModel(
+            id=value.id, sequential=value.sequential, nodes=value.nodes
+        )
+    ),
 ]
 
 PrimitiveType = Annotated[
@@ -352,7 +360,9 @@ TracerType = Annotated[
     Tracer,
     AfterValidator(
         lambda value: TracerModel(
-            kwargs=value._kwargs, batched_input=value._batched_input, graph=value.graph
+            kwargs=value._kwargs,
+            invoker_inputs=value._invoker_inputs,
+            graph=value.graph,
         )
     ),
 ]
