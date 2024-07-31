@@ -17,6 +17,8 @@ import torch
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
+from .contexts.Conditional import Conditional
+
 from . import util
 from .tracing import protocols
 from .tracing.Graph import Graph
@@ -25,7 +27,7 @@ from .tracing.protocols import Protocol
 from .tracing.Proxy import Proxy
 
 
-class InterventionProxy(Proxy):
+class InterventionProxy(Proxy, Conditional):
     """Sub-class for Proxy that adds additional user functionality to proxies.
 
     Examples:
@@ -48,6 +50,11 @@ class InterventionProxy(Proxy):
         self.__dict__["_grad"] = None
 
         self._grad: InterventionProxy
+
+    def __enter__(self) -> Conditional:
+        self.__dict__["_condition"] = self.node
+
+        return Conditional.__enter__(self)
 
     def save(self) -> InterventionProxy:
         """Method when called, indicates to the intervention graph to not delete the tensor values of the result.

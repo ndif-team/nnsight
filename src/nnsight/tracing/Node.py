@@ -128,13 +128,16 @@ class Node:
             and self.target.__name__ != "InterventionProtocol"
             and self.target.__name__ != "BridgeProtocol"): 
 
-            conditional = protocols.ConditionalProtocol.peek_conditional(self.graph)
+            conditional_node = protocols.ConditionalProtocol.peek_conditional(self.graph)
 
             # only the top dependency needs to add the Conditional as a dependency
             # if none of the dependent are dependent on the Conditional, then add it
-            if conditional and all([(conditional.proxy.node != arg.cond_dependency if isinstance(arg, Node) else True) for arg in self.args]):
-                self.cond_dependency = conditional.proxy.node
-                conditional.proxy.node.listeners.append(weakref.proxy(self))
+            if conditional_node:
+                if all([not protocols.ConditionalProtocol.is_node_conditioned(arg) for arg in self.arg_dependencies]):
+                    self.cond_dependency = conditional_node
+                    conditional_node.listeners.append(weakref.proxy(self))
+                
+                protocols.ConditionalProtocol.add_conditioned_node(self)
 
     @property
     def value(self) -> Any:
