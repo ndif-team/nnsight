@@ -82,19 +82,14 @@ class Node:
     def preprocess(self) -> None:
         """Preprocess Node.args and Node.kwargs."""
 
-        if self.attached() and protocols.BridgeProtocol.has_bridge(self.graph):
-
-            bridge = protocols.BridgeProtocol.get_bridge(self.graph)
-
-            # Protocol nodes don't redirect execution to the current context's graph by default
-            redirect_execution = (
-                self.target.redirect
-                if isinstance(self.target, type)
-                and issubclass(self.target, protocols.Protocol)
-                else True
-            )
-            if redirect_execution:
-                self.graph = bridge.peek_graph()
+        # bridge graph redirection
+        if self.attached():
+            self.graph = protocols.BridgeProtocol.peek_graph(self.graph) \
+                if (self.target.redirect
+                    if isinstance(self.target, type)
+                        and issubclass(self.target, protocols.Protocol)
+                    else True) \
+                else self.graph
 
         def preprocess_node(node: Union[Node, Proxy]):
 
@@ -123,18 +118,25 @@ class Node:
             (self.args, self.kwargs), preprocess_node, (Node, Proxy)
         )
 
+        # conditional context handling
         if (self.attached()
             and protocols.ConditionalProtocol.has_conditional(self.graph)
-            and self.target.__name__ != "InterventionProtocol"
-            and self.target.__name__ != "BridgeProtocol"): 
+            and (self.target.condition
+                if isinstance(self.target, type)
+                and issubclass(self.target, protocols.Protocol)
+                else True)
+            ): 
 
-            conditional = protocols.ConditionalProtocol.peek_conditional(self.graph)
+            conditional_node = protocols.ConditionalProtocol.peek_conditional(self.graph)
 
             # only the top dependency needs to add the Conditional as a dependency
             # if none of the dependent are dependent on the Conditional, then add it
-            if conditional and all([(conditional.proxy.node != arg.cond_dependency if isinstance(arg, Node) else True) for arg in self.args]):
-                self.cond_dependency = conditional.proxy.node
-                conditional.proxy.node.listeners.append(weakref.proxy(self))
+            if conditional_node:
+                if all([not protocols.ConditionalProtocol.is_node_conditioned(arg) for arg in self.arg_dependencies]):
+                    self.cond_dependency = conditional_node
+                    conditional_node.listeners.append(weakref.proxy(self))
+                
+                protocols.ConditionalProtocol.add_conditioned_node(self)
 
     @property
     def value(self) -> Any:
@@ -222,7 +224,7 @@ class Node:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = len(self.arg_dependencies) + int(bool(self.cond_dependency))
+        self.remaining_dependencies = len(self.arg_dependencies) + int(not(self.cond_dependency is None))
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.

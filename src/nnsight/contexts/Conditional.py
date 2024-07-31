@@ -1,83 +1,107 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Union, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from ..tracing import protocols
 
 if TYPE_CHECKING:
-    from ..tracing.Graph import Graph
     from ..tracing.Node import Node
 
 class ConditionalManager():
     """ A Graph attachement that manages the Conditional contexts defined within an Intervention Graph.
     
     Attributes:
-        _conditional_dict (Dict): Mapping of ConditionalProtocol node name to Conditional context.
-        _conditional_stack (Dict): Stack of visited Conditional contexts.
+        _conditional_dict (Dict[str, Node]): Mapping of ConditionalProtocol node name to Conditional context.
+        _conditioned_nodes_dict (Dict[str, Set[Node]]): Mapping of ConditionalProtocol node name to all the Nodes conditiones by it.
+        _conditional_stack (Dict): Stack of visited Conditional contexts' ConditonalProtocol nodes.
     """
 
     def __init__(self):
-        self._conditional_dict: Dict = dict()
-        self._conditional_stack: List = list()
+        self._conditional_nodes_dict: Dict[str, Node] = dict()
+        self._conditioned_nodes_dict: Dict[str, Set[Node]] = dict()
+        self._conditional_nodes_stack: List[Node] = list()
 
-    def push(self, conditional: Conditional) -> None:
-        """ Adds the Conditional to the stack of conditional contexts.
+    def push(self, conditional_node: "Node") -> None:
+        """ Adds the Conditional to the stack of Conditional contexts.
         
         Args:
-            conditional (Conditional): Conditional context.
+            conditional_node (Node): ConditionalProtocol node.
         """
 
-        self._conditional_dict[conditional.proxy.node.name] = conditional
-        self._conditional_stack.append(conditional)
+        self._conditional_nodes_dict[conditional_node.name] = conditional_node
+        self._conditioned_nodes_dict[conditional_node.name] = set()
+        self._conditional_nodes_stack.append(conditional_node)
 
     def get(self, key: str) -> Conditional:
-        """ Returns the Conditional context for a given ConditionalProtocol node name.
+        """ Returns a ConditionalProtocol node.
 
         Args:
             key (str): ConditionalProtocol node name.
 
         Returns:    
-            Conditional: Conditional context.
+            Node: ConditionalProtocol node.
         """
 
-        return self._conditional_dict[key]
+        return self._conditional_nodes_dict[key]
 
     def pop(self) -> None:
-        """ Pops the current Conditional context from the ConditionalManager stack. """
+        """ Pops the ConditionalProtocol node of the current Conditional context from the ConditionalManager stack. """
 
-        self._conditional_stack.pop()
+        self._conditional_nodes_stack.pop()
 
-    def peek(self) -> Optional[Conditional]:
-        """ Gets the current Conditional context.
+    def peek(self) -> Optional["Node"]:
+        """ Gets the current Conditional context's ConditionalProtocol node.
         
         Returns:
-            Optional[Conditional]: Lastest Conditonal context if the ConditionalManager stack is non-empty.
+            Optional[Node]: Lastest ConditonalProtocol node if the ConditionalManager stack is non-empty.
         """
 
-        if len(self._conditional_stack) > 0:
-            return self._conditional_stack[-1]
+        if len(self._conditional_nodes_stack) > 0:
+            return self._conditional_nodes_stack[-1]
+        
+    def add_conditioned_node(self, node: "Node") -> None:
+        """  Adding a Node to the set of conditioned nodes by the current Conditonal context.
+
+        Args:
+            - node (Node): A node conditioned by the latest Conditional context.
+        """
+
+        self._conditioned_nodes_dict[self.peek().name].add(node)
+
+    def is_node_conditioned(self, node: "Node") -> bool:
+        """ Returns True if the Node argument is conditioned by the current Conditional context.
+        
+        Args:
+            - node (Node): Node.
+
+        Returns:
+            bool: Whether the Node is conditioned.
+        """
+
+        curr_conditioned_nodes_set = self._conditioned_nodes_dict[self.peek().name]
+
+        return (node in curr_conditioned_nodes_set)
+    
 
 class Conditional(AbstractContextManager):
     """ A context defined by a boolean condition, upon which the execution of all nodes defined from within is contingent. 
 
     Attributes:
-        _graph (Graph): Intervention Graph where the Conditional context is defined.
-        _condition (Conditional): Condition for the execution of the context body.
+        _condition (Node): Node with the condition value.
     """
 
-    def __init__(self, graph: "Graph", condition: Union["Node", Any]):
-       self._graph: "Graph" = graph
-       self._condition: Union["Node", Any] = condition
+    def __init__(self, condition: "Node"):
+       self._condition: "Node" = condition
 
     def __enter__(self) -> Conditional:
 
-        self.proxy = protocols.ConditionalProtocol.add(self._graph, self._condition) 
-        
-        # push this conditional to the stack of the ConditionalManager
-        protocols.ConditionalProtocol.push_conditional(self._graph, self)
+        conditional_node = protocols.ConditionalProtocol.add(self._condition).node
+
+        protocols.ConditionalProtocol.push_conditional(conditional_node)
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        protocols.ConditionalProtocol.pop_conditional(self._graph)
+
+        protocols.ConditionalProtocol.pop_conditional(protocols.BridgeProtocol.peek_graph(self._condition.graph))
