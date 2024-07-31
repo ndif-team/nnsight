@@ -83,19 +83,13 @@ class Node:
         """Preprocess Node.args and Node.kwargs."""
 
         # bridge graph redirection
-        if self.attached() and protocols.BridgeProtocol.has_bridge(self.graph):
-
-            bridge = protocols.BridgeProtocol.get_bridge(self.graph)
-
-            # Protocol nodes don't redirect execution to the current context's graph by default
-            redirect_execution = (
-                self.target.redirect
-                if isinstance(self.target, type)
-                and issubclass(self.target, protocols.Protocol)
-                else True
-            )
-            if redirect_execution:
-                self.graph = bridge.peek_graph()
+        if self.attached():
+            self.graph = protocols.BridgeProtocol.peek_graph(self.graph) \
+                if (self.target.redirect
+                    if isinstance(self.target, type)
+                        and issubclass(self.target, protocols.Protocol)
+                    else True) \
+                else self.graph
 
         def preprocess_node(node: Union[Node, Proxy]):
 

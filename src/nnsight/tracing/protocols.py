@@ -435,6 +435,23 @@ class BridgeProtocol(Protocol):
 
         return cls.attachment_name in graph.attachments
 
+    @classmethod
+    def peek_graph(cls, graph: "Graph") -> "Graph":
+        """ Returns current Intervention Graph.
+        
+        Args:
+            - graph (Graph): Graph.
+
+        Returns:
+            Graph: Graph.
+        """
+
+        if not BridgeProtocol.has_bridge(graph):
+            return graph
+        else:
+            bridge = BridgeProtocol.get_bridge(graph)
+            return bridge.peek_graph()
+
 
 class EarlyStopException(Exception):
     pass

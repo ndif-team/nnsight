@@ -103,10 +103,5 @@ class Conditional(AbstractContextManager):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if protocols.BridgeProtocol.has_bridge(self._condition.graph):
-            bridge = protocols.BridgeProtocol.get_bridge(self._condition.graph)
-            conditional_graph = bridge.peek_graph()
-        else:  
-            conditional_graph = self._condition.graph
 
-        protocols.ConditionalProtocol.pop_conditional(conditional_graph)
+        protocols.ConditionalProtocol.pop_conditional(protocols.BridgeProtocol.peek_graph(self._condition.graph))
