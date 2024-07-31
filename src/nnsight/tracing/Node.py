@@ -82,6 +82,7 @@ class Node:
     def preprocess(self) -> None:
         """Preprocess Node.args and Node.kwargs."""
 
+        # bridge graph redirection
         if self.attached() and protocols.BridgeProtocol.has_bridge(self.graph):
 
             bridge = protocols.BridgeProtocol.get_bridge(self.graph)
@@ -123,10 +124,14 @@ class Node:
             (self.args, self.kwargs), preprocess_node, (Node, Proxy)
         )
 
+        # conditional context handling
         if (self.attached()
             and protocols.ConditionalProtocol.has_conditional(self.graph)
-            and self.target.__name__ != "InterventionProtocol"
-            and self.target.__name__ != "BridgeProtocol"): 
+            and (self.target.condition
+                if isinstance(self.target, type)
+                and issubclass(self.target, protocols.Protocol)
+                else True)
+            ): 
 
             conditional_node = protocols.ConditionalProtocol.peek_conditional(self.graph)
 

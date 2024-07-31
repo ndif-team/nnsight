@@ -26,6 +26,7 @@ class Protocol:
     """
 
     redirect: bool = True
+    condition: bool = True
 
     @classmethod
     def add(cls, *args, **kwargs) -> "InterventionProxy":
@@ -352,6 +353,7 @@ class BridgeProtocol(Protocol):
     """
 
     attachment_name = "nnsight_bridge"
+    condition: bool = False
 
     @classmethod
     def add(cls, from_node: "Node", to_graph: "Graph") -> "InterventionProxy":

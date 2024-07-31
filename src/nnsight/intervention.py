@@ -217,6 +217,7 @@ class InterventionProtocol(Protocol):
     """
 
     attachment_name = "nnsight_module_nodes"
+    condition: bool = False
 
     @classmethod
     def add(
