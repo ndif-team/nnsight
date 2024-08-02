@@ -124,50 +124,6 @@ def from_import_path(import_path: str) -> type:
 
     return getattr(importlib.import_module(import_path), classname)
 
-def add_arg_to_viz(
-        graph_viz: "Digraph", 
-        value: Union["Node", any], 
-        cls: Type,
-        value_count: int, 
-        style: Dict[str, any], 
-        kname: Optional[str]=None
-    ) -> Tuple[str, int]:
-    """ Adds the argument of a Node (dependencies) to the graph visualization. 
-        Handles adding arguments that are nodes themselves by calling Node.visualize() with the flag is_arg set to true.
-
-    Args:
-        graph_viz (Digraph): Visualization graph object.
-        value (Union[Node, any]): Node argument could be a Node itself or some other value.
-        cls (Type): Node class type. 
-        value_count (int): Total number of non-Node type of arguments so far.
-        style (Dict[str, any]): Style properties for the node display of this argument.
-        kname Optional[str]: Label key word.
-
-    Returns:
-        str: Name of argument node added to the Digraph.
-        int: Total count of value arguments added to the Digraph so far.
-    """
-
-    if isinstance(value, cls):
-        name, value_count = value.visualize(graph_viz, value_count, is_arg=True)
-    else:
-        name = str(value_count)
-        if isinstance(value, torch.Tensor):
-            label = "Tensor"
-        elif isinstance(value, str):
-            label = f'"{value}"'
-        else:
-            label = str(value)
-
-        if kname is not None:
-            label = f"{kname}={label}"
-
-        graph_viz.node(name, label=label, **style)
-
-        value_count += 1
-
-    return name, value_count
-
 
 class WrapperModule(torch.nn.Module):
     """Simple torch module which passes it's input through. Useful for hooking.

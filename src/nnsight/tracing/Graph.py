@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import inspect
-from typing import Dict, Type, Optional
+from typing import Dict, Type
 
-import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
-import graphviz
+import pygraphviz as pgv
 
 from .Node import Node
 from .Proxy import Proxy
-from .protocols import Protocol, LockProtocol
+from .protocols import Protocol
 from ..util import apply
 
 
@@ -150,25 +149,21 @@ class Graph:
 
         return new_graph
 
-    def vis(self, title: str = "graph", path: Optional[str] = None, format: str = "png"):
-        """ Generates and saves a graphical visualization of the Intervention Graph using the graphviz library. 
+    def vis(self, title: str = "graph", path: str = "."):
+        """ Generates and saves a graphical visualization of the Intervention Graph using the pygraphviz library. 
         Args:
             title (str): Name of the Intervention Graph. Defaults to "graph".
-            path (Optional[str]): Directory path to save the graphic in. If None saves content to the current directory.
-            format (str): Image format of the graphic. Defaults to "png".
+            path (str): Directory path to save the graphic in. If None saves content to the current directory.
         """
 
-        arg_value_count = 0
+        graph: pgv.AGraph = pgv.AGraph(strict=True, directed=True)
 
-        graph = graphviz.Digraph("round-table", comment="The Round Table")
+        graph.graph_attr.update(label=title, fontsize='20', labelloc='t', labeljust='c')    
+        
+        for node in self.nodes.values(): 
+            node.visualize(graph)
 
-        # Adding title
-        graph.attr(label=title, fontsize='20', labelloc='t', labeljust='c')
-
-        for node in self.nodes.values():
-            arg_value_count = node.visualize(graph, arg_value_count, is_arg=False)[1]        
-
-        graph.render(filename=title, directory=path, format=format)
+        graph.draw(f"{path}/{title}.png", prog="dot")
 
     def __str__(self) -> str:
         result = ""

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import inspect
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, Dict, List, Tuple, Union
+from typing import Any, Callable, Collection, Dict, List, Union
 from collections import defaultdict
 
 import torch
@@ -211,9 +211,6 @@ class InterventionProtocol(Protocol):
     """
 
     attachment_name = "nnsight_module_nodes"
-    styles: Dict[str, any] = {"node": {"color": "green4", "shape": "ellipse"},
-                              "arg": defaultdict(lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}),
-                              "edge": defaultdict(lambda: "solid")}
 
     @classmethod
     def add(
@@ -447,6 +444,19 @@ class InterventionProtocol(Protocol):
                     activations = value
 
         return activations
+    
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """ Visualization style for this protocol node.
+        
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {"node": {"color": "green4", "shape": "ellipse"}, # Node display
+                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
+                "arg_kname": defaultdict(lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}), # Argument label key word
+                "edge": defaultdict(lambda: "solid")} # Argument Edge display
 
 
 class HookHandler(AbstractContextManager):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -13,7 +14,7 @@ from .Proxy import Proxy
 
 if TYPE_CHECKING:
     from .Graph import Graph
-    from graphviz import Digraph
+    from pygraphviz import AGraph
 
 
 class Node:
@@ -339,58 +340,65 @@ class Node:
 
         self._value = inspect._empty
 
-    def visualize(
-            self, 
-            graph_viz: "Digraph", 
-            arg_value_count: int, 
-            is_arg: bool
-            ) -> Tuple[str, int]:
-        """ Visualizes this node by adding it to Digraph visual object. Can handle adding dependency arguments as well as edges between them.
+    def visualize(self, viz_graph: "AGraph") -> str:
+        """ Adds this node to the visualization graph and recursively visualizes its arguments and adds edges between them.
 
         Args:
-            graph_viz (Digraph): Visualization graph object.
-            arg_value_count (int): Total count of non-Node arguments in the Digraph so far.
-            is_arg (bool): If True, node will add itself to the graph without looping over its dependencies. 
-                           Nodes are responsible for visualizing their arguments only when they are called to visualize directly from the main loop in Graph.viz()
+            - viz_graph (AGraph): Visualization graph. 
         
         Returns:
-            str: Node name.
-            int: Count of value argument added to the Digraph so far.
+            - str: name of this node.
         """
+
+        node_label = self.target if isinstance(self.target, str) else self.target.__name__
+
+        styles = {"node": {"color": "black", "shape": "ellipse"},
+                  "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
+                  "arg_kname": defaultdict(lambda: None),
+                  "edge": defaultdict(lambda: "solid")}
         
-        # Visualization of protocol nodes is delegated to their respective classes
         if isinstance(self.target, type) and issubclass(self.target, protocols.Protocol):
-            arg_value_count = self.target.visualize(self, 
-                                                    graph_viz, 
-                                                    arg_value_count=arg_value_count, 
-                                                    is_arg=is_arg)
-        else:
-            # Adding current node
-            graph_viz.node(self.name, 
-                           label=self.target.__name__, 
-                           **{"color": "black", "shape": "ellipse"})
+            styles = self.target.style()
 
-            if not is_arg:
-                base_arg_style = {"color": "gray", "shape": "box"}
-                for i, arg in enumerate(self.args):
-                    name, arg_value_count = util.add_arg_to_viz(graph_viz, 
-                                                                arg, 
-                                                                Node,
-                                                                arg_value_count, 
-                                                                base_arg_style)
-                    
-                    graph_viz.edge(name, self.name)
+        viz_graph.add_node(self.name, label=node_label, **styles["node"])
 
-                for key, arg in self.kwargs.items():
-                    name, arg_value_count = util.add_arg_to_viz(graph_viz, 
-                                                                arg, 
-                                                                Node,
-                                                                arg_value_count, 
-                                                                base_arg_style, 
-                                                                key)
-                    graph_viz.edge(name, self.name)
-        
-        return self.name, arg_value_count
+        def visualize_args(arg_collection):
+            """ Recursively visualizes the arguments of this node.
+
+            Args:
+                - arg_collection (Union[List[Any], Dict[str, Any]]): Collection of Node arguments. 
+            """
+
+            for key, arg in arg_collection:
+                if isinstance(arg, Node):
+                    name = arg.visualize(viz_graph)
+                else:
+                    name = self.name
+                    if isinstance(arg, torch.Tensor):
+                        name += f"_Tensor_{key}"
+                        label = "Tensor"
+                    elif isinstance(arg, str):
+                        name += f"_{arg}_{key}"
+                        label = f'"{arg}"'
+                    else:
+                        name += f"_{arg}_{key}"
+                        label = str(arg)
+
+                    if isinstance(key, int):
+                        if not styles["arg_kname"][key] is None:
+                            label = f"{styles['arg_kname'][key]}={label}"
+                    else:
+                        label = f"{key}={label}"
+
+                    viz_graph.add_node(name, label=label, **styles["arg"][key])
+                
+                viz_graph.add_edge(name, self.name, style=styles["edge"][key])
+
+        visualize_args(enumerate(self.args))
+
+        visualize_args(self.kwargs.items())
+
+        return self.name
 
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)
