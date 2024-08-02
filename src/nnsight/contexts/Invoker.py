@@ -106,8 +106,8 @@ class Invoker(AbstractContextManager):
             with Patcher() as patcher:
 
                 # Some logic (like gpt-j rotary embeddings) gets "poisoned" by FakeTensors.
-                # This does not happen when `torch.jit.is_tracing() returns True.`
-                patcher.add(Patch(torch.jit, lambda: True, "is_tracing"))
+                # This does not happen when `torch._jit_internal.is_scripting() returns True.`
+                patcher.add(Patch(torch._jit_internal, lambda: True, "is_scripting"))
 
                 with FakeTensorMode(
                     allow_non_fake_inputs=True,
