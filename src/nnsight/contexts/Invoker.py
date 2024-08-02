@@ -62,7 +62,9 @@ class Invoker(AbstractContextManager):
 
         self.tracer.invoker = self
 
-        preserved_inputs = None
+        has_proxies_in_inputs = False
+        
+        inputs = self.inputs
 
         # If were accumulating, we might have Proxies in the input.
         # Therefore we first: Check to see if there are any Proxies.
@@ -74,9 +76,9 @@ class Invoker(AbstractContextManager):
 
                 if not proxy.node.done():
 
-                    nonlocal preserved_inputs
+                    nonlocal has_proxies_in_inputs
 
-                    preserved_inputs = self.inputs
+                    has_proxies_in_inputs = True
 
                     node = proxy.node
 
@@ -84,21 +86,31 @@ class Invoker(AbstractContextManager):
                         protocols.BridgeProtocol.add(node, self.tracer.graph).node
                     ).node
 
-            inputs = util.apply(self.inputs, check_for_nodes, Proxy)
+                else:
 
-            if preserved_inputs is not None:
+                    return proxy.node.value
 
-                preserved_inputs = inputs
-
-                self.inputs = util.apply(
-                    self.inputs, lambda x: x.node.proxy_value, Proxy
-                )
-
-        self.inputs, batch_size = self.tracer.model._prepare_inputs(
-            *self.inputs, **self.kwargs
-        )
+            inputs = util.apply(inputs, check_for_nodes, Proxy)
+            
+            
+        if not has_proxies_in_inputs:
+            
+            inputs, batch_size = self.tracer.model._prepare_inputs(
+                *inputs, **self.kwargs
+            )
+            
+            self.inputs = inputs
 
         if self.scan:
+
+            if has_proxies_in_inputs:
+
+                inputs = util.apply(inputs, lambda x: x.proxy_value, Node)
+
+                inputs, batch_size = self.tracer.model._prepare_inputs(
+                    *inputs, **self.kwargs
+                )
+
             self.tracer.model._envoy._clear()
 
             self.scanning = True
@@ -115,7 +127,7 @@ class Invoker(AbstractContextManager):
                 ) as fake_mode:
                     with FakeCopyMode(fake_mode):
                         self.tracer.model._execute(
-                            *copy.deepcopy(self.inputs),
+                            *copy.deepcopy(inputs),
                             **copy.deepcopy(self.tracer._kwargs),
                         )
 
@@ -124,27 +136,7 @@ class Invoker(AbstractContextManager):
         else:
             self.tracer.model._envoy._reset()
 
-        self.tracer._batch_start += self.tracer._batch_size
-        self.tracer._batch_size = batch_size
-
-        # If there were no Proxies in the input, batch together the input.
-        if preserved_inputs is None:
-
-            self.tracer._batched_input = self.tracer.model._batch_inputs(
-                self.tracer._batched_input,
-                *self.inputs,
-            )
-
-        # Otherwise we don't know how to batch the Proxies so just assume we can add each input to a list?
-        # TODO: revisit this.
-        else:
-
-            if self.tracer._batched_input is None:
-
-                self.tracer._batched_input = [*preserved_inputs]
-            else:
-
-                self.tracer._batched_input.extend(preserved_inputs)
+        self.tracer._invoker_inputs.append(self.inputs)
 
         return self
 
