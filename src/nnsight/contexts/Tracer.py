@@ -221,3 +221,6 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
         """
 
         self._graph.vis(**kwargs)
+
+    def __repr__(self) -> str:
+        return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

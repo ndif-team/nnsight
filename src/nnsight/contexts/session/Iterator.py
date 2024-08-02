@@ -125,3 +125,6 @@ class Iterator(Collection):
             )
 
             super().local_backend_execute()
+
+    def __repr__(self) -> str:
+        return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

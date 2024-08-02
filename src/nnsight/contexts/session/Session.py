@@ -87,3 +87,6 @@ class Session(Collection, RemoteMixin):
             graph.alive = False
 
         self.bridge = weakref.proxy(self.bridge)
+
+    def __repr__(self) -> str:
+        return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

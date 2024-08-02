@@ -405,3 +405,6 @@ class Node:
         args = util.apply(args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]
         return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} d:{len(self.dependencies)}]"
+    
+    def __repr__(self) -> str:
+        return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"
