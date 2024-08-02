@@ -68,7 +68,7 @@ class Collection(AbstractContextManager, LocalMixin, BridgeMixin):
 
         self.graph = weakref.proxy(self.graph)
 
-    def visual(self, **kwargs) -> None:
+    def vis(self, **kwargs) -> None:
         """
         Helper method to save a visualization of the current state of the intervention graph.
         """

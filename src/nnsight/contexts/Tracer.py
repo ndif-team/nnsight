@@ -215,7 +215,7 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
         
         self._graph = weakref.proxy(self._graph)
 
-    def visual(self, **kwargs) -> None:
+    def vis(self, **kwargs) -> None:
         """
         Helper method to save a visualization of the current state of the intervention graph.
         """
