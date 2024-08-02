@@ -453,7 +453,7 @@ class InterventionProtocol(Protocol):
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "green4", "shape": "ellipse"}, # Node display
+        return {"node": {"color": "green4", "shape": "box"}, # Node display
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument Edge display
