@@ -102,7 +102,7 @@ class NNsight:
         invoker_args: Dict[str, Any] = None,
         backend: Union[Backend, str] = None,
         remote: bool = False,
-        scan: bool = True,
+        scan: bool = False,
         **kwargs: Dict[str, Any],
     ) -> Union[Tracer, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
