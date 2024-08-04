@@ -31,7 +31,7 @@ class Graph:
     def __init__(
         self,
         proxy_class: Type[Proxy] = Proxy,
-        validate: bool = True,
+        validate: bool = False,
         sequential: bool = True,
         graph_id: int = None,
     ) -> None:

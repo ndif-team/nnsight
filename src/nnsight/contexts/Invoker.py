@@ -37,7 +37,7 @@ class Invoker(AbstractContextManager):
         self,
         tracer: "Tracer",
         *inputs: Any,
-        scan: bool = True,
+        scan: bool = False,
         **kwargs,
     ) -> None:
 

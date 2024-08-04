@@ -32,7 +32,7 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         self,
         target: Callable,
         *args,
-        validate: bool = True,
+        validate: bool = False,
         **kwargs,
     ) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
