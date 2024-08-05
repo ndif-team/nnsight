@@ -6,6 +6,8 @@ from nnsight.contexts.Tracer import Tracer
 from nnsight.schema.Request import RequestModel
 from nnsight.tracing.Graph import Graph
 
+import json
+
 
 @pytest.fixture(scope="module")
 def gpt2(device: str):
@@ -320,3 +322,15 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
 
     # Check that the batch size does not narrow
     assert edited.shape[0] == 2
+
+def test_conditional_interventions(gpt2: nnsight.LanguageModel):
+    with gpt2.session() as session:
+        with gpt2.trace("Hello World") as tracer:
+            with torch.all(gpt2.transformer.h[5].output[0] < 100000):
+                gpt2.transformer.h[-1].output[0][:] = 0
+
+            output = gpt2.transformer.h[-1].output[0].save()
+
+        _test_serialize(session)
+
+    assert torch.all(output.value == 0)

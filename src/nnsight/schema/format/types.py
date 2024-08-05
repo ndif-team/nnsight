@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import weakref
 from types import BuiltinFunctionType
 from types import FunctionType as FuncType
 from types import MethodDescriptorType
-from typing import Dict, List, Literal, Union
+from typing import Dict, List, Literal, Union, Optional
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, Strict, field_validator
@@ -56,6 +57,7 @@ class NodeModel(BaseModel):
     target: Union[FunctionModel, FunctionType]
     args: List[ValueTypes]
     kwargs: Dict[str, ValueTypes]
+    condition: Union[NodeReferenceType, NodeModel.Reference, PrimitiveModel, PrimitiveType]
 
     def deserialize(self, handler: DeserializeHandler) -> Node:
 
@@ -71,6 +73,10 @@ class NodeModel(BaseModel):
             },
             name=self.name,
         ).node
+
+        node.cond_dependency = self.condition.deserialize(handler)
+        if isinstance(node.cond_dependency, Node):
+            node.cond_dependency.listeners.append(weakref.proxy(node))
 
         if isinstance(node.target, type) and issubclass(
             node.target, protocols.Protocol
@@ -323,17 +329,18 @@ FunctionType = Annotated[
 ]
 
 NodeReferenceType = Annotated[
-    Node, AfterValidator(lambda value: NodeModel.Reference(name=value.name))
+    Node, AfterValidator(lambda value: NodeModel.Reference(name=value.name))   
 ]
 
 NodeType = Annotated[
     Node,
     AfterValidator(
         lambda value: NodeModel(
-            name=value.name, target=value.target, args=value.args, kwargs=value.kwargs
+            name=value.name, target=value.target, args=value.args, kwargs=value.kwargs, condition=value.cond_dependency
         )
     ),
 ]
+
 TracerType = Annotated[
     Tracer,
     AfterValidator(
