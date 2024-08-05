@@ -582,6 +582,8 @@ class ConditionalProtocol(Protocol):
             for listener in conditioned_node.listeners:
                 for listener_arg in listener.arg_dependencies:
                     listener_arg.remaining_listeners -= 1
+                    if listener_arg.done() and listener_arg.redundant():
+                        listener_arg.destroy()
                     update_conditioned_nodes(listener)
         
         # If the condition value is ignore or evaluated to False, update conditioned nodes
