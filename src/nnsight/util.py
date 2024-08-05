@@ -6,7 +6,6 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Collection, Type, Dict, Tuple, Optional, Union
 
 import torch
-from graphviz import Digraph
 
 if TYPE_CHECKING:
     from .tracing.Node import Node
