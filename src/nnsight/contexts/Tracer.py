@@ -8,7 +8,8 @@ from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from ..tracing.Node import Node
-from .backends import Backend, BridgeMixin, RemoteMixin, EditMixin
+from . import resolve_dependencies
+from .backends import Backend, BridgeMixin, EditMixin, RemoteMixin
 from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
 
@@ -48,7 +49,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
             bridge=bridge,
             proxy_class=model.proxy_class,
             validate=validate,
-            sequential=False
+            sequential=False,
         )
 
         protocols.ApplyModuleProtocol.set_module(self.graph, self.model)
@@ -117,20 +118,12 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.graph.execute()
 
-        invoker_inputs  = self._invoker_inputs
+        invoker_inputs = self._invoker_inputs
 
         # If ths graph has a Bridge, we need to check for Nodes in the input itself.
         if protocols.BridgeProtocol.has_bridge(self.graph):
 
-            def get_value(node: Node):
-
-                value = node.args[0].value
-
-                node.set_value(None)
-
-                return value
-
-            invoker_inputs = util.apply(invoker_inputs, get_value, Node)
+            invoker_inputs = resolve_dependencies(invoker_inputs)
 
         self.model.interleave(
             self.model._execute,
@@ -146,24 +139,24 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
             self.graph = weakref.proxy(graph)
 
         return graph
-    
+
     def edit_backend_execute(self) -> Graph:
-        
+
         self.model._default_graph = self.graph
 
-    def remote_backend_get_model_key(self):
+    def remote_backend_get_model_key(self) -> str:
 
         self.model: "RemoteableMixin"
 
         return self.model.to_model_key()
 
-    def remote_backend_postprocess_result(self, local_result: Graph):
+    def remote_backend_postprocess_result(self, local_result: Graph) -> Dict[str, Any]:
 
         from ..schema.Response import ResultModel
 
         return ResultModel.from_graph(local_result)
 
-    def remote_backend_handle_result_value(self, value: Dict[str, Any]):
+    def remote_backend_handle_result_value(self, value: Dict[str, Any]) -> None:
 
         for node_name, node_value in value.items():
             self.graph.nodes[node_name]._value = node_value
@@ -173,5 +166,3 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         if not isinstance(graph, weakref.ProxyType):
             self.graph = weakref.proxy(graph)
-
-        return graph

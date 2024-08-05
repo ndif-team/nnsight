@@ -62,7 +62,7 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
 
     ### BACKENDS ########
 
-    def local_backend_execute(self) -> None:
+    def local_backend_execute(self) -> Graph:
 
         self.graph.execute()
 

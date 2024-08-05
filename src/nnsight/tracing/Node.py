@@ -100,20 +100,17 @@ class Node:
 
                 node = node.node
 
+            if node.done():
+
+                return node.value
+
             if self.attached() and self.graph.id != node.graph.id:
 
-                node = protocols.BridgeProtocol.add(node, self.graph).node
+                node = protocols.BridgeProtocol.add(node).node
 
-            if not node.done():
-
-                self.dependencies.append(node)
-                # Weakref so no reference loop
-                node.listeners.append(weakref.proxy(self))
-
-            # Otherwise just get the value if its already done.
-            else:
-
-                node = node.value
+            self.dependencies.append(node)
+            # Weakref so no reference loop
+            node.listeners.append(weakref.proxy(self))
 
             return node
 
@@ -167,6 +164,32 @@ class Node:
         """
 
         if not self.attached():
+
+            graph: "Graph" = None
+
+            def find_attached_graph(node: Union[Proxy, Node]):
+
+                if isinstance(node, Proxy):
+
+                    node = node.node
+
+                nonlocal graph
+
+                if node.attached():
+
+                    graph = node.graph
+
+            util.apply((args, kwargs), find_attached_graph, (Proxy, Node))
+
+            if graph is not None:
+
+                return graph.create(
+                    target=target,
+                    name=name,
+                    proxy_value=proxy_value,
+                    args=args,
+                    kwargs=kwargs,
+                )
 
             # Create Node with no values or Graph.
             node = Node(
@@ -318,13 +341,11 @@ class Node:
 
         logger.info(f"=> SET({self.name})")
 
-        if self.attached() and not self.graph.sequential:
+        for listener in self.listeners:
+            listener.remaining_dependencies -= 1
 
-            for listener in self.listeners:
-                listener.remaining_dependencies -= 1
-
-                if listener.fulfilled():
-                    listener.execute()
+            if listener.fulfilled() and not self.graph.sequential:
+                listener.execute()
 
         for dependency in self.dependencies:
             dependency.remaining_listeners -= 1

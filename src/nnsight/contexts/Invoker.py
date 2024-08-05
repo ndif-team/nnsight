@@ -10,9 +10,9 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
 from ..patching import Patch, Patcher
-from ..tracing import protocols
 from ..tracing.Node import Node
 from ..tracing.Proxy import Proxy
+from . import check_for_dependencies
 
 if TYPE_CHECKING:
 
@@ -63,45 +63,24 @@ class Invoker(AbstractContextManager):
         self.tracer.invoker = self
 
         has_proxies_in_inputs = False
-        
-        inputs = self.inputs
 
         # If were accumulating, we might have Proxies in the input.
         # Therefore we first: Check to see if there are any Proxies.
         # If there are, preserve the raw inputs with Proxies converted to a Locked Bridge protocol.
         # Set self.inputs to be the proxy_value so we can prepare_inputs, get the batch size, and scan.
         if self.tracer.model._session is not None:
-
-            def check_for_nodes(proxy: Proxy):
-
-                if not proxy.node.done():
-
-                    nonlocal has_proxies_in_inputs
-
-                    has_proxies_in_inputs = True
-
-                    node = proxy.node
-
-                    return protocols.LockProtocol.add(
-                        protocols.BridgeProtocol.add(node, self.tracer.graph).node
-                    ).node
-
-                else:
-
-                    return proxy.node.value
-
-            inputs = util.apply(inputs, check_for_nodes, Proxy)
             
-            
+            self.inputs, has_proxies_in_inputs = check_for_dependencies(self.inputs)
+
         if not has_proxies_in_inputs:
-            
-            inputs, batch_size = self.tracer.model._prepare_inputs(
-                *inputs, **self.kwargs
+
+            self.inputs, batch_size = self.tracer.model._prepare_inputs(
+                *self.inputs, **self.kwargs
             )
-            
-            self.inputs = inputs
 
         if self.scan:
+            
+            inputs = self.inputs
 
             if has_proxies_in_inputs:
 

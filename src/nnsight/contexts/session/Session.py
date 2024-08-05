@@ -43,13 +43,13 @@ class Session(GraphBasedContext, RemoteMixin):
 
         self.backend(self)
 
-    def iter(self, iterable) -> Iterator:
+    def iter(self, iterable, **kwargs) -> Iterator:
 
         bridge = weakref.proxy(self.bridge)
 
         backend = BridgeBackend(bridge)
 
-        return Iterator(iterable, backend, bridge=bridge)
+        return Iterator(iterable, backend, bridge=bridge, **kwargs)
 
     ### BACKENDS ########
 

@@ -3,11 +3,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Iterable, Tuple
 
 from ...tracing import protocols
+from ...tracing.Node import Node
+from .. import check_for_dependencies, resolve_dependencies
 from ..GraphBasedContext import GraphBasedContext
 
 if TYPE_CHECKING:
     from ...intervention import InterventionProxy
     from ...tracing.Bridge import Bridge
+
 
 class Iterator(GraphBasedContext):
 
@@ -21,7 +24,11 @@ class Iterator(GraphBasedContext):
 
         super().__enter__()
 
-        iter_item_proxy: "InterventionProxy" = protocols.ValueProtocol.add(self.graph, next(iter(self.data)))
+        iter_item_proxy: "InterventionProxy" = protocols.ValueProtocol.add(
+            self.graph, None
+        )
+
+        self.data, _ = check_for_dependencies(self.data)
 
         return iter_item_proxy, self
 
@@ -31,11 +38,13 @@ class Iterator(GraphBasedContext):
 
         bridge: "Bridge" = protocols.BridgeProtocol.get_bridge(self.graph)
 
+        data = resolve_dependencies(self.data)
+
         bridge.locks += 1
 
-        last_idx: int = len(self.data) - 1
+        last_idx: int = len(data) - 1
 
-        for idx, item in enumerate(self.data):
+        for idx, item in enumerate(data):
 
             last_iter = idx == last_idx
 
