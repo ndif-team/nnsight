@@ -1,10 +1,11 @@
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from . import protocols
 
 if TYPE_CHECKING:
     from .Graph import Graph
+    from .Node import Node
 
 
 class Bridge:
@@ -14,6 +15,7 @@ class Bridge:
     Attributes:
         id_to_graph (Dict[int, Graph]): Mapping of graph id to Graph.
         graph_stack (List[Graph]): Stack of visited Intervention Graphs.
+        bridged_nodes (defaultdict[Node, List[Node]]): Mapping of bridged Nodes to the BridgeProtocol nodes representing them on different graphs. 
         locks (int): Count of how many entities are depending on ties between graphs not to be released.
     """
 
@@ -23,6 +25,7 @@ class Bridge:
         self.id_to_graph: Dict[int, "Graph"] = OrderedDict()
         # Stack to keep track of most inner current graph
         self.graph_stack: List["Graph"] = list()
+        self.bridged_nodes: defaultdict[Node, List[Node]] = defaultdict(lambda: list())
 
         self.locks = 0
 
@@ -69,3 +72,30 @@ class Bridge:
         """
 
         return self.id_to_graph[id]
+    
+    def add_bridge_node(self, node: "Node", bridge_node: "Node") -> None:
+        """ Adds a BridgeProtocol to the bridged nodes attribute.
+
+        Args:
+            - node (Node): Bridged Node.
+            - bridge_node (Node): BridgeProtocol node of the bridged node.
+        """ 
+
+        self.bridged_nodes[node].append(bridge_node)
+
+    def get_bridge_node(self, node: "Node", graph_id: int) -> Optional["Node"]:
+        """ Check if the argument Node is bridged within the specified graph and returns its corresponding BridgeProtocol node.
+
+        Args:
+            - node (Node): Node.
+            - graph_id (int): Graph id.
+
+        Returns: 
+            Optional[Node]: Bridge Node if it exists.
+        """
+
+        for bridge_node in self.bridged_nodes_dict[node]:
+            if bridge_node.graph.id == graph_id:
+                return bridge_node
+
+        return None

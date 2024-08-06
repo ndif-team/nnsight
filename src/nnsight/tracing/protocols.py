@@ -454,6 +454,29 @@ class BridgeProtocol(Protocol):
         else:
             bridge = BridgeProtocol.get_bridge(graph)
             return bridge.peek_graph()
+        
+    @classmethod
+    def bridge_node(cls, node: "Node", graph_id: int) -> "Node":
+        """ Creates a reference to an external proxy node by creating a BridgeProtocol node or returning an existing one from the same graph.
+
+        Args:
+            - node (Node): Node to bridge.
+            - graph_id (int): Graph id.
+
+        Returns:
+            Node: BridgeProtocol node.        
+        """
+
+        bridge = cls.get_bridge(node.graph)
+        bridge_node = bridge.get_bridge_node(node, graph_id) # a bridged node has a unique bridge node per graph reference
+
+        # if the bridge node does not exist, create one
+        if bridge_node:
+            return bridge_node
+        else:
+            bridge_node = cls.add(node).node
+            bridge.add_bridge_node(node, bridge_node)
+            return bridge_node
 
 
 class EarlyStopException(Exception):
