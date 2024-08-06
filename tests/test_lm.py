@@ -6,9 +6,6 @@ from nnsight.contexts.Tracer import Tracer
 from nnsight.schema.Request import RequestModel
 from nnsight.tracing.Graph import Graph
 
-import json
-
-
 @pytest.fixture(scope="module")
 def gpt2(device: str):
     return nnsight.LanguageModel(
