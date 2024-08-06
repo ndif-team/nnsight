@@ -32,7 +32,7 @@ class Session(GraphBasedContext, RemoteMixin):
 
         self.model = model
 
-        GraphBasedContext.__init__(self, backend, bridge=self.bridge, proxy_class=model.proxy_class, *args, **kwargs)
+        GraphBasedContext.__init__(self, backend, bridge=self.bridge, proxy_class=self.model.proxy_class, *args, **kwargs)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
@@ -43,13 +43,13 @@ class Session(GraphBasedContext, RemoteMixin):
 
         self.backend(self)
 
-    def iter(self, iterable) -> Iterator:
+    def iter(self, iterable, **kwargs) -> Iterator:
 
         bridge = weakref.proxy(self.bridge)
 
         backend = BridgeBackend(bridge)
 
-        return Iterator(iterable, backend, bridge=bridge, proxy_class=self.model.proxy_class)
+        return Iterator(iterable, backend, bridge=bridge, proxy_class=self.model.proxy_class, **kwargs)
 
     ### BACKENDS ########
 

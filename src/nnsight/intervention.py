@@ -70,7 +70,7 @@ class InterventionProxy(Proxy, Conditional):
         protocols.LockProtocol.add(self.node)
 
         return self
-    
+
     def stop(self) -> InterventionProxy:
         """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed..
 
@@ -81,6 +81,23 @@ class InterventionProxy(Proxy, Conditional):
         protocols.EarlyStopProtocol.add(self.node)
 
         return self
+
+    def update(self, value: Union[Node, Any]) -> InterventionProxy:
+        """Updates the value of the Proxy via the creation of the UpdateProtocol node.
+
+        Args:
+            - value (Union[Node, Any]): New proxy value.
+
+        Returns:
+            InterventionProxy: Proxy.
+
+        .. codeb-block:: python
+            with model.trace(input) as tracer:
+                num = tracer.apply(int, 0)
+                num.update(5)
+        """
+
+        return protocols.UpdateProtocol.add(self.node, value)
 
     @property
     def grad(self) -> InterventionProxy:
@@ -391,8 +408,12 @@ class InterventionProtocol(Protocol):
 
                 node = intervention_handler.graph.nodes[intervention_node_name]
 
-                # Args for intervention nodes are (module_path, batch_size, batch_start, call_iter).
-                _, batch_size, batch_start, call_iter = node.args
+                # Args for intervention nodes are (module_path, batch_group_idx, call_iter).
+                _, batch_group_idx, call_iter = node.args
+
+                batch_start, batch_size = intervention_handler.batch_groups[
+                    batch_group_idx
+                ]
 
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
@@ -400,31 +421,27 @@ class InterventionProtocol(Protocol):
 
                     continue
 
-                # Narrow tensor values in activations only to relevant batch idxs.
-                # Only narrow if batch_size != total batch size ( no need to narrow when its the entire batch )
-                # and if the first dim == total_batch_size ( otherwise must not be a batched tensor ).
-                # Checks to see if anything was narrowed. If not, no need to concat later.
+                value = activations
+
                 narrowed = False
 
-                def narrow(acts: torch.Tensor):
+                if len(intervention_handler.batch_groups) > 1:
 
-                    nonlocal narrowed
+                    narrowed = True
 
-                    if (
-                        batch_size != intervention_handler.total_batch_size
-                        and intervention_handler.total_batch_size == acts.shape[0]
-                        and batch_size != -1
-                    ):
-                        narrowed = True
-                        return acts.narrow(0, batch_start, batch_size)
+                    def narrow(acts: torch.Tensor):
 
-                    return acts
+                        if acts.shape[0] == intervention_handler.batch_size:
 
-                value = util.apply(
-                    activations,
-                    narrow,
-                    torch.Tensor,
-                )
+                            return acts.narrow(0, batch_start, batch_size)
+
+                        return acts
+
+                    value = util.apply(
+                        activations,
+                        narrow,
+                        torch.Tensor,
+                    )
 
                 # Value injection.
                 node.set_value(value)
@@ -443,7 +460,7 @@ class InterventionProtocol(Protocol):
                         value,
                         batch_start,
                         batch_size,
-                        intervention_handler.total_batch_size,
+                        intervention_handler.batch_size,
                     )
                 # Otherwise just return the whole value as the activations.
                 else:
@@ -509,7 +526,9 @@ class HookHandler(AbstractContextManager):
                     return self.input_hook((input, kwargs), module_path)
 
                 self.handles.append(
-                    module.register_forward_pre_hook(input_hook, with_kwargs=True)
+                    module.register_forward_pre_hook(
+                        input_hook, with_kwargs=True, prepend=True
+                    )
                 )
 
             elif hook_type == "output":
@@ -517,7 +536,9 @@ class HookHandler(AbstractContextManager):
                 def output_hook(module, input, output, module_path=module_path):
                     return self.output_hook(output, module_path)
 
-                self.handles.append(module.register_forward_hook(output_hook))
+                self.handles.append(
+                    module.register_forward_hook(output_hook, prepend=True)
+                )
 
         return self
 
@@ -537,10 +558,13 @@ class InterventionHandler:
     Like the Intervention Graph, the total batch size that is being executed, and a counter for how many times an Intervention node has been attempted to be executed.
     """
 
-    def __init__(self, graph: Graph, total_batch_size: int) -> None:
+    def __init__(
+        self, graph: Graph, batch_groups: List[Tuple[int, int]], batch_size: int
+    ) -> None:
 
         self.graph = graph
-        self.total_batch_size = total_batch_size
+        self.batch_groups = batch_groups
+        self.batch_size = batch_size
         self.call_counter: Dict[str, int] = {}
 
     def count(self, name: str) -> int:

@@ -10,9 +10,9 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from .. import util
 from ..patching import Patch, Patcher
-from ..tracing import protocols
 from ..tracing.Node import Node
 from ..tracing.Proxy import Proxy
+from . import check_for_dependencies
 
 if TYPE_CHECKING:
 
@@ -37,7 +37,7 @@ class Invoker(AbstractContextManager):
         self,
         tracer: "Tracer",
         *inputs: Any,
-        scan: bool = True,
+        scan: bool = False,
         **kwargs,
     ) -> None:
 
@@ -62,43 +62,34 @@ class Invoker(AbstractContextManager):
 
         self.tracer.invoker = self
 
-        preserved_inputs = None
+        has_proxies_in_inputs = False
 
         # If were accumulating, we might have Proxies in the input.
         # Therefore we first: Check to see if there are any Proxies.
         # If there are, preserve the raw inputs with Proxies converted to a Locked Bridge protocol.
         # Set self.inputs to be the proxy_value so we can prepare_inputs, get the batch size, and scan.
         if self.tracer.model._session is not None:
+            
+            self.inputs, has_proxies_in_inputs = check_for_dependencies(self.inputs)
 
-            def check_for_nodes(proxy: Proxy):
+        if not has_proxies_in_inputs:
 
-                if not proxy.node.done():
-
-                    nonlocal preserved_inputs
-
-                    preserved_inputs = self.inputs
-
-                    node = proxy.node
-
-                    return protocols.LockProtocol.add(
-                        protocols.BridgeProtocol.add(node, self.tracer.graph).node
-                    ).node
-
-            inputs = util.apply(self.inputs, check_for_nodes, Proxy)
-
-            if preserved_inputs is not None:
-
-                preserved_inputs = inputs
-
-                self.inputs = util.apply(
-                    self.inputs, lambda x: x.node.proxy_value, Proxy
-                )
-
-        self.inputs, batch_size = self.tracer.model._prepare_inputs(
-            *self.inputs, **self.kwargs
-        )
+            self.inputs, batch_size = self.tracer.model._prepare_inputs(
+                *self.inputs, **self.kwargs
+            )
 
         if self.scan:
+            
+            inputs = self.inputs
+
+            if has_proxies_in_inputs:
+
+                inputs = util.apply(inputs, lambda x: x.proxy_value, Node)
+
+                inputs, batch_size = self.tracer.model._prepare_inputs(
+                    *inputs, **self.kwargs
+                )
+
             self.tracer.model._envoy._clear()
 
             self.scanning = True
@@ -106,8 +97,8 @@ class Invoker(AbstractContextManager):
             with Patcher() as patcher:
 
                 # Some logic (like gpt-j rotary embeddings) gets "poisoned" by FakeTensors.
-                # This does not happen when `torch.jit.is_tracing() returns True.`
-                patcher.add(Patch(torch.jit, lambda: True, "is_tracing"))
+                # This does not happen when `torch._jit_internal.is_scripting() returns True.`
+                patcher.add(Patch(torch._jit_internal, lambda: True, "is_scripting"))
 
                 with FakeTensorMode(
                     allow_non_fake_inputs=True,
@@ -115,7 +106,7 @@ class Invoker(AbstractContextManager):
                 ) as fake_mode:
                     with FakeCopyMode(fake_mode):
                         self.tracer.model._execute(
-                            *copy.deepcopy(self.inputs),
+                            *copy.deepcopy(inputs),
                             **copy.deepcopy(self.tracer._kwargs),
                         )
 
@@ -124,27 +115,7 @@ class Invoker(AbstractContextManager):
         else:
             self.tracer.model._envoy._reset()
 
-        self.tracer._batch_start += self.tracer._batch_size
-        self.tracer._batch_size = batch_size
-
-        # If there were no Proxies in the input, batch together the input.
-        if preserved_inputs is None:
-
-            self.tracer._batched_input = self.tracer.model._batch_inputs(
-                self.tracer._batched_input,
-                *self.inputs,
-            )
-
-        # Otherwise we don't know how to batch the Proxies so just assume we can add each input to a list?
-        # TODO: revisit this.
-        else:
-
-            if self.tracer._batched_input is None:
-
-                self.tracer._batched_input = [*preserved_inputs]
-            else:
-
-                self.tracer._batched_input.extend(preserved_inputs)
+        self.tracer._invoker_inputs.append(self.inputs)
 
         return self
 

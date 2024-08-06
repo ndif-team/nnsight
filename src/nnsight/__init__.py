@@ -33,10 +33,9 @@ for key, value in getmembers(einops.einops, isfunction):
 for key, value in getmembers(math, isbuiltin):
     DEFAULT_PATCHER.add(Patch(math, proxy_wrapper(value), key))
 
-# TODO THis does not work. Because of accelerate also patching? because they are overloaded?
-#DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))
-# DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
-# DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
+DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))
+DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
+DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
 
 from torch._subclasses.fake_tensor import FakeTensor
 
@@ -99,56 +98,47 @@ DEFAULT_PATCHER.add(Patch(FakeTensor, noop_wrapper(FakeTensor.tolist), "tolist")
 import warnings
 
 try:
+    
+    from torch.amp.autocast_mode import autocast, is_autocast_available
+    
     # Hacky patch to get around the fact this init method has no handling for 'meta' tensors.
     def autoamp_init(
         self,
         device_type: str,
-        dtype=None,
+        dtype = None,
         enabled: bool = True,
         cache_enabled: Optional[bool] = None,
     ):
+        if not isinstance(device_type, str):
+            raise ValueError(
+                f"Expected `device_type` of type `str`, got: `{type(device_type)}`"
+            )
+        if dtype is None:
+            if device_type == 'meta':
+                dtype = torch.get_autocast_dtype('cpu')
+            else:
+                dtype = torch.get_autocast_dtype(device_type)
         if torch._jit_internal.is_scripting():
             self._enabled = enabled
             self.device = device_type
             self.fast_dtype = dtype
-            # TODO: support get_autocast_gpu/cpu_dtype
             assert dtype is not None
             return
         self.device = device_type
+        if not is_autocast_available(self.device):
+            raise RuntimeError(
+                f"User specified an unsupported autocast device_type '{self.device}'"
+            )
         self.custom_backend_name = torch._C._get_privateuse1_backend_name()
-
-        if self.device == "cuda":
-            self.fast_dtype = torch.get_autocast_gpu_dtype()
-        ### PATCH ###
-        elif self.device == "meta":
-            self.fast_dtype = torch.get_autocast_cpu_dtype()
-        ### PATCH ###
-        elif self.device == "cpu":
-            self.fast_dtype = torch.get_autocast_cpu_dtype()
-        elif self.device == "xpu":
-            self.fast_dtype = torch.xpu.get_autocast_xpu_dtype()  # type: ignore[attr-defined]
-        elif self.device == "ipu":
-            self.fast_dtype = torch.get_autocast_ipu_dtype()  # type: ignore[attr-defined]
-        elif self.device == "hpu":
-            self.fast_dtype = torch.hpu.get_autocast_hpu_dtype()  # type: ignore[attr-defined]
-        elif self.device == "xla":
-            self.fast_dtype = torch.get_autocast_xla_dtype()  # type: ignore[attr-defined]
-        elif self.device == self.custom_backend_name:
+        self.fast_dtype = torch.get_autocast_dtype(self.device)
+        if self.device == self.custom_backend_name:
             necessary_funcs = [
-                "is_autocast_enabled",
-                "set_autocast_enabled",
-                "get_autocast_dtype",
-                "set_autocast_dtype",
                 "get_amp_supported_dtype",
             ]
             message = f"Tried to use AMP with the `{self.custom_backend_name}` backend, but the backend has not "
             message += "registered a module or  the module miss some necessary funcs. The backend should register "
             message += "a module by `torch._register_device_module`, and the module must have these funcs: \n"
-            message += "`is_autocast_enabled() -> bool`, `set_autocast_enabled(bool) -> None`, "
-            message += "`get_autocast_dtype() -> torch.dtype`, `set_autocast_dtype(torch.dtype) "
-            message += (
-                "-> None` and `get_amp_supported_dtype() -> List[torch.dtype]`. \n"
-            )
+            message += "`get_amp_supported_dtype() -> List[torch.dtype]`. \n"
 
             assert hasattr(torch, self.custom_backend_name), message
             self.custom_device_mod = getattr(torch, self.custom_backend_name)
@@ -157,11 +147,6 @@ try:
                     message + f"But the func `{func}` is missing. \n"
                 )
 
-            self.fast_dtype = self.custom_device_mod.get_autocast_dtype()
-        else:
-            raise RuntimeError(
-                f"User specified an unsupported autocast device_type '{self.device}'"
-            )
         self._cache_enabled = torch.is_autocast_cache_enabled()
         if (
             enabled
@@ -237,6 +222,7 @@ try:
                 warnings.warn(error_message)
                 enabled = False
         self._enabled = enabled
+
 
     from torch.amp.autocast_mode import autocast
 

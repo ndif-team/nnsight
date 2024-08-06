@@ -97,20 +97,17 @@ class Node:
 
                 node = node.node
 
+            if node.done():
+
+                return node.value
+
             if self.attached() and self.graph.id != node.graph.id:
 
-                node = protocols.BridgeProtocol.add(node, self.graph).node
+                node = protocols.BridgeProtocol.add(node).node
 
-            if not node.done():
-
-                self.arg_dependencies.append(node)
-                # Weakref so no reference loop
-                node.listeners.append(weakref.proxy(self))
-
-            # Otherwise just get the value if its already done.
-            else:
-
-                node = node.value
+            self.arg_dependencies.append(node)
+            # Weakref so no reference loop
+            node.listeners.append(weakref.proxy(self))
 
             return node
 
@@ -184,6 +181,32 @@ class Node:
         """
 
         if not self.attached():
+
+            graph: "Graph" = None
+
+            def find_attached_graph(node: Union[Proxy, Node]):
+
+                if isinstance(node, Proxy):
+
+                    node = node.node
+
+                nonlocal graph
+
+                if node.attached():
+
+                    graph = node.graph
+
+            util.apply((args, kwargs), find_attached_graph, (Proxy, Node))
+
+            if graph is not None:
+
+                return graph.create(
+                    target=target,
+                    name=name,
+                    proxy_value=proxy_value,
+                    args=args,
+                    kwargs=kwargs,
+                )
 
             # Create Node with no values or Graph.
             node = Node(
@@ -297,7 +320,7 @@ class Node:
         Lets protocol execute if target is str.
         Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
-        
+
         try:
 
             if isinstance(self.target, type) and issubclass(
@@ -316,10 +339,12 @@ class Node:
 
                 # Set value.
                 self.set_value(output)
-                
+
         except Exception as e:
-            
-            raise type(e)(f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'") from e
+
+            raise type(e)(
+                f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
+            ) from e
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
@@ -336,7 +361,7 @@ class Node:
         for listener in self.listeners:
             listener.remaining_dependencies -= 1
 
-            if listener.fulfilled():
+            if listener.fulfilled() and not self.graph.sequential:
                 listener.execute()
 
         for dependency in self.arg_dependencies:

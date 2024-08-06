@@ -31,7 +31,7 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         self,
         target: Callable,
         *args,
-        validate: bool = True,
+        validate: bool = False,
         **kwargs,
     ) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
@@ -61,9 +61,9 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
 
     ### BACKENDS ########
 
-    def local_backend_execute(self) -> None:
+    def local_backend_execute(self) -> Graph:
 
-        self.graph.compile()
+        self.graph.execute()
 
         graph = self.graph
         graph.alive = False

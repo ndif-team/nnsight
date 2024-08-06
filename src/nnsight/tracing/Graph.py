@@ -7,10 +7,10 @@ import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-from .Node import Node
-from .Proxy import Proxy
-from .protocols import Protocol, LockProtocol
 from ..util import apply
+from .Node import Node
+from .protocols import LockProtocol, Protocol
+from .Proxy import Proxy
 
 
 class Graph:
@@ -19,6 +19,7 @@ class Graph:
 
     Attributes:
         validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
+        sequential (bool): If to run nodes sequentially when executing this graph. Otherwise, only execute root nodes and have them execute nodes downstream.
         proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
         alive (bool): If this Graph should be considered alive, and therefore added to. Used by Nodes.
         nodes (Dict[str, Node]): Mapping of node name to node.
@@ -30,7 +31,8 @@ class Graph:
     def __init__(
         self,
         proxy_class: Type[Proxy] = Proxy,
-        validate: bool = True,
+        validate: bool = False,
+        sequential: bool = True,
         graph_id: int = None,
     ) -> None:
 
@@ -38,6 +40,7 @@ class Graph:
 
         self.proxy_class = proxy_class
         self.validate = validate
+        self.sequential = sequential
 
         self.alive = True
 
@@ -46,7 +49,7 @@ class Graph:
 
         self.attachments = dict()
 
-    def compile(self) -> None:
+    def execute(self) -> None:
         """Re-compile graph to prepare for a new execution of the graph.
 
         Resets all nodes, then compiles all nodes.
@@ -56,10 +59,17 @@ class Graph:
         for node in self.nodes.values():
             node.reset()
 
-        root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
+        if self.sequential:
 
-        for node in root_nodes:
-            node.execute()
+            for node in self.nodes.values():
+                node.execute()
+
+        else:
+
+            root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
+
+            for node in root_nodes:
+                node.execute()
 
     def create(self, *args, **kwargs) -> Proxy:
         """Creates a Node directly on this Graph and returns its Proxy.
@@ -114,12 +124,16 @@ class Graph:
         self.nodes[node.name] = node
 
     def copy(self):
-        """Copy constructs a new Graph and then recursively 
+        """Copy constructs a new Graph and then recursively
         creates new Nodes on the graph.
         """
-        new_graph = Graph(validate=False, proxy_class=self.proxy_class)
+        new_graph = Graph(
+            validate=self.validate,
+            sequential=self.sequential,
+            proxy_class=self.proxy_class,
+        )
 
-        def compile(graph, old_node):
+        def compile(graph: Graph, old_node: Node):
             if old_node.name in graph.nodes:
                 return graph.nodes[old_node.name]
 
@@ -127,25 +141,27 @@ class Graph:
                 target=old_node.target,
                 name=old_node.name,
                 proxy_value=None,
-                args=apply(
-                    old_node.args, 
-                    lambda x: compile(graph, x), Node
-                ),
-                kwargs=apply(
-                    old_node.kwargs, 
-                    lambda x: compile(graph, x), Node
-                )
+                args=apply(old_node.args, lambda x: compile(graph, x), Node),
+                kwargs=apply(old_node.kwargs, lambda x: compile(graph, x), Node),
             ).node
 
-            if isinstance(node.target, type) and issubclass(
-                node.target, Protocol
-            ):
+            if isinstance(node.target, type) and issubclass(node.target, Protocol):
                 node.target.compile(node)
 
             return node
 
+        # To preserve order
+        nodes = {}
+
         for node in self.nodes.values():
+
             compile(new_graph, node)
+
+            # To preserve order
+            nodes[node.name] = new_graph.nodes[node.name]
+
+        # To preserve order
+        new_graph.nodes = nodes
 
         return new_graph
 

@@ -1,6 +1,6 @@
 import inspect
 import weakref
-from typing import TYPE_CHECKING, Any, Union, Optional
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -346,6 +346,9 @@ class SwapProtocol(Protocol):
 
         return value
 
+class BridgeException(Exception):
+    def __init__(self):
+        super.__init__("Must define a Session context to make use of the Bridge")
 
 class BridgeProtocol(Protocol):
     """Protocol to connect two Graphs by grabbing a value from one and injecting it into another.
@@ -356,17 +359,17 @@ class BridgeProtocol(Protocol):
     condition: bool = False
 
     @classmethod
-    def add(cls, from_node: "Node", to_graph: "Graph") -> "InterventionProxy":
+    def add(cls, node: "Node") -> "InterventionProxy":
 
         # Adds a Lock Node. One, so the value from_node isn't destroyed until the to_nodes are done with it,
         # and two acts as an easy reference to the from_node to get its value from the lock Node args.
-        lock_node = LockProtocol.add(from_node).node
+        lock_node = LockProtocol.add(node).node
 
         # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
-        return to_graph.create(
+        return node.create(
             target=cls,
-            proxy_value=from_node.proxy_value,
-            args=[from_node.graph.id, lock_node.name],
+            proxy_value=node.proxy_value,
+            args=[node.graph.id, lock_node.name],
         )
 
     @classmethod
@@ -383,6 +386,7 @@ class BridgeProtocol(Protocol):
 
         # Value node is Lock Node's only arg
         value_node: "Node" = lock_node.args[0]
+        
 
         if value_node.done():
 
@@ -417,8 +421,7 @@ class BridgeProtocol(Protocol):
         """
 
         if not cls.has_bridge(graph):
-            # TODO error
-            pass
+            raise BridgeException()
 
         return graph.attachments[cls.attachment_name]
 
@@ -511,6 +514,7 @@ class ValueProtocol(Protocol):
     def set(cls, node: Node, value: Any) -> None:
 
         node.args[0] = value
+
 
 class ConditionalProtocol(Protocol):
     """ Protocol operating as a conditional statement. 
@@ -673,3 +677,57 @@ class ConditionalProtocol(Protocol):
         """
 
         return node.graph.attachments[cls.attachment_name].is_node_conditioned(node)
+
+
+class UpdateProtocol(Protocol):
+    """ Protocol to update the value of an InterventionProxy node.
+
+    .. codeb-block:: python
+        with model.trace(input) as tracer:
+            num = tracer.apply(int, 0)
+            num.update(5)
+    """
+
+    @classmethod
+    def add(cls, node: "Node", new_value: Union[Node, Any]) -> "InterventionProxy":
+        """ Creates an UpdateProtocol node.
+
+        Args:
+            node (Node): Original node.
+            new_value (Union[Node, Any]): The update value.
+        
+        Returns:
+            InterventionProxy: proxy.
+        """
+
+        return node.create(
+            target=cls,
+            proxy_value=node.proxy_value,
+            args=[
+                node,
+                new_value,
+            ],
+        )
+    
+    @classmethod
+    def execute(cls, node: "Node") -> None:
+        """ Sets the value of the original node to the new value.
+            If the original is defined outside the context, it uses the bridge to get the node.
+        
+        Args:
+            node (Node): UpdateProtocol node.
+        """
+
+        value_node, new_value = node.args
+
+        if value_node.target == BridgeProtocol:
+            bridge = BridgeProtocol.get_bridge(value_node.graph)
+            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
+            value_node = lock_node.args[0]
+
+        new_value = Node.prepare_inputs(new_value)
+
+        value_node._value = new_value
+
+        node.set_value(new_value)
+

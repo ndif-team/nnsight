@@ -10,7 +10,13 @@ from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
 from .. import util
-from ..contexts.backends import Backend, BridgeBackend, LocalBackend, RemoteBackend, EditBackend
+from ..contexts.backends import (
+    Backend,
+    BridgeBackend,
+    EditBackend,
+    LocalBackend,
+    RemoteBackend,
+)
 from ..contexts.session.Session import Session
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
@@ -78,9 +84,7 @@ class NNsight:
 
         # Otherwise load from _load(...).
         if not self._custom_model:
-            # accelerate.init_empty_weights makes all parameters loaded on the 'meta' device.
-            # Also do .to('meta') because why not.
-            with accelerate.init_empty_weights(include_buffers=True):
+            with torch.device("meta"):
                 self._model = self._load(self._model_key, *args, **kwargs).to("meta")
 
         self._envoy = Envoy(self._model)
@@ -98,7 +102,7 @@ class NNsight:
         invoker_args: Dict[str, Any] = None,
         backend: Union[Backend, str] = None,
         remote: bool = False,
-        scan: bool = True,
+        scan: bool = False,
         **kwargs: Dict[str, Any],
     ) -> Union[Tracer, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
@@ -184,13 +188,13 @@ class NNsight:
         """
 
         # TODO raise error/warning if trying to use one backend with another condition satisfied?
-        
+
         bridge = None
 
         if self._session is not None:
 
             backend = BridgeBackend(weakref.proxy(self._session.bridge))
-            
+
             bridge = self._session.bridge
 
         # If remote, use RemoteBackend with default url.
@@ -250,15 +254,15 @@ class NNsight:
     ):
         """Create a trace context with an edit backend and apply a list of edits.
 
-        The edit backend sets a default graph on the NNsight model which is 
+        The edit backend sets a default graph on the NNsight model which is
         run on future trace calls.
         """
 
         return self.trace(
-            *inputs, 
+            *inputs,
             validate=kwargs.pop("validate", False),
-            **kwargs, 
-            backend=EditBackend()
+            **kwargs,
+            backend=EditBackend(),
         )
 
     def session(
@@ -299,7 +303,7 @@ class NNsight:
         self,
         fn: Callable,
         intervention_graph: Graph,
-        *inputs: List[Any],
+        *inputs: List[List[Any]],
         **kwargs,
     ) -> None:
         """Runs some function with some inputs and some graph with the appropriate contexts for this model.
@@ -317,7 +321,7 @@ class NNsight:
         Args:
             fn (Callable): Function or method to run.
             intervention_graph (Graph): Intervention graph to interleave with model's computation graph.
-            inputs (List[Any]): Inputs to give to function.
+            inputs (List[List[Any]]): List of multiple groups of inputs to give to function for each invoker.
         """
 
         # Loads and dispatched ._model if not already done so.
@@ -326,9 +330,25 @@ class NNsight:
 
         logger.info(f"Running `{self._model_key}`...")
 
-        inputs, total_batch_size = self._prepare_inputs(*inputs)
+        # We need to pre-process and batch all inputs as (inputs) is a list of each set of inputs from each invocation.
+        batch_groups = []
+        batch_start = 0
+        batched_input = None
 
-        intervention_handler = InterventionHandler(intervention_graph, total_batch_size)
+        for _inputs in inputs:
+
+            _inputs, batch_size = self._prepare_inputs(*_inputs)
+
+            batch_groups.append((batch_start, batch_size))
+            batch_start += batch_size
+
+            batched_input = self._batch_inputs(batched_input, *_inputs)
+            
+        inputs, batch_size = self._prepare_inputs(*batched_input)
+
+        intervention_handler = InterventionHandler(
+            intervention_graph, batch_groups, batch_size
+        )
 
         module_paths = InterventionProtocol.get_interventions(intervention_graph).keys()
 

@@ -16,3 +16,80 @@ The :class:`Invoker <nnsight.contexts.Invoker.Invoker>` class is what actually a
 
 nnsight comes with an extension of a Tracer, RemoteTracer,  which enables both local and remote execution.
 """
+
+from typing import Any, Tuple
+
+from .. import util
+from ..tracing import protocols
+from ..tracing.Node import Node
+from ..tracing.Proxy import Proxy
+
+
+def check_for_dependencies(data: Any) -> Tuple[Any, bool]:
+    """Checks to see if there are any Proxies in data.
+    If so, convert them to a Bridge Node, then a Lock Node in order to
+    later get the value of the Bridge Node come execution.
+
+    Args:
+        data (Any): Data to check for Proxies.
+
+    Returns:
+        Any: Data with Proxies replaced with Bridge/Lock Nodes.
+        bool: If there were any proxies in data.
+    """
+
+    has_proxies = False
+
+    def check_for_nodes(proxy: Proxy):
+
+        if not proxy.node.done():
+
+            nonlocal has_proxies
+
+            has_proxies = True
+
+            node = proxy.node
+
+            return protocols.LockProtocol.add(
+                protocols.BridgeProtocol.add(
+                    node,
+                ).node
+            ).node
+
+        else:
+
+            return proxy.node.value
+
+    return util.apply(data, check_for_nodes, Proxy), has_proxies
+
+
+def resolve_dependencies(data: Any) -> Any:
+    """Turn any dependencies (Locked Bridge Node) within data into their value.
+    If the Bridge Node is not executed, execute it.
+
+    Args:
+        data (Any): Data to find and resolve dependencies within.
+
+    Returns:
+        Any: Data with dependencies converted to their value.
+    """
+
+    def get_value(node: Node):
+
+        bridge_node: Node = node.args[0]
+
+        if not bridge_node.done():
+
+            bridge_node.reset()
+
+            bridge_node.execute()
+
+        # Get value of Bridge Node
+        value = bridge_node.value
+
+        # Clear Lock Node
+        node.set_value(None)
+
+        return value
+
+    return util.apply(data, get_value, Node)
