@@ -13,6 +13,7 @@ class Bridge:
 
     Attributes:
         id_to_graph (Dict[int, Graph]): Mapping of graph id to Graph.
+        graph_stack (List[Graph]): Stack of visited Intervention Graphs.
         locks (int): Count of how many entities are depending on ties between graphs not to be released.
     """
 

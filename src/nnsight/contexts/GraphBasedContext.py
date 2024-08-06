@@ -3,8 +3,7 @@ from __future__ import annotations
 import inspect
 import weakref
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
-
+from typing import TYPE_CHECKING, Callable
 from typing_extensions import Self
 
 from ..intervention import InterventionProxy

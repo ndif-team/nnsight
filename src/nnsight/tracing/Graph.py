@@ -247,6 +247,10 @@ class Graph:
 
                 graph.edge(name, node.name)
 
+            if node.cond_dependency:
+                name = add_node(node.cond_dependency, graph)
+                graph.edge(name, node.name)
+
         graph.render(filename=filename, format=format)
 
     def __str__(self) -> str:

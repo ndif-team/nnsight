@@ -49,7 +49,7 @@ class Session(GraphBasedContext, RemoteMixin):
 
         backend = BridgeBackend(bridge)
 
-        return Iterator(iterable, backend, bridge=bridge, **kwargs)
+        return Iterator(iterable, backend, bridge=bridge, proxy_class=self.model.proxy_class, **kwargs)
 
     ### BACKENDS ########
 
