@@ -742,13 +742,13 @@ class UpdateProtocol(Protocol):
         """
 
         value_node, new_value = node.args
+        new_value = Node.prepare_inputs(new_value)
 
         if value_node.target == BridgeProtocol:
+            value_node._value = new_value
             bridge = BridgeProtocol.get_bridge(value_node.graph)
             lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
             value_node = lock_node.args[0]
-
-        new_value = Node.prepare_inputs(new_value)
 
         value_node._value = new_value
 

@@ -94,7 +94,7 @@ class Bridge:
             Optional[Node]: Bridge Node if it exists.
         """
 
-        for bridge_node in self.bridged_nodes_dict[node]:
+        for bridge_node in self.bridged_nodes[node]:
             if bridge_node.graph.id == graph_id:
                 return bridge_node
 
