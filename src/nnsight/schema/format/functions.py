@@ -27,6 +27,8 @@ def get_function_name(fn, module_name=None):
 
 
 FUNCTIONS_WHITELIST = {}
+
+### Torch functions
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(value): value
@@ -87,13 +89,7 @@ FUNCTIONS_WHITELIST.update(
         if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
     }
 )
-FUNCTIONS_WHITELIST.update(
-    {
-        get_function_name(protocol): protocol
-        for key, protocol in getmembers(Iterator)
-        if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
-    }
-)
+
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(protocol): protocol

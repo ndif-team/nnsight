@@ -63,7 +63,7 @@ def test_external_proxy_intervention_executed_locally(tiny_model: NNsight, tiny_
         with tiny_model.trace(tiny_input) as tracer_2:
             l1_out[:, 2] = 5
 
-        assert list(tracer_2._graph.nodes.keys()) == ['BridgeProtocol_0', 'setitem_0']
+        assert list(tracer_2.graph.nodes.keys()) == ['BridgeProtocol_0', 'setitem_0']
     
     assert l1_out[:, 2] == 5
 
@@ -77,4 +77,119 @@ def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 
     with pytest.raises(ValueError):
         l2_out.value
+
+def test_true_conditional_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input) as tracer:
+        num = tracer.apply(int, 5)
+        with num > 0:
+            tiny_model.layer1.output[:] = 1
+            l1_out = tiny_model.layer1.output.save()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+    assert torch.all(l1_out.value == 1).item()
+
+def test_false_conditional_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input) as tracer:
+        num = tracer.apply(int, 5)
+        with num < 0:
+            tiny_model.layer1.output[:] = 1
+            l1_out = tiny_model.layer1.output.save()
+
+        # check that the condition does not persist outside the context
+        l2_out = tiny_model.layer2.output.save()
+
+    with pytest.raises(ValueError):
+        l1_out.value
+    assert isinstance(l2_out.value, torch.Tensor)
+
+def test_node_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
+    """ Test a Tensor a boolean value as a result of a boolean operation on an InterventionProxy """
+
+    with tiny_model.trace(tiny_input):
+        out = tiny_model.layer1.output
+        out[:, 0] = 1
+        with out[:, 0] != 1:
+            tiny_model.layer1.output[:] = 1
+            l1_out = tiny_model.layer1.output.save()
+
+    with pytest.raises(ValueError):
+        l1_out.value
+
+def test_multiple_dependent_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
+    """ Test that interventions defined within different Intervention contexts can be referenced if their conditions evaluated to True. """
+
+    with tiny_model.trace(tiny_input) as tracer:
+        num = tracer.apply(int, 5)
+        l1_out = tiny_model.layer1.output
+        l2_out = tiny_model.layer2.output.save()
+        with num > 0:
+            l1_out[:] = 1
+
+        with l1_out[:, 0] != 1:
+            tiny_model.layer2.output[:] = 2
+        
+        with l1_out[:, 0] == 1:
+            tiny_model.layer2.output[:] = 3
+
+    assert torch.all(l2_out.value == 3).item()
+
+def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input) as tracer:
+        num = tracer.apply(int, 5)
+        with num > 0: # True
+            l1_out = tiny_model.layer1.output.save()
+
+            with num > 0: # True
+                tiny_model.layer1.output[:] = 1
+
+            with num < 0: # False
+                tiny_model.layer1.output[:] = 2
+
+        with num < 0: # False
+            tiny_model.layer2.output[:] = 0
+
+            with num > 0: # True
+                l2_out = tiny_model.layer2.output.save()
+
+    assert isinstance(l1_out.value, torch.Tensor)
+    assert torch.all(l1_out.value == 1).item()
+    with pytest.raises(ValueError):
+        l2_out.value
+
+def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.session() as session:
+        num = session.apply(int, 5)
+        with num > 0:
+            with tiny_model.trace(tiny_input):
+                output = tiny_model.output.save()
+
+    assert isinstance(output.value, torch.Tensor)
+
+def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.session() as session:
+        result = session.apply(list).save()
+        with session.iter([0, 1, 2]) as (item, iterator):
+            with (item % 2 == 0):
+                with tiny_model.trace(tiny_input):
+                    result.append(item)
     
+    assert result.value == [0, 2]
+
+def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.session() as session:
+        val = session.apply(int, 0)
+        with tiny_model.trace(tiny_input):
+            tiny_model.layer1.output[:] = val # fetches the val proxy using the bridge protocol
+            l1_out = tiny_model.layer1.output.save()
+
+    assert torch.all(l1_out.value == 0).item()
+
+def test_update_protocol(tiny_model: NNsight):
+    with tiny_model.session() as session:
+        sum = session.apply(int, 0).save()
+        with session.iter([0, 1, 2]) as (item, iterator):
+            sum.update(sum + item)
+
+        sum.update(sum + 4)
+
+    assert sum.value == 7

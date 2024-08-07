@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-import inspect
 import weakref
-from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from .. import util
-from ..intervention import InterventionProxy
 from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
-from ..tracing.Node import Node
-from .backends import Backend, RemoteMixin, BridgeMixin, EditMixin
+from . import resolve_dependencies
+from .backends import Backend, BridgeMixin, EditMixin, RemoteMixin
+from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
@@ -19,7 +16,7 @@ if TYPE_CHECKING:
     from ..models.NNsightModel import NNsight
 
 
-class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
+class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -27,9 +24,7 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
         _graph (nnsight.tracing.Graph.Graph): Graph which traces operations performed on the input and output of modules' Envoys are added and later executed.
         _args (List[Any]): Positional arguments to be passed to function that executes the model.
         _kwargs (Dict[str,Any]): Keyword arguments to be passed to function that executes the model.
-        _batch_size (int): Batch size of the most recent input. Used by Envoy to create input/output proxies.
-        _batch_start (int): Batch start of the most recent input. Used by Envoy to create input/output proxies.
-        _batched_input (Any): Batched version of all inputs involved in this Tracer.
+        _invoker_inputs (List[Any]): Inputs for each invocation of this Tracer.
         _invoker (Invoker): Currently open Invoker.
     """
 
@@ -37,39 +32,34 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
         self,
         backend: Backend,
         model: "NNsight",
+        validate: bool = False,
         graph: Graph = None,
-        bridge:Bridge = None, 
-        validate: bool = True,
+        bridge: Bridge = None,
         **kwargs,
     ) -> None:
 
-        self._model = model
+        self.model = model
 
-        self._graph = (
-            Graph(proxy_class=model.proxy_class, validate=validate)
-            if graph is None
-            else graph
+        GraphBasedContext.__init__(
+            self,
+            backend,
+            graph=graph,
+            bridge=bridge,
+            proxy_class=model.proxy_class,
+            validate=validate,
+            sequential=False,
         )
-        
-        protocols.ApplyModuleProtocol.set_module(self._graph, self._model)
 
-        if bridge is not None:
-            
-            bridge.add(self._graph)
-
-        self._backend = backend
+        protocols.ApplyModuleProtocol.set_module(self.graph, self.model)
 
         self._kwargs = kwargs
 
-        self._invoker: Optional[Invoker] = None
+        self.invoker: Optional[Invoker] = None
 
-        self._batch_size: int = 0
-        self._batch_start: int = 0
-
-        self._batched_input: Any = None
+        self._invoker_inputs: List[Any] = []
 
         # Module Envoys need to know about the current Tracer to create the correct proxies.
-        self._model._envoy._set_tracer(weakref.proxy(self))
+        self.model._envoy._set_tracer(weakref.proxy(self))
 
     def __getattr__(self, key: Any) -> Any:
         """Wrapper of .model._envoy's attributes to access module Envoy inputs and outputs.
@@ -77,20 +67,21 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
         Returns:
             Any: Attribute.
         """
-        return getattr(self._model._envoy, key)
+        return getattr(self.model._envoy, key)
 
     def __enter__(self) -> Tracer:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if isinstance(exc_val, BaseException):
-            self._graph.alive = False
-            self._graph = None
+            self.graph.alive = False
+            self.graph = None
             raise exc_val
-        if self._batched_input is None:
+
+        if len(self._invoker_inputs) == 0:
             raise ValueError("No input was provided to the tracing context.")
 
-        self._backend(self)
+        self.backend(self)
 
     def invoke(self, *inputs: Any, **kwargs) -> Invoker:
         """Create an Invoker context dor a given input.
@@ -102,7 +93,7 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
             Invoker: Invoker.
         """
 
-        if self._invoker is not None:
+        if self.invoker is not None:
 
             raise Exception("Can't create an invoker context with one already open!")
 
@@ -115,112 +106,64 @@ class Tracer(AbstractContextManager, RemoteMixin, BridgeMixin, EditMixin):
             increment (int): How many call_iter to increment at once. Defaults to 1.
         """
 
-        self._model._envoy.next(increment=increment, propagate=True)
-
-    def apply(
-        self,
-        target: Callable,
-        *args,
-        validate: bool = False,
-        **kwargs,
-    ) -> InterventionProxy:
-        """Helper method to directly add a function to the intervention graph.
-
-        Args:
-            target (Callable): Function to apply
-            validate (bool): If to try and run this operation in FakeMode to test it out and scan it.
-
-        Returns:
-            InterventionProxy: Proxy of applying that function.
-        """
-        return self._graph.create(
-            target=target,
-            proxy_value=inspect._empty if validate else None,
-            args=args,
-            kwargs=kwargs,
-        )
+        self.model._envoy.next(increment=increment, propagate=True)
 
     ##### BACKENDS ###############################
 
     def local_backend_execute(self) -> Graph:
 
-        self._graph.compile()
+        protocols.ApplyModuleProtocol.set_module(self.graph, self.model._model)
 
-        protocols.ApplyModuleProtocol.set_module(self._graph, self._model._model)
+        self.graph.execute()
 
-        _batched_input = self._batched_input
+        invoker_inputs = self._invoker_inputs
 
         # If ths graph has a Bridge, we need to check for Nodes in the input itself.
-        if protocols.BridgeProtocol.has_bridge(self._graph):
+        if protocols.BridgeProtocol.has_bridge(self.graph):
 
-            def get_value(node: Node):
+            invoker_inputs = resolve_dependencies(invoker_inputs)
 
-                value = node.args[0].value
-
-                node.set_value(None)
-
-                return value
-
-            _batched_input = util.apply(_batched_input, get_value, Node)
-
-        self._model.interleave(
-            self._model._execute,
-            self._graph,
-            *_batched_input,
+        self.model.interleave(
+            self.model._execute,
+            self.graph,
+            *invoker_inputs,
             **self._kwargs,
         )
 
-        graph = self._graph
+        graph = self.graph
         graph.alive = False
-        
+
         if not isinstance(graph, weakref.ProxyType):
-            self._graph = weakref.proxy(graph)
+            self.graph = weakref.proxy(graph)
 
         return graph
-    
+
     def edit_backend_execute(self) -> Graph:
-        
-        self._model._default_graph = self._graph
 
-    def remote_backend_get_model_key(self):
+        self.model._default_graph = self.graph
 
-        self._model: "RemoteableMixin"
+    def remote_backend_get_model_key(self) -> str:
 
-        return self._model.to_model_key()
+        self.model: "RemoteableMixin"
 
-    def remote_backend_postprocess_result(self, local_result: Graph):
+        return self.model.to_model_key()
+
+    def remote_backend_postprocess_result(self, local_result: Graph) -> Dict[str, Any]:
 
         from ..schema.Response import ResultModel
 
         return ResultModel.from_graph(local_result)
 
-    def remote_backend_handle_result_value(self, value: Dict[str, Any]):
+    def remote_backend_handle_result_value(self, value: Dict[str, Any]) -> None:
 
         for node_name, node_value in value.items():
-            self._graph.nodes[node_name]._value = node_value
+            self.graph.nodes[node_name]._value = node_value
 
-        graph = self._graph
+        graph = self.graph
         graph.alive = False
-        
+
         if not isinstance(graph, weakref.ProxyType):
-            self._graph = weakref.proxy(graph)
-
-        return graph
-
-    def bridge_backend_handle(self, bridge: Bridge) -> None:
-
-        bridge.pop_graph()
-        
-        protocols.LocalBackendExecuteProtocol.add(self, bridge.peek_graph())
-        
-        self._graph = weakref.proxy(self._graph)
-
-    def vis(self, **kwargs) -> None:
-        """
-        Helper method to save a visualization of the current state of the intervention graph.
-        """
-
-        self._graph.vis(**kwargs)
+            self.graph = weakref.proxy(graph)
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"
