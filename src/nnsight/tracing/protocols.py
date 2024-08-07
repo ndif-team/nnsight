@@ -804,7 +804,7 @@ class ConditionalProtocol(Protocol):
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "orange", "shape": "polygon", "sides": 6}, # Node display
+        return {"node": {"color": "#FF8C00", "shape": "polygon", "sides": 6}, # Node display
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument  
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display

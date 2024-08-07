@@ -440,13 +440,17 @@ class Node:
 
         visualize_args(self.kwargs.items())
 
+        if isinstance(self.cond_dependency, Node):
+            name = self.cond_dependency.visualize(viz_graph)
+            viz_graph.add_edge(name, self.name, style=styles["edge"][None], color="#FF8C00")
+
         return self.name
 
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)
         args = util.apply(args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]
-        
+
         return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} a_d:{len(self.arg_dependencies)} c_d{bool(self.cond_dependency)}]"
     
     def __repr__(self) -> str:
