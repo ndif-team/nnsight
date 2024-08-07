@@ -15,6 +15,7 @@ from ..contexts.backends import (
     BridgeBackend,
     EditBackend,
     LocalBackend,
+    NoopBackend,
     RemoteBackend,
 )
 from ..contexts.session.Session import Session
@@ -247,6 +248,28 @@ class NNsight:
 
         return tracer
 
+    def scan(self, *inputs, **kwargs) -> Tracer:
+        """Context just to populate fake tenor proxy values using scan and validate.
+        Useful when looking for just the shapes of future tensors
+
+        Examples:
+
+            .. code-block:: python
+
+                with model.scan(" "):
+
+                    dim = model.module.output.shape[-1]
+
+                print(dim)
+
+        Returns:
+            Tracer: Tracer context with Noop backend.
+        """
+
+        return self.trace(
+            *inputs, **kwargs, scan=True, validate=True, backend=NoopBackend()
+        )
+
     def edit(
         self,
         *inputs: Any,
@@ -343,7 +366,7 @@ class NNsight:
             batch_start += batch_size
 
             batched_input = self._batch_inputs(batched_input, *_inputs)
-            
+
         inputs, batch_size = self._prepare_inputs(*batched_input)
 
         intervention_handler = InterventionHandler(
