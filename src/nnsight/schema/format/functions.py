@@ -1,12 +1,11 @@
 import operator
-from inspect import (getmembers, isbuiltin, isfunction, ismethod,
-                     ismethoddescriptor)
+from inspect import getmembers, isbuiltin, isfunction, ismethod, ismethoddescriptor, isclass
 
 import einops
 import torch
+from torch.utils.data.dataloader import DataLoader
 
 from ... import intervention, util
-from ...contexts.session import Iterator
 from ...tracing import protocols
 from ...tracing.Proxy import Proxy
 
@@ -55,6 +54,16 @@ FUNCTIONS_WHITELIST.update(
         )
     }
 )
+FUNCTIONS_WHITELIST.update({get_function_name(torch.nn.Parameter): torch.nn.Parameter})
+
+FUNCTIONS_WHITELIST.update(
+    {
+        get_function_name(value): value
+        for key, value in getmembers(torch.optim, isclass)
+        if issubclass(value, torch.optim.Optimizer)
+    }
+)
+FUNCTIONS_WHITELIST.update({get_function_name(DataLoader): DataLoader})
 ### operator functions
 FUNCTIONS_WHITELIST.update(
     {
