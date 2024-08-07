@@ -4,7 +4,7 @@ import weakref
 from types import BuiltinFunctionType
 from types import FunctionType as FuncType
 from types import MethodDescriptorType
-from typing import Dict, List, Literal, Union, Optional
+from typing import Dict, List, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, Strict, field_validator
@@ -68,7 +68,9 @@ class NodeModel(BaseNNsightModel):
     target: Union[FunctionModel, FunctionType]
     args: List[ValueTypes]
     kwargs: Dict[str, ValueTypes]
-    condition: Union[NodeReferenceType, NodeModel.Reference, PrimitiveModel, PrimitiveType]
+    condition: Union[
+        NodeReferenceType, NodeModel.Reference, PrimitiveModel, PrimitiveType
+    ]
 
     def deserialize(self, handler: DeserializeHandler) -> Node:
 
@@ -244,18 +246,26 @@ class TracerModel(BaseNNsightModel):
 
     def deserialize(self, handler: DeserializeHandler) -> Tracer:
 
+        _graph = handler.graph
+        _nodes = handler.nodes
+
+        graph = self.graph.deserialize(handler)
+
+        handler.graph = graph
+
         kwargs = {key: value.deserialize(handler) for key, value in self.kwargs.items()}
 
         invoker_inputs = [
             invoker_input.deserialize(handler) for invoker_input in self.invoker_inputs
         ]
 
-        graph = self.graph.deserialize(handler)
-
         tracer = Tracer(
             None, handler.model, bridge=handler.bridge, graph=graph, **kwargs
         )
         tracer._invoker_inputs = invoker_inputs
+
+        handler.graph = _graph
+        handler.nodes = _nodes
 
         return tracer
 
@@ -270,11 +280,19 @@ class IteratorModel(BaseNNsightModel):
 
     def deserialize(self, handler: DeserializeHandler) -> Iterator:
 
-        data = self.data.deserialize(handler)
+        _graph = handler.graph
+        _nodes = handler.nodes
 
         graph = self.graph.deserialize(handler)
 
+        handler.graph = graph
+
+        data = self.data.deserialize(handler)
+
         iterator = Iterator(data, None, bridge=handler.bridge, graph=graph)
+
+        handler.graph = _graph
+        handler.nodes = _nodes
 
         return iterator
 
@@ -351,14 +369,18 @@ FunctionType = Annotated[
 ]
 
 NodeReferenceType = Annotated[
-    Node, AfterValidator(lambda value: NodeModel.Reference(name=value.name))   
+    Node, AfterValidator(lambda value: NodeModel.Reference(name=value.name))
 ]
 
 NodeType = Annotated[
     Node,
     AfterValidator(
         lambda value: NodeModel(
-            name=value.name, target=value.target, args=value.args, kwargs=value.kwargs, condition=value.cond_dependency
+            name=value.name,
+            target=value.target,
+            args=value.args,
+            kwargs=value.kwargs,
+            condition=value.cond_dependency,
         )
     ),
 ]
