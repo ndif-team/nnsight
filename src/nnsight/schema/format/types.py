@@ -264,13 +264,13 @@ class IteratorModel(BaseNNsightModel):
 
     type_name: Literal["ITERATOR"] = "ITERATOR"
 
-    data: List[ValueTypes]
+    data: ValueTypes
 
     graph: Union[GraphModel, GraphType]
 
     def deserialize(self, handler: DeserializeHandler) -> Iterator:
 
-        data = [value.deserialize(handler) for value in self.data]
+        data = self.data.deserialize(handler)
 
         graph = self.graph.deserialize(handler)
 
