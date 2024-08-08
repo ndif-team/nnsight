@@ -537,12 +537,11 @@ class BridgeProtocol(Protocol):
         bridge_node = bridge.get_bridge_node(node, graph_id) # a bridged node has a unique bridge node per graph reference
 
         # if the bridge node does not exist, create one
-        if bridge_node:
-            return bridge_node
-        else:
+        if bridge_node is None:
             bridge_node = cls.add(node).node
             bridge.add_bridge_node(node, bridge_node)
-            return bridge_node
+            
+        return bridge_node
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
