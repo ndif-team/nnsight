@@ -15,6 +15,7 @@ from ..contexts.backends import (
     BridgeBackend,
     EditBackend,
     LocalBackend,
+    NoopBackend,
     RemoteBackend,
 )
 from ..contexts.session.Session import Session
@@ -191,7 +192,10 @@ class NNsight:
 
         bridge = None
 
-        if self._session is not None:
+        if backend is not None:
+            pass
+
+        elif self._session is not None:
 
             backend = BridgeBackend(weakref.proxy(self._session.bridge))
 
@@ -246,6 +250,28 @@ class NNsight:
             raise ValueError("Can't execute on no inputs!")
 
         return tracer
+
+    def scan(self, *inputs, **kwargs) -> Tracer:
+        """Context just to populate fake tenor proxy values using scan and validate.
+        Useful when looking for just the shapes of future tensors
+
+        Examples:
+
+            .. code-block:: python
+
+                with model.scan(" "):
+
+                    dim = model.module.output.shape[-1]
+
+                print(dim)
+
+        Returns:
+            Tracer: Tracer context with Noop backend.
+        """
+
+        return self.trace(
+            *inputs, **kwargs, scan=True, validate=True, backend=NoopBackend()
+        )
 
     def edit(
         self,
@@ -343,7 +369,7 @@ class NNsight:
             batch_start += batch_size
 
             batched_input = self._batch_inputs(batched_input, *_inputs)
-            
+
         inputs, batch_size = self._prepare_inputs(*batched_input)
 
         intervention_handler = InterventionHandler(
@@ -364,7 +390,7 @@ class NNsight:
         ):
             try:
                 fn(*inputs, **kwargs)
-            except protocols.EarlyStopException:
+            except protocols.EarlyStopProtocol.EarlyStopException:
                 # TODO: Log.
                 pass
 

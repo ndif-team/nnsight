@@ -49,6 +49,13 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             args=args,
             kwargs=kwargs,
         )
+    
+    def vis(self, **kwargs) -> None:
+        """
+        Helper method to save a visualization of the current state of the intervention graph.
+        """
+
+        self.graph.vis(**kwargs)
 
     def __enter__(self) -> Self:
         return self

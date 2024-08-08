@@ -3,9 +3,12 @@
 import importlib
 import types
 from functools import wraps
-from typing import Any, Callable, Collection, Type
+from typing import TYPE_CHECKING, Any, Callable, Collection, Type, Dict, Tuple, Optional, Union
 
 import torch
+
+if TYPE_CHECKING:
+    from .tracing.Node import Node
 
 # TODO Have an Exception you can raise to stop apply early
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import weakref
+from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -13,6 +14,7 @@ from .Proxy import Proxy
 
 if TYPE_CHECKING:
     from .Graph import Graph
+    from pygraphviz import AGraph
 
 
 class Node:
@@ -380,8 +382,91 @@ class Node:
 
         self._value = inspect._empty
 
+    def visualize(self, viz_graph: "AGraph", recursive: bool, backend_name: str = "") -> str:
+        """ Adds this node to the visualization graph and recursively visualizes its arguments and adds edges between them.
+
+        Args:
+            - viz_graph (AGraph): Visualization graph.
+            - recursive (bool): If True, recursively visualizes all sub-graphs.
+            - backend_name (str): Inherent parent graph name for unique differentiation in recursive visualization.
+        
+        Returns:
+            - str: name of this node.
+        """
+
+        node_label = self.target if isinstance(self.target, str) else self.target.__name__
+
+        styles = {"node": {"color": "black", "shape": "ellipse"},
+                  "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
+                  "arg_kname": defaultdict(lambda: None),
+                  "edge": defaultdict(lambda: "solid")}
+        
+        node_name = backend_name + self.name
+
+        if isinstance(self.target, type) and issubclass(self.target, protocols.Protocol):
+            styles = self.target.style()
+            viz_graph.add_node(node_name, label=node_label, **styles["node"])
+            if recursive and self.target == protocols.LocalBackendExecuteProtocol:
+                # recursively draw all sub-graphs
+                for sub_node in self.args[0].graph.nodes.values():
+                    # draw root nodes and attach them to their LocalBackendExecuteProtocol node
+                    if (len(sub_node.arg_dependencies) + int(not(sub_node.cond_dependency is None))) == 0:
+                        sub_node_name = sub_node.visualize(viz_graph, recursive, node_name + "_")
+                        viz_graph.add_edge(node_name, sub_node_name, style="dotted", color="purple")
+                    # draw bottom up
+                    elif len(sub_node.listeners) == 0:
+                        sub_node_name = sub_node.visualize(viz_graph, recursive, node_name + "_")
+        else:
+            viz_graph.add_node(node_name, label=node_label, **styles["node"])
+
+        def visualize_args(arg_collection):
+            """ Recursively visualizes the arguments of this node.
+
+            Args:
+                - arg_collection (Union[List[Any], Dict[str, Any]]): Collection of Node arguments. 
+            """
+
+            for key, arg in arg_collection:
+                if isinstance(arg, Node):
+                    name = arg.visualize(viz_graph, recursive, backend_name)
+                else:
+                    name = node_name
+                    if isinstance(arg, torch.Tensor):
+                        name += f"_Tensor_{key}"
+                        label = "Tensor"
+                    elif isinstance(arg, str):
+                        name += f"_{arg}_{key}"
+                        label = f'"{arg}"'
+                    else:
+                        name += f"_{arg}_{key}"
+                        label = str(arg)
+
+                    if isinstance(key, int):
+                        if not styles["arg_kname"][key] is None:
+                            label = f"{styles['arg_kname'][key]}={label}"
+                    else:
+                        label = f"{key}={label}"
+
+                    viz_graph.add_node(name, label=label, **styles["arg"][key])
+                
+                viz_graph.add_edge(name, node_name, style=styles["edge"][key])
+
+        visualize_args(enumerate(self.args))
+
+        visualize_args(self.kwargs.items())
+
+        if isinstance(self.cond_dependency, Node):
+            name = self.cond_dependency.visualize(viz_graph, recursive, backend_name)
+            viz_graph.add_edge(name, node_name, style=styles["edge"][None], color="#FF8C00")
+
+        return node_name
+
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)
         args = util.apply(args, lambda x: x.name, Node)
         args = [str(arg) for arg in args]
+
         return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} a_d:{len(self.arg_dependencies)} c_d{bool(self.cond_dependency)}]"
+    
+    def __repr__(self) -> str:
+        return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

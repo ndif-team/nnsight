@@ -3,14 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Iterable, Tuple
 
 from ...tracing import protocols
-from ...tracing.Node import Node
 from .. import check_for_dependencies, resolve_dependencies
 from ..GraphBasedContext import GraphBasedContext
 
 if TYPE_CHECKING:
     from ...intervention import InterventionProxy
     from ...tracing.Bridge import Bridge
-
 
 class Iterator(GraphBasedContext):
 
@@ -57,3 +55,6 @@ class Iterator(GraphBasedContext):
             )
 
             super().local_backend_execute()
+
+    def __repr__(self) -> str:
+        return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"
