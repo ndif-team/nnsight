@@ -520,6 +520,28 @@ class BridgeProtocol(Protocol):
         else:
             bridge = BridgeProtocol.get_bridge(graph)
             return bridge.peek_graph()
+        
+    @classmethod
+    def bridge_node(cls, node: "Node", graph_id: int) -> "Node":
+        """ Creates a reference to an external proxy node by creating a BridgeProtocol node or returning an existing one from the same graph.
+
+        Args:
+            - node (Node): Node to bridge.
+            - graph_id (int): Graph id.
+
+        Returns:
+            Node: BridgeProtocol node.        
+        """
+
+        bridge = cls.get_bridge(node.graph)
+        bridge_node = bridge.get_bridge_node(node, graph_id) # a bridged node has a unique bridge node per graph reference
+
+        # if the bridge node does not exist, create one
+        if bridge_node is None:
+            bridge_node = cls.add(node).node
+            bridge.add_bridge_node(node, bridge_node)
+            
+        return bridge_node
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
@@ -850,13 +872,13 @@ class UpdateProtocol(Protocol):
         """
 
         value_node, new_value = node.args
+        new_value = Node.prepare_inputs(new_value)
 
         if value_node.target == BridgeProtocol:
+            value_node._value = new_value
             bridge = BridgeProtocol.get_bridge(value_node.graph)
             lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
             value_node = lock_node.args[0]
-
-        new_value = Node.prepare_inputs(new_value)
 
         value_node._value = new_value
 
