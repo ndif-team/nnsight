@@ -165,11 +165,12 @@ class Graph:
 
         return new_graph
 
-    def vis(self, title: str = "graph", path: str = "."):
+    def vis(self, title: str = "graph", path: str = ".", recursive: bool = False):
         """ Generates and saves a graphical visualization of the Intervention Graph using the pygraphviz library. 
         Args:
             title (str): Name of the Intervention Graph. Defaults to "graph".
             path (str): Directory path to save the graphic in. If None saves content to the current directory.
+            recursive (bool): If True, recursively visualize sub-graphs.
         """
 
         graph: pgv.AGraph = pgv.AGraph(strict=True, directed=True)
@@ -177,7 +178,9 @@ class Graph:
         graph.graph_attr.update(label=title, fontsize='20', labelloc='t', labeljust='c')    
         
         for node in self.nodes.values(): 
-            node.visualize(graph)
+            # draw bottom up
+            if len(node.listeners) == 0:
+                node.visualize(graph, recursive)
 
         graph.draw(f"{path}/{title}.png", prog="dot")
 
