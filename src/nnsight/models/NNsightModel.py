@@ -390,7 +390,7 @@ class NNsight:
         ):
             try:
                 fn(*inputs, **kwargs)
-            except protocols.EarlyStopException:
+            except protocols.EarlyStopProtocol.EarlyStopException:
                 # TODO: Log.
                 pass
 

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from .. import util
 from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
-from ..tracing.Node import Node
 from . import resolve_dependencies
 from .backends import Backend, BridgeMixin, EditMixin, RemoteMixin
 from .GraphBasedContext import GraphBasedContext
@@ -166,3 +164,6 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         if not isinstance(graph, weakref.ProxyType):
             self.graph = weakref.proxy(graph)
+
+    def __repr__(self) -> str:
+        return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

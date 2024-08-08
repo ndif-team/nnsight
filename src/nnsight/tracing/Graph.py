@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, List, Type, Union
+from typing import Dict, Type
 
-import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+import pygraphviz as pgv
 
 from ..util import apply
 from .Node import Node
-from .protocols import LockProtocol, Protocol
+from .protocols import Protocol
 from .Proxy import Proxy
 
 
@@ -165,93 +165,24 @@ class Graph:
 
         return new_graph
 
-    def vis(self, filename: str = "graph", format: str = "png"):
-        import graphviz
+    def vis(self, title: str = "graph", path: str = ".", recursive: bool = False):
+        """ Generates and saves a graphical visualization of the Intervention Graph using the pygraphviz library. 
+        Args:
+            title (str): Name of the Intervention Graph. Defaults to "graph".
+            path (str): Directory path to save the graphic in. If None saves content to the current directory.
+            recursive (bool): If True, recursively visualize sub-graphs.
+        """
 
-        def style(value: Any) -> Dict[str, Any]:
-            style = {}
+        graph: pgv.AGraph = pgv.AGraph(strict=True, directed=True)
 
-            if isinstance(value, Node):
-                if value.target == "null":
-                    style["color"] = "red"
+        graph.graph_attr.update(label=title, fontsize='20', labelloc='t', labeljust='c')    
+        
+        for node in self.nodes.values(): 
+            # draw bottom up
+            if len(node.listeners) == 0:
+                node.visualize(graph, recursive)
 
-                elif value.target == "argument":
-                    style["color"] = "green"
-
-                elif value.target == "module":
-                    style["color"] = "green4"
-
-                else:
-                    style["color"] = "black"
-            else:
-                style["color"] = "grey"
-                style["shape"] = "box"
-
-            return style
-
-        arg_name_idx = 0
-
-        def add_node(value: Any, graph: graphviz.Digraph, kname: str = None) -> str:
-            nonlocal arg_name_idx
-
-            if isinstance(value, Node):
-                name = value.name
-                label = (
-                    value.target
-                    if isinstance(value.target, str)
-                    else value.target.__name__
-                )
-            else:
-                if isinstance(value, torch.Tensor):
-                    name = str(arg_name_idx)
-                    label = "Tensor"
-                elif isinstance(value, str):
-                    name = str(arg_name_idx)
-                    label = f'"{value}"'
-                else:
-                    name = str(arg_name_idx)
-                    label = str(value)
-
-                arg_name_idx += 1
-
-            if kname is not None:
-                label = f"{kname}={label}"
-
-            if f"\t{name}" not in graph.body:
-                graph.node(name, label=label, **style(value))
-
-            return name
-
-        graph = graphviz.Digraph("round-table", comment="The Round Table")
-
-        for node in self.nodes.values():
-            add_node(node, graph)
-
-            for i, arg in enumerate(node.args):
-                kname = None
-
-                if node.target == "argument":
-                    if i == 0:
-                        kname = "key"
-                    elif i == 1:
-                        kname = "batch_size"
-                    elif i == 2:
-                        kname = "batch_start"
-
-                name = add_node(arg, graph, kname=kname)
-
-                graph.edge(name, node.name)
-
-            for kname, arg in node.kwargs.items():
-                name = add_node(arg, graph, kname=kname)
-
-                graph.edge(name, node.name)
-
-            if node.cond_dependency:
-                name = add_node(node.cond_dependency, graph)
-                graph.edge(name, node.name)
-
-        graph.render(filename=filename, format=format)
+        graph.draw(f"{path}/{title}.png", prog="dot")
 
     def __str__(self) -> str:
         result = ""

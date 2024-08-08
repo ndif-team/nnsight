@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import inspect
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, Dict, List, Tuple, Union
+from typing import Any, Callable, Collection, Dict, List, Union
+from collections import defaultdict
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -468,6 +469,19 @@ class InterventionProtocol(Protocol):
                     activations = value
 
         return activations
+    
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """ Visualization style for this protocol node.
+        
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {"node": {"color": "green4", "shape": "box"}, # Node display
+                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
+                "arg_kname": defaultdict(lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}), # Argument label key word
+                "edge": defaultdict(lambda: "solid")} # Argument Edge display
 
 
 class HookHandler(AbstractContextManager):

@@ -28,7 +28,8 @@ dependencies = [
     "torchvision",
     "accelerate",
     "diffusers",
-    "einops"
+    "einops",
+    "pygraphviz"
     ]
 [project.urls]
 "Homepage" = "https://github.com/ndif-team/nnsight"
