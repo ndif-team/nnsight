@@ -192,7 +192,10 @@ class NNsight:
 
         bridge = None
 
-        if self._session is not None:
+        if backend is not None:
+            pass
+
+        elif self._session is not None:
 
             backend = BridgeBackend(weakref.proxy(self._session.bridge))
 
