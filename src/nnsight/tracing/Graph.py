@@ -5,7 +5,6 @@ from typing import Dict, Type
 
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
-import pygraphviz as pgv
 
 from ..util import apply
 from .Node import Node
@@ -172,6 +171,14 @@ class Graph:
             path (str): Directory path to save the graphic in. If None saves content to the current directory.
             recursive (bool): If True, recursively visualize sub-graphs.
         """
+        
+        try:
+        
+            import pygraphviz as pgv
+            
+        except Exception as e:
+            
+            raise type(e)("Visualization of the Graph requires `pygraphviz` which requires `graphviz` to be installed on your machine.") from e
 
         graph: pgv.AGraph = pgv.AGraph(strict=True, directed=True)
 

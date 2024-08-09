@@ -14,7 +14,10 @@ from .Proxy import Proxy
 
 if TYPE_CHECKING:
     from .Graph import Graph
-    from pygraphviz import AGraph
+    try:
+        from pygraphviz import AGraph
+    except:
+        pass
 
 
 class Node:
