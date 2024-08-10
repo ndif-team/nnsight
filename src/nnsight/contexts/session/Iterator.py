@@ -56,7 +56,7 @@ class Iterator(GraphBasedContext):
 
             try:
                 super().local_backend_execute()
-            except:
+            except protocols.EarlyStopProtocol.EarlyStopException:
                 break
 
     def __repr__(self) -> str:
