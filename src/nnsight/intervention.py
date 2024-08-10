@@ -79,7 +79,7 @@ class InterventionProxy(Proxy, Conditional):
             InterventionProxy: Proxy.
         """
 
-        protocols.EarlyStopProtocol.add(self.node)
+        protocols.EarlyStopProtocol.add(self.node.graph, self.node)
 
         return self
 

@@ -193,3 +193,18 @@ def test_update_protocol(tiny_model: NNsight):
         sum.update(sum + 4)
 
     assert sum.value == 7
+
+def test_sequential_graph_based_context_exit(tiny_model: NNsight):
+    with tiny_model.session() as session:
+        l = session.apply(list).save()
+        l.append(0)
+
+        with session.iter([1, 2, 3, 4]) as (item, iterator):
+            with item == 3:
+                iterator.exit()
+            l.append(item)
+        l.append(5)
+        session.exit()
+        l.append(6)
+
+    assert l.value == [0, 1, 2, 5]

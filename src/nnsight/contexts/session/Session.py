@@ -8,6 +8,7 @@ from ...tracing.Graph import Graph
 from ..backends import Backend, BridgeBackend, RemoteMixin
 from ..GraphBasedContext import GraphBasedContext
 from .Iterator import Iterator
+from ...tracing.protocols import EarlyStopProtocol
 
 if TYPE_CHECKING:
     from ...models.mixins import RemoteableMixin
@@ -55,7 +56,10 @@ class Session(GraphBasedContext, RemoteMixin):
 
     def local_backend_execute(self) -> Dict[int, Graph]:
 
-        super().local_backend_execute()
+        try:
+            super().local_backend_execute()
+        except EarlyStopProtocol.EarlyStopException:
+            pass
 
         local_result = self.bridge.id_to_graph
 

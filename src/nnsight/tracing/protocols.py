@@ -1,7 +1,7 @@
 import inspect
 import weakref
 
-from typing import TYPE_CHECKING, Any, Dict, Union
+from typing import TYPE_CHECKING, Any, Dict, Union, Optional
 from collections import defaultdict
 
 import torch
@@ -543,11 +543,11 @@ class EarlyStopProtocol(Protocol):
         pass
 
     @classmethod
-    def add(cls, node: "Node") -> "InterventionProxy":
-        return node.create(
+    def add(cls, graph: "Graph", stop_point_node: Optional["Node"] = None) -> "InterventionProxy":
+        return graph.create(
             target=cls,
             proxy_value=None,
-            args=[node],
+            args=([stop_point_node] if stop_point_node is not None else []),
         )
 
     @classmethod

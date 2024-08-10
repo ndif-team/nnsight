@@ -61,7 +61,8 @@ class Graph:
         if self.sequential:
 
             for node in self.nodes.values():
-                node.execute()
+                if node.fulfilled():
+                    node.execute()
 
         else:
 

@@ -50,6 +50,15 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             kwargs=kwargs,
         )
     
+    def exit(self) -> InterventionProxy:
+        """ Exits the execution of a sequential intervention graph.
+        
+        Returns:
+            InterventionProxy: Proxy of the EarlyStopProtocol node.
+        """
+
+        return protocols.EarlyStopProtocol.add(self.graph)
+
     def vis(self, **kwargs) -> None:
         """
         Helper method to save a visualization of the current state of the intervention graph.
@@ -68,17 +77,18 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
 
     ### BACKENDS ########
 
-    def local_backend_execute(self) -> Graph:
+    def local_backend_execute(self) -> None:
 
-        self.graph.execute()
+        try:
+            self.graph.execute()
+        except protocols.EarlyStopProtocol.EarlyStopException as e:
+            raise e
+        finally:
+            graph = self.graph
+            graph.alive = False
 
-        graph = self.graph
-        graph.alive = False
-
-        if not isinstance(graph, weakref.ProxyType):
-            self.graph = weakref.proxy(graph)
-
-        return graph
+            if not isinstance(graph, weakref.ProxyType):
+                self.graph = weakref.proxy(graph)
 
     def bridge_backend_handle(self, bridge: Bridge) -> None:
 
