@@ -57,7 +57,10 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             InterventionProxy: Proxy of the EarlyStopProtocol node.
         """
 
-        return protocols.EarlyStopProtocol.add(self.graph)
+        if self.graph.sequential:
+            return protocols.EarlyStopProtocol.add(self.graph)
+        else:
+            raise Exception("Early exit is only supported for sequential graph-based contexts.")
 
     def vis(self, **kwargs) -> None:
         """

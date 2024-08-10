@@ -109,15 +109,6 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.model._envoy.next(increment=increment, propagate=True)
 
-    def exit(self) -> "InterventionProxy":
-        """ Exits the execution of a sequential intervention graph.
-        
-        Returns:
-            InterventionProxy: Proxy of the EarlyStopProtocol node.
-        """
-        raise Exception(".exit() not supported on the Tracer entity.\n" + \
-                        "Refer to the .stop() functionaly on Envoys for an early stop of the Tracer execution.")
-
     ##### BACKENDS ###############################
 
     def local_backend_execute(self) -> Graph:
