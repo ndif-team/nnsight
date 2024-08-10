@@ -58,7 +58,7 @@ def handle_response(handle_result: Callable, url: str, event: str, data: Any) ->
 
         # Decode bytes with pickle and then into pydantic object.
         result: "ResultModel" = ResultModel(
-            **torch.load(result_bytes, map_location="cpu")
+            **torch.load(result_bytes, map_location="cpu", weights_only=False)
         )
 
         # Close bytes
