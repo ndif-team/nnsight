@@ -78,6 +78,15 @@ def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
     with pytest.raises(ValueError):
         l2_out.value
 
+def test_tracer_early_stop_cleanup(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input):
+        l1_out = tiny_model.layer1.output
+        tiny_model.layer1.output.stop()
+        l1_out_double = l1_out * 2
+
+    with pytest.raises(ValueError):
+        l1_out.value
+
 def test_true_conditional_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.trace(tiny_input) as tracer:
         num = tracer.apply(int, 5)

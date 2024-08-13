@@ -392,7 +392,12 @@ class NNsight:
                 fn(*inputs, **kwargs)
             except protocols.EarlyStopProtocol.EarlyStopException:
                 # TODO: Log.
-                pass
+                for node in intervention_graph.nodes.values():
+                    if not node.fulfilled():
+                        for dependency in node.arg_dependencies:
+                            dependency.remaining_listeners -= 1
+                            if dependency.redundant():
+                                dependency.destroy()
 
         logger.info(f"Completed `{self._model_key}`")
 
