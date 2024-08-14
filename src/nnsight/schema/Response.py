@@ -32,8 +32,9 @@ class ResponseModel(BaseModel):
     class JobStatus(Enum):
         RECEIVED = "RECEIVED"
         APPROVED = "APPROVED"
-        SUBMITTED = "SUBMITTED"
+        RUNNING = "RUNNING"
         COMPLETED = "COMPLETED"
+        LOG = "LOG"
         ERROR = "ERROR"
 
     id: str
