@@ -73,6 +73,9 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        
+        self.model._envoy._reset()
+        
         if isinstance(exc_val, BaseException):
             self.graph.alive = False
             self.graph = None
