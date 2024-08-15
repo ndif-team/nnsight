@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Dict, Type
+from typing import Dict, Type, Optional
 
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -9,6 +9,8 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from ..util import apply
 from .Node import Node
 from .protocols import Protocol
+from .protocols import BridgeProtocol
+from .protocols import EarlyStopProtocol
 from .Proxy import Proxy
 
 
@@ -59,11 +61,21 @@ class Graph:
             node.reset()
 
         if self.sequential:
-
+            is_stopped_early: bool = False
+            early_stop_execption: Optional[EarlyStopProtocol.EarlyStopException] = None
             for node in self.nodes.values():
-                if node.fulfilled():
-                    node.execute()
-
+                if not is_stopped_early:
+                    if node.fulfilled():
+                        try:
+                            node.execute()
+                        except EarlyStopProtocol.EarlyStopException as e:
+                            is_stopped_early = True
+                            early_stop_execption = e
+                            continue
+                else:
+                    node.clean()
+            if is_stopped_early:
+                raise early_stop_execption
         else:
 
             root_nodes = [node for node in self.nodes.values() if node.fulfilled()]

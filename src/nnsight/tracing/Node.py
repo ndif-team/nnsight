@@ -385,6 +385,25 @@ class Node:
 
         self._value = inspect._empty
 
+    def clean(self) -> None:
+        """Clean up dependencies during early execution stop"""
+
+        # BridgeProtocol nodes must clean up their corresponding external proxy
+        if isinstance(self.target, type) and issubclass(self.target, protocols.BridgeProtocol):
+            bridge = protocols.BridgeProtocol.get_bridge(self.graph)
+            lock_node = bridge.get_graph(self.args[0]).nodes[self.args[1]]
+            lock_dependency = lock_node.args[0]
+            if not lock_node.done():
+                lock_dependency.remaining_listeners -= 1
+                lock_node.destroy()
+                if lock_dependency.redundant():
+                    lock_dependency.destroy()
+        else:
+            for dependency in self.arg_dependencies:
+                dependency.remaining_listeners -= 1
+                if dependency.redundant():
+                    dependency.destroy()
+
     def visualize(self, viz_graph: "AGraph", recursive: bool, backend_name: str = "") -> str:
         """ Adds this node to the visualization graph and recursively visualizes its arguments and adds edges between them.
 
