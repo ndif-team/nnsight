@@ -311,25 +311,29 @@ class InterventionProtocol(Protocol):
         total_batch_size: int,
     ):
         def _concat(values):
-            if isinstance(values[0], torch.Tensor):
+
+            data_type = type(values[0])
+
+            if data_type == torch.Tensor:
                 orig_size = values[-1]
                 new_size = sum([value.shape[0] for value in values[:-1]])
                 if new_size == orig_size:
                     return torch.concatenate(values[:-1])
+
                 return values[0]
-            elif isinstance(values[0], list):
+            elif data_type == list:
                 return [
                     _concat([value[value_idx] for value in values])
                     for value_idx in range(len(values[0]))
                 ]
-            elif isinstance(values[0], tuple):
+            elif data_type == tuple:
                 return tuple(
                     [
                         _concat([value[value_idx] for value in values])
                         for value_idx in range(len(values[0]))
                     ]
                 )
-            elif isinstance(values[0], dict):
+            elif data_type == dict:
                 return {
                     key: _concat([value[key] for value in values])
                     for key in values[0].keys()
@@ -428,11 +432,13 @@ class InterventionProtocol(Protocol):
 
                 if len(intervention_handler.batch_groups) > 1:
 
-                    narrowed = True
-
                     def narrow(acts: torch.Tensor):
 
                         if acts.shape[0] == intervention_handler.batch_size:
+
+                            nonlocal narrowed
+
+                            narrowed = True
 
                             return acts.narrow(0, batch_start, batch_size)
 
@@ -469,19 +475,25 @@ class InterventionProtocol(Protocol):
                     activations = value
 
         return activations
-    
+
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "green4", "shape": "box"}, # Node display
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument Edge display
+        return {
+            "node": {"color": "green4", "shape": "box"},  # Node display
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(
+                lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}
+            ),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument Edge display
 
 
 class HookHandler(AbstractContextManager):

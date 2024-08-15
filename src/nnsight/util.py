@@ -3,7 +3,8 @@
 import importlib
 import types
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Callable, Collection, Type, Dict, Tuple, Optional, Union
+from typing import (TYPE_CHECKING, Any, Callable, Collection, Dict, Optional,
+                    Tuple, Type, Union)
 
 import torch
 
@@ -13,19 +14,19 @@ if TYPE_CHECKING:
 # TODO Have an Exception you can raise to stop apply early
 
 
-def apply(
-    data: Collection, fn: Callable, cls: Type, inplace: bool = False
-) -> Collection:
+def apply(data: Any, fn: Callable, cls: Type, inplace: bool = False) -> Collection:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
-        data (Collection): Collection to apply function to.
+        data (Any): Collection of data to apply function to.
         fn (Callable): Function to apply.
         cls (type): Type or Types to apply function to.
+        inplace (bool): If to apply the fn inplace. (For lists and dicts)
 
     Returns:
-        Collection: Same kind of collection as data, after then fn has been applied to members of given type.
+        Any: Same kind of collection as data, after then fn has been applied to members of given type.
     """
+
     if isinstance(data, cls):
         return fn(data)
 
@@ -38,10 +39,10 @@ def apply(
             return data
         return [apply(_data, fn, cls, inplace=inplace) for _data in data]
 
-    if data_type == tuple:
+    elif data_type == tuple:
         return tuple([apply(_data, fn, cls, inplace=inplace) for _data in data])
 
-    if data_type == dict:
+    elif data_type == dict:
         if inplace:
             for key, value in data.items():
                 data[key] = apply(value, fn, cls, inplace=inplace)
@@ -50,7 +51,7 @@ def apply(
             key: apply(value, fn, cls, inplace=inplace) for key, value in data.items()
         }
 
-    if data_type == slice:
+    elif data_type == slice:
         return slice(
             apply(data.start, fn, cls, inplace=inplace),
             apply(data.stop, fn, cls, inplace=inplace),
