@@ -197,3 +197,38 @@ def test_update_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
             double_sum = (sum * 2).save()
 
     assert double_sum.value == 20
+
+def test_sequential_graph_based_context_exit(tiny_model: NNsight):
+    with tiny_model.session() as session:
+        l = session.apply(list).save()
+        l.append(0)
+
+        with session.iter([1, 2, 3, 4]) as (item, iterator):
+            with item == 3:
+                iterator.exit()
+            l.append(item)
+        l.append(5)
+        session.exit()
+        l.append(6)
+
+    assert l.value == [0, 1, 2, 5]
+
+def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input):
+        l1_out = tiny_model.layer1.output
+        tiny_model.layer1.output.stop()
+        l1_out_double = l1_out * 2
+
+    with pytest.raises(ValueError):
+        l1_out.value
+
+def test_bridged_node_cleanup(tiny_model: NNsight):
+    with tiny_model.session() as session:
+        l = session.apply(list)
+        with session.iter([0, 1, 2]) as (item, iterator):
+            with item == 2:
+                iterator.exit()
+            l.append(item)
+
+    with pytest.raises(ValueError):
+        l.value
