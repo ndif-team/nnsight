@@ -184,7 +184,7 @@ def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 
     assert torch.all(l1_out.value == 0).item()
 
-def test_update_protocol(tiny_model: NNsight):
+def test_update_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.session() as session:
         sum = session.apply(int, 0).save()
         with session.iter([0, 1, 2]) as (item, iterator):
@@ -192,7 +192,11 @@ def test_update_protocol(tiny_model: NNsight):
 
         sum.update(sum + 4)
 
-    assert sum.value == 7
+        with tiny_model.trace(tiny_input):
+            sum.update(sum + 3)
+            double_sum = (sum * 2).save()
+
+    assert double_sum.value == 20
 
 def test_sequential_graph_based_context_exit(tiny_model: NNsight):
     with tiny_model.session() as session:

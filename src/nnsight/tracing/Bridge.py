@@ -1,10 +1,12 @@
-from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from collections import OrderedDict, defaultdict
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from . import protocols
 
 if TYPE_CHECKING:
+    from ..intervention import InterventionProxy
     from .Graph import Graph
+    from .Node import Node
 
 
 class Bridge:
@@ -14,6 +16,8 @@ class Bridge:
     Attributes:
         id_to_graph (Dict[int, Graph]): Mapping of graph id to Graph.
         graph_stack (List[Graph]): Stack of visited Intervention Graphs.
+        bridged_nodes (defaultdict[Node, defaultdict[int, Optional[InterventionProxy]]]): Mapping of bridged Nodes 
+            to the BridgeProtocol nodes representing them on different graphs. 
         locks (int): Count of how many entities are depending on ties between graphs not to be released.
     """
 
@@ -23,6 +27,7 @@ class Bridge:
         self.id_to_graph: Dict[int, "Graph"] = OrderedDict()
         # Stack to keep track of most inner current graph
         self.graph_stack: List["Graph"] = list()
+        self.bridged_nodes: defaultdict["Node", defaultdict[int, "InterventionProxy"]] = defaultdict(lambda: defaultdict(lambda: None))
 
         self.locks = 0
 
@@ -69,3 +74,26 @@ class Bridge:
         """
 
         return self.id_to_graph[id]
+    
+    def add_bridge_proxy(self, node: "Node", bridge_proxy: "Node") -> None:
+        """ Adds a BridgeProtocol Proxy to the bridged nodes attribute.
+
+        Args:
+            - node (Node): Bridged Node.
+            - bridge_proxy (Node): BridgeProtocol node proxy corresponding to the bridged node.
+        """ 
+
+        self.bridged_nodes[node][bridge_proxy.node.graph.id] = bridge_proxy
+
+    def get_bridge_proxy(self, node: "Node", graph_id: int) -> Optional["InterventionProxy"]:
+        """ Check if the argument Node is bridged within the specified graph and returns its corresponding BridgeProtocol node proxy.
+
+        Args:
+            - node (Node): Node.
+            - graph_id (int): Graph id.
+
+        Returns: 
+            Optional[InterventionProxy]: BridgeProtocol node proxy if it exists.
+        """
+
+        return self.bridged_nodes[node][graph_id]
