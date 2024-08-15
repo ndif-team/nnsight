@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import tempfile
 from typing import Dict, Type
 
+from PIL import Image as PILImage
+from IPython.display import Image
+from IPython.display import display as IDisplay
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
@@ -189,12 +193,14 @@ class Graph:
         return new_graph
 
     def vis(
-        self, title: str = "graph", path: str = ".", recursive: bool = False
+        self, title: str = "graph", path: str = ".", display: bool = True, save: bool = False, recursive: bool = False
     ):
         """Generates and saves a graphical visualization of the Intervention Graph using the pygraphviz library.
         Args:
             title (str): Name of the Intervention Graph. Defaults to "graph".
             path (str): Directory path to save the graphic in. If None saves content to the current directory.
+            display (bool): If True, shows the graph image.
+            save (bool): If True, saves the graph to the specified path.
             recursive (bool): If True, recursively visualize sub-graphs.
         """
 
@@ -219,7 +225,35 @@ class Graph:
             if len(node.listeners) == 0:
                 node.visualize(graph, recursive)
 
-        graph.draw(f"{path}/{title}.png", prog="dot")
+        def display_graph(file_name):
+            in_notebook = True
+
+            # Credit: Till Hoffmann - https://stackoverflow.com/a/22424821
+            try:
+                from IPython import get_ipython
+                if 'IPKernelApp' not in get_ipython().config:
+                    in_notebook = False
+            except ImportError:
+                in_notebook = False
+            except AttributeError:
+                in_notebook = False
+
+            if in_notebook:
+                IDisplay(Image(filename=file_name))
+            else:
+                img = PILImage.open(file_name)
+                img.show()
+                img.close()
+
+        if not save:
+            with tempfile.NamedTemporaryFile(suffix=".png") as temp_file:
+                graph.draw(temp_file.name, prog="dot")
+                if display:
+                    display_graph(temp_file.name)
+        else:       
+            graph.draw(f"{path}/{title}.png", prog="dot")
+            if display:
+                display_graph(f"{path}/{title}.png")
 
     def __str__(self) -> str:
         result = ""
