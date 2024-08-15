@@ -427,16 +427,25 @@ class BridgeProtocol(Protocol):
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
 
-        # Adds a Lock Node. One, so the value from_node isn't destroyed until the to_nodes are done with it,
-        # and two acts as an easy reference to the from_node to get its value from the lock Node args.
-        lock_node = LockProtocol.add(node).node
+        bridge = cls.get_bridge(node.graph)
+        curr_graph = bridge.peek_graph()
+        bridge_proxy = bridge.get_bridge_proxy(node, curr_graph.id) # a bridged node has a unique bridge node proxy per graph reference
 
-        # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
-        return node.create(
-            target=cls,
-            proxy_value=node.proxy_value,
-            args=[node.graph.id, lock_node.name],
-        )
+        # if the bridge node does not exist, create one
+        if bridge_proxy is None:
+            # Adds a Lock Node. One, so the value from_node isn't destroyed until the to_nodes are done with it,
+            # and two acts as an easy reference to the from_node to get its value from the lock Node args.
+            lock_node = LockProtocol.add(node).node
+
+            # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
+            bridge_proxy = node.create(
+                                target=cls,
+                                proxy_value=node.proxy_value,
+                                args=[node.graph.id, lock_node.name],
+                            )
+            bridge.add_bridge_proxy(node, curr_graph.id, bridge_proxy)
+        
+        return bridge_proxy
 
     @classmethod
     def execute(cls, node: "Node") -> None:
@@ -520,28 +529,6 @@ class BridgeProtocol(Protocol):
         else:
             bridge = BridgeProtocol.get_bridge(graph)
             return bridge.peek_graph()
-        
-    @classmethod
-    def bridge_node(cls, node: "Node", graph_id: int) -> "Node":
-        """ Creates a reference to an external proxy node by creating a BridgeProtocol node or returning an existing one from the same graph.
-
-        Args:
-            - node (Node): Node to bridge.
-            - graph_id (int): Graph id.
-
-        Returns:
-            Node: BridgeProtocol node.        
-        """
-
-        bridge = cls.get_bridge(node.graph)
-        bridge_node = bridge.get_bridge_node(node, graph_id) # a bridged node has a unique bridge node per graph reference
-
-        # if the bridge node does not exist, create one
-        if bridge_node is None:
-            bridge_node = cls.add(node).node
-            bridge.add_bridge_node(node, bridge_node)
-            
-        return bridge_node
 
     @classmethod
     def style(cls) -> Dict[str, Any]:

@@ -105,7 +105,7 @@ class Node:
 
             if self.attached() and self.graph.id != node.graph.id:
 
-                node = protocols.BridgeProtocol.bridge_node(node, self.graph.id)
+                node = protocols.BridgeProtocol.add(node).node
 
             self.arg_dependencies.append(node)
             # Weakref so no reference loop
