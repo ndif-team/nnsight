@@ -443,7 +443,7 @@ class BridgeProtocol(Protocol):
                                 proxy_value=node.proxy_value,
                                 args=[node.graph.id, lock_node.name],
                             )
-            bridge.add_bridge_proxy(node, curr_graph.id, bridge_proxy)
+            bridge.add_bridge_proxy(node, bridge_proxy)
         
         return bridge_proxy
 
