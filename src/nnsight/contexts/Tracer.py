@@ -118,7 +118,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         protocols.ApplyModuleProtocol.set_module(self.graph, self.model._model)
 
-        self.graph.execute()
+        self.graph.reset()
+        
 
         invoker_inputs = self._invoker_inputs
 
@@ -126,6 +127,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         if protocols.BridgeProtocol.has_bridge(self.graph):
 
             invoker_inputs = resolve_dependencies(invoker_inputs)
+            
+        self.graph.execute()
 
         self.model.interleave(
             self.model._execute,

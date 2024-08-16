@@ -4,8 +4,6 @@ import inspect
 import tempfile
 from typing import Dict, Optional, Type
 
-from IPython.display import Image
-from IPython.display import display as IDisplay
 from PIL import Image as PILImage
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -63,19 +61,23 @@ class Graph:
 
         self.attachments = dict()
 
-    def execute(self) -> None:
-        """Executes operations of `Graph`.
-
-        Resets all `Node`s, then executes all `Node`s sequentially if `Graph.sequential`. Otherwise execute only root `Node`s sequentially.
-        """
+    def reset(self) -> None:
 
         # Reset Nodes individually.
         for node in self.nodes.values():
             node.reset()
 
+    def execute(self) -> None:
+        """Executes operations of `Graph`.
+
+        Executes all `Node`s sequentially if `Graph.sequential`. Otherwise execute only root `Node`s sequentially.
+        """
+
         if self.sequential:
             is_stopped_early: bool = False
-            early_stop_execption: Optional[EarlyStopProtocol.EarlyStopException] = None
+            early_stop_execption: Optional[
+                EarlyStopProtocol.EarlyStopException
+            ] = None
             for node in self.nodes.values():
                 if not is_stopped_early:
                     if node.fulfilled():
@@ -91,7 +93,9 @@ class Graph:
                 raise early_stop_execption
         else:
 
-            root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
+            root_nodes = [
+                node for node in self.nodes.values() if node.fulfilled()
+            ]
 
             for node in root_nodes:
                 node.execute()
@@ -205,7 +209,12 @@ class Graph:
         return new_graph
 
     def vis(
-        self, title: str = "graph", path: str = ".", display: bool = True, save: bool = False, recursive: bool = False
+        self,
+        title: str = "graph",
+        path: str = ".",
+        display: bool = True,
+        save: bool = False,
+        recursive: bool = False,
     ):
         """Generates and saves a graphical visualization of the Intervention Graph using the pygraphviz library.
         Args:
@@ -226,6 +235,9 @@ class Graph:
                 "Visualization of the Graph requires `pygraphviz` which requires `graphviz` to be installed on your machine."
             ) from e
 
+        from IPython.display import Image
+        from IPython.display import display as IDisplay
+
         graph: pgv.AGraph = pgv.AGraph(strict=True, directed=True)
 
         graph.graph_attr.update(
@@ -243,7 +255,8 @@ class Graph:
             # Credit: Till Hoffmann - https://stackoverflow.com/a/22424821
             try:
                 from IPython import get_ipython
-                if 'IPKernelApp' not in get_ipython().config:
+
+                if "IPKernelApp" not in get_ipython().config:
                     in_notebook = False
             except ImportError:
                 in_notebook = False
@@ -262,7 +275,7 @@ class Graph:
                 graph.draw(temp_file.name, prog="dot")
                 if display:
                     display_graph(temp_file.name)
-        else:       
+        else:
             graph.draw(f"{path}/{title}.png", prog="dot")
             if display:
                 display_graph(f"{path}/{title}.png")

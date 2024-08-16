@@ -65,7 +65,7 @@ def check_for_dependencies(data: Any) -> Tuple[Any, bool]:
 
 def resolve_dependencies(data: Any) -> Any:
     """Turn any dependencies (Locked Bridge Node) within data into their value.
-    If the Bridge Node is not executed, execute it.
+    Executes the Bridge Node.
 
     Args:
         data (Any): Data to find and resolve dependencies within.
@@ -75,15 +75,11 @@ def resolve_dependencies(data: Any) -> Any:
     """
 
     def get_value(node: Node):
-
+        
         bridge_node: Node = node.args[0]
 
-        if not bridge_node.done():
-
-            bridge_node.reset()
-
-            bridge_node.execute()
-
+        bridge_node.execute()
+            
         # Get value of Bridge Node
         value = bridge_node.value
 

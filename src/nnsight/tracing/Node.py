@@ -3,7 +3,16 @@ from __future__ import annotations
 import inspect
 import weakref
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import torch
 
@@ -14,6 +23,7 @@ from .Proxy import Proxy
 
 if TYPE_CHECKING:
     from .Graph import Graph
+
     try:
         from pygraphviz import AGraph
     except:
@@ -75,7 +85,9 @@ class Node:
         self.preprocess()
 
         # Node.graph is a weak reference to avoid reference loops.
-        self.graph = weakref.proxy(self.graph) if self.graph is not None else None
+        self.graph = (
+            weakref.proxy(self.graph) if self.graph is not None else None
+        )
 
         self.name: str = name
 
@@ -89,12 +101,16 @@ class Node:
 
         # bridge graph redirection
         if self.attached():
-            self.graph = protocols.BridgeProtocol.peek_graph(self.graph) \
-                if (self.target.redirect
+            self.graph = (
+                protocols.BridgeProtocol.peek_graph(self.graph)
+                if (
+                    self.target.redirect
                     if isinstance(self.target, type)
-                        and issubclass(self.target, protocols.Protocol)
-                    else True) \
+                    and issubclass(self.target, protocols.Protocol)
+                    else True
+                )
                 else self.graph
+            )
 
         def preprocess_node(node: Union[Node, Proxy]):
 
@@ -121,23 +137,35 @@ class Node:
         )
 
         # conditional context handling
-        if (self.attached()
+        if (
+            self.attached()
             and protocols.ConditionalProtocol.has_conditional(self.graph)
-            and (self.target.condition
+            and (
+                self.target.condition
                 if isinstance(self.target, type)
                 and issubclass(self.target, protocols.Protocol)
-                else True)
-            ): 
+                else True
+            )
+        ):
 
-            conditional_node = protocols.ConditionalProtocol.peek_conditional(self.graph)
+            conditional_node = protocols.ConditionalProtocol.peek_conditional(
+                self.graph
+            )
 
             # only the top dependency needs to add the Conditional as a dependency
             # if none of the dependent are dependent on the Conditional, then add it
             if conditional_node:
-                if all([not protocols.ConditionalProtocol.is_node_conditioned(arg) for arg in self.arg_dependencies]):
+                if all(
+                    [
+                        not protocols.ConditionalProtocol.is_node_conditioned(
+                            arg
+                        )
+                        for arg in self.arg_dependencies
+                    ]
+                ):
                     self.cond_dependency = conditional_node
                     conditional_node.listeners.append(weakref.proxy(self))
-                
+
                 protocols.ConditionalProtocol.add_conditioned_node(self)
 
     @property
@@ -252,7 +280,9 @@ class Node:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = len(self.arg_dependencies) + int(not(self.cond_dependency is None))
+        self.remaining_dependencies = len(self.arg_dependencies) + int(
+            not (self.cond_dependency is None)
+        )
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
@@ -261,6 +291,14 @@ class Node:
             bool: If done.
         """
         return self._value is not inspect._empty
+
+    def executed(self) -> bool:
+        """Returns true if remaining_dependencies is less than 0.
+
+        Returns:
+            bool: If executed.
+        """
+        return self.remaining_dependencies < 0
 
     def fulfilled(self) -> bool:
         """Returns true if remaining_dependencies is 0.
@@ -351,6 +389,9 @@ class Node:
                 f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
             ) from e
 
+        finally:
+            self.remaining_dependencies -= 1
+
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
         Updates remaining_dependencies of listeners. If they are now fulfilled, execute them.
@@ -389,7 +430,9 @@ class Node:
         """Clean up dependencies during early execution stop"""
 
         # BridgeProtocol nodes must clean up their corresponding external proxy
-        if isinstance(self.target, type) and issubclass(self.target, protocols.BridgeProtocol):
+        if isinstance(self.target, type) and issubclass(
+            self.target, protocols.BridgeProtocol
+        ):
             bridge = protocols.BridgeProtocol.get_bridge(self.graph)
             lock_node = bridge.get_graph(self.args[0]).nodes[self.args[1]]
             lock_dependency = lock_node.args[0]
@@ -403,48 +446,73 @@ class Node:
                 if dependency.redundant():
                     dependency.destroy()
 
-    def visualize(self, viz_graph: "AGraph", recursive: bool, backend_name: str = "") -> str:
-        """ Adds this node to the visualization graph and recursively visualizes its arguments and adds edges between them.
+    def visualize(
+        self, viz_graph: "AGraph", recursive: bool, backend_name: str = ""
+    ) -> str:
+        """Adds this node to the visualization graph and recursively visualizes its arguments and adds edges between them.
 
         Args:
             - viz_graph (AGraph): Visualization graph.
             - recursive (bool): If True, recursively visualizes all sub-graphs.
             - backend_name (str): Inherent parent graph name for unique differentiation in recursive visualization.
-        
+
         Returns:
             - str: name of this node.
         """
 
-        node_label = self.target if isinstance(self.target, str) else self.target.__name__
+        node_label = (
+            self.target
+            if isinstance(self.target, str)
+            else self.target.__name__
+        )
 
-        styles = {"node": {"color": "black", "shape": "ellipse"},
-                  "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
-                  "arg_kname": defaultdict(lambda: None),
-                  "edge": defaultdict(lambda: "solid")}
-        
+        styles = {
+            "node": {"color": "black", "shape": "ellipse"},
+            "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
+            "arg_kname": defaultdict(lambda: None),
+            "edge": defaultdict(lambda: "solid"),
+        }
+
         node_name = backend_name + self.name
 
-        if isinstance(self.target, type) and issubclass(self.target, protocols.Protocol):
+        if isinstance(self.target, type) and issubclass(
+            self.target, protocols.Protocol
+        ):
             styles = self.target.style()
             viz_graph.add_node(node_name, label=node_label, **styles["node"])
-            if recursive and self.target == protocols.LocalBackendExecuteProtocol:
+            if (
+                recursive
+                and self.target == protocols.LocalBackendExecuteProtocol
+            ):
                 # recursively draw all sub-graphs
                 for sub_node in self.args[0].graph.nodes.values():
                     # draw root nodes and attach them to their LocalBackendExecuteProtocol node
-                    if (len(sub_node.arg_dependencies) + int(not(sub_node.cond_dependency is None))) == 0:
-                        sub_node_name = sub_node.visualize(viz_graph, recursive, node_name + "_")
-                        viz_graph.add_edge(node_name, sub_node_name, style="dotted", color="purple")
+                    if (
+                        len(sub_node.arg_dependencies)
+                        + int(not (sub_node.cond_dependency is None))
+                    ) == 0:
+                        sub_node_name = sub_node.visualize(
+                            viz_graph, recursive, node_name + "_"
+                        )
+                        viz_graph.add_edge(
+                            node_name,
+                            sub_node_name,
+                            style="dotted",
+                            color="purple",
+                        )
                     # draw bottom up
                     elif len(sub_node.listeners) == 0:
-                        sub_node_name = sub_node.visualize(viz_graph, recursive, node_name + "_")
+                        sub_node_name = sub_node.visualize(
+                            viz_graph, recursive, node_name + "_"
+                        )
         else:
             viz_graph.add_node(node_name, label=node_label, **styles["node"])
 
         def visualize_args(arg_collection):
-            """ Recursively visualizes the arguments of this node.
+            """Recursively visualizes the arguments of this node.
 
             Args:
-                - arg_collection (Union[List[Any], Dict[str, Any]]): Collection of Node arguments. 
+                - arg_collection (Union[List[Any], Dict[str, Any]]): Collection of Node arguments.
             """
 
             for key, arg in arg_collection:
@@ -469,7 +537,7 @@ class Node:
                         label = f"{key}={label}"
 
                     viz_graph.add_node(name, label=label, **styles["arg"][key])
-                
+
                 viz_graph.add_edge(name, node_name, style=styles["edge"][key])
 
         visualize_args(enumerate(self.args))
@@ -477,8 +545,12 @@ class Node:
         visualize_args(self.kwargs.items())
 
         if isinstance(self.cond_dependency, Node):
-            name = self.cond_dependency.visualize(viz_graph, recursive, backend_name)
-            viz_graph.add_edge(name, node_name, style=styles["edge"][None], color="#FF8C00")
+            name = self.cond_dependency.visualize(
+                viz_graph, recursive, backend_name
+            )
+            viz_graph.add_edge(
+                name, node_name, style=styles["edge"][None], color="#FF8C00"
+            )
 
         return node_name
 
@@ -488,6 +560,6 @@ class Node:
         args = [str(arg) for arg in args]
 
         return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} a_d:{len(self.arg_dependencies)} c_d{bool(self.cond_dependency)}]"
-    
+
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"
