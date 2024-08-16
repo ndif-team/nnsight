@@ -3,7 +3,8 @@ from __future__ import annotations
 import inspect
 import weakref
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
 from typing_extensions import Self
 
 from ..intervention import InterventionProxy
@@ -16,7 +17,11 @@ from .backends import Backend, BridgeMixin
 class GraphBasedContext(AbstractContextManager, BridgeMixin):
 
     def __init__(
-        self, backend: Backend, graph: Graph = None, bridge: Bridge = None, **kwargs
+        self,
+        backend: Backend,
+        graph: Graph = None,
+        bridge: Bridge = None,
+        **kwargs,
     ) -> None:
 
         self.backend = backend
@@ -49,10 +54,10 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             args=args,
             kwargs=kwargs,
         )
-    
+
     def exit(self) -> InterventionProxy:
-        """ Exits the execution of a sequential intervention graph.
-        
+        """Exits the execution of a sequential intervention graph.
+
         Returns:
             InterventionProxy: Proxy of the EarlyStopProtocol node.
         """
@@ -60,7 +65,17 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         if self.graph.sequential:
             return protocols.EarlyStopProtocol.add(self.graph)
         else:
-            raise Exception("Early exit is only supported for sequential graph-based contexts.")
+            raise Exception(
+                "Early exit is only supported for sequential graph-based contexts."
+            )
+
+    def log(self, data: Any) -> None:
+        """Adds a node via .apply to print the value of a Node.
+
+        Args:
+            data (Any): Data to print.
+        """
+        self.apply(print, data)
 
     def vis(self, **kwargs) -> None:
         """
