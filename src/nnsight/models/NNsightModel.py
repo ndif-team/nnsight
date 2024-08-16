@@ -86,7 +86,9 @@ class NNsight:
         # Otherwise load from _load(...).
         if not self._custom_model:
             with torch.device("meta"):
-                self._model = self._load(self._model_key, *args, **kwargs).to("meta")
+                self._model = self._load(self._model_key, *args, **kwargs).to(
+                    "meta"
+                )
 
         self._envoy = Envoy(self._model)
 
@@ -376,7 +378,9 @@ class NNsight:
             intervention_graph, batch_groups, batch_size
         )
 
-        module_paths = InterventionProtocol.get_interventions(intervention_graph).keys()
+        module_paths = InterventionProtocol.get_interventions(
+            intervention_graph
+        ).keys()
 
         with HookHandler(
             self._model,
@@ -393,7 +397,7 @@ class NNsight:
             except protocols.EarlyStopProtocol.EarlyStopException:
                 # TODO: Log.
                 for node in intervention_graph.nodes.values():
-                    if not node.fulfilled():
+                    if not node.executed():
                         node.clean()
 
         logger.info(f"Completed `{self._model_key}`")
@@ -435,7 +439,9 @@ class NNsight:
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
-        if key not in ("_model", "_model_key") and isinstance(value, torch.nn.Module):
+        if key not in ("_model", "_model_key") and isinstance(
+            value, torch.nn.Module
+        ):
 
             setattr(self._envoy, key, value)
 
@@ -471,7 +477,9 @@ class NNsight:
 
             return AutoModel.from_config(config, trust_remote_code=True)
 
-        return accelerate.load_checkpoint_and_dispatch(self._model, repo_id, **kwargs)
+        return accelerate.load_checkpoint_and_dispatch(
+            self._model, repo_id, **kwargs
+        )
 
     def _execute(self, *prepared_inputs: Any, **kwargs) -> Any:
         """Virtual method to run the underlying ._model with some inputs.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING, Iterable, Tuple
 
 from ...tracing import protocols
@@ -9,6 +10,7 @@ from ..GraphBasedContext import GraphBasedContext
 if TYPE_CHECKING:
     from ...intervention import InterventionProxy
     from ...tracing.Bridge import Bridge
+
 
 class Iterator(GraphBasedContext):
 
@@ -34,6 +36,8 @@ class Iterator(GraphBasedContext):
 
     def local_backend_execute(self) -> None:
 
+        self.graph.reset()
+
         bridge: "Bridge" = protocols.BridgeProtocol.get_bridge(self.graph)
 
         data = resolve_dependencies(self.data)
@@ -43,6 +47,10 @@ class Iterator(GraphBasedContext):
         last_idx: int = len(data) - 1
 
         for idx, item in enumerate(data):
+
+            if idx != 0:
+
+                self.graph.reset()
 
             last_iter = idx == last_idx
 
@@ -55,9 +63,15 @@ class Iterator(GraphBasedContext):
             )
 
             try:
-                super().local_backend_execute()
-            except protocols.EarlyStopProtocol.EarlyStopException:
+                self.graph.execute()
+            except protocols.EarlyStopProtocol.EarlyStopException as e:
                 break
+            finally:
+                graph = self.graph
+                graph.alive = False
+
+                if not isinstance(graph, weakref.ProxyType):
+                    self.graph = weakref.proxy(graph)
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

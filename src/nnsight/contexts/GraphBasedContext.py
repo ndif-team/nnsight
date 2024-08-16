@@ -83,6 +83,7 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
     def local_backend_execute(self) -> None:
 
         try:
+            self.graph.reset()
             self.graph.execute()
         except protocols.EarlyStopProtocol.EarlyStopException as e:
             raise e

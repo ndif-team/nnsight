@@ -74,6 +74,9 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        
+        self.model._envoy._reset()
+        
         if isinstance(exc_val, BaseException):
             self.graph.alive = False
             self.graph = None
@@ -115,7 +118,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         protocols.ApplyModuleProtocol.set_module(self.graph, self.model._model)
 
-        self.graph.execute()
+        self.graph.reset()
+        
 
         invoker_inputs = self._invoker_inputs
 
@@ -123,6 +127,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         if protocols.BridgeProtocol.has_bridge(self.graph):
 
             invoker_inputs = resolve_dependencies(invoker_inputs)
+            
+        self.graph.execute()
 
         self.model.interleave(
             self.model._execute,
