@@ -54,7 +54,10 @@ class Iterator(GraphBasedContext):
                 self.graph.nodes[f"{protocols.ValueProtocol.__name__}_0"], item
             )
 
-            super().local_backend_execute()
+            try:
+                super().local_backend_execute()
+            except protocols.EarlyStopProtocol.EarlyStopException:
+                break
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

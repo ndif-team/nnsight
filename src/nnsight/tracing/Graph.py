@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import inspect
-from typing import Dict, Type
+import tempfile
+from typing import Dict, Optional, Type
 
+from IPython.display import Image
+from IPython.display import display as IDisplay
+from PIL import Image as PILImage
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from ..util import apply
 from .Node import Node
-from .protocols import Protocol
+from .protocols import BridgeProtocol, EarlyStopProtocol, Protocol
 from .Proxy import Proxy
 
 
@@ -69,16 +73,28 @@ class Graph:
         for node in self.nodes.values():
             node.reset()
 
-        nodes = self.nodes.values()
+        if self.sequential:
+            is_stopped_early: bool = False
+            early_stop_execption: Optional[EarlyStopProtocol.EarlyStopException] = None
+            for node in self.nodes.values():
+                if not is_stopped_early:
+                    if node.fulfilled():
+                        try:
+                            node.execute()
+                        except EarlyStopProtocol.EarlyStopException as e:
+                            is_stopped_early = True
+                            early_stop_execption = e
+                            continue
+                else:
+                    node.clean()
+            if is_stopped_early:
+                raise early_stop_execption
+        else:
 
-        # Only root Nodes if sequential.
-        if not self.sequential:
+            root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
 
-            nodes = [node for node in nodes if node.fulfilled()]
-
-        # Execute.
-        for node in nodes:
-            node.execute()
+            for node in root_nodes:
+                node.execute()
 
     def create(self, *args, **kwargs) -> Proxy:
         """Creates a Node directly on this `Graph` and returns its `Proxy`.
@@ -189,12 +205,14 @@ class Graph:
         return new_graph
 
     def vis(
-        self, title: str = "graph", path: str = ".", recursive: bool = False
+        self, title: str = "graph", path: str = ".", display: bool = True, save: bool = False, recursive: bool = False
     ):
         """Generates and saves a graphical visualization of the Intervention Graph using the pygraphviz library.
         Args:
             title (str): Name of the Intervention Graph. Defaults to "graph".
             path (str): Directory path to save the graphic in. If None saves content to the current directory.
+            display (bool): If True, shows the graph image.
+            save (bool): If True, saves the graph to the specified path.
             recursive (bool): If True, recursively visualize sub-graphs.
         """
 
@@ -219,7 +237,35 @@ class Graph:
             if len(node.listeners) == 0:
                 node.visualize(graph, recursive)
 
-        graph.draw(f"{path}/{title}.png", prog="dot")
+        def display_graph(file_name):
+            in_notebook = True
+
+            # Credit: Till Hoffmann - https://stackoverflow.com/a/22424821
+            try:
+                from IPython import get_ipython
+                if 'IPKernelApp' not in get_ipython().config:
+                    in_notebook = False
+            except ImportError:
+                in_notebook = False
+            except AttributeError:
+                in_notebook = False
+
+            if in_notebook:
+                IDisplay(Image(filename=file_name))
+            else:
+                img = PILImage.open(file_name)
+                img.show()
+                img.close()
+
+        if not save:
+            with tempfile.NamedTemporaryFile(suffix=".png") as temp_file:
+                graph.draw(temp_file.name, prog="dot")
+                if display:
+                    display_graph(temp_file.name)
+        else:       
+            graph.draw(f"{path}/{title}.png", prog="dot")
+            if display:
+                display_graph(f"{path}/{title}.png")
 
     def __str__(self) -> str:
         result = ""

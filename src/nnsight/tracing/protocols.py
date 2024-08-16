@@ -1,7 +1,7 @@
 import inspect
 import weakref
 
-from typing import TYPE_CHECKING, Any, Dict, Union
+from typing import TYPE_CHECKING, Any, Dict, Union, Optional
 from collections import defaultdict
 
 import torch
@@ -427,16 +427,25 @@ class BridgeProtocol(Protocol):
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
 
-        # Adds a Lock Node. One, so the value from_node isn't destroyed until the to_nodes are done with it,
-        # and two acts as an easy reference to the from_node to get its value from the lock Node args.
-        lock_node = LockProtocol.add(node).node
+        bridge = cls.get_bridge(node.graph)
+        curr_graph = bridge.peek_graph()
+        bridge_proxy = bridge.get_bridge_proxy(node, curr_graph.id) # a bridged node has a unique bridge node proxy per graph reference
 
-        # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
-        return node.create(
-            target=cls,
-            proxy_value=node.proxy_value,
-            args=[node.graph.id, lock_node.name],
-        )
+        # if the bridge node does not exist, create one
+        if bridge_proxy is None:
+            # Adds a Lock Node. One, so the value from_node isn't destroyed until the to_nodes are done with it,
+            # and two acts as an easy reference to the from_node to get its value from the lock Node args.
+            lock_node = LockProtocol.add(node).node
+
+            # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
+            bridge_proxy = node.create(
+                                target=cls,
+                                proxy_value=node.proxy_value,
+                                args=[node.graph.id, lock_node.name],
+                            )
+            bridge.add_bridge_proxy(node, bridge_proxy)
+        
+        return bridge_proxy
 
     @classmethod
     def execute(cls, node: "Node") -> None:
@@ -543,11 +552,11 @@ class EarlyStopProtocol(Protocol):
         pass
 
     @classmethod
-    def add(cls, node: "Node") -> "InterventionProxy":
-        return node.create(
+    def add(cls, graph: "Graph", stop_point_node: Optional["Node"] = None) -> "InterventionProxy":
+        return graph.create(
             target=cls,
             proxy_value=None,
-            args=[node],
+            args=([stop_point_node] if stop_point_node is not None else []),
         )
 
     @classmethod
@@ -850,13 +859,13 @@ class UpdateProtocol(Protocol):
         """
 
         value_node, new_value = node.args
+        new_value = Node.prepare_inputs(new_value)
 
         if value_node.target == BridgeProtocol:
+            value_node._value = new_value
             bridge = BridgeProtocol.get_bridge(value_node.graph)
             lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
             value_node = lock_node.args[0]
-
-        new_value = Node.prepare_inputs(new_value)
 
         value_node._value = new_value
 

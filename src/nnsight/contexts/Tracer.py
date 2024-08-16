@@ -14,6 +14,7 @@ from .Invoker import Invoker
 if TYPE_CHECKING:
     from ..models.mixins import RemoteableMixin
     from ..models.NNsightModel import NNsight
+    from ..intervention import InterventionProxy
 
 
 class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
