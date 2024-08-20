@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import gc
+import inspect
 import weakref
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
@@ -30,6 +32,22 @@ from ..intervention import (
 from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
+
+
+class MetaDispatcher(TorchDispatchMode):
+    """This exists because `with torch.device('meta') is evil.
+
+    Ty Caden
+
+    """
+
+    def __torch_dispatch__(self, func, types, args, kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        if "device" in kwargs or "device" in inspect.signature(func).parameters:
+            kwargs["device"] = "meta"
+        return func(*args, **kwargs)
 
 
 class NNsight:
@@ -85,7 +103,8 @@ class NNsight:
 
         # Otherwise load from _load(...).
         if not self._custom_model:
-            with torch.device("meta"):
+            # Load skeleton of model by putting all tensors on meta.
+            with MetaDispatcher():
                 self._model = self._load(self._model_key, *args, **kwargs).to(
                     "meta"
                 )
