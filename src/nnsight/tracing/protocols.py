@@ -58,6 +58,7 @@ class Protocol:
         """
 
         return {"node": {"color": "black", "shape": "ellipse"}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -191,6 +192,7 @@ class ApplyModuleProtocol(Protocol):
         """
 
         return {"node": {"color": "blue", "shape": "polygon", "sides": 6}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None), # Argument label word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -219,6 +221,7 @@ class LockProtocol(Protocol):
         """
 
         return {"node": {"color": "brown", "shape": "ellipse"}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None), # Argument lable key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -324,6 +327,7 @@ class GradProtocol(Protocol):
         """
 
         return {"node": {"color": "green4", "shape": "box"}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -408,6 +412,7 @@ class SwapProtocol(Protocol):
         """
 
         return {"node": {"color": "green4", "shape": "ellipse"}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge key word
@@ -539,6 +544,7 @@ class BridgeProtocol(Protocol):
         """
 
         return {"node": {"color": "brown", "shape": "box"}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}, # Non-node argument display
                                            {0: {"color": "gray", "shape": "box", "style": "dashed"}}),
                 "arg_kname": defaultdict(lambda: None, {0: "graph_id"}), # Arugment label key word
@@ -575,6 +581,7 @@ class EarlyStopProtocol(Protocol):
         """
 
         return {"node": {"color": "red", "shape": "polygon", "sides": 6}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -605,6 +612,7 @@ class LocalBackendExecuteProtocol(Protocol):
         """
 
         return {"node": {"color": "purple", "shape": "polygon", "sides": 6}, # Node display
+                "label": "ExecuteProtocol",
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -638,6 +646,7 @@ class ValueProtocol(Protocol):
         """
 
         return {"node": {"color": "blue", "shape": "box"}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument  
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -814,6 +823,7 @@ class ConditionalProtocol(Protocol):
         """
 
         return {"node": {"color": "#FF8C00", "shape": "polygon", "sides": 6}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument  
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display
@@ -880,6 +890,7 @@ class UpdateProtocol(Protocol):
         """
 
         return {"node": {"color": "blue", "shape": "ellipse"}, # Node display
+                "label": cls.__name__,
                 "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument  
                 "arg_kname": defaultdict(lambda: None), # Argument label key word
                 "edge": defaultdict(lambda: "solid")} # Argument edge display

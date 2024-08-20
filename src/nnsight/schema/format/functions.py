@@ -83,6 +83,17 @@ FUNCTIONS_WHITELIST.update(
 ### nnsight functions
 FUNCTIONS_WHITELIST.update(
     {
+        get_function_name(bool): bool,
+        get_function_name(bytes): bytes,
+        get_function_name(int): int,
+        get_function_name(float): float,
+        get_function_name(str): str,
+        get_function_name(complex): complex,
+        get_function_name(bytearray): bytearray,
+        get_function_name(tuple): tuple,
+        get_function_name(list): list,
+        get_function_name(set): set,
+        get_function_name(dict): dict,
         get_function_name(print): print,
         get_function_name(setattr): setattr,
         get_function_name(util.fetch_attr): util.fetch_attr,

@@ -467,14 +467,9 @@ class Node:
             - str: name of this node.
         """
 
-        node_label = (
-            self.target
-            if isinstance(self.target, str)
-            else self.target.__name__
-        )
-
         styles = {
             "node": {"color": "black", "shape": "ellipse"},
+            "label": (self.target if isinstance(self.target, str) else self.target.__name__),
             "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
             "arg_kname": defaultdict(lambda: None),
             "edge": defaultdict(lambda: "solid"),
@@ -486,7 +481,7 @@ class Node:
             self.target, protocols.Protocol
         ):
             styles = self.target.style()
-            viz_graph.add_node(node_name, label=node_label, **styles["node"])
+            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
             if (
                 recursive
                 and self.target == protocols.LocalBackendExecuteProtocol
@@ -513,7 +508,7 @@ class Node:
                             viz_graph, recursive, node_name + "_"
                         )
         else:
-            viz_graph.add_node(node_name, label=node_label, **styles["node"])
+            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
 
         def visualize_args(arg_collection):
             """Recursively visualizes the arguments of this node.
