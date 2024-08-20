@@ -486,6 +486,7 @@ class InterventionProtocol(Protocol):
 
         return {
             "node": {"color": "green4", "shape": "box"},  # Node display
+            "label": cls.__name__,
             "arg": defaultdict(
                 lambda: {"color": "gray", "shape": "box"}
             ),  # Non-node argument display
