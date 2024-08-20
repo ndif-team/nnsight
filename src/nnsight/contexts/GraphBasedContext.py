@@ -69,13 +69,13 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
                 "Early exit is only supported for sequential graph-based contexts."
             )
 
-    def log(self, data: Any) -> None:
+    def log(self, *data: Any) -> None:
         """Adds a node via .apply to print the value of a Node.
 
         Args:
             data (Any): Data to print.
         """
-        self.apply(print, data)
+        self.apply(print, *data)
 
     def vis(self, **kwargs) -> None:
         """
