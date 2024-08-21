@@ -91,8 +91,8 @@ def test_true_conditional_protocol(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
     with tiny_model.trace(tiny_input) as tracer:
-        num = tracer.apply(int, 5)
-        with num > 0:
+        num = 5
+        with tracer.cond(num > 0):
             tiny_model.layer1.output[:] = 1
             l1_out = tiny_model.layer1.output.save()
 
@@ -104,8 +104,8 @@ def test_false_conditional_protocol(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
     with tiny_model.trace(tiny_input) as tracer:
-        num = tracer.apply(int, 5)
-        with num < 0:
+        num = 5
+        with tracer.cond(num < 0):
             tiny_model.layer1.output[:] = 1
             l1_out = tiny_model.layer1.output.save()
 
@@ -120,10 +120,10 @@ def test_false_conditional_protocol(
 def test_node_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
     """Test a Tensor a boolean value as a result of a boolean operation on an InterventionProxy"""
 
-    with tiny_model.trace(tiny_input):
+    with tiny_model.trace(tiny_input) as tracer:
         out = tiny_model.layer1.output
         out[:, 0] = 1
-        with out[:, 0] != 1:
+        with tracer.cond(out[:, 0] != 1):
             tiny_model.layer1.output[:] = 1
             l1_out = tiny_model.layer1.output.save()
 
@@ -137,16 +137,16 @@ def test_multiple_dependent_conditionals(
     """Test that interventions defined within different Intervention contexts can be referenced if their conditions evaluated to True."""
 
     with tiny_model.trace(tiny_input) as tracer:
-        num = tracer.apply(int, 5)
+        num = 5
         l1_out = tiny_model.layer1.output
         l2_out = tiny_model.layer2.output.save()
-        with num > 0:
+        with tracer.cond(num > 0):
             l1_out[:] = 1
 
-        with l1_out[:, 0] != 1:
+        with tracer.cond(l1_out[:, 0] != 1):
             tiny_model.layer2.output[:] = 2
 
-        with l1_out[:, 0] == 1:
+        with tracer.cond(l1_out[:, 0] == 1):
             tiny_model.layer2.output[:] = 3
 
     assert torch.all(l2_out.value == 3).item()
@@ -154,20 +154,20 @@ def test_multiple_dependent_conditionals(
 
 def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.trace(tiny_input) as tracer:
-        num = tracer.apply(int, 5)
-        with num > 0:  # True
+        num = 5
+        with tracer.cond(num > 0):  # True
             l1_out = tiny_model.layer1.output.save()
 
-            with num > 0:  # True
+            with tracer.cond(num > 0):  # True
                 tiny_model.layer1.output[:] = 1
 
-            with num < 0:  # False
+            with tracer.cond(num < 0):  # False
                 tiny_model.layer1.output[:] = 2
 
-        with num < 0:  # False
+        with tracer.cond(num < 0):  # False
             tiny_model.layer2.output[:] = 0
 
-            with num > 0:  # True
+            with tracer.cond(num > 0):  # True
                 l2_out = tiny_model.layer2.output.save()
 
     assert isinstance(l1_out.value, torch.Tensor)
@@ -178,8 +178,8 @@ def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.session() as session:
-        num = session.apply(int, 5)
-        with num > 0:
+        num = 5
+        with session.cond(num > 0):
             with tiny_model.trace(tiny_input):
                 output = tiny_model.output.save()
 
@@ -190,7 +190,7 @@ def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.session() as session:
         result = session.apply(list).save()
         with session.iter([0, 1, 2]) as (item, iterator):
-            with item % 2 == 0:
+            with iterator.cond(item % 2 == 0):
                 with tiny_model.trace(tiny_input):
                     result.append(item)
 
@@ -230,7 +230,7 @@ def test_sequential_graph_based_context_exit(tiny_model: NNsight):
         l.append(0)
 
         with session.iter([1, 2, 3, 4]) as (item, iterator):
-            with item == 3:
+            with iterator.cond(item == 3):
                 iterator.exit()
             l.append(item)
         l.append(5)
@@ -254,7 +254,7 @@ def test_bridged_node_cleanup(tiny_model: NNsight):
     with tiny_model.session() as session:
         l = session.apply(list)
         with session.iter([0, 1, 2]) as (item, iterator):
-            with item == 2:
+            with iterator.cond(item == 2):
                 iterator.exit()
             l.append(item)
 

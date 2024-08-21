@@ -28,7 +28,7 @@ from .tracing.protocols import Protocol
 from .tracing.Proxy import Proxy
 
 
-class InterventionProxy(Proxy, Conditional):
+class InterventionProxy(Proxy):
     """Sub-class for Proxy that adds additional user functionality to proxies.
 
     Examples:
@@ -51,11 +51,6 @@ class InterventionProxy(Proxy, Conditional):
         self.__dict__["_grad"] = None
 
         self._grad: InterventionProxy
-
-    def __enter__(self) -> Conditional:
-        self.__dict__["_condition"] = self.node
-
-        return Conditional.__enter__(self)
 
     def save(self) -> InterventionProxy:
         """Method when called, indicates to the intervention graph to not delete the tensor values of the result.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import weakref
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable, Union
 
 from typing_extensions import Self
 
@@ -12,6 +12,7 @@ from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from .backends import Backend, BridgeMixin
+from .Conditional import Conditional
 
 
 class GraphBasedContext(AbstractContextManager, BridgeMixin):
@@ -54,6 +55,57 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             args=args,
             kwargs=kwargs,
         )
+
+    def cond(self, condition: Union[InterventionProxy, Any]) -> Conditional:
+        """ Entrypoint to the Conditional context. 
+            Takes in a condition argument which acts as the dependency of the Conditional node in the Intervention graph.
+            The condition is evaluated as a boolean, and if True, executes all the interventions defined within the body
+            of the conditional context.
+        
+        Args:
+            condition (Union[InterventionProxy, Any]): Dependency of the Conditional Node.
+                                                             
+        Returns:
+            Conditional: Conditional context object.
+
+        Example:
+
+            Setup:
+                .. code-block:: python
+                    import torch
+                    from collections import OrderedDict
+
+                    input_size = 5
+                    hidden_dims = 10
+                    output_size = 2
+
+                    model = nn.Sequential(OrderedDict([
+                        ('layer1', torch.nn.Linear(input_size, hidden_dims)),
+                        ('layer2', torch.nn.Linear(hidden_dims, output_size)),
+                    ]))
+
+                    input = torch.rand((1, input_size))
+
+            Ex 1: The .save() on the model output will only be executed if the condition passed to tracer.cond() is evaluated to True.    
+        
+            .. code-block:: python
+                x: int = 5
+                with model.trace(input) as trace:
+                    with tracer.cond(x > 0):
+                        out = model.output.save()
+
+            Ex 2: The condition is on an InterventionProxy which creates in return an InterventionProxy
+
+            .. code-block:: python
+                with model.trace(input) as trace:
+                    with tracer.cond(model.layer1.output[:, 0] > 0):
+                        out = model.output.save()
+        """
+
+        if isinstance(condition, InterventionProxy):
+            condition = condition.node
+
+        return Conditional(self.graph, condition)
 
     def exit(self) -> InterventionProxy:
         """Exits the execution of a sequential intervention graph.

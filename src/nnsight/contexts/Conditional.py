@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Any, Union
 
 from ..tracing import protocols
 
 if TYPE_CHECKING:
     from ..tracing.Node import Node
+    from ..tracing.Graph import Graph
 
 class ConditionalManager():
     """ A Graph attachement that manages the Conditional contexts defined within an Intervention Graph.
@@ -88,15 +89,17 @@ class Conditional(AbstractContextManager):
     """ A context defined by a boolean condition, upon which the execution of all nodes defined from within is contingent. 
 
     Attributes:
+        _graph (Graph): Conditional Context graph.
         _condition (Node): Node with the condition value.
     """
 
-    def __init__(self, condition: "Node"):
-       self._condition: "Node" = condition
+    def __init__(self, graph: "Graph", condition: Union["Node", Any]):
+       self._graph = graph
+       self._condition: Union["Node", Any] = condition
 
     def __enter__(self) -> Conditional:
 
-        conditional_node = protocols.ConditionalProtocol.add(self._condition).node
+        conditional_node = protocols.ConditionalProtocol.add(self._graph, self._condition).node
 
         protocols.ConditionalProtocol.push_conditional(conditional_node)
 
@@ -104,4 +107,4 @@ class Conditional(AbstractContextManager):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
-        protocols.ConditionalProtocol.pop_conditional(protocols.BridgeProtocol.peek_graph(self._condition.graph))
+        protocols.ConditionalProtocol.pop_conditional(self._graph)
