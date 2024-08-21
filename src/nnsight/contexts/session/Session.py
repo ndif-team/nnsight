@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable
 
 from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
@@ -44,13 +44,43 @@ class Session(GraphBasedContext, RemoteMixin):
 
         self.backend(self)
 
-    def iter(self, iterable, **kwargs) -> Iterator:
+    def iter(self, iterable: Iterable, return_context: bool = False, **kwargs) -> Iterator:
+        """Creates an Iterator context to iteratively execute an intervention graph, with an update item at each iteration.
+        
+        Args:
+            - iterable (Iterable): Data to iterate over.
+            - return_context (bool): If True, returns the Iterator context. Default: False.
+        
+        Returns:
+            Iterator: Iterator context.
+
+        Example:
+            Setup:
+                .. code-block:: python
+                    import torch
+                    from collections import OrderedDict
+                    input_size = 5
+                    hidden_dims = 10
+                    output_size = 2
+                    model = nn.Sequential(OrderedDict([
+                        ('layer1', torch.nn.Linear(input_size, hidden_dims)),
+                        ('layer2', torch.nn.Linear(hidden_dims, output_size)),
+                    ]))
+                    input = torch.rand((1, input_size))
+
+            Ex:
+                .. code-block:: python
+                    with model.session() as session:
+                        l  = session.apply(list).save()
+                        with session.iter([0, 1, 2]) as item:
+                            l.append(item)
+        """
 
         bridge = weakref.proxy(self.bridge)
 
         backend = BridgeBackend(bridge)
 
-        return Iterator(iterable, backend, bridge=bridge, proxy_class=self.model.proxy_class, **kwargs)
+        return Iterator(iterable, return_context, backend, bridge=bridge, proxy_class=self.model.proxy_class, **kwargs)
 
     ### BACKENDS ########
 

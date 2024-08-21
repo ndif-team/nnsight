@@ -189,7 +189,7 @@ def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.session() as session:
         result = session.apply(list).save()
-        with session.iter([0, 1, 2]) as (item, iterator):
+        with session.iter([0, 1, 2]) as item:
             with item % 2 == 0:
                 with tiny_model.trace(tiny_input):
                     result.append(item)
@@ -212,7 +212,7 @@ def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_update_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.session() as session:
         sum = session.apply(int, 0).save()
-        with session.iter([0, 1, 2]) as (item, iterator):
+        with session.iter([0, 1, 2]) as item:
             sum.update(sum + item)
 
         sum.update(sum + 4)
@@ -229,7 +229,7 @@ def test_sequential_graph_based_context_exit(tiny_model: NNsight):
         l = session.apply(list).save()
         l.append(0)
 
-        with session.iter([1, 2, 3, 4]) as (item, iterator):
+        with session.iter([1, 2, 3, 4], return_context=True) as (item, iterator):
             with item == 3:
                 iterator.exit()
             l.append(item)
@@ -253,7 +253,7 @@ def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_bridged_node_cleanup(tiny_model: NNsight):
     with tiny_model.session() as session:
         l = session.apply(list)
-        with session.iter([0, 1, 2]) as (item, iterator):
+        with session.iter([0, 1, 2], return_context=True) as (item, iterator):
             with item == 2:
                 iterator.exit()
             l.append(item)
@@ -270,8 +270,8 @@ def test_nested_iterator(tiny_model: NNsight):
         l.append([1])
         l.append([2])
         l2 = session.apply(list).save()
-        with session.iter(l) as (item, iterator):
-            with session.iter(item) as (item_2, iterator_2):
+        with session.iter(l) as item:
+            with session.iter(item) as item_2:
                 l2.append(item_2)
 
     assert l2.value == [0, 1, 2]
