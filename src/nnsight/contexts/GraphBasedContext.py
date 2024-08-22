@@ -3,12 +3,15 @@ from __future__ import annotations
 import inspect
 import weakref
 from contextlib import AbstractContextManager
+from functools import wraps
 from typing import Any, Callable, Union
 
+import torch
 from torch.overrides import TorchFunctionMode
 from typing_extensions import Self
 
 from ..intervention import InterventionProxy
+from ..patching import Patch, Patcher
 from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
@@ -176,6 +179,26 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         self.graph = weakref.proxy(self.graph)
 
 
+from inspect import getmembers, isclass
+
+from torch.utils import data
+
+
+def global_patch(fn):
+
+    @wraps(fn)
+    def inner(*args, **kwargs):
+
+        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
+            fn,
+            *args,
+            **kwargs,
+            validate=GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.validate,
+        )
+
+    return inner
+
+
 class GlobalTracingContext(GraphBasedContext):
     """The Global Tracing Context handles adding tracing operations globally without reference to a given `GraphBasedContext`.
     There should only be one of these and that is `GlobalTracingContext.GLOBAL_TRACING_CONTEXT`.
@@ -185,6 +208,17 @@ class GlobalTracingContext(GraphBasedContext):
 
     GLOBAL_TRACING_CONTEXT: GlobalTracingContext
     TORCH_HANDLER: GlobalTracingContext.GlobalTracingTorchHandler
+    PATCHER: Patcher = Patcher(
+        [
+            Patch(torch.nn, global_patch(torch.nn.Parameter), "Parameter"),
+            Patch(data, global_patch(data.DataLoader), "DataLoader"),
+        ]
+        + [
+            Patch(torch.optim, global_patch(value), key)
+            for key, value in getmembers(torch.optim, isclass)
+            if issubclass(value, torch.optim.Optimizer)
+        ]
+    )
 
     class GlobalTracingTorchHandler(TorchFunctionMode):
 
@@ -209,12 +243,14 @@ class GlobalTracingContext(GraphBasedContext):
         def __enter__(self) -> Any:
 
             GlobalTracingContext.TORCH_HANDLER.__exit__(None, None, None)
+            GlobalTracingContext.PATCHER.__exit__(None, None, None)
 
             return self
 
         def __exit__(self, exc_type, exc_val, traceback):
 
             GlobalTracingContext.TORCH_HANDLER.__enter__()
+            GlobalTracingContext.PATCHER.__enter__()
 
             if isinstance(exc_val, BaseException):
 
@@ -287,6 +323,7 @@ class GlobalTracingContext(GraphBasedContext):
         )
 
         GlobalTracingContext.TORCH_HANDLER.__enter__()
+        GlobalTracingContext.PATCHER.__enter__()
 
     @staticmethod
     def deregister() -> None:
@@ -301,6 +338,7 @@ class GlobalTracingContext(GraphBasedContext):
         GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = None
 
         GlobalTracingContext.TORCH_HANDLER.__exit__(None, None, None)
+        GlobalTracingContext.PATCHER.__exit__(None, None, None)
 
     def __bool__(self) -> bool:
         """True if there is a `GraphBasedContext` registered globally. False otherwise."""
