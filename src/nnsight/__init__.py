@@ -49,19 +49,6 @@ for key, value in getmembers(math, isbuiltin):
     DEFAULT_PATCHER.add(Patch(math, proxy_wrapper(value), key))
 
 # Tensor creation operations
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.arange), "arange"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.empty), "empty"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.eye), "eye"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.full), "full"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.linspace), "linspace"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.logspace), "logspace"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.randint), "randint"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.randn), "randn"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.randperm), "randperm"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))
-
 from torch._subclasses.fake_tensor import FakeTensor
 
 

@@ -6,14 +6,13 @@ from typing import Callable, Dict, Optional, Type
 
 from PIL import Image as PILImage
 
-
 from .. import util
 from ..util import apply
 from .Node import Node
 from .protocols import EarlyStopProtocol, Protocol
 from .Proxy import Proxy
-
 from .util import validate
+
 
 class Graph:
     """Represents a computation graph composed of :class:`Nodes <nnsight.tracing.Node.Node>`.
