@@ -5,7 +5,7 @@ import nnsight
 from nnsight.contexts.Tracer import Tracer
 from nnsight.schema.Request import RequestModel
 from nnsight.tracing.Graph import Graph
-
+from nnsight.contexts.GraphBasedContext import GlobalTracingContext
 @pytest.fixture(scope="module")
 def gpt2(device: str):
     return nnsight.LanguageModel(
@@ -19,7 +19,7 @@ def MSG_prompt():
 
 
 def _test_serialize(tracer: Tracer):
-
+    GlobalTracingContext.TORCH_DISPATCHER.__exit__(None, None, None)
     request =  RequestModel(object=tracer, model_key=tracer.remote_backend_get_model_key())
     request_json = request.model_dump(
         mode="json", exclude=["session_id", "received", "id"]
@@ -27,7 +27,7 @@ def _test_serialize(tracer: Tracer):
 
     request2 = RequestModel(**request_json)
     tracer = request2.deserialize(tracer.model)
-
+    GlobalTracingContext.TORCH_DISPATCHER.__enter__()
     assert isinstance(tracer.graph, Graph)
 
 

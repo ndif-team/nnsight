@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Iterable, Tuple
+from typing import TYPE_CHECKING, Iterable, Tuple, Union
 
 from ...tracing import protocols
 from .. import check_for_dependencies, resolve_dependencies
@@ -13,14 +13,30 @@ if TYPE_CHECKING:
 
 
 class Iterator(GraphBasedContext):
+    """ Intervention loop context for iterative execution of an intervention graph. 
+    
+    Attributes:
+        - data (Iterable): Data to iterate over.
+        - return_context (bool): If True, returns the Iterator object upon entering the Iterator context.
+    """
 
-    def __init__(self, data: Iterable, *args, **kwargs) -> None:
+    def __init__(
+            self, 
+            data: Iterable, 
+            return_context: bool, 
+            *args, 
+            **kwargs
+        ) -> None:
 
         self.data: Iterable = data
+        self._return_context: bool = return_context
 
         super().__init__(*args, **kwargs)
 
-    def __enter__(self) -> Tuple[int, Iterator]:
+    def __enter__(self) -> Union[
+                            "InterventionProxy", 
+                            Tuple["InterventionProxy", Iterator]
+                            ]:
 
         super().__enter__()
 
@@ -30,7 +46,10 @@ class Iterator(GraphBasedContext):
 
         self.data, _ = check_for_dependencies(self.data)
 
-        return iter_item_proxy, self
+        if self._return_context:
+            return iter_item_proxy, self
+        else:
+            return iter_item_proxy
 
     ### BACKENDS ########
 

@@ -65,7 +65,7 @@ class NNsight:
         _custom_model (bool): If the value passed to repoid_path_model was a custom model.
         _model (torch.nn.Module): Underlying torch module.
         _envoy (Envoy): Envoy for underlying model.
-        _session (Session): Session object if in a session.
+        _session (Session): Session object if in a Session.
     """
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
@@ -239,7 +239,9 @@ class NNsight:
 
         # Create Tracer object.
         if self._default_graph is not None:
+            
             graph = self._default_graph.copy()
+            
             tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
         else:
             tracer = Tracer(backend, self, bridge=bridge, **kwargs)
@@ -263,7 +265,7 @@ class NNsight:
                 return output.value
 
             # Otherwise open an invoker context with the give args.
-            tracer.invoke(*inputs, **invoker_args).__enter__()
+            tracer.invoke(*inputs, **invoker_args)
 
         # If trace is False, you had to have provided an input.
         if not trace:

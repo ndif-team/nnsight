@@ -62,6 +62,9 @@ class Graph:
         self.attachments = dict()
 
     def reset(self) -> None:
+        """Resets the Graph to prepare for a new execution of the Graph.
+        Calls `.reset()` on all Nodes.
+        """
 
         # Reset Nodes individually.
         for node in self.nodes.values():
