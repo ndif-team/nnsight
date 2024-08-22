@@ -323,7 +323,7 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
 def test_conditional_interventions(gpt2: nnsight.LanguageModel):
     with gpt2.session() as session:
         with gpt2.trace("Hello World") as tracer:
-            with torch.all(gpt2.transformer.h[5].output[0] < 100000):
+            with tracer.cond(torch.all(gpt2.transformer.h[5].output[0] < 100000)):
                 gpt2.transformer.h[-1].output[0][:] = 0
 
             output = gpt2.transformer.h[-1].output[0].save()

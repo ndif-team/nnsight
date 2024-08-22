@@ -679,8 +679,8 @@ class ConditionalProtocol(Protocol):
     
         .. code-block:: python
             with model.trace(input) as tracer:
-                num = tracer.apply(int, 5)
-                with x > 0:
+                num = 5
+                with tracer.cond(x > 0):
                     out = model.output.save()
 
         Ex 2: The condition is a tensor boolean operation on the Envoy's output InterventionProxy.
@@ -688,16 +688,16 @@ class ConditionalProtocol(Protocol):
         .. code-block:: python
             with model.trace(input) as tracer:
                 l1_out = model.layer1.output
-                with l1_out[:, 0] > 0:
+                with tracer.cond(l1_out[:, 0] > 0):
                     out = model.output.save()
     """
 
     attachment_name = "nnsight_conditional_manager"
 
     @classmethod
-    def add(cls, node: "Node") -> "InterventionProxy":
+    def add(cls, graph: "Graph", condition: Union["Node", Any]) -> "InterventionProxy":
 
-        return node.graph.create(target=cls, proxy_value=True, args=[node])
+        return graph.create(target=cls, proxy_value=True, args=[condition])
     
     @classmethod
     def execute(cls, node: "Node") -> None:
@@ -724,7 +724,7 @@ class ConditionalProtocol(Protocol):
                     listener_arg.remaining_listeners -= 1
                     if listener_arg.done() and listener_arg.redundant():
                         listener_arg.destroy()
-                    update_conditioned_nodes(listener)
+                update_conditioned_nodes(listener)
         
         # If the condition value is ignore or evaluated to False, update conditioned nodes
         update_conditioned_nodes(node)
