@@ -127,6 +127,83 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         """
         self.apply(print, *data)
 
+    def bool(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(bool, *args, **kwargs)
+
+    def bytes(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(bytes, *args, **kwargs)
+
+    def int(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(int, *args, **kwargs)
+
+    def float(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(float, *args, **kwargs)
+
+    def str(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(str, *args, **kwargs)
+
+    def complex(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(complex, *args, **kwargs)
+
+    def bytearray(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(bytearray, *args, **kwargs)
+
+    def tuple(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(tuple, *args, **kwargs)
+
+    def list(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(list, *args, **kwargs)
+    
+    def set(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(set, *args, **kwargs)
+    
+    def dict(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(dict, *args, **kwargs)
+
     def vis(self, **kwargs) -> None:
         """
         Helper method to save a visualization of the current state of the intervention graph.

@@ -28,9 +28,19 @@ from .models.NNsightModel import NNsight
 from .models.LanguageModel import LanguageModel
 from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper
-# from .globals import GlobalTracingContext
+from .contexts.GraphBasedContext import GlobalTracingContext
 
-# ops = GlobalTracingContext.GLOBAL_TRACING_CONTEXT
+bool = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bool
+bytes = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytes
+int = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.int
+float = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.float
+str = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.str
+complex = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.complex
+bytearray = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytearray
+tuple = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.tuple
+list = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.list
+set = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.set
+dict = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.dict
 
 logger.disabled = not CONFIG.APP.LOGGING
 remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
