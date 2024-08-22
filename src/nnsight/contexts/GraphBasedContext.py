@@ -41,7 +41,7 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         self,
         target: Callable,
         *args,
-        validate: bool = False,
+        validate: bool = None,
         **kwargs,
     ) -> InterventionProxy:
         """Helper method to directly add a function to the intervention graph.
@@ -53,9 +53,17 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         Returns:
             InterventionProxy: Proxy of applying that function.
         """
+        
+        
+        proxy_value = inspect._empty
+                
+        if validate is False:
+            
+            proxy_value = None
+        
         return self.graph.create(
             target=target,
-            proxy_value=inspect._empty if validate else None,
+            proxy_value=proxy_value,
             args=args,
             kwargs=kwargs,
         )
@@ -130,6 +138,83 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         """
         self.apply(print, *data)
 
+    def bool(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(bool, *args, **kwargs)
+
+    def bytes(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(bytes, *args, **kwargs)
+
+    def int(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(int, *args, **kwargs)
+
+    def float(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(float, *args, **kwargs)
+
+    def str(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(str, *args, **kwargs)
+
+    def complex(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(complex, *args, **kwargs)
+
+    def bytearray(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(bytearray, *args, **kwargs)
+
+    def tuple(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(tuple, *args, **kwargs)
+
+    def list(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(list, *args, **kwargs)
+    
+    def set(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(set, *args, **kwargs)
+    
+    def dict(self, *args, **kwargs) -> InterventionProxy:
+        """
+        
+        """
+
+        return self.apply(dict, *args, **kwargs)
+
     def vis(self, **kwargs) -> None:
         """
         Helper method to save a visualization of the current state of the intervention graph.
@@ -192,8 +277,7 @@ def global_patch(fn):
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
             fn,
             *args,
-            **kwargs,
-            validate=GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.validate,
+            **kwargs
         )
 
     return inner
@@ -232,8 +316,7 @@ class GlobalTracingContext(GraphBasedContext):
                 return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
                     func,
                     *args,
-                    **kwargs,
-                    validate=GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.validate,
+                    **kwargs
                 )
 
             return func(*args, **kwargs)

@@ -10,21 +10,18 @@ def validate(target: Callable, *args, **kwargs):
 
     from ..contexts.GraphBasedContext import GlobalTracingContext
 
-    
     # Enter FakeMode.
     with FakeTensorMode(
         allow_non_fake_inputs=True,
         shape_env=ShapeEnv(assume_static_by_default=True),
     ) as fake_mode:
         with FakeCopyMode(fake_mode):
-            
+
             with GlobalTracingContext.exit_global_tracing_context():
-                    
+
                 args, kwargs = Node.prepare_inputs((args, kwargs), proxy=True)
 
-                zzz =  target(
+                return target(
                     *args,
                     **kwargs,
                 )
-                
-                return zzz

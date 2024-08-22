@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import weakref
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Iterable, Tuple, Union
 
+from ... import util
 from ...tracing import protocols
+from ...tracing.Node import Node
 from .. import check_for_dependencies, resolve_dependencies
 from ..GraphBasedContext import GraphBasedContext
 
@@ -35,11 +38,25 @@ class Iterator(GraphBasedContext):
 
         super().__enter__()
 
-        iter_item_proxy: "InterventionProxy" = protocols.ValueProtocol.add(
-            self.graph, None
-        )
+        self.data, has_dependencies = check_for_dependencies(self.data)
 
-        self.data, _ = check_for_dependencies(self.data)
+        proxy_value = None
+
+        if self.graph.validate:
+
+            proxy_value = util.apply(self.data, lambda node: node.args[0].proxy_value, Node)
+                
+            if len(proxy_value) != 0:
+            
+                proxy_value = (
+                    next(proxy_value)
+                    if hasattr(proxy_value, "__next__")
+                    else proxy_value[0]
+                )
+
+        iter_item_proxy: "InterventionProxy" = protocols.ValueProtocol.add(
+            self.graph, proxy_value
+        )
 
         if self._return_context:
             return iter_item_proxy, self

@@ -42,7 +42,7 @@ def test_tiny(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_grad_setting(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input):
+    with tiny_model.trace(tiny_input, validate=True, scan=True):
         l1_grad = tiny_model.layer1.output.grad.clone().save()
 
         tiny_model.layer1.output.grad = (
@@ -60,11 +60,11 @@ def test_grad_setting(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_external_proxy_intervention_executed_locally(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
-    with tiny_model.session() as sesh:
-        with tiny_model.trace(tiny_input) as tracer_1:
+    with tiny_model.session(validate=True) as sesh:
+        with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer_1:
             l1_out = tiny_model.layer1.output.save()
 
-        with tiny_model.trace(tiny_input) as tracer_2:
+        with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer_2:
             l1_out[:, 2] = 5
 
         assert list(tracer_2.graph.nodes.keys()) == [
@@ -76,7 +76,7 @@ def test_external_proxy_intervention_executed_locally(
 
 
 def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input):
+    with tiny_model.trace(tiny_input, validate=True, scan=True):
         l1_out = tiny_model.layer1.output.save()
         l2_out = tiny_model.layer2.output.save()
         tiny_model.layer1.output.stop()
@@ -90,7 +90,7 @@ def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_true_conditional_protocol(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
-    with tiny_model.trace(tiny_input) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
         num = 5
         with tracer.cond(num > 0):
             tiny_model.layer1.output[:] = 1
@@ -103,7 +103,7 @@ def test_true_conditional_protocol(
 def test_false_conditional_protocol(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
-    with tiny_model.trace(tiny_input) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
         num = 5
         with tracer.cond(num < 0):
             tiny_model.layer1.output[:] = 1
@@ -120,7 +120,7 @@ def test_false_conditional_protocol(
 def test_node_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
     """Test a Tensor a boolean value as a result of a boolean operation on an InterventionProxy"""
 
-    with tiny_model.trace(tiny_input) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
         out = tiny_model.layer1.output
         out[:, 0] = 1
         with tracer.cond(out[:, 0] != 1):
@@ -136,7 +136,7 @@ def test_multiple_dependent_conditionals(
 ):
     """Test that interventions defined within different Intervention contexts can be referenced if their conditions evaluated to True."""
 
-    with tiny_model.trace(tiny_input) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
         num = 5
         l1_out = tiny_model.layer1.output
         l2_out = tiny_model.layer2.output.save()
@@ -153,7 +153,7 @@ def test_multiple_dependent_conditionals(
 
 
 def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
         num = 5
         with tracer.cond(num > 0):  # True
             l1_out = tiny_model.layer1.output.save()
@@ -177,30 +177,33 @@ def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session() as session:
+    with tiny_model.session(validate=True) as session:
         num = 5
         with session.cond(num > 0):
-            with tiny_model.trace(tiny_input):
+            with tiny_model.trace(tiny_input, validate=True, scan=True):
                 output = tiny_model.output.save()
 
     assert isinstance(output.value, torch.Tensor)
 
 
 def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session() as session:
+    with tiny_model.session(validate=True) as session:
         result = session.apply(list).save()
-        with session.iter([0, 1, 2], return_context=True) as (item, iterator):
+        with session.iter([0, 1, 2], return_context=True, validate=True) as (
+            item,
+            iterator,
+        ):
             with iterator.cond(item % 2 == 0):
-                with tiny_model.trace(tiny_input):
+                with tiny_model.trace(tiny_input, validate=True, scan=True):
                     result.append(item)
 
     assert result.value == [0, 2]
 
 
 def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session() as session:
+    with tiny_model.session(validate=True) as session:
         val = session.apply(int, 0)
-        with tiny_model.trace(tiny_input):
+        with tiny_model.trace(tiny_input, validate=True, scan=True):
             tiny_model.layer1.output[:] = (
                 val  # fetches the val proxy using the bridge protocol
             )
@@ -210,14 +213,14 @@ def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_update_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session() as session:
+    with tiny_model.session(validate=True) as session:
         sum = session.apply(int, 0).save()
-        with session.iter([0, 1, 2]) as item:
+        with session.iter([0, 1, 2], validate=True) as item:
             sum.update(sum + item)
 
         sum.update(sum + 4)
 
-        with tiny_model.trace(tiny_input):
+        with tiny_model.trace(tiny_input, validate=True, scan=True):
             sum.update(sum + 3)
             double_sum = (sum * 2).save()
 
@@ -225,11 +228,14 @@ def test_update_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_sequential_graph_based_context_exit(tiny_model: NNsight):
-    with tiny_model.session() as session:
+    with tiny_model.session(validate=True) as session:
         l = session.apply(list).save()
         l.append(0)
 
-        with session.iter([1, 2, 3, 4], return_context=True) as (item, iterator):
+        with session.iter([1, 2, 3, 4], return_context=True, validate=True) as (
+            item,
+            iterator,
+        ):
             with iterator.cond(item == 3):
                 iterator.exit()
             l.append(item)
@@ -241,7 +247,7 @@ def test_sequential_graph_based_context_exit(tiny_model: NNsight):
 
 
 def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input):
+    with tiny_model.trace(tiny_input, validate=True, scan=True):
         l1_out = tiny_model.layer1.output
         tiny_model.layer1.output.stop()
         l1_out_double = l1_out * 2
@@ -251,9 +257,9 @@ def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_bridged_node_cleanup(tiny_model: NNsight):
-    with tiny_model.session() as session:
+    with tiny_model.session(validate=True) as session:
         l = session.apply(list)
-        with session.iter([0, 1, 2], return_context=True) as (item, iterator):
+        with session.iter([0, 1, 2], return_context=True, validate=True) as (item, iterator):
             with iterator.cond(item == 2):
                 iterator.exit()
             l.append(item)
@@ -264,14 +270,14 @@ def test_bridged_node_cleanup(tiny_model: NNsight):
 
 def test_nested_iterator(tiny_model: NNsight):
 
-    with tiny_model.session() as session:
+    with tiny_model.session(validate=True) as session:
         l = session.apply(list)
         l.append([0])
         l.append([1])
         l.append([2])
         l2 = session.apply(list).save()
-        with session.iter(l) as item:
-            with session.iter(item) as item_2:
+        with session.iter(l, validate=True) as item:
+            with session.iter(item, validate=True) as item_2:
                 l2.append(item_2)
 
     assert l2.value == [0, 1, 2]

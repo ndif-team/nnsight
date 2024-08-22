@@ -239,9 +239,9 @@ class NNsight:
 
         # Create Tracer object.
         if self._default_graph is not None:
-            
+
             graph = self._default_graph.copy()
-            
+
             tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
         else:
             tracer = Tracer(backend, self, bridge=bridge, **kwargs)
@@ -315,7 +315,10 @@ class NNsight:
         )
 
     def session(
-        self, backend: Union[Backend, str] = None, remote: bool = False
+        self,
+        backend: Union[Backend, str] = None,
+        remote: bool = False,
+        **kwargs,
     ) -> Session:
         """Create a session context using a Session.
 
@@ -342,7 +345,7 @@ class NNsight:
 
             backend = RemoteBackend(backend)
 
-        session = Session(backend, self)
+        session = Session(backend, self, **kwargs)
 
         self._session = session
 
