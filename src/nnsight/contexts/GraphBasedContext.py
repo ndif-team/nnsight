@@ -58,14 +58,14 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         )
 
     def cond(self, condition: Union[InterventionProxy, Any]) -> Conditional:
-        """ Entrypoint to the Conditional context. 
+        """Entrypoint to the Conditional context.
             Takes in a condition argument which acts as the dependency of the Conditional node in the Intervention graph.
             The condition is evaluated as a boolean, and if True, executes all the interventions defined within the body
             of the conditional context.
-        
+
         Args:
             condition (Union[InterventionProxy, Any]): Dependency of the Conditional Node.
-                                                             
+
         Returns:
             Conditional: Conditional context object.
 
@@ -87,8 +87,8 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
 
                     input = torch.rand((1, input_size))
 
-            Ex 1: The .save() on the model output will only be executed if the condition passed to tracer.cond() is evaluated to True.    
-        
+            Ex 1: The .save() on the model output will only be executed if the condition passed to tracer.cond() is evaluated to True.
+
             .. code-block:: python
                 x: int = 5
                 with model.trace(input) as trace:
@@ -194,10 +194,31 @@ class GlobalTracingContext(GraphBasedContext):
                 func, *args, **kwargs
             )
 
+    class GlobalTracingExit(AbstractContextManager):
+
+        def __enter__(self) -> Any:
+
+            GlobalTracingContext.TORCH_DISPATCHER.__exit__(None, None, None)
+
+            return self
+
+        def __exit__(self, exc_type, exc_val, traceback):
+
+            GlobalTracingContext.TORCH_DISPATCHER.__enter__()
+
+            if isinstance(exc_val, BaseException):
+
+                raise exc_val
+
     def __init__(self) -> None:
         """We create an empty `GraphBasedContext` by default."""
 
         self.graph: Graph = None
+
+    @staticmethod
+    def exit_global_tracing_context():
+
+        return GlobalTracingContext.GlobalTracingExit()
 
     @staticmethod
     def try_register(graph_based_context: GraphBasedContext) -> bool:
@@ -251,7 +272,9 @@ class GlobalTracingContext(GraphBasedContext):
 
         assert GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph is None
 
-        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = graph_based_context.graph
+        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = (
+            graph_based_context.graph
+        )
 
         GlobalTracingContext.TORCH_DISPATCHER.__enter__()
 
@@ -296,4 +319,6 @@ class GlobalTracingContext(GraphBasedContext):
 
 
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()
-GlobalTracingContext.TORCH_DISPATCHER = GlobalTracingContext.GlobalTracingDispatcher()
+GlobalTracingContext.TORCH_DISPATCHER = (
+    GlobalTracingContext.GlobalTracingDispatcher()
+)

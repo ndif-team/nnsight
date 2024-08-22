@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import inspect
 import tempfile
-from typing import Dict, Optional, Type
+from typing import Callable, Dict, Optional, Type
 
 from PIL import Image as PILImage
-from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
-from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
+
+from .. import util
 from ..util import apply
 from .Node import Node
-from .protocols import BridgeProtocol, EarlyStopProtocol, Protocol
+from .protocols import EarlyStopProtocol, Protocol
 from .Proxy import Proxy
 
+from .util import validate
 
 class Graph:
     """Represents a computation graph composed of :class:`Nodes <nnsight.tracing.Node.Node>`.
@@ -128,21 +129,7 @@ class Graph:
         # If we're validating and the user did not provide a proxy_value, execute the given target with meta proxy values to compute new proxy_value.
         if self.validate and node.proxy_value is inspect._empty:
 
-            # Enter FakeMode.
-            with FakeTensorMode(
-                allow_non_fake_inputs=True,
-                shape_env=ShapeEnv(assume_static_by_default=True),
-            ) as fake_mode:
-                with FakeCopyMode(fake_mode):
-
-                    proxy_args, proxy_kwargs = Node.prepare_inputs(
-                        (node.args, node.kwargs), proxy=True
-                    )
-
-                    node.proxy_value = node.target(
-                        *proxy_args,
-                        **proxy_kwargs,
-                    )
+            node.proxy_value = validate(node.target, *node.args, **node.kwargs)
 
         # Get name of target.
         name = (
