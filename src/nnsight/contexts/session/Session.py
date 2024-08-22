@@ -38,11 +38,8 @@ class Session(GraphBasedContext, RemoteMixin):
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
         self.model._session = None
-
-        if isinstance(exc_val, BaseException):
-            raise exc_val
-
-        self.backend(self)
+        
+        super().__exit__(exc_type, exc_val, exc_tb)
 
     def iter(self, iterable, **kwargs) -> Iterator:
 

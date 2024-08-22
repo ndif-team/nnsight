@@ -13,7 +13,7 @@ from ..patching import Patch, Patcher
 from ..tracing.Node import Node
 from ..tracing.Proxy import Proxy
 from . import check_for_dependencies
-
+from .GraphBasedContext import GlobalTracingContext
 if TYPE_CHECKING:
 
     from .Tracer import Tracer
@@ -47,6 +47,8 @@ class Invoker(AbstractContextManager):
         self.kwargs = kwargs
 
         self.scanning = False
+        
+        self.tracer.invoker = self
 
     def __enter__(self) -> Invoker:
         """Enters a new invocation context with a given input.
@@ -60,8 +62,6 @@ class Invoker(AbstractContextManager):
             Invoker: Invoker.
         """
 
-        self.tracer.invoker = self
-
         has_proxies_in_inputs = False
 
         # If were accumulating, we might have Proxies in the input.
@@ -71,6 +71,8 @@ class Invoker(AbstractContextManager):
         if self.tracer.model._session is not None:
             
             self.inputs, has_proxies_in_inputs = check_for_dependencies(self.inputs)
+            
+        GlobalTracingContext.TORCH_DISPATCHER.__exit__(None, None, None)
 
         if not has_proxies_in_inputs:
 
@@ -116,6 +118,8 @@ class Invoker(AbstractContextManager):
             self.tracer.model._envoy._reset()
 
         self.tracer._invoker_inputs.append(self.inputs)
+        
+        GlobalTracingContext.TORCH_DISPATCHER.__enter__()
 
         return self
 

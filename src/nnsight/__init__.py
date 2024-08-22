@@ -1,3 +1,14 @@
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+#                                                                                                                       #
+#      ::::    ::: ::::    :::  :::::::: ::::::::::: ::::::::  :::    ::: :::::::::::       :::::::       ::::::::      #
+#      :+:+:   :+: :+:+:   :+: :+:    :+:    :+:    :+:    :+: :+:    :+:     :+:          :+:   :+:     :+:    :+:     #
+#      :+:+:+  +:+ :+:+:+  +:+ +:+           +:+    +:+        +:+    +:+     +:+          +:+  :+:+            +:+     #
+#      +#+ +:+ +#+ +#+ +:+ +#+ +#++:++#++    +#+    :#:        +#++:++#++     +#+          +#+ + +:+         +#++:      #
+#      +#+  +#+#+# +#+  +#+#+#        +#+    +#+    +#+   +#+# +#+    +#+     +#+          +#+#  +#+            +#+     #
+#      #+#   #+#+# #+#   #+#+# #+#    #+#    #+#    #+#    #+# #+#    #+#     #+#          #+#   #+# #+# #+#    #+#     #
+#      ###    #### ###    ####  ######## ########### ########  ###    ###     ###           #######  ###  ########      #
+#                                                                                                                       #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 import os
 from functools import wraps
 from typing import Dict, Union
@@ -17,6 +28,9 @@ from .models.NNsightModel import NNsight
 from .models.LanguageModel import LanguageModel
 from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper
+# from .globals import GlobalTracingContext
+
+# ops = GlobalTracingContext.GLOBAL_TRACING_CONTEXT
 
 logger.disabled = not CONFIG.APP.LOGGING
 remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
@@ -531,3 +545,4 @@ except:
 
 
 DEFAULT_PATCHER.__enter__()
+

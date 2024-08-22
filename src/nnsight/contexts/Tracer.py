@@ -3,6 +3,8 @@ from __future__ import annotations
 import weakref
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from typing_extensions import Self
+
 from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
@@ -12,9 +14,9 @@ from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
+    from ..intervention import InterventionProxy
     from ..models.mixins import RemoteableMixin
     from ..models.NNsightModel import NNsight
-    from ..intervention import InterventionProxy
 
 
 class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
@@ -70,22 +72,28 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         """
         return getattr(self.model._envoy, key)
 
-    def __enter__(self) -> Tracer:
-        return self
+    def __enter__(self) -> Self:
+
+        tracer = super().__enter__()
+
+        if self.invoker is not None:
+
+            self.invoker.__enter__()
+
+        return tracer
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        
+
+        if self.invoker is not None:
+
+            self.invoker.__exit__(None, None, None)
+
         self.model._envoy._reset()
-        
-        if isinstance(exc_val, BaseException):
-            self.graph.alive = False
-            self.graph = None
-            raise exc_val
 
         if len(self._invoker_inputs) == 0:
             raise ValueError("No input was provided to the tracing context.")
 
-        self.backend(self)
+        super().__exit__(exc_type, exc_val, exc_tb)
 
     def invoke(self, *inputs: Any, **kwargs) -> Invoker:
         """Create an Invoker context dor a given input.
@@ -119,7 +127,6 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         protocols.ApplyModuleProtocol.set_module(self.graph, self.model._model)
 
         self.graph.reset()
-        
 
         invoker_inputs = self._invoker_inputs
 
@@ -127,7 +134,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         if protocols.BridgeProtocol.has_bridge(self.graph):
 
             invoker_inputs = resolve_dependencies(invoker_inputs)
-            
+
         self.graph.execute()
 
         self.model.interleave(

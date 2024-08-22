@@ -265,7 +265,7 @@ class NNsight:
                 return output.value
 
             # Otherwise open an invoker context with the give args.
-            tracer.invoke(*inputs, **invoker_args).__enter__()
+            tracer.invoke(*inputs, **invoker_args)
 
         # If trace is False, you had to have provided an input.
         if not trace:
