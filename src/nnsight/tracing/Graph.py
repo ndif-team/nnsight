@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import tempfile
 from typing import Dict, Optional, Type
+from functools import partial
 
 from PIL import Image as PILImage
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -145,11 +146,14 @@ class Graph:
                     )
 
         # Get name of target.
-        name = (
-            node.target
-            if isinstance(node.target, str)
-            else node.target.__name__
-        )
+        if isinstance(node.target, partial):
+            name = node.target.func.__name__
+        else:
+            name = (
+                node.target
+                if isinstance(node.target, str)
+                else node.target.__name__
+            )
 
         # Init name_idx tracker for this Node's name if not already added.
         if name not in self.name_idx:
