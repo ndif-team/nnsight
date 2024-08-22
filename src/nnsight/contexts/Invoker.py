@@ -14,6 +14,7 @@ from ..tracing.Node import Node
 from ..tracing.Proxy import Proxy
 from . import check_for_dependencies
 from .GraphBasedContext import GlobalTracingContext
+
 if TYPE_CHECKING:
 
     from .Tracer import Tracer
@@ -47,7 +48,7 @@ class Invoker(AbstractContextManager):
         self.kwargs = kwargs
 
         self.scanning = False
-        
+
         self.tracer.invoker = self
 
     def __enter__(self) -> Invoker:
@@ -69,57 +70,59 @@ class Invoker(AbstractContextManager):
         # If there are, preserve the raw inputs with Proxies converted to a Locked Bridge protocol.
         # Set self.inputs to be the proxy_value so we can prepare_inputs, get the batch size, and scan.
         if self.tracer.model._session is not None:
-            
-            self.inputs, has_proxies_in_inputs = check_for_dependencies(self.inputs)
-            
-        GlobalTracingContext.TORCH_DISPATCHER.__exit__(None, None, None)
 
-        if not has_proxies_in_inputs:
-
-            self.inputs, batch_size = self.tracer.model._prepare_inputs(
-                *self.inputs, **self.kwargs
+            self.inputs, has_proxies_in_inputs = check_for_dependencies(
+                self.inputs
             )
 
-        if self.scan:
-            
-            inputs = self.inputs
+        with GlobalTracingContext.exit_global_tracing_context():
 
-            if has_proxies_in_inputs:
+            if not has_proxies_in_inputs:
 
-                inputs = util.apply(inputs, lambda x: x.proxy_value, Node)
-
-                inputs, batch_size = self.tracer.model._prepare_inputs(
-                    *inputs, **self.kwargs
+                self.inputs, batch_size = self.tracer.model._prepare_inputs(
+                    *self.inputs, **self.kwargs
                 )
 
-            self.tracer.model._envoy._clear()
+            if self.scan:
 
-            self.scanning = True
+                inputs = self.inputs
 
-            with Patcher() as patcher:
+                if has_proxies_in_inputs:
 
-                # Some logic (like gpt-j rotary embeddings) gets "poisoned" by FakeTensors.
-                # This does not happen when `torch._jit_internal.is_scripting() returns True.`
-                patcher.add(Patch(torch._jit_internal, lambda: True, "is_scripting"))
+                    inputs = util.apply(inputs, lambda x: x.proxy_value, Node)
 
-                with FakeTensorMode(
-                    allow_non_fake_inputs=True,
-                    shape_env=ShapeEnv(assume_static_by_default=True),
-                ) as fake_mode:
-                    with FakeCopyMode(fake_mode):
-                        self.tracer.model._execute(
-                            *copy.deepcopy(inputs),
-                            **copy.deepcopy(self.tracer._kwargs),
-                        )
+                    inputs, batch_size = self.tracer.model._prepare_inputs(
+                        *inputs, **self.kwargs
+                    )
 
-            self.scanning = False
+                self.tracer.model._envoy._clear()
 
-        else:
-            self.tracer.model._envoy._reset()
+                self.scanning = True
 
-        self.tracer._invoker_inputs.append(self.inputs)
-        
-        GlobalTracingContext.TORCH_DISPATCHER.__enter__()
+                with Patcher() as patcher:
+
+                    # Some logic (like gpt-j rotary embeddings) gets "poisoned" by FakeTensors.
+                    # This does not happen when `torch._jit_internal.is_scripting() returns True.`
+                    patcher.add(
+                        Patch(torch._jit_internal, lambda: True, "is_scripting")
+                    )
+
+                    with FakeTensorMode(
+                        allow_non_fake_inputs=True,
+                        shape_env=ShapeEnv(assume_static_by_default=True),
+                    ) as fake_mode:
+                        with FakeCopyMode(fake_mode):
+                            self.tracer.model._execute(
+                                *copy.deepcopy(inputs),
+                                **copy.deepcopy(self.tracer._kwargs),
+                            )
+
+                self.scanning = False
+
+            else:
+                self.tracer.model._envoy._reset()
+
+            self.tracer._invoker_inputs.append(self.inputs)
 
         return self
 

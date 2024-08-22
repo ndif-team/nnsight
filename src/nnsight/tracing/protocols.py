@@ -1,25 +1,25 @@
 import inspect
 import weakref
-
-from typing import TYPE_CHECKING, Any, Dict, Union, Optional
 from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from nnsight.tracing.Node import Node
-from ..contexts.Conditional import ConditionalManager
 
 from .. import util
+from ..contexts.Conditional import ConditionalManager
+from .util import validate
 
 if TYPE_CHECKING:
     from ..contexts.backends.LocalBackend import LocalMixin
+    from ..contexts.Conditional import Conditional
     from ..intervention import InterventionProxy
     from .Bridge import Bridge
     from .Graph import Graph
     from .Node import Node
-    from ..contexts.Conditional import Conditional
 
 
 class Protocol:
@@ -51,17 +51,22 @@ class Protocol:
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "black", "shape": "ellipse"}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {"color": "black", "shape": "ellipse"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
+
 
 class ApplyModuleProtocol(Protocol):
     """Protocol that references some root model, and calls its .forward() method given some input.
@@ -104,20 +109,7 @@ class ApplyModuleProtocol(Protocol):
                 device = None
 
             # Enter FakeMode for proxy_value computing.
-            with FakeTensorMode(
-                allow_non_fake_inputs=True,
-                shape_env=ShapeEnv(assume_static_by_default=True),
-            ) as fake_mode:
-                with FakeCopyMode(fake_mode):
-
-                    proxy_args, proxy_kwargs = Node.prepare_inputs(
-                        (args, kwargs), device=device, proxy=True
-                    )
-
-                    value = module.forward(
-                        *proxy_args,
-                        **proxy_kwargs,
-                    )
+            value = validate(module.forward, *args, **kwargs)
 
         kwargs["hook"] = hook
 
@@ -146,7 +138,9 @@ class ApplyModuleProtocol(Protocol):
         except:
             device = None
 
-        args, kwargs = node.prepare_inputs((node.args, node.kwargs), device=device)
+        args, kwargs = node.prepare_inputs(
+            (node.args, node.kwargs), device=device
+        )
 
         module_path, *args = args
 
@@ -182,20 +176,28 @@ class ApplyModuleProtocol(Protocol):
         """
 
         return graph.attachments[cls.attachment_name]
-    
+
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "blue", "shape": "polygon", "sides": 6}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None), # Argument label word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {
+                "color": "blue",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
 
 
 class LockProtocol(Protocol):
@@ -211,20 +213,24 @@ class LockProtocol(Protocol):
             target=cls,
             args=[node],
         )
-    
+
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "brown", "shape": "ellipse"}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None), # Argument lable key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {"color": "brown", "shape": "ellipse"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument lable key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
 
 
 class GradProtocol(Protocol):
@@ -320,17 +326,21 @@ class GradProtocol(Protocol):
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "green4", "shape": "box"}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {"color": "green4", "shape": "box"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
 
 
 class SwapProtocol(Protocol):
@@ -405,17 +415,22 @@ class SwapProtocol(Protocol):
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "green4", "shape": "ellipse"}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge key word
+        return {
+            "node": {"color": "green4", "shape": "ellipse"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge key word
+
 
 class BridgeProtocol(Protocol):
     """Protocol to connect two Graphs by grabbing a value from one and injecting it into another.
@@ -427,14 +442,18 @@ class BridgeProtocol(Protocol):
 
     class BridgeException(Exception):
         def __init__(self):
-            super.__init__("Must define a Session context to make use of the Bridge")
+            super.__init__(
+                "Must define a Session context to make use of the Bridge"
+            )
 
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
 
         bridge = cls.get_bridge(node.graph)
         curr_graph = bridge.peek_graph()
-        bridge_proxy = bridge.get_bridge_proxy(node, curr_graph.id) # a bridged node has a unique bridge node proxy per graph reference
+        bridge_proxy = bridge.get_bridge_proxy(
+            node, curr_graph.id
+        )  # a bridged node has a unique bridge node proxy per graph reference
 
         # if the bridge node does not exist, create one
         if bridge_proxy is None:
@@ -444,12 +463,12 @@ class BridgeProtocol(Protocol):
 
             # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
             bridge_proxy = node.create(
-                                target=cls,
-                                proxy_value=node.proxy_value,
-                                args=[node.graph.id, lock_node.name],
-                            )
+                target=cls,
+                proxy_value=node.proxy_value,
+                args=[node.graph.id, lock_node.name],
+            )
             bridge.add_bridge_proxy(node, bridge_proxy)
-        
+
         return bridge_proxy
 
     @classmethod
@@ -467,7 +486,6 @@ class BridgeProtocol(Protocol):
         # Value node is Lock Node's only arg
         value_node: "Node" = lock_node.args[0]
         
-
         if value_node.done():
 
             # Set value to that of the value Node.
@@ -520,8 +538,8 @@ class BridgeProtocol(Protocol):
 
     @classmethod
     def peek_graph(cls, graph: "Graph") -> "Graph":
-        """ Returns current Intervention Graph.
-        
+        """Returns current Intervention Graph.
+
         Args:
             - graph (Graph): Graph.
 
@@ -537,18 +555,27 @@ class BridgeProtocol(Protocol):
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "brown", "shape": "box"}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}, # Non-node argument display
-                                           {0: {"color": "gray", "shape": "box", "style": "dashed"}}),
-                "arg_kname": defaultdict(lambda: None, {0: "graph_id"}), # Arugment label key word
-                "edge": defaultdict(lambda: "solid", {0: "dashed"})} # Argument edge display
+        return {
+            "node": {"color": "brown", "shape": "box"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {
+                    "color": "gray",
+                    "shape": "box",
+                },  # Non-node argument display
+                {0: {"color": "gray", "shape": "box", "style": "dashed"}},
+            ),
+            "arg_kname": defaultdict(
+                lambda: None, {0: "graph_id"}
+            ),  # Arugment label key word
+            "edge": defaultdict(lambda: "solid", {0: "dashed"}),
+        }  # Argument edge display
 
 
 class EarlyStopProtocol(Protocol):
@@ -558,7 +585,9 @@ class EarlyStopProtocol(Protocol):
         pass
 
     @classmethod
-    def add(cls, graph: "Graph", stop_point_node: Optional["Node"] = None) -> "InterventionProxy":
+    def add(
+        cls, graph: "Graph", stop_point_node: Optional["Node"] = None
+    ) -> "InterventionProxy":
         return graph.create(
             target=cls,
             proxy_value=None,
@@ -574,17 +603,25 @@ class EarlyStopProtocol(Protocol):
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "red", "shape": "polygon", "sides": 6}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {
+                "color": "red",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
 
 
 class LocalBackendExecuteProtocol(Protocol):
@@ -605,17 +642,25 @@ class LocalBackendExecuteProtocol(Protocol):
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "purple", "shape": "polygon", "sides": 6}, # Node display
-                "label": "ExecuteProtocol",
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument display
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {
+                "color": "purple",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": "ExecuteProtocol",
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
 
 
 class ValueProtocol(Protocol):
@@ -627,10 +672,8 @@ class ValueProtocol(Protocol):
 
     @classmethod
     def execute(cls, node: Node) -> None:
-
-        value = Node.prepare_inputs(node.args[0])
-
-        node.set_value(value)
+        
+        node.set_value(node.args[0])
 
     @classmethod
     def set(cls, node: Node, value: Any) -> None:
@@ -639,21 +682,25 @@ class ValueProtocol(Protocol):
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "blue", "shape": "box"}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument  
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {"color": "blue", "shape": "box"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
 
 
 class ConditionalProtocol(Protocol):
-    """ Protocol operating as a conditional statement. 
+    """Protocol operating as a conditional statement.
     Uses the ConditionalManager attachment to handle all visited Conditional contexts within a single Intervention Graph.
     Evaluates the condition value of the Conditional as a boolean.
 
@@ -675,12 +722,12 @@ class ConditionalProtocol(Protocol):
 
                 input = torch.rand((1, input_size))    å
 
-        Ex 1: The .save() on the model output will only be executed if the condition (x > 0) is evaluated to True.    
-    
+        Ex 1: The .save() on the model output will only be executed if the condition (x > 0) is evaluated to True.
+
         .. code-block:: python
             with model.trace(input) as tracer:
-                num = tracer.apply(int, 5)
-                with x > 0:
+                num = 5
+                with tracer.cond(x > 0):
                     out = model.output.save()
 
         Ex 2: The condition is a tensor boolean operation on the Envoy's output InterventionProxy.
@@ -688,34 +735,36 @@ class ConditionalProtocol(Protocol):
         .. code-block:: python
             with model.trace(input) as tracer:
                 l1_out = model.layer1.output
-                with l1_out[:, 0] > 0:
+                with tracer.cond(l1_out[:, 0] > 0):
                     out = model.output.save()
     """
 
     attachment_name = "nnsight_conditional_manager"
 
     @classmethod
-    def add(cls, node: "Node") -> "InterventionProxy":
+    def add(
+        cls, graph: "Graph", condition: Union["Node", Any]
+    ) -> "InterventionProxy":
 
-        return node.graph.create(target=cls, proxy_value=True, args=[node])
-    
+        return graph.create(target=cls, proxy_value=True, args=[condition])
+
     @classmethod
     def execute(cls, node: "Node") -> None:
-        """ Evaluate the node condition to a boolean. 
-        
+        """Evaluate the node condition to a boolean.
+
         Args:
             node (Node): ConditionalProtocol node.
         """
-        
+
         cond_value = Node.prepare_inputs(node.args[0])
         if cond_value:
             # cond_value is True
             node.set_value(True)
             return
-            
+
         def update_conditioned_nodes(conditioned_node: "Node") -> None:
-            """ Recursively decrement the remaining listeners count of all the dependencies of conditioned nodes.
-            
+            """Recursively decrement the remaining listeners count of all the dependencies of conditioned nodes.
+
             Args:
                 - conditioned_node (Node): Conditioned Node
             """
@@ -724,27 +773,29 @@ class ConditionalProtocol(Protocol):
                     listener_arg.remaining_listeners -= 1
                     if listener_arg.done() and listener_arg.redundant():
                         listener_arg.destroy()
-                    update_conditioned_nodes(listener)
-        
+                update_conditioned_nodes(listener)
+
         # If the condition value is ignore or evaluated to False, update conditioned nodes
         update_conditioned_nodes(node)
 
     @classmethod
     def has_conditional(cls, graph: "Graph") -> bool:
-        """ Checks if the Intervention Graph has a ConditionalManager attached to it.
+        """Checks if the Intervention Graph has a ConditionalManager attached to it.
 
         Args:
             graph (Graph): Intervention Graph.
-        
+
         Returns:
-            bool: If graph has a ConditionalManager attachement. 
+            bool: If graph has a ConditionalManager attachement.
         """
         return cls.attachment_name in graph.attachments.keys()
-    
+
     @classmethod
-    def get_conditional(cls, graph: "Graph", cond_node_name: str) -> "Conditional":
-        """ Gets the ConditionalProtocol node by its name.
-        
+    def get_conditional(
+        cls, graph: "Graph", cond_node_name: str
+    ) -> "Conditional":
+        """Gets the ConditionalProtocol node by its name.
+
         Args:
             graph (Graph): Intervention Graph.
             cond_node_name (str): ConditionalProtocol name.
@@ -756,8 +807,8 @@ class ConditionalProtocol(Protocol):
 
     @classmethod
     def push_conditional(cls, node: "Node") -> None:
-        """ Attaches a Conditional context to its graph.
-        
+        """Attaches a Conditional context to its graph.
+
         Args:
             node (Node): ConditionalProtocol of the current Conditional context.
         """
@@ -766,14 +817,14 @@ class ConditionalProtocol(Protocol):
         # Create a ConditionalManager attachement to the graph if this the first Conditional context to be entered.
         if cls.attachment_name not in node.graph.attachments.keys():
             node.graph.attachments[cls.attachment_name] = ConditionalManager()
-        
+
         # Push the ConditionalProtocol node to the ConditionalManager
         node.graph.attachments[cls.attachment_name].push(node)
 
     @classmethod
     def pop_conditional(cls, graph: "Graph") -> None:
-        """ Pops latest ConditionalProtocol from the ConditionalManager attached to the graph.
-        
+        """Pops latest ConditionalProtocol from the ConditionalManager attached to the graph.
+
         Args:
             graph (Graph): Intervention Graph.
         """
@@ -781,19 +832,19 @@ class ConditionalProtocol(Protocol):
 
     @classmethod
     def peek_conditional(cls, graph: "Graph") -> "Node":
-        """ Gets the ConditionalProtocol node of the current Conditional context.
+        """Gets the ConditionalProtocol node of the current Conditional context.
 
         Args:
             - graph (Graph): Graph.
-        
+
         Returns:
             Node: ConditionalProtocol of the current Conditional context.
         """
         return graph.attachments[cls.attachment_name].peek()
-    
+
     @classmethod
     def add_conditioned_node(cls, node: "Node") -> None:
-        """ Adds a conditioned Node the ConditionalManager attached to its graph.
+        """Adds a conditioned Node the ConditionalManager attached to its graph.
 
         Args:
             - node (Node): Conditioned Node.
@@ -803,8 +854,8 @@ class ConditionalProtocol(Protocol):
 
     @classmethod
     def is_node_conditioned(cls, node: "Node") -> bool:
-        """ Checks if the Node is conditoned by the current Conditional context.
-        
+        """Checks if the Node is conditoned by the current Conditional context.
+
         Args:
             - node (Node): Conditioned Node.
 
@@ -812,25 +863,35 @@ class ConditionalProtocol(Protocol):
             bool: Whether the Node is conditioned.
         """
 
-        return node.graph.attachments[cls.attachment_name].is_node_conditioned(node)
+        return node.graph.attachments[cls.attachment_name].is_node_conditioned(
+            node
+        )
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "#FF8C00", "shape": "polygon", "sides": 6}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument  
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {
+                "color": "#FF8C00",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display
 
 
 class UpdateProtocol(Protocol):
-    """ Protocol to update the value of an InterventionProxy node.
+    """Protocol to update the value of an InterventionProxy node.
 
     .. codeb-block:: python
         with model.trace(input) as tracer:
@@ -839,13 +900,15 @@ class UpdateProtocol(Protocol):
     """
 
     @classmethod
-    def add(cls, node: "Node", new_value: Union[Node, Any]) -> "InterventionProxy":
-        """ Creates an UpdateProtocol node.
+    def add(
+        cls, node: "Node", new_value: Union[Node, Any]
+    ) -> "InterventionProxy":
+        """Creates an UpdateProtocol node.
 
         Args:
             node (Node): Original node.
             new_value (Union[Node, Any]): The update value.
-        
+
         Returns:
             InterventionProxy: proxy.
         """
@@ -858,12 +921,12 @@ class UpdateProtocol(Protocol):
                 new_value,
             ],
         )
-    
+
     @classmethod
     def execute(cls, node: "Node") -> None:
-        """ Sets the value of the original node to the new value.
+        """Sets the value of the original node to the new value.
             If the original is defined outside the context, it uses the bridge to get the node.
-        
+
         Args:
             node (Node): UpdateProtocol node.
         """
@@ -874,7 +937,9 @@ class UpdateProtocol(Protocol):
         if value_node.target == BridgeProtocol:
             value_node._value = new_value
             bridge = BridgeProtocol.get_bridge(value_node.graph)
-            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
+            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[
+                value_node.args[1]
+            ]
             value_node = lock_node.args[0]
 
         value_node._value = new_value
@@ -883,14 +948,18 @@ class UpdateProtocol(Protocol):
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
-        """ Visualization style for this protocol node.
-        
+        """Visualization style for this protocol node.
+
         Returns:
             - Dict: dictionary style.
         """
 
-        return {"node": {"color": "blue", "shape": "ellipse"}, # Node display
-                "label": cls.__name__,
-                "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}), # Non-node argument  
-                "arg_kname": defaultdict(lambda: None), # Argument label key word
-                "edge": defaultdict(lambda: "solid")} # Argument edge display
+        return {
+            "node": {"color": "blue", "shape": "ellipse"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display

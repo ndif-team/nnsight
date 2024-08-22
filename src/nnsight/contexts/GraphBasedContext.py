@@ -3,9 +3,9 @@ from __future__ import annotations
 import inspect
 import weakref
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable, Union
 
-from torch.utils._python_dispatch import TorchDispatchMode
+from torch.overrides import TorchFunctionMode
 from typing_extensions import Self
 
 from ..intervention import InterventionProxy
@@ -13,6 +13,7 @@ from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from .backends import Backend, BridgeMixin
+from .Conditional import Conditional
 
 
 class GraphBasedContext(AbstractContextManager, BridgeMixin):
@@ -55,6 +56,54 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             args=args,
             kwargs=kwargs,
         )
+
+    def cond(self, condition: Union[InterventionProxy, Any]) -> Conditional:
+        """Entrypoint to the Conditional context.
+            Takes in a condition argument which acts as the dependency of the Conditional node in the Intervention graph.
+            The condition is evaluated as a boolean, and if True, executes all the interventions defined within the body
+            of the conditional context.
+
+        Args:
+            condition (Union[InterventionProxy, Any]): Dependency of the Conditional Node.
+
+        Returns:
+            Conditional: Conditional context object.
+
+        Example:
+
+            Setup:
+                .. code-block:: python
+                    import torch
+                    from collections import OrderedDict
+
+                    input_size = 5
+                    hidden_dims = 10
+                    output_size = 2
+
+                    model = nn.Sequential(OrderedDict([
+                        ('layer1', torch.nn.Linear(input_size, hidden_dims)),
+                        ('layer2', torch.nn.Linear(hidden_dims, output_size)),
+                    ]))
+
+                    input = torch.rand((1, input_size))
+
+            Ex 1: The .save() on the model output will only be executed if the condition passed to tracer.cond() is evaluated to True.
+
+            .. code-block:: python
+                x: int = 5
+                with model.trace(input) as trace:
+                    with tracer.cond(x > 0):
+                        out = model.output.save()
+
+            Ex 2: The condition is on an InterventionProxy which creates in return an InterventionProxy
+
+            .. code-block:: python
+                with model.trace(input) as trace:
+                    with tracer.cond(model.layer1.output[:, 0] > 0):
+                        out = model.output.save()
+        """
+
+        return Conditional(self.graph, condition)
 
     def exit(self) -> InterventionProxy:
         """Exits the execution of a sequential intervention graph.
@@ -185,25 +234,56 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
 class GlobalTracingContext(GraphBasedContext):
     """The Global Tracing Context handles adding tracing operations globally without reference to a given `GraphBasedContext`.
     There should only be one of these and that is `GlobalTracingContext.GLOBAL_TRACING_CONTEXT`.
-    `GlobalTracingContext.TORCH_DISPATCHER` handles adding torch functions without reference to a given `GraphBasedContext`.
+    `GlobalTracingContext.TORCH_HANDLER` handles adding torch functions without reference to a given `GraphBasedContext`.
 
     """
 
     GLOBAL_TRACING_CONTEXT: GlobalTracingContext
-    TORCH_DISPATCHER: GlobalTracingContext.GlobalTracingDispatcher
+    TORCH_HANDLER: GlobalTracingContext.GlobalTracingTorchHandler
 
-    class GlobalTracingDispatcher(TorchDispatchMode):
+    class GlobalTracingTorchHandler(TorchFunctionMode):
 
-        def __torch_dispatch__(self, func, types, args, kwargs=None):
+        def __torch_function__(self, func, types, args, kwargs=None):
 
-            return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
-                func, *args, **kwargs
-            )
+            if kwargs is None:
+
+                kwargs = {}
+
+            if "_VariableFunctionsClass" in func.__qualname__:
+                return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
+                    func,
+                    *args,
+                    **kwargs,
+                    validate=GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.validate,
+                )
+
+            return func(*args, **kwargs)
+
+    class GlobalTracingExit(AbstractContextManager):
+
+        def __enter__(self) -> Any:
+
+            GlobalTracingContext.TORCH_HANDLER.__exit__(None, None, None)
+
+            return self
+
+        def __exit__(self, exc_type, exc_val, traceback):
+
+            GlobalTracingContext.TORCH_HANDLER.__enter__()
+
+            if isinstance(exc_val, BaseException):
+
+                raise exc_val
 
     def __init__(self) -> None:
         """We create an empty `GraphBasedContext` by default."""
 
         self.graph: Graph = None
+
+    @staticmethod
+    def exit_global_tracing_context():
+
+        return GlobalTracingContext.GlobalTracingExit()
 
     @staticmethod
     def try_register(graph_based_context: GraphBasedContext) -> bool:
@@ -257,9 +337,11 @@ class GlobalTracingContext(GraphBasedContext):
 
         assert GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph is None
 
-        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = graph_based_context.graph
+        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = (
+            graph_based_context.graph
+        )
 
-        GlobalTracingContext.TORCH_DISPATCHER.__enter__()
+        GlobalTracingContext.TORCH_HANDLER.__enter__()
 
     @staticmethod
     def deregister() -> None:
@@ -273,7 +355,7 @@ class GlobalTracingContext(GraphBasedContext):
 
         GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = None
 
-        GlobalTracingContext.TORCH_DISPATCHER.__exit__(None, None, None)
+        GlobalTracingContext.TORCH_HANDLER.__exit__(None, None, None)
 
     def __bool__(self) -> bool:
         """True if there is a `GraphBasedContext` registered globally. False otherwise."""
@@ -302,4 +384,6 @@ class GlobalTracingContext(GraphBasedContext):
 
 
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()
-GlobalTracingContext.TORCH_DISPATCHER = GlobalTracingContext.GlobalTracingDispatcher()
+GlobalTracingContext.TORCH_HANDLER = (
+    GlobalTracingContext.GlobalTracingTorchHandler()
+)

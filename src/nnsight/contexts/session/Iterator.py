@@ -13,30 +13,25 @@ if TYPE_CHECKING:
 
 
 class Iterator(GraphBasedContext):
-    """ Intervention loop context for iterative execution of an intervention graph. 
-    
+    """Intervention loop context for iterative execution of an intervention graph.
+
     Attributes:
         - data (Iterable): Data to iterate over.
         - return_context (bool): If True, returns the Iterator object upon entering the Iterator context.
     """
 
     def __init__(
-            self, 
-            data: Iterable, 
-            return_context: bool, 
-            *args, 
-            **kwargs
-        ) -> None:
+        self, data: Iterable, return_context: bool, *args, **kwargs
+    ) -> None:
 
         self.data: Iterable = data
         self._return_context: bool = return_context
 
         super().__init__(*args, **kwargs)
 
-    def __enter__(self) -> Union[
-                            "InterventionProxy", 
-                            Tuple["InterventionProxy", Iterator]
-                            ]:
+    def __enter__(
+        self,
+    ) -> Union["InterventionProxy", Tuple["InterventionProxy", Iterator]]:
 
         super().__enter__()
 
@@ -59,9 +54,9 @@ class Iterator(GraphBasedContext):
 
         bridge: "Bridge" = protocols.BridgeProtocol.get_bridge(self.graph)
 
-        data = resolve_dependencies(self.data)
-
         bridge.locks += 1
+
+        data = resolve_dependencies(self.data)
 
         last_idx: int = len(data) - 1
 

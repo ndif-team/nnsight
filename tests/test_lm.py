@@ -2,10 +2,12 @@ import pytest
 import torch
 
 import nnsight
+from nnsight.contexts.GraphBasedContext import GlobalTracingContext
 from nnsight.contexts.Tracer import Tracer
 from nnsight.schema.Request import RequestModel
 from nnsight.tracing.Graph import Graph
-from nnsight.contexts.GraphBasedContext import GlobalTracingContext
+
+
 @pytest.fixture(scope="module")
 def gpt2(device: str):
     return nnsight.LanguageModel(
@@ -19,34 +21,38 @@ def MSG_prompt():
 
 
 def _test_serialize(tracer: Tracer):
-    GlobalTracingContext.TORCH_DISPATCHER.__exit__(None, None, None)
-    request =  RequestModel(object=tracer, model_key=tracer.remote_backend_get_model_key())
-    request_json = request.model_dump(
-        mode="json", exclude=["session_id", "received", "id"]
-    )
+    with GlobalTracingContext.exit_global_tracing_context():
+        request = RequestModel(
+            object=tracer, model_key=tracer.remote_backend_get_model_key()
+        )
+        request_json = request.model_dump(
+            mode="json", exclude=["session_id", "received", "id"]
+        )
 
-    request2 = RequestModel(**request_json)
-    tracer = request2.deserialize(tracer.model)
-    GlobalTracingContext.TORCH_DISPATCHER.__enter__()
+        request2 = RequestModel(**request_json)
+        tracer = request2.deserialize(tracer.model)
     assert isinstance(tracer.graph, Graph)
 
 
 @torch.no_grad()
 def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate(max_new_tokens=3) as generator:
-        with generator.invoke(MSG_prompt) as invoker:
+    with gpt2.generate(max_new_tokens=3, validate=True) as generator:
+        with generator.invoke(MSG_prompt, scan=True) as invoker:
             output = gpt2.generator.output.save()
 
         _test_serialize(generator)
 
     output = gpt2.tokenizer.decode(output.value[0])
 
-    assert output == "Madison Square Garden is located in the city of New York City"
+    assert (
+        output
+        == "Madison Square Garden is located in the city of New York City"
+    )
 
 
 @torch.no_grad()
 def test_save(gpt2: nnsight.LanguageModel):
-    with gpt2.generate("Hello world") as tracer:
+    with gpt2.generate("Hello world", validate=True, scan=True) as tracer:
 
         hs = gpt2.transformer.h[-1].output[0].save()
         hs_input = gpt2.transformer.h[-1].input[0][0].save()
@@ -64,8 +70,8 @@ def test_save(gpt2: nnsight.LanguageModel):
 
 @torch.no_grad()
 def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate() as tracer:
-        with tracer.invoke(MSG_prompt) as invoker:
+    with gpt2.generate(validate=True) as tracer:
+        with tracer.invoke(MSG_prompt, scan=True) as invoker:
             pre = gpt2.transformer.h[-1].output[0].clone().save()
 
             gpt2.transformer.h[-1].output[0][:] = 0
@@ -85,8 +91,8 @@ def test_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
 @torch.no_grad()
 def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate() as generator:
-        with generator.invoke(MSG_prompt) as invoker:
+    with gpt2.generate(validate=True) as generator:
+        with generator.invoke(MSG_prompt, scan=True) as invoker:
             pre = gpt2.transformer.wte.output.clone().save()
 
             gpt2.transformer.wte.output = gpt2.transformer.wte.output * 0
@@ -106,8 +112,10 @@ def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
 @torch.no_grad()
 def test_adhoc_module(gpt2: nnsight.LanguageModel):
-    with gpt2.generate() as generator:
-        with generator.invoke("The Eiffel Tower is in the city of") as invoker:
+    with gpt2.generate(validate=True) as generator:
+        with generator.invoke(
+            "The Eiffel Tower is in the city of", scan=True
+        ) as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0]
             hidden_states = gpt2.lm_head(gpt2.transformer.ln_f(hidden_states))
             tokens = torch.softmax(hidden_states, dim=2).argmax(dim=2).save()
@@ -121,13 +129,13 @@ def test_adhoc_module(gpt2: nnsight.LanguageModel):
 
 @torch.no_grad()
 def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate(max_new_tokens=3) as generator:
-        with generator.invoke(MSG_prompt) as invoker:
+    with gpt2.generate(max_new_tokens=3, validate=True) as generator:
+        with generator.invoke(MSG_prompt, scan=True) as invoker:
             embeddings = gpt2.transformer.wte.output
 
             output1 = gpt2.generator.output.save()
 
-        with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
+        with generator.invoke("_ _ _ _ _ _ _ _ _", scan=True) as invoker:
             gpt2.transformer.wte.output = embeddings
 
             output2 = gpt2.generator.output.save()
@@ -137,22 +145,25 @@ def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     output1 = gpt2.tokenizer.decode(output1.value[0])
     output2 = gpt2.tokenizer.decode(output2.value[0])
 
-    assert output1 == "Madison Square Garden is located in the city of New York City"
+    assert (
+        output1
+        == "Madison Square Garden is located in the city of New York City"
+    )
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
 
 @torch.no_grad()
 def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate(max_new_tokens=3) as generator:
-        with generator.invoke(MSG_prompt) as invoker:
+    with gpt2.generate(max_new_tokens=3, validate=True) as generator:
+        with generator.invoke(MSG_prompt, scan=True) as invoker:
             embeddings = gpt2.transformer.wte.output.save()
 
             output = gpt2.generator.output.save()
 
     output1 = gpt2.tokenizer.decode(output.value[0])
 
-    with gpt2.generate(max_new_tokens=3) as generator:
-        with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
+    with gpt2.generate(max_new_tokens=3, validate=True) as generator:
+        with generator.invoke("_ _ _ _ _ _ _ _ _", scan=True) as invoker:
             gpt2.transformer.wte.output = embeddings.value
 
             output = gpt2.generator.output.save()
@@ -161,13 +172,16 @@ def test_embeddings_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     output2 = gpt2.tokenizer.decode(output.value[0])
 
-    assert output1 == "Madison Square Garden is located in the city of New York City"
+    assert (
+        output1
+        == "Madison Square Garden is located in the city of New York City"
+    )
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
 
 def test_retain_grad(gpt2: nnsight.LanguageModel):
-    with gpt2.trace() as tracer:
-        with tracer.invoke("Hello World") as invoker:
+    with gpt2.trace(validate=True) as tracer:
+        with tracer.invoke("Hello World", scan=True) as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
             hidden_states.retain_grad()
 
@@ -181,8 +195,8 @@ def test_retain_grad(gpt2: nnsight.LanguageModel):
 
 
 def test_grad(gpt2: nnsight.LanguageModel):
-    with gpt2.trace() as tracer:
-        with tracer.invoke("Hello World") as invoker:
+    with gpt2.trace(validate=True) as tracer:
+        with tracer.invoke("Hello World", scan=True) as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
             hidden_states_grad = hidden_states.grad.save()
             hidden_states_grad[:] = 0
@@ -197,8 +211,8 @@ def test_grad(gpt2: nnsight.LanguageModel):
 
     assert (hidden_states_grad.value == 0).all().item()
 
-    with gpt2.trace() as tracer:
-        with tracer.invoke("Hello World") as invoker:
+    with gpt2.trace(validate=True) as tracer:
+        with tracer.invoke("Hello World", scan=True) as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
             grad = hidden_states.grad.clone()
             grad[:] = 0
@@ -224,7 +238,7 @@ def test_other_device_tensors(gpt2: nnsight.LanguageModel):
     def fun(x):
         return torch.nn.ReLU()(lin(x) - bias)
 
-    with gpt2.trace("fish") as tracer:
+    with gpt2.trace("fish", validate=True, scan=True) as tracer:
         x = gpt2.transformer.h[0].mlp.output
         y = fun(x)
         z = y.save()
@@ -236,8 +250,8 @@ def test_other_device_tensors(gpt2: nnsight.LanguageModel):
 
 
 def test_multi_grad(gpt2: nnsight.LanguageModel):
-    with gpt2.trace() as tracer:
-        with tracer.invoke("Hello World") as invoker:
+    with gpt2.trace(validate=True) as tracer:
+        with tracer.invoke("Hello World", scan=True) as invoker:
             hidden_states = gpt2.transformer.h[-1].output[0].save()
 
             hidden_states_grad1 = hidden_states.grad.save()
@@ -267,26 +281,26 @@ def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
         def forward(self, x):
             return self.one(x)
-    
+
     l0 = gpt2.transformer.h[0]
     l0.attachment = ComplexModule()
 
     # Get values pre editing
     with gpt2.trace(MSG_prompt):
         original = l0.output[0].clone().save()
-        l0.output[0][:] *= 0.
+        l0.output[0][:] *= 0.0
         original_output = gpt2.output.logits.save()
-    
+
     with gpt2.edit("test"):
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 
     with gpt2.trace(MSG_prompt):
         one = l0.attachment.one.output.clone().save()
-        l0.attachment.output *= 0.
+        l0.attachment.output *= 0.0
         edited_output = gpt2.output.logits.save()
 
-    # Check that submodule in attached model 
+    # Check that submodule in attached model
     # is equal to original output.
     assert torch.equal(original, one)
     # Check that edits propagate from attached module
@@ -320,10 +334,13 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
     # Check that the batch size does not narrow
     assert edited.shape[0] == 2
 
+
 def test_conditional_interventions(gpt2: nnsight.LanguageModel):
     with gpt2.session() as session:
-        with gpt2.trace("Hello World") as tracer:
-            with torch.all(gpt2.transformer.h[5].output[0] < 100000):
+        with gpt2.trace("Hello World", validate=True, scan=True) as tracer:
+            with tracer.cond(
+                torch.all(gpt2.transformer.h[5].output[0] < 100000)
+            ):
                 gpt2.transformer.h[-1].output[0][:] = 0
 
             output = gpt2.transformer.h[-1].output[0].save()

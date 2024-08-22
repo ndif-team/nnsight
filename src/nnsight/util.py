@@ -3,8 +3,17 @@
 import importlib
 import types
 from functools import wraps
-from typing import (TYPE_CHECKING, Any, Callable, Collection, Dict, Optional,
-                    Tuple, Type, Union)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import torch
 
@@ -13,8 +22,9 @@ if TYPE_CHECKING:
 
 # TODO Have an Exception you can raise to stop apply early
 
-
-def apply(data: Any, fn: Callable, cls: Type, inplace: bool = False) -> Collection:
+def apply(
+    data: Any, fn: Callable, cls: Type, inplace: bool = False
+) -> Collection:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
@@ -48,7 +58,8 @@ def apply(data: Any, fn: Callable, cls: Type, inplace: bool = False) -> Collecti
                 data[key] = apply(value, fn, cls, inplace=inplace)
             return data
         return {
-            key: apply(value, fn, cls, inplace=inplace) for key, value in data.items()
+            key: apply(value, fn, cls, inplace=inplace)
+            for key, value in data.items()
         }
 
     elif data_type == slice:
