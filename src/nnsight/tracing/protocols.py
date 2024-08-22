@@ -485,7 +485,7 @@ class BridgeProtocol(Protocol):
 
         # Value node is Lock Node's only arg
         value_node: "Node" = lock_node.args[0]
-
+        
         if value_node.done():
 
             # Set value to that of the value Node.
@@ -672,10 +672,8 @@ class ValueProtocol(Protocol):
 
     @classmethod
     def execute(cls, node: Node) -> None:
-
-        value = Node.prepare_inputs(node.args[0])
-
-        node.set_value(value)
+        
+        node.set_value(node.args[0])
 
     @classmethod
     def set(cls, node: Node, value: Any) -> None:
