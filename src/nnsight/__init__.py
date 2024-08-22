@@ -28,19 +28,6 @@ from .models.NNsightModel import NNsight
 from .models.LanguageModel import LanguageModel
 from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper
-from .contexts.GraphBasedContext import GlobalTracingContext
-
-bool = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bool
-bytes = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytes
-int = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.int
-float = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.float
-str = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.str
-complex = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.complex
-bytearray = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytearray
-tuple = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.tuple
-list = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.list
-set = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.set
-dict = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.dict
 
 logger.disabled = not CONFIG.APP.LOGGING
 remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
@@ -124,8 +111,10 @@ DEFAULT_PATCHER.add(
 )
 
 import warnings
-
+_str = str
 try:
+    
+    
 
     from torch.amp.autocast_mode import autocast, is_autocast_available
 
@@ -137,7 +126,7 @@ try:
         enabled: bool = True,
         cache_enabled: Optional[bool] = None,
     ):
-        if not isinstance(device_type, str):
+        if not isinstance(device_type, _str):
             raise ValueError(
                 f"Expected `device_type` of type `str`, got: `{type(device_type)}`"
             )
@@ -543,3 +532,18 @@ except:
 
 DEFAULT_PATCHER.__enter__()
 
+from .contexts.GraphBasedContext import GlobalTracingContext
+
+bool = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bool
+bytes = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytes
+int = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.int
+float = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.float
+str = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.str
+complex = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.complex
+bytearray = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytearray
+tuple = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.tuple
+list = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.list
+set = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.set
+dict = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.dict
+apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
+log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
