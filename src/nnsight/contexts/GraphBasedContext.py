@@ -187,26 +187,27 @@ class GlobalTracingContext(GraphBasedContext):
     TORCH_HANDLER: GlobalTracingContext.GlobalTracingTorchHandler
 
     class GlobalTracingTorchHandler(TorchFunctionMode):
-        
-        TORCH_CATCH_LIST = [""]
 
         def __torch_function__(self, func, types, args, kwargs=None):
 
             if kwargs is None:
 
                 kwargs = {}
-                
-            if '_VariableFunctionsClass' in func.__qualname__:
+
+            if "_VariableFunctionsClass" in func.__qualname__:
                 return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
-                    func, *args, **kwargs, validate = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.validate
+                    func,
+                    *args,
+                    **kwargs,
+                    validate=GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.validate,
                 )
-            
+
             return func(*args, **kwargs)
 
     class GlobalTracingExit(AbstractContextManager):
 
         def __enter__(self) -> Any:
-            
+
             GlobalTracingContext.TORCH_HANDLER.__exit__(None, None, None)
 
             return self
