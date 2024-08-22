@@ -8,6 +8,7 @@ from ..tracing import protocols
 if TYPE_CHECKING:
     from ..tracing.Node import Node
     from ..tracing.Graph import Graph
+    from ..intervention import InterventionProxy
 
 class ConditionalManager():
     """ A Graph attachement that manages the Conditional contexts defined within an Intervention Graph.
@@ -90,12 +91,12 @@ class Conditional(AbstractContextManager):
 
     Attributes:
         _graph (Graph): Conditional Context graph.
-        _condition (Node): Node with the condition value.
+        _condition (Union[InterventionProxy, Any]): Condition.
     """
 
-    def __init__(self, graph: "Graph", condition: Union["Node", Any]):
+    def __init__(self, graph: "Graph", condition: Union["InterventionProxy", Any]):
        self._graph = graph
-       self._condition: Union["Node", Any] = condition
+       self._condition: Union["InterventionProxy", Any] = condition
 
     def __enter__(self) -> Conditional:
 

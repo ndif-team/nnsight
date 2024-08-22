@@ -102,9 +102,6 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
                         out = model.output.save()
         """
 
-        if isinstance(condition, InterventionProxy):
-            condition = condition.node
-
         return Conditional(self.graph, condition)
 
     def exit(self) -> InterventionProxy:
