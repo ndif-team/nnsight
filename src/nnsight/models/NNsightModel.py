@@ -106,9 +106,7 @@ class NNsight:
         if not self._custom_model:
             # Load skeleton of model by putting all tensors on meta.
             with init_empty_weights():
-                self._model = self._load(self._model_key, *args, **kwargs).to(
-                    "meta"
-                )
+                self._model = self._load(self._model_key, *args, **kwargs)
 
         self._envoy = Envoy(self._model)
 
