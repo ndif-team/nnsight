@@ -183,25 +183,11 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         if self._model is None:
 
-            if (
-                isinstance(config, LlamaConfig)
-                and isinstance(config.rope_scaling, dict)
-                and "rope_type" in config.rope_scaling
-            ):
-                config.rope_scaling["rope_type"] = "default"
-
             model = self.automodel.from_config(config, trust_remote_code=True)
 
             setattr(model, "generator", WrapperModule())
 
             return model
-
-        if (
-            isinstance(config, LlamaConfig)
-            and isinstance(config.rope_scaling, dict)
-            and "rope_type" in config.rope_scaling
-        ):
-            config.rope_scaling["rope_type"] = "llama3"
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
@@ -260,9 +246,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
             new_inputs = dict()
 
-            tokenized_inputs = self._tokenize(inputs["input_ids"], **kwargs).to(
-                torch.get_default_device()
-            )
+            tokenized_inputs = self._tokenize(inputs["input_ids"], **kwargs)
 
             new_inputs["input_ids"] = tokenized_inputs["input_ids"]
 
@@ -277,22 +261,16 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                 ]
 
             if "labels" in inputs:
-                labels = self._tokenize(inputs["labels"], **kwargs).to(
-                    torch.get_default_device()
-                )
+                labels = self._tokenize(inputs["labels"], **kwargs)
 
                 new_inputs["labels"] = labels["input_ids"]
 
-            return (
-                BatchEncoding(new_inputs).to(torch.get_default_device()),
-            ), len(new_inputs["input_ids"])
+            return (BatchEncoding(new_inputs),), len(new_inputs["input_ids"])
 
-        inputs = self._tokenize(inputs, **kwargs).to(torch.get_default_device())
+        inputs = self._tokenize(inputs, **kwargs)
 
         if labels is not None:
-            labels = self._tokenize(labels, **kwargs).to(
-                torch.get_default_device()
-            )
+            labels = self._tokenize(labels, **kwargs)
 
             inputs["labels"] = labels["input_ids"]
 
