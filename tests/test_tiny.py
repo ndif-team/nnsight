@@ -281,3 +281,17 @@ def test_nested_iterator(tiny_model: NNsight):
                 l2.append(item_2)
 
     assert l2.value == [0, 1, 2]
+
+def test_nnsight_builtins(tiny_model: NNsight):
+    with tiny_model.session() as session:
+        nn_list = nnsight.list().save()
+        sesh_list = session.list().save()
+        apply_list = session.apply(list).save()
+
+        with session.iter([nn_list, sesh_list, apply_list], return_context=True) as (l, iterator):
+            l.append(nnsight.int(0))
+            l.append(iterator.str("Hello World"))
+            l.append(nnsight.dict({"a": "1"}))
+
+    assert nn_list == sesh_list
+    assert sesh_list == apply_list
