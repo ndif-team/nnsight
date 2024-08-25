@@ -76,6 +76,7 @@ class NNsight:
         model_key: Union[str, torch.nn.Module],
         *args,
         dispatch: bool = False,
+        meta_buffers: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -105,7 +106,7 @@ class NNsight:
         # Otherwise load from _load(...).
         if not self._custom_model:
             # Load skeleton of model by putting all tensors on meta.
-            with init_empty_weights():
+            with init_empty_weights(include_buffers=meta_buffers):
                 self._model = self._load(self._model_key, *args, **kwargs)
 
         self._envoy = Envoy(self._model)
