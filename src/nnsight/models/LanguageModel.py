@@ -160,6 +160,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         self,
         repo_id: str,
         tokenizer_kwargs: Optional[Dict[str, Any]] = None,
+        patch_llama_scan: bool = True,
         **kwargs,
     ) -> PreTrainedModel:
 
@@ -181,13 +182,27 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        if self._model is None:
+            if (
+                patch_llama_scan
+                and isinstance(config, LlamaConfig)
+                and isinstance(config.rope_scaling, dict)
+                and "rope_type" in config.rope_scaling
+            ):
+                config.rope_scaling["rope_type"] = "default"
 
             model = self.automodel.from_config(config, trust_remote_code=True)
 
             setattr(model, "generator", WrapperModule())
 
             return model
+
+        if (
+            patch_llama_scan
+            and isinstance(config, LlamaConfig)
+            and isinstance(config.rope_scaling, dict)
+            and "rope_type" in config.rope_scaling
+        ):
+            config.rope_scaling["rope_type"] = "llama3"
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
