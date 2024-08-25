@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable
 
 from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
+from ...tracing.protocols import EarlyStopProtocol
 from ..backends import Backend, BridgeBackend, RemoteMixin
 from ..GraphBasedContext import GraphBasedContext
 from .Iterator import Iterator
-from ...tracing.protocols import EarlyStopProtocol
 
 if TYPE_CHECKING:
     from ...models.mixins import RemoteableMixin
@@ -26,28 +26,40 @@ class Session(GraphBasedContext, RemoteMixin):
     """
 
     def __init__(
-        self, backend: Backend, model: "NNsight", *args, bridge: Bridge = None, **kwargs
+        self,
+        backend: Backend,
+        model: "NNsight",
+        *args,
+        bridge: Bridge = None,
+        **kwargs,
     ) -> None:
 
         self.bridge = Bridge() if bridge is None else bridge
 
         self.model = model
 
-        GraphBasedContext.__init__(self, backend, bridge=self.bridge, proxy_class=self.model.proxy_class, *args, **kwargs)
+        GraphBasedContext.__init__(
+            self,
+            backend,
+            bridge=self.bridge,
+            proxy_class=self.model.proxy_class,
+            *args,
+            **kwargs,
+        )
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
         self.model._session = None
-        
+
         super().__exit__(exc_type, exc_val, exc_tb)
 
-    def iter(self, iterable: Iterable, return_context: bool = False, **kwargs) -> Iterator:
+    def iter(self, iterable: Iterable, **kwargs) -> Iterator:
         """Creates an Iterator context to iteratively execute an intervention graph, with an update item at each iteration.
-        
+
         Args:
             - iterable (Iterable): Data to iterate over.
             - return_context (bool): If True, returns the Iterator context. Default: False.
-        
+
         Returns:
             Iterator: Iterator context.
 
@@ -77,7 +89,13 @@ class Session(GraphBasedContext, RemoteMixin):
 
         backend = BridgeBackend(bridge)
 
-        return Iterator(iterable, return_context, backend, bridge=bridge, proxy_class=self.model.proxy_class, **kwargs)
+        return Iterator(
+            iterable,
+            backend,
+            bridge=bridge,
+            proxy_class=self.model.proxy_class,
+            **kwargs,
+        )
 
     ### BACKENDS ########
 
@@ -104,9 +122,14 @@ class Session(GraphBasedContext, RemoteMixin):
 
         from ...schema.Response import ResultModel
 
-        return {id: ResultModel.from_graph(graph) for id, graph in local_result.items()}
+        return {
+            id: ResultModel.from_graph(graph)
+            for id, graph in local_result.items()
+        }
 
-    def remote_backend_handle_result_value(self, value: Dict[int, Dict[str, Any]]):
+    def remote_backend_handle_result_value(
+        self, value: Dict[int, Dict[str, Any]]
+    ):
 
         for graph_id, saves in value.items():
 

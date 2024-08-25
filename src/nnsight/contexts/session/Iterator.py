@@ -24,7 +24,7 @@ class Iterator(GraphBasedContext):
     """
 
     def __init__(
-        self, data: Iterable, return_context: bool, *args, **kwargs
+        self, data: Iterable, *args, return_context: bool = False, **kwargs
     ) -> None:
 
         self.data: Iterable = data
@@ -44,10 +44,12 @@ class Iterator(GraphBasedContext):
 
         if self.graph.validate:
 
-            proxy_value = util.apply(self.data, lambda node: node.args[0].proxy_value, Node)
-                
+            proxy_value = util.apply(
+                self.data, lambda node: node.args[0].proxy_value, Node
+            )
+
             if len(proxy_value) != 0:
-            
+
                 proxy_value = (
                     next(proxy_value)
                     if hasattr(proxy_value, "__next__")
