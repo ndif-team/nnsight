@@ -481,7 +481,7 @@ class Envoy:
         self._output = None
 
     @property
-    def input(self) -> InterventionProxy:
+    def inputs(self) -> InterventionProxy:
         """
         Calling denotes the user wishes to get the input of the underlying module and therefore we create a Proxy of that request.
         Only generates a proxy the first time it is references otherwise return the already set one.
@@ -519,8 +519,8 @@ class Envoy:
 
         return self._input
 
-    @input.setter
-    def input(self, value: Union[InterventionProxy, Any]) -> None:
+    @inputs.setter
+    def inputs(self, value: Union[InterventionProxy, Any]) -> None:
         """
         Calling denotes the user wishes to set the input of the underlying module and therefore we create a Proxy of that request.
 
@@ -528,6 +528,26 @@ class Envoy:
             value (Union[InterventionProxy, Any]): Value to set input to.
         """
 
-        protocols.SwapProtocol.add(self.input.node, value)
+        protocols.SwapProtocol.add(self.inputs.node, value)
 
         self._input = None
+
+    @property
+    def input(self) -> InterventionProxy:
+        """Getting the first positional argument input of the model's module.
+
+        Returns:
+            InterventionProxy: Input proxy.
+        """
+
+        return self.inputs[0][0]
+    
+    @input.setter
+    def input(self, value: Union[InterventionProxy, Any]) -> None:
+        """Setting the value of the input's first positionl argument in the model's module.
+        
+        Args;
+            value (Union[InterventionProxy, Any]): Value to set the input to.
+        """
+        
+        self.inputs = ((value,) + self.inputs[0][1:],) + (self.inputs[1:])

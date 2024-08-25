@@ -55,7 +55,7 @@ def test_save(gpt2: nnsight.LanguageModel):
     with gpt2.generate("Hello world", validate=True, scan=True) as tracer:
 
         hs = gpt2.transformer.h[-1].output[0].save()
-        hs_input = gpt2.transformer.h[-1].input[0][0].save()
+        hs_input = gpt2.transformer.h[-1].input.save()
 
         _test_serialize(tracer)
 
@@ -348,3 +348,19 @@ def test_conditional_interventions(gpt2: nnsight.LanguageModel):
         _test_serialize(session)
 
     assert torch.all(output.value == 0)
+
+
+def test_input_setting(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.session():
+        with gpt2.trace(MSG_prompt):
+            hs = gpt2.transformer.h[6].inputs
+            tokens_out_1 = gpt2.lm_head.output.argmax(dim=-1).save()
+
+        with gpt2.trace(MSG_prompt):
+            gpt2.transformer.h[6].input = hs[0][0]
+            tokens_out_2 = gpt2.lm_head.output.argmax(dim=-1).save()
+
+    prediction_1 = gpt2.tokenizer.decode(tokens_out_1[0][-1])
+    prediction_2 = gpt2.tokenizer.decode(tokens_out_2[0][-1])
+
+    assert prediction_1 == prediction_2

@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
+from accelerate import init_empty_weights
 from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
@@ -104,10 +105,8 @@ class NNsight:
         # Otherwise load from _load(...).
         if not self._custom_model:
             # Load skeleton of model by putting all tensors on meta.
-            with MetaDispatcher():
-                self._model = self._load(self._model_key, *args, **kwargs).to(
-                    "meta"
-                )
+            with init_empty_weights():
+                self._model = self._load(self._model_key, *args, **kwargs)
 
         self._envoy = Envoy(self._model)
 

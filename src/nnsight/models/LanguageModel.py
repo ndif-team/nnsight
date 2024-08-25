@@ -14,18 +14,9 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
 )
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
 from transformers.models.auto import modeling_auto
-from typing_extensions import Self
 from transformers.models.llama.configuration_llama import LlamaConfig
+from typing_extensions import Self
 
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
@@ -57,7 +48,9 @@ class TokenIndexer:
 
         return self.proxy[:, key]
 
-    def __setitem__(self, key: int, value: Union[LanguageModelProxy, Any]) -> None:
+    def __setitem__(
+        self, key: int, value: Union[LanguageModelProxy, Any]
+    ) -> None:
         key = self.convert_idx(key)
 
         self.proxy[:, key] = value
@@ -164,7 +157,10 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         super().__init__(model_key, *args, **kwargs)
 
     def _load(
-        self, repo_id: str, tokenizer_kwargs: Optional[Dict[str, Any]] = None, **kwargs
+        self,
+        repo_id: str,
+        tokenizer_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
     ) -> PreTrainedModel:
 
         config = kwargs.pop("config", None) or AutoConfig.from_pretrained(
@@ -187,17 +183,11 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         if self._model is None:
 
-            if isinstance(config, LlamaConfig) and isinstance(config.rope_scaling, dict) and "rope_type" in config.rope_scaling:
-                config.rope_scaling["rope_type"] = "default"
-
             model = self.automodel.from_config(config, trust_remote_code=True)
 
             setattr(model, "generator", WrapperModule())
 
             return model
-
-        if isinstance(config, LlamaConfig) and isinstance(config.rope_scaling, dict) and "rope_type" in config.rope_scaling:
-            config.rope_scaling["rope_type"] = "llama3"
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
@@ -233,7 +223,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             inputs = [{"input_ids": ids} for ids in inputs]
             return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
-        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
+        return self.tokenizer(
+            inputs, return_tensors="pt", padding=True, **kwargs
+        )
 
     def _prepare_inputs(
         self,
@@ -264,7 +256,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                         ai, -len(attn_mask) :
                     ] = attn_mask
 
-                new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
+                new_inputs["attention_mask"] = tokenized_inputs[
+                    "attention_mask"
+                ]
 
             if "labels" in inputs:
                 labels = self._tokenize(inputs["labels"], **kwargs)
@@ -306,7 +300,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         if "labels" in prepared_inputs:
             batched_inputs["labels"].extend(prepared_inputs["labels"])
         if "attention_mask" in prepared_inputs:
-            batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
+            batched_inputs["attention_mask"].extend(
+                prepared_inputs["attention_mask"]
+            )
 
         return (batched_inputs,)
 
@@ -339,7 +335,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {"repo_id": self._model_key}# , "torch_dtype": str(self._model.dtype)}
+            {
+                "repo_id": self._model_key
+            }  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
