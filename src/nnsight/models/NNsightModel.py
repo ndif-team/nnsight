@@ -299,6 +299,8 @@ class NNsight:
     def edit(
         self,
         *inputs: Any,
+        inplace: bool = False,
+        return_context: bool = False,
         **kwargs: Dict[str, Any],
     ) -> Union[Tracer, Any]:
         """Create a trace context with an edit backend and apply a list of edits.
@@ -310,6 +312,8 @@ class NNsight:
 
         Args:
             inputs (tuple[Any])
+            inplace (bool): If True, makes edits in-place.
+            return_context (bool): If True, returns the editor Tracer context.
             kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
 
         Returns:
@@ -349,12 +353,14 @@ class NNsight:
             print(original_output)
             print(edited_output)
         """
+        model_to_edit = self
+        if not inplace:
+            model_to_edit = self._shallow_copy()
 
-        model_copy = self._shallow_copy()
-
-        return model_copy.trace(
+        return model_to_edit.trace(
             *inputs,
             validate=kwargs.pop("validate", False),
+            return_context=return_context,
             **kwargs,
             backend=EditBackend(),
         )

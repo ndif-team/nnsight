@@ -285,7 +285,7 @@ def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     l0 = gpt2.transformer.h[0]
     l0.attachment = ComplexModule()
 
-    with gpt2.edit("test") as gpt2_edited:
+    with gpt2.edit() as gpt2_edited:
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 
@@ -309,8 +309,11 @@ def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
 def test_non_inplace_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
-    with gpt2.edit("") as gpt2_edited:
-        gpt2.transformer.h[1].output[0][:] = 0
+    with gpt2.edit(inplace=True):
+        gpt2.transformer.h[1].output[0][:, 0] = 0
+
+    with gpt2.edit() as gpt2_edited:
+        gpt2.transformer.h[1].output[0][:, 1] = 0
 
     with gpt2.trace(MSG_prompt):
         l1_out = gpt2.transformer.h[1].output[0].save()
@@ -318,12 +321,12 @@ def test_non_inplace_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2_edited.trace(MSG_prompt):
         l1_out_edited = gpt2_edited.transformer.h[1].output[0].save()
 
-    assert torch.all(l1_out != 0)
-    assert torch.all(l1_out_edited == 0)
+    assert torch.all(l1_out[:, 0] == 0) and torch.all(l1_out[:, 1] != 0)
+    assert torch.all(l1_out_edited[:, 0] == 0) and torch.all(l1_out_edited[: , 1] == 0)
 
 
 def test_clear_edits(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.edit("") as gpt2:
+    with gpt2.edit(inplace=True):
         gpt2.transformer.h[1].output[0][:] = 0
 
     with gpt2.trace(MSG_prompt):
