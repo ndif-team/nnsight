@@ -322,6 +322,22 @@ def test_non_inplace_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert torch.all(l1_out_edited == 0)
 
 
+def test_clear_edits(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.edit("") as gpt2:
+        gpt2.transformer.h[1].output[0][:] = 0
+
+    with gpt2.trace(MSG_prompt):
+        l1_out = gpt2.transformer.h[1].output[0].save()
+
+    gpt2.clear_edits()
+
+    with gpt2.trace(MSG_prompt):
+        l1_out_unedited = gpt2.transformer.h[1].output[0].save()
+
+    assert torch.all(l1_out == 0)
+    assert torch.all(l1_out_unedited != 0)
+
+
 def test_batched_editing(gpt2: nnsight.LanguageModel):
     from nnsight.util import WrapperModule
 

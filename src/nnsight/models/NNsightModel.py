@@ -496,6 +496,10 @@ class NNsight:
         self._model = self._model.to(*args, **kwargs)
 
         return self
+    
+    def clear_edits(self) -> None:
+        """Resets the default graph of this model."""
+        self._default_graph = None
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
