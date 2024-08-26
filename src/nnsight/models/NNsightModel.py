@@ -300,14 +300,59 @@ class NNsight:
         self,
         *inputs: Any,
         **kwargs: Dict[str, Any],
-    ):
+    ) -> Union[Tracer, Any]:
         """Create a trace context with an edit backend and apply a list of edits.
 
-        The edit backend sets a default graph on the NNsight model which is
+        The edit backend sets a default graph on an NNsight model copy which is
         run on future trace calls.
+
+        This operation is not inplace!
+
+        Args:
+            inputs (tuple[Any])
+            kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
+
+        Returns:
+            Union[Tracer, Any]: Either the Tracer used for tracing, or the raw output if trace is False.
+
+        Example:
+            .. code-block:: python
+            from nnsight import LanguageModel
+
+            gpt2 = LanguageModel("openai-community/gpt2)
+            
+            class ComplexModule(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.one = WrapperModule()
+
+                def forward(self, x):
+                    return self.one(x)
+
+            l0 = gpt2.transformer.h[0]
+            l0.attachment = ComplexModule()
+
+            with gpt2.edit("test") as gpt2_edited:
+                acts = l0.output[0]
+                l0.output[0][:] = l0.attachment(acts, hook=True)
+
+            with gpt2.trace(MSG_prompt):
+                original = l0.output[0].clone().save()
+                l0.output[0][:] *= 0.0
+                original_output = gpt2.output.logits.save()
+
+            with gpt2_edited.trace(MSG_prompt):
+                one = l0.attachment.one.output.clone().save()
+                l0.attachment.output *= 0.0
+                edited_output = gpt2.output.logits.save()
+            
+            print(original_output)
+            print(edited_output)
         """
 
-        return self.trace(
+        model_copy = self._shallow_copy()
+
+        return model_copy.trace(
             *inputs,
             validate=kwargs.pop("validate", False),
             **kwargs,
@@ -573,3 +618,15 @@ class NNsight:
             )
 
         return batched_inputs
+
+    def _shallow_copy(self) -> Self:
+        """ Creates a new instance copy of the same class with the all the attributes of the original instance.
+
+        Returns:
+            Self: NNsightModel        
+        """
+        copy = self.__class__.__new__(self.__class__)
+        for key, value in self.__dict__.items():
+            copy.__dict__[key] = value
+
+        return copy

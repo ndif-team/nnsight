@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from typing_extensions import Self
 
@@ -9,7 +9,7 @@ from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from . import resolve_dependencies
-from .backends import Backend, BridgeMixin, EditMixin, RemoteMixin
+from .backends import Backend, EditBackend, BridgeMixin, EditMixin, RemoteMixin
 from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
 
@@ -72,13 +72,16 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         """
         return getattr(self.model._envoy, key)
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> Union[Self, "NNsight"]:
 
         tracer = super().__enter__()
 
         if self.invoker is not None:
 
             self.invoker.__enter__()
+
+        if isinstance(self.backend, EditBackend):
+            return self.model
 
         return tracer
 
