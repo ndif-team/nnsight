@@ -93,8 +93,6 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.model._envoy._reset()
 
-        if len(self._invoker_inputs) == 0:
-            raise ValueError("No input was provided to the tracing context.")
 
         super().__exit__(exc_type, exc_val, exc_tb)
 

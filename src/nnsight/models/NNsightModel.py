@@ -431,6 +431,7 @@ class NNsight:
         batch_groups = []
         batch_start = 0
         batched_input = None
+        batch_size = 0
 
         for _inputs in inputs:
 
@@ -441,7 +442,8 @@ class NNsight:
 
             batched_input = self._batch_inputs(batched_input, *_inputs)
 
-        inputs, batch_size = self._prepare_inputs(*batched_input)
+        if len(inputs) > 0:
+            inputs, batch_size = self._prepare_inputs(*batched_input)
 
         intervention_handler = InterventionHandler(
             intervention_graph, batch_groups, batch_size
