@@ -3,16 +3,8 @@ from __future__ import annotations
 import inspect
 import weakref
 from collections import defaultdict
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Union,
-)
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import torch
 
@@ -521,6 +513,14 @@ class Node:
                 if isinstance(arg, Node):
                     name = arg.visualize(viz_graph, recursive, backend_name)
                 else:
+                    # show link between iterable values with Node dependencies
+                    iter_val_dependencies = []
+                    if isinstance(arg, Iterable):
+                        for element in arg:
+                            if isinstance(element, Node):
+                                dep_name = element.visualize(viz_graph, recursive, backend_name)
+                                iter_val_dependencies.append(dep_name)
+                    
                     name = node_name
                     if isinstance(arg, torch.Tensor):
                         name += f"_Tensor_{key}"
@@ -539,6 +539,9 @@ class Node:
                         label = f"{key}={label}"
 
                     viz_graph.add_node(name, label=label, **styles["arg"][key])
+
+                    for dep_name in iter_val_dependencies:
+                        viz_graph.add_edge(dep_name, name, style="dashed", color="gray")
 
                 viz_graph.add_edge(name, node_name, style=styles["edge"][key])
 
