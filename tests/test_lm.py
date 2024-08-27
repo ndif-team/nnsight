@@ -285,17 +285,17 @@ def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     l0 = gpt2.transformer.h[0]
     l0.attachment = ComplexModule()
 
+    with gpt2.edit() as gpt2_edited:
+        acts = l0.output[0]
+        l0.output[0][:] = l0.attachment(acts, hook=True)
+
     # Get values pre editing
     with gpt2.trace(MSG_prompt):
         original = l0.output[0].clone().save()
         l0.output[0][:] *= 0.0
         original_output = gpt2.output.logits.save()
 
-    with gpt2.edit("test"):
-        acts = l0.output[0]
-        l0.output[0][:] = l0.attachment(acts, hook=True)
-
-    with gpt2.trace(MSG_prompt):
+    with gpt2_edited.trace(MSG_prompt):
         one = l0.attachment.one.output.clone().save()
         l0.attachment.output *= 0.0
         edited_output = gpt2.output.logits.save()
@@ -305,6 +305,40 @@ def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert torch.equal(original, one)
     # Check that edits propagate from attached module
     assert torch.equal(original_output, edited_output)
+
+
+def test_non_inplace_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+
+    with gpt2.edit(inplace=True):
+        gpt2.transformer.h[1].output[0][:, 0] = 0
+
+    with gpt2.edit() as gpt2_edited:
+        gpt2.transformer.h[1].output[0][:, 1] = 0
+
+    with gpt2.trace(MSG_prompt):
+        l1_out = gpt2.transformer.h[1].output[0].save()
+
+    with gpt2_edited.trace(MSG_prompt):
+        l1_out_edited = gpt2_edited.transformer.h[1].output[0].save()
+
+    assert torch.all(l1_out[:, 0] == 0) and torch.all(l1_out[:, 1] != 0)
+    assert torch.all(l1_out_edited[:, 0] == 0) and torch.all(l1_out_edited[: , 1] == 0)
+
+
+def test_clear_edits(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.edit(inplace=True):
+        gpt2.transformer.h[1].output[0][:] = 0
+
+    with gpt2.trace(MSG_prompt):
+        l1_out = gpt2.transformer.h[1].output[0].save()
+
+    gpt2.clear_edits()
+
+    with gpt2.trace(MSG_prompt):
+        l1_out_unedited = gpt2.transformer.h[1].output[0].save()
+
+    assert torch.all(l1_out == 0)
+    assert torch.all(l1_out_unedited != 0)
 
 
 def test_batched_editing(gpt2: nnsight.LanguageModel):
@@ -324,11 +358,11 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
     batch = ["a", "b"]
     single = "a"
 
-    with gpt2.edit(single):
+    with gpt2.edit(single) as gpt2_edited:
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 
-    with gpt2.trace(batch):
+    with gpt2_edited.trace(batch):
         edited = l0.attachment.output.save()
 
     # Check that the batch size does not narrow

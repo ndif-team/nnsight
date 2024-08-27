@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple
 
 from typing_extensions import Self
 
@@ -9,7 +9,7 @@ from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from . import resolve_dependencies
-from .backends import Backend, BridgeMixin, EditMixin, RemoteMixin
+from .backends import Backend, EditBackend, BridgeMixin, EditMixin, RemoteMixin
 from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
 
@@ -38,10 +38,13 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         validate: bool = False,
         graph: Graph = None,
         bridge: Bridge = None,
+        return_context: bool = False,
         **kwargs,
     ) -> None:
 
         self.model = model
+
+        self.return_context = return_context
 
         GraphBasedContext.__init__(
             self,
@@ -72,13 +75,19 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         """
         return getattr(self.model._envoy, key)
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> Union[Self, "NNsight", Tuple["NNsight", Self]]:
 
         tracer = super().__enter__()
 
         if self.invoker is not None:
 
             self.invoker.__enter__()
+
+        if isinstance(self.backend, EditBackend):
+            if self.return_context:
+                return self.model, self
+            
+            return self.model
 
         return tracer
 
@@ -90,8 +99,6 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.model._envoy._reset()
 
-        if len(self._invoker_inputs) == 0:
-            raise ValueError("No input was provided to the tracing context.")
 
         super().__exit__(exc_type, exc_val, exc_tb)
 

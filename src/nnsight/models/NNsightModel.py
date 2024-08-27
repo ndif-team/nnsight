@@ -299,17 +299,68 @@ class NNsight:
     def edit(
         self,
         *inputs: Any,
+        inplace: bool = False,
+        return_context: bool = False,
         **kwargs: Dict[str, Any],
-    ):
+    ) -> Union[Tracer, Any]:
         """Create a trace context with an edit backend and apply a list of edits.
 
-        The edit backend sets a default graph on the NNsight model which is
+        The edit backend sets a default graph on an NNsight model copy which is
         run on future trace calls.
-        """
 
-        return self.trace(
+        This operation is not inplace!
+
+        Args:
+            inputs (tuple[Any])
+            inplace (bool): If True, makes edits in-place.
+            return_context (bool): If True, returns the editor Tracer context.
+            kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
+
+        Returns:
+            Union[Tracer, Any]: Either the Tracer used for tracing, or the raw output if trace is False.
+
+        Example:
+            .. code-block:: python
+            from nnsight import LanguageModel
+
+            gpt2 = LanguageModel("openai-community/gpt2)
+            
+            class ComplexModule(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.one = WrapperModule()
+
+                def forward(self, x):
+                    return self.one(x)
+
+            l0 = gpt2.transformer.h[0]
+            l0.attachment = ComplexModule()
+
+            with gpt2.edit("test") as gpt2_edited:
+                acts = l0.output[0]
+                l0.output[0][:] = l0.attachment(acts, hook=True)
+
+            with gpt2.trace(MSG_prompt):
+                original = l0.output[0].clone().save()
+                l0.output[0][:] *= 0.0
+                original_output = gpt2.output.logits.save()
+
+            with gpt2_edited.trace(MSG_prompt):
+                one = l0.attachment.one.output.clone().save()
+                l0.attachment.output *= 0.0
+                edited_output = gpt2.output.logits.save()
+            
+            print(original_output)
+            print(edited_output)
+        """
+        model_to_edit = self
+        if not inplace:
+            model_to_edit = self._shallow_copy()
+
+        return model_to_edit.trace(
             *inputs,
             validate=kwargs.pop("validate", False),
+            return_context=return_context,
             **kwargs,
             backend=EditBackend(),
         )
@@ -386,6 +437,7 @@ class NNsight:
         batch_groups = []
         batch_start = 0
         batched_input = None
+        batch_size = 0
 
         for _inputs in inputs:
 
@@ -396,7 +448,8 @@ class NNsight:
 
             batched_input = self._batch_inputs(batched_input, *_inputs)
 
-        inputs, batch_size = self._prepare_inputs(*batched_input)
+        if len(inputs) > 0:
+            inputs, batch_size = self._prepare_inputs(*batched_input)
 
         intervention_handler = InterventionHandler(
             intervention_graph, batch_groups, batch_size
@@ -451,6 +504,10 @@ class NNsight:
         self._model = self._model.to(*args, **kwargs)
 
         return self
+    
+    def clear_edits(self) -> None:
+        """Resets the default graph of this model."""
+        self._default_graph = None
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
@@ -573,3 +630,15 @@ class NNsight:
             )
 
         return batched_inputs
+
+    def _shallow_copy(self) -> Self:
+        """ Creates a new instance copy of the same class with the all the attributes of the original instance.
+
+        Returns:
+            Self: NNsightModel        
+        """
+        copy = self.__class__.__new__(self.__class__)
+        for key, value in self.__dict__.items():
+            copy.__dict__[key] = value
+
+        return copy
