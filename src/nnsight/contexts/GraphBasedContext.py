@@ -273,7 +273,19 @@ class GlobalTracingContext(GraphBasedContext):
     PATCHER: Patcher = Patcher(
         [
             Patch(torch.nn, global_patch(torch.nn.Parameter), "Parameter"),
-            Patch(data, global_patch(data.DataLoader), "DataLoader"),
+            Patch(data, global_patch(data.DataLoader), "DataLoader"),   
+            Patch(torch, global_patch(torch.arange), "arange"),
+            Patch(torch, global_patch(torch.empty), "empty"),
+            Patch(torch, global_patch(torch.eye), "eye"),
+            Patch(torch, global_patch(torch.full), "full"),
+            Patch(torch, global_patch(torch.linspace), "linspace"),
+            Patch(torch, global_patch(torch.logspace), "logspace"),
+            Patch(torch, global_patch(torch.ones), "ones"),
+            Patch(torch, global_patch(torch.rand), "rand"),
+            Patch(torch, global_patch(torch.randint), "randint"),
+            Patch(torch, global_patch(torch.randn), "randn"),
+            Patch(torch, global_patch(torch.randperm), "randperm"),
+            Patch(torch, global_patch(torch.zeros), "zeros"),
         ]
         + [
             Patch(torch.optim, global_patch(value), key)

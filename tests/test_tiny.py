@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from enum import auto
 
 import pytest
 import torch
@@ -25,6 +26,11 @@ def tiny_model(device: str):
 
     return NNsight(net).to(device)
 
+@pytest.fixture(autouse=True)
+def model_clear(tiny_model: NNsight):
+    # clear the model before each test
+    tiny_model._clear()
+    return tiny_model
 
 @pytest.fixture
 def tiny_input():
@@ -295,3 +301,19 @@ def test_nnsight_builtins(tiny_model: NNsight):
 
     assert nn_list == sesh_list
     assert sesh_list == apply_list
+
+def test_torch_creation_operations_patch(tiny_model: NNsight, tiny_input: torch.Tensor):
+    with tiny_model.trace(tiny_input, scan=False, validate=False):
+        l1_output = tiny_model.layer1.output
+        torch.arange(l1_output.shape[0], l1_output.shape[1])
+        torch.empty(l1_output.shape)
+        torch.eye(l1_output.shape[0])
+        torch.full(l1_output.shape, 5)
+        torch.linspace(l1_output.shape[0], l1_output.shape[1], 5)
+        torch.logspace(l1_output.shape[0], l1_output.shape[1], 5)
+        torch.ones(l1_output.shape)
+        torch.rand(l1_output.shape)
+        torch.randint(5, l1_output.shape)
+        torch.randn(l1_output.shape)
+        torch.randperm(l1_output.shape[0])
+        torch.zeros(l1_output.shape)
