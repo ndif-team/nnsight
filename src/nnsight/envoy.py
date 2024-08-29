@@ -5,13 +5,11 @@ import warnings
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
-from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
-from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
+from .contexts.backends import EditBackend
 from .contexts.Tracer import Tracer
-from .intervention import InterventionProxy
-from .tracing.Node import Node
-from .tracing.Proxy import Proxy
+from .intervention import InterventionProtocol, InterventionProxy
+from .tracing import protocols
 
 
 class Envoy:
@@ -72,7 +70,12 @@ class Envoy:
             self._sub_envoys[i]._update(module)
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> None:
-        """Creates Envoy from a module and adds it as a child of this Envoy."""
+        """Adds a new Envoy for a given torch module under this Envoy.
+
+        Args:
+            module (torch.nn.Module): Module to create Envoy for.
+            name (str): name of envoy/attribute.
+        """
 
         envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
 
@@ -88,7 +91,15 @@ class Envoy:
 
             super().__setattr__(name, envoy)
 
-    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str):
+    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
+        """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
+
+        Directly edits the underlying class to accomplish this.
+
+        Args:
+            envoy (Envoy): Envoy to handle.
+            mount_point (str): Overloaded attribute name.
+        """
 
         warnings.warn(
             f"Module of type `{type(self._module)}` has pre-defined a `{mount_point}` attribute. nnsight access for `{mount_point}` will be mounted at `.nns_{mount_point}` instead of `.{mount_point}` for this module only."
@@ -133,10 +144,15 @@ class Envoy:
                 envoy._set_tracer(tracer, propagate=True)
 
     def _scanning(self) -> bool:
+        """Whether or not in scanning mode. Checks the current Tracer's Invoker.
+
+        Returns:
+            bool: _description_
+        """
 
         try:
 
-            return self._tracer._invoker.scanning
+            return self._tracer.invoker.scanning
 
         except:
 
@@ -212,6 +228,17 @@ class Envoy:
 
         return self
 
+    def to(self, *args, **kwargs) -> Envoy:
+        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
+
+        Returns:
+            Envoy: Envoy.
+        """
+
+        self._module = self._module.to(*args, **kwargs)
+
+        return self
+
     def modules(
         self, include_fn: Callable = None, names: bool = False, envoys: List = None
     ) -> List[Envoy]:
@@ -240,7 +267,7 @@ class Envoy:
                 envoys.append(self)
 
         for sub_envoy in self._sub_envoys:
-            sub_envoy.modules(include_fn=include_fn, envoys=envoys)
+            sub_envoy.modules(include_fn=include_fn, names=names, envoys=envoys)
 
         return envoys
 
@@ -373,8 +400,7 @@ class Envoy:
         return getattr(self._module, key)
 
     def __setattr__(self, key: Any, value: Any) -> None:
-        """Overload setattr to create and set an Envoy when trying to set a torch Module.
-        """
+        """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
         if key != "_module" and isinstance(value, torch.nn.Module):
 
@@ -386,50 +412,20 @@ class Envoy:
 
             super().__setattr__(key, value)
 
-    def __call__(self, *args: List[Any], **kwargs: Dict[str, Any]) -> InterventionProxy:
+    def __call__(
+        self, *args: List[Any], hook=False, **kwargs: Dict[str, Any]
+    ) -> InterventionProxy:
         """Creates a proxy to call the underlying module's forward method with some inputs.
 
         Returns:
             InterventionProxy: Module call proxy.
         """
 
-        module_proxy = getattr(self._tracer._graph.module_proxy, self._module_path)
+        if isinstance(self._tracer.backend, EditBackend):
+            hook = True
 
-        proxy = module_proxy.forward
-
-        proxy_value = inspect._empty
-
-        if self._tracer._graph.validate:
-
-            try:
-
-                device = next(self._module.parameters()).device
-
-            except:
-
-                device = None
-
-            # Enter FakeMode for proxy_value computing.
-            with FakeTensorMode(
-                allow_non_fake_inputs=True,
-                shape_env=ShapeEnv(assume_static_by_default=True),
-            ) as fake_mode:
-                with FakeCopyMode(fake_mode):
-
-                    proxy_args, proxy_kwargs = Node.prepare_inputs(
-                        (args, kwargs), proxy=True
-                    )
-
-                    proxy_value = self._module.forward(
-                        *proxy_args,
-                        **proxy_kwargs,
-                    )
-
-        return self._tracer._graph.add(
-            Proxy.proxy_call,
-            value=proxy_value,
-            args=[proxy] + list(args),
-            kwargs=kwargs,
+        return protocols.ApplyModuleProtocol.add(
+            self._tracer.graph, self._module_path, *args, hook=hook, **kwargs
         )
 
     @property
@@ -457,13 +453,14 @@ class Envoy:
             else:
                 fake_output = self._fake_outputs[self._call_iter]
 
-            self._output = self._tracer._graph.add(
-                value=fake_output,
-                target="argument",
+            module_path = f"{self._module_path}.output"
+
+            self._output = InterventionProtocol.add(
+                self._tracer.graph,
+                fake_output,
                 args=[
-                    f"{self._module_path}.output",
-                    self._tracer._batch_size,
-                    self._tracer._batch_start,
+                    module_path,
+                    len(self._tracer._invoker_inputs) - 1,
                     self._call_iter,
                 ],
             )
@@ -479,14 +476,12 @@ class Envoy:
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
 
-        self._tracer._graph.add(
-            target="swap", args=[self.output.node, value], value=True
-        )
+        protocols.SwapProtocol.add(self.output.node, value)
 
         self._output = None
 
     @property
-    def input(self) -> InterventionProxy:
+    def inputs(self) -> InterventionProxy:
         """
         Calling denotes the user wishes to get the input of the underlying module and therefore we create a Proxy of that request.
         Only generates a proxy the first time it is references otherwise return the already set one.
@@ -510,21 +505,22 @@ class Envoy:
             else:
                 fake_input = self._fake_inputs[self._call_iter]
 
-            self._input = self._tracer._graph.add(
-                value=fake_input,
-                target="argument",
+            module_path = f"{self._module_path}.input"
+
+            self._input = InterventionProtocol.add(
+                self._tracer.graph,
+                fake_input,
                 args=[
-                    f"{self._module_path}.input",
-                    self._tracer._batch_size,
-                    self._tracer._batch_start,
+                    module_path,
+                    len(self._tracer._invoker_inputs) - 1,
                     self._call_iter,
                 ],
             )
 
         return self._input
 
-    @input.setter
-    def input(self, value: Union[InterventionProxy, Any]) -> None:
+    @inputs.setter
+    def inputs(self, value: Union[InterventionProxy, Any]) -> None:
         """
         Calling denotes the user wishes to set the input of the underlying module and therefore we create a Proxy of that request.
 
@@ -532,8 +528,26 @@ class Envoy:
             value (Union[InterventionProxy, Any]): Value to set input to.
         """
 
-        self._tracer._graph.add(
-            target="swap", args=[self.input.node, value], value=True
-        )
+        protocols.SwapProtocol.add(self.inputs.node, value)
 
         self._input = None
+
+    @property
+    def input(self) -> InterventionProxy:
+        """Getting the first positional argument input of the model's module.
+
+        Returns:
+            InterventionProxy: Input proxy.
+        """
+
+        return self.inputs[0][0]
+    
+    @input.setter
+    def input(self, value: Union[InterventionProxy, Any]) -> None:
+        """Setting the value of the input's first positionl argument in the model's module.
+        
+        Args;
+            value (Union[InterventionProxy, Any]): Value to set the input to.
+        """
+        
+        self.inputs = ((value,) + self.inputs[0][1:],) + (self.inputs[1:])

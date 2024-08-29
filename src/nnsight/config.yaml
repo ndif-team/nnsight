@@ -1,6 +1,7 @@
 API:
   APIKEY: null
   HOST: ndif.dev
+  SSL: True
 APP:
   LOGGING: false
   REMOTE_LOGGING: true

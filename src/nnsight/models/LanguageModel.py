@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import json
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
-from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
-                          AutoTokenizer, BatchEncoding, PreTrainedModel,
-                          PreTrainedTokenizer)
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.models.auto import modeling_auto
+from transformers.models.llama.configuration_llama import LlamaConfig
+from typing_extensions import Self
 
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
 from . import NNsight
-from .mixins import GenerationMixin
+from .mixins import GenerationMixin, RemoteableMixin
 
 
 class TokenIndexer:
@@ -39,7 +48,9 @@ class TokenIndexer:
 
         return self.proxy[:, key]
 
-    def __setitem__(self, key: int, value: Union[LanguageModelProxy, Any]) -> None:
+    def __setitem__(
+        self, key: int, value: Union[LanguageModelProxy, Any]
+    ) -> None:
         key = self.convert_idx(key)
 
         self.proxy[:, key] = value
@@ -98,7 +109,7 @@ class LanguageModelProxy(InterventionProxy):
         return self.token
 
 
-class LanguageModel(GenerationMixin, NNsight):
+class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
     """LanguageModels are NNsight wrappers around transformers language models.
 
     Inputs can be in the form of:
@@ -138,18 +149,24 @@ class LanguageModel(GenerationMixin, NNsight):
             if not isinstance(automodel, str)
             else getattr(modeling_auto, automodel)
         )
-        
+
         if isinstance(model_key, torch.nn.Module):
-            
-            setattr(model_key, 'generator', WrapperModule())
+
+            setattr(model_key, "generator", WrapperModule())
 
         super().__init__(model_key, *args, **kwargs)
 
     def _load(
-        self, repo_id: str, tokenizer_kwargs: Optional[Dict[str, Any]] = None, **kwargs
+        self,
+        repo_id: str,
+        tokenizer_kwargs: Optional[Dict[str, Any]] = None,
+        patch_llama_scan: bool = True,
+        **kwargs,
     ) -> PreTrainedModel:
 
-        config = kwargs.pop("config", None) or AutoConfig.from_pretrained(repo_id, **kwargs)
+        config = kwargs.pop("config", None) or AutoConfig.from_pretrained(
+            repo_id, **kwargs
+        )
 
         if self.tokenizer is None:
             if tokenizer_kwargs is None:
@@ -159,23 +176,37 @@ class LanguageModel(GenerationMixin, NNsight):
                 warnings.warn(
                     "NNsight LanguageModel requires padding_side='left' for tokenizers, setting it to 'left'"
                 )
-                
+
             self.tokenizer = AutoTokenizer.from_pretrained(
                 repo_id, config=config, padding_side="left", **tokenizer_kwargs
             )
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        if self._model is None:
+            if (
+                patch_llama_scan
+                and isinstance(config, LlamaConfig)
+                and isinstance(config.rope_scaling, dict)
+                and "rope_type" in config.rope_scaling
+            ):
+                config.rope_scaling["rope_type"] = "default"
 
             model = self.automodel.from_config(config, trust_remote_code=True)
-            
-            setattr(model, 'generator', WrapperModule())
+
+            setattr(model, "generator", WrapperModule())
 
             return model
 
+        if (
+            patch_llama_scan
+            and isinstance(config, LlamaConfig)
+            and isinstance(config.rope_scaling, dict)
+            and "rope_type" in config.rope_scaling
+        ):
+            config.rope_scaling["rope_type"] = "llama3"
+
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
-        setattr(model, 'generator', WrapperModule())
+        setattr(model, "generator", WrapperModule())
 
         return model
 
@@ -207,7 +238,9 @@ class LanguageModel(GenerationMixin, NNsight):
             inputs = [{"input_ids": ids} for ids in inputs]
             return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
-        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
+        return self.tokenizer(
+            inputs, return_tensors="pt", padding=True, **kwargs
+        )
 
     def _prepare_inputs(
         self,
@@ -238,7 +271,9 @@ class LanguageModel(GenerationMixin, NNsight):
                         ai, -len(attn_mask) :
                     ] = attn_mask
 
-                new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
+                new_inputs["attention_mask"] = tokenized_inputs[
+                    "attention_mask"
+                ]
 
             if "labels" in inputs:
                 labels = self._tokenize(inputs["labels"], **kwargs)
@@ -280,7 +315,9 @@ class LanguageModel(GenerationMixin, NNsight):
         if "labels" in prepared_inputs:
             batched_inputs["labels"].extend(prepared_inputs["labels"])
         if "attention_mask" in prepared_inputs:
-            batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
+            batched_inputs["attention_mask"].extend(
+                prepared_inputs["attention_mask"]
+            )
 
         return (batched_inputs,)
 
@@ -310,3 +347,19 @@ class LanguageModel(GenerationMixin, NNsight):
         self._model.generator(output)
 
         return output
+
+    def _remoteable_model_key(self) -> str:
+        return json.dumps(
+            {
+                "repo_id": self._model_key
+            }  # , "torch_dtype": str(self._model.dtype)}
+        )
+
+    @classmethod
+    def _remoteable_from_model_key(cls, model_key: str, **kwargs) -> Self:
+
+        kwargs = {**json.loads(model_key), **kwargs}
+
+        repo_id = kwargs.pop("repo_id")
+
+        return LanguageModel(repo_id, **kwargs)

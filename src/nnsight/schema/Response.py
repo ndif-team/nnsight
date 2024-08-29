@@ -3,23 +3,38 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Union, Optional
+from typing import Any, Dict, List, Optional, Union
 
+import torch
 from pydantic import BaseModel
+
+from .. import util
+from ..tracing.Graph import Graph
 
 
 class ResultModel(BaseModel):
     id: str
-    output: Any = None
-    saves: Dict[str, Any] = None
+    value: Any = None
 
+    @classmethod
+    def from_graph(cls, graph: Graph) -> Dict[str, Any]:
+
+        saves = {
+            name: util.apply(node.value, lambda x: x.detach().cpu(), torch.Tensor)
+            for name, node in graph.nodes.items()
+            if node.done()
+        }
+
+        return saves
+ 
 
 class ResponseModel(BaseModel):
     class JobStatus(Enum):
         RECEIVED = "RECEIVED"
         APPROVED = "APPROVED"
-        SUBMITTED = "SUBMITTED"
+        RUNNING = "RUNNING"
         COMPLETED = "COMPLETED"
+        LOG = "LOG"
         ERROR = "ERROR"
 
     id: str

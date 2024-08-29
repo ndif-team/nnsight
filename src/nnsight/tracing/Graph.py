@@ -1,275 +1,273 @@
 from __future__ import annotations
 
 import inspect
-import weakref
-from typing import Any, Callable, Dict, List, Type, Union
+import tempfile
+from typing import Callable, Dict, Optional, Type
 
-import torch
-from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
-from torch.fx.experimental.symbolic_shapes import ShapeEnv
+from PIL import Image as PILImage
 
 from .. import util
+from ..util import apply
 from .Node import Node
+from .protocols import EarlyStopProtocol, Protocol
 from .Proxy import Proxy
+from .util import validate
 
 
 class Graph:
-    """Represents a computation graph involving a torch.nn.module.
+    """Represents a computation graph composed of :class:`Nodes <nnsight.tracing.Node.Node>`.
 
-    Reserved target names:
-
-    * 'argument' : There can be multiple argument nodes. Their first argument needs to be the argument name which acts as a key in graph.argument_node_names which maps to a list of names for nodes that depend on it's value. These nodes values need to be set outside of the computation graph as entry points to kick of the execution of the graph.
-    * 'swap' : swp nodes indicate populating the graph's swap attribute. When executed, its value is not set. Logic involving the swap value should set its value after using it.
-    * 'null' : Null nodes never get executed and therefore their listeners never get destroyed.
-    * 'grad' : grad nodes indicates adding a `.register_hook()` to a tensor proxy
 
     Attributes:
-        validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible (i.e shape errors etc). Defaults to True.
-        proxy_class (Type[Proxy]): Proxy class to use. Defaults to Proxy.
-        tracing (bool): If currently tracing operations
-        nodes (Dict[str, Node]): Mapping of node name to node.
-        name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name.
-            Used so names are unique.
-        module_proxy (Proxy): Proxy for given root meta module.
-        argument_node_names (Dict[str, List[str]]): Map of name of argument to name of nodes that depend on it.
-        generation_idx (int): Current generation index.
-        swap (Node): Attribute to store swap values from 'swap' nodes.
+        nodes (Dict[str, :class:`Node <nnsight.tracing.Node.Node>`]): Mapping of `Node` name to node. Order is preserved and important when executing the graph sequentially.
+        attachments (Dict[str, Any]): Dictionary object used to add extra functionality to this Graph. Used by Protocols.
+        proxy_class (Type[class:`Proxy <nnsight.tracing.Proxy.Proxy>`]): Proxy class to use. Defaults to class:`Proxy <nnsight.tracing.Proxy.Proxy>`.
+        alive (bool): If this Graph should be considered alive (still tracing), and therefore added to. Used by `Node`s.
+        name_idx (Dict[str, int]): Mapping of node target_name to number of previous names with the same target_name. Used so names are unique.
+        
+        validate (bool): If to execute nodes as they are added with their proxy values in order to check if the executions are possible and create a new proxy_value. Defaults to True.
+        
+            When adding `Node`s to the `Graph`, if the `Graph`'s validate attribute is set to `True`, \
+            it will execute the `Node`'s target with its arguments' `.proxy_value` attributes (essentially executing the Node, with FakeTensors in FakeTensorMode).
+            This 1.) checks to see of the operation is valid on the tensor shape's within the `.proxy_value`s (this would catch an indexing error) and \
+            2.) populating this new `Node`'s `.proxy_value` attribute with the result.
+        
+        sequential (bool): If to run nodes sequentially when executing this graph.
+        
+            When this is set to `True`, `Node`s attempt to be executed in the order they were added to the `Graph` when calling `.execute(). \
+            Otherwise, all nodes are checked to be fulfilled (they have no dependencies). These are root nodes and they are then executed in the order they were added.
+
+        
     """
 
     def __init__(
         self,
-        module: torch.nn.Module,
         proxy_class: Type[Proxy] = Proxy,
-        validate: bool = True,
+        validate: bool = False,
+        sequential: bool = True,
+        graph_id: int = None,
     ) -> None:
+
+        self.id = graph_id or id(self)
 
         self.proxy_class = proxy_class
         self.validate = validate
+        self.sequential = sequential
 
-        self.tracing = True
+        self.alive = True
 
         self.nodes: Dict[str, Node] = dict()
         self.name_idx: Dict[str, int] = dict()
 
-        self.argument_node_names: Dict[str, List[str]] = dict()
+        self.attachments = dict()
 
-        self.swap: Node = None
-
-        self.module_proxy = self.add(
-            value=module, target="argument", args=["nnsight_root_module"]
-        )
-
-    def get_swap(self, value):
-        if self.swap is not None:
-            device = None
-
-            def _device(value: torch.Tensor):
-                nonlocal device
-
-                device = value.device
-
-            util.apply(value, _device, torch.Tensor)
-
-            value = util.apply(self.swap.args[1], lambda x: x.value, Node)
-
-            if device is not None:
-
-                def _to(value: torch.Tensor):
-                    return value.to(device)
-
-                value = util.apply(value, _to, torch.Tensor)
-
-            # Set value of 'swp' node so it destroys itself and listeners.
-            self.swap.set_value(True)
-
-            # Un-set swap.
-            self.swap = None
-
-        return value
-
-    def compile(self, module: torch.nn.Module) -> None:
-        """Re-compile graph to prepare for a new execution of the graph.
-
-        Compiles all nodes.
-
-        Finally, sets the "nnsight_root_module" node's value to the module that is being interleaved.
-
-        Args:
-            module (torch.nn.Module): Module to be considered the root module of the graph.
+    def reset(self) -> None:
+        """Resets the Graph to prepare for a new execution of the Graph.
+        Calls `.reset()` on all Nodes.
         """
 
-        # Remove nodes that have no effect.
-        self.eliminate_dead_code()
-
-        # Compile nodes individually.
+        # Reset Nodes individually.
         for node in self.nodes.values():
-            node.compile()
+            node.reset()
 
-        # Setting the root module kicks off the graph execution.
-        self.module_proxy.node.set_value(module)
+    def execute(self) -> None:
+        """Executes operations of `Graph`.
 
-    def add(
-        self,
-        target: Union[Callable, str],
-        value: Any = inspect._empty,
-        args: List[Any] = None,
-        kwargs: Dict[str, Any] = None,
-        name: str = None,
-    ) -> Proxy:
-        """Adds a node to the graph and returns it's proxy.
+        Executes all `Node`s sequentially if `Graph.sequential`. Otherwise execute only root `Node`s sequentially.
+        """
 
-        Args:
-            value (Any): 'meta' proxy value used for tracing the shapes and values.
-            target (Union[Callable, str]): Either the function to call for this node, or a string of a reserved target name.
-            args (List[Any], optional): Positional arguments of node. Defaults to None.
-            kwargs (Dict[str, Any], optional): Keyword arguments of node. Defaults to None.
-            name (str, optional): Unique name of node. Otherwise pull name from target Defaults to None.
+        if self.sequential:
+            is_stopped_early: bool = False
+            early_stop_execption: Optional[
+                EarlyStopProtocol.EarlyStopException
+            ] = None
+            for node in self.nodes.values():
+                if not is_stopped_early:
+                    if node.fulfilled():
+                        try:
+                            node.execute()
+                        except EarlyStopProtocol.EarlyStopException as e:
+                            is_stopped_early = True
+                            early_stop_execption = e
+                            continue
+                else:
+                    node.clean()
+            if is_stopped_early:
+                raise early_stop_execption
+        else:
+
+            root_nodes = [
+                node for node in self.nodes.values() if node.fulfilled()
+            ]
+
+            for node in root_nodes:
+                node.execute()
+
+    def create(self, *args, **kwargs) -> Proxy:
+        """Creates a Node directly on this `Graph` and returns its `Proxy`.
 
         Returns:
-            Proxy: Proxy for the added node.
-
-        Raises:
-            ValueError: If more than one reserved "module" nodes are added to the graph.
+            Proxy: `Proxy` for newly created `Node`.
         """
 
-        # If we're validating and the user did not provide a value, execute the given target with meta proxy values to compute new proxy_value.
-        if self.validate and value is inspect._empty:
-            _args = args if args is not None else []
-            _kwargs = kwargs if kwargs is not None else {}
+        return self.proxy_class(Node(*args, graph=self, **kwargs))
 
-            with FakeTensorMode(
-                allow_non_fake_inputs=True,
-                shape_env=ShapeEnv(assume_static_by_default=True),
-            ) as fake_mode:
-                with FakeCopyMode(fake_mode):
+    def add(self, node: Node) -> None:
+        """Adds a Node to this Graph. Called by Nodes on __init__.
+        
+        When adding `Node`s to the `Graph`, if the `Graph`'s validate attribute is set to `True`, \
+        it will execute the `Node`'s target with its arguments' `.proxy_value` attributes (essentially executing the Node, with FakeTensors in FakeTensorMode).
+        This 1.) checks to see of the operation is valid on the tensor shape's within the `.proxy_value`s (this would catch an indexing error) and \
+        2.) populating this new `Node`'s `.proxy_value` attribute with the result.
+    
 
-                    proxy_args, proxy_kwargs = Node.prepare_inputs(
-                        (_args, _kwargs), proxy=True
-                    )
+        Args:
+            node (Node): Node to add.
+        """
 
-                    value = target(
-                        *proxy_args,
-                        **proxy_kwargs,
-                    )
+        # If we're validating and the user did not provide a proxy_value, execute the given target with meta proxy values to compute new proxy_value.
+        if self.validate and node.proxy_value is inspect._empty:
 
-        target_name = target if isinstance(target, str) else target.__name__
+            node.proxy_value = validate(node.target, *node.args, **node.kwargs)
 
-        if target_name not in self.name_idx:
-            self.name_idx[target_name] = 0
-
-        if name is None:
-            name = f"{target_name}_{self.name_idx[target_name]}"
-
-        node = Node(
-            name=name,
-            graph=weakref.proxy(self),
-            value=value,
-            target=target,
-            args=args,
-            kwargs=kwargs,
+        # Get name of target.
+        name = (
+            node.target
+            if isinstance(node.target, str)
+            else node.target.__name__
         )
 
-        self.name_idx[target_name] += 1
+        # Init name_idx tracker for this Node's name if not already added.
+        if name not in self.name_idx:
+            self.name_idx[name] = 0
 
-        self.nodes[name] = node
+        # If Node's name is not set, set it to the name_idxed version.
+        if node.name is None:
+            node.name = f"{name}_{self.name_idx[name]}"
 
-        if target_name == "argument":
-            module_path = args[0]
+        # Increment name_idx for name.
+        self.name_idx[name] += 1
 
-            if module_path not in self.argument_node_names:
-                self.argument_node_names[module_path] = []
+        # Add Node.
+        self.nodes[node.name] = node
 
-            self.argument_node_names[module_path].append(name)
+    def copy(self):
+        """Copy constructs a new Graph and then recursively
+        creates new Nodes on the graph.
+        """
+        new_graph = Graph(
+            validate=self.validate,
+            sequential=self.sequential,
+            proxy_class=self.proxy_class,
+        )
 
-        return self.proxy_class(node)
+        def compile(graph: Graph, old_node: Node):
+            if old_node.name in graph.nodes:
+                return graph.nodes[old_node.name]
 
-    def eliminate_dead_code(self):
-        # TODO
-        pass
+            node = graph.create(
+                target=old_node.target,
+                name=old_node.name,
+                proxy_value=None,
+                args=apply(old_node.args, lambda x: compile(graph, x), Node),
+                kwargs=apply(
+                    old_node.kwargs, lambda x: compile(graph, x), Node
+                ),
+            ).node
 
-    def vis(self, filename: str = "graph", format: str = "png"):
-        import graphviz
+            if isinstance(node.target, type) and issubclass(
+                node.target, Protocol
+            ):
+                node.target.compile(node)
 
-        def style(value: Any) -> Dict[str, Any]:
-            style = {}
+            return node
 
-            if isinstance(value, Node):
-                if value.target == "null":
-                    style["color"] = "red"
-
-                elif value.target == "argument":
-                    style["color"] = "green"
-
-                elif value.target == "module":
-                    style["color"] = "green4"
-
-                else:
-                    style["color"] = "black"
-            else:
-                style["color"] = "grey"
-                style["shape"] = "box"
-
-            return style
-
-        arg_name_idx = 0
-
-        def add_node(value: Any, graph: graphviz.Digraph, kname: str = None) -> str:
-            nonlocal arg_name_idx
-
-            if isinstance(value, Node):
-                name = value.name
-                label = (
-                    value.target
-                    if isinstance(value.target, str)
-                    else value.target.__name__
-                )
-            else:
-                if isinstance(value, torch.Tensor):
-                    name = str(arg_name_idx)
-                    label = "Tensor"
-                elif isinstance(value, str):
-                    name = str(arg_name_idx)
-                    label = f'"{value}"'
-                else:
-                    name = str(arg_name_idx)
-                    label = str(value)
-
-                arg_name_idx += 1
-
-            if kname is not None:
-                label = f"{kname}={label}"
-
-            if f"\t{name}" not in graph.body:
-                graph.node(name, label=label, **style(value))
-
-            return name
-
-        graph = graphviz.Digraph("round-table", comment="The Round Table")
+        # To preserve order
+        nodes = {}
 
         for node in self.nodes.values():
-            add_node(node, graph)
 
-            for i, arg in enumerate(node.args):
-                kname = None
+            compile(new_graph, node)
 
-                if node.target == "argument":
-                    if i == 0:
-                        kname = "key"
-                    elif i == 1:
-                        kname = "batch_size"
-                    elif i == 2:
-                        kname = "batch_start"
+            # To preserve order
+            nodes[node.name] = new_graph.nodes[node.name]
 
-                name = add_node(arg, graph, kname=kname)
+        # To preserve order
+        new_graph.nodes = nodes
 
-                graph.edge(name, node.name)
+        return new_graph
 
-            for kname, arg in node.kwargs.items():
-                name = add_node(arg, graph, kname=kname)
+    def vis(
+        self,
+        title: str = "graph",
+        path: str = ".",
+        display: bool = True,
+        save: bool = False,
+        recursive: bool = False,
+    ):
+        """Generates and saves a graphical visualization of the Intervention Graph using the pygraphviz library.
+        Args:
+            title (str): Name of the Intervention Graph. Defaults to "graph".
+            path (str): Directory path to save the graphic in. If None saves content to the current directory.
+            display (bool): If True, shows the graph image.
+            save (bool): If True, saves the graph to the specified path.
+            recursive (bool): If True, recursively visualize sub-graphs.
+        """
 
-                graph.edge(name, node.name)
+        try:
 
-        graph.render(filename=filename, format=format)
+            import pygraphviz as pgv
+
+        except Exception as e:
+
+            raise type(e)(
+                "Visualization of the Graph requires `pygraphviz` which requires `graphviz` to be installed on your machine."
+            ) from e
+
+        from IPython.display import Image
+        from IPython.display import display as IDisplay
+
+        graph: pgv.AGraph = pgv.AGraph(strict=True, directed=True)
+
+        graph.graph_attr.update(
+            label=title, fontsize="20", labelloc="t", labeljust="c"
+        )
+
+        for node in self.nodes.values():
+            # draw bottom up
+            if len(node.listeners) == 0:
+                node.visualize(graph, recursive)
+
+        def display_graph(file_name):
+            in_notebook = True
+
+            # Credit: Till Hoffmann - https://stackoverflow.com/a/22424821
+            try:
+                from IPython import get_ipython
+
+                if "IPKernelApp" not in get_ipython().config:
+                    in_notebook = False
+            except ImportError:
+                in_notebook = False
+            except AttributeError:
+                in_notebook = False
+
+            if in_notebook:
+                IDisplay(Image(filename=file_name))
+            else:
+                img = PILImage.open(file_name)
+                img.show()
+                img.close()
+
+        if not save:
+            with tempfile.NamedTemporaryFile(suffix=".png") as temp_file:
+                graph.draw(temp_file.name, prog="dot")
+                if display:
+                    display_graph(temp_file.name)
+        else:
+            graph.draw(f"{path}/{title}.png", prog="dot")
+            if display:
+                display_graph(f"{path}/{title}.png")
 
     def __str__(self) -> str:
         result = ""

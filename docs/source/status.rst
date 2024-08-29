@@ -191,7 +191,7 @@ Status
 .. card::
     :shadow: none
     
-    The library can be used to run local models without a key. Running experiments on remote models requires a free server API key. To obtain a key, join the `NDIF Discord <https://discord.gg/6uFJmCSwW7>`_ and say hello on the #introductions channel.
+    The library can be used to run local models without requiring a key. However, running experiments on remote models requires a free server API key. To obtain a key, register for an `NDIF account <https://login.ndif.us>`_ which allows you to manage and generate keys.
 
 .. raw:: html
 

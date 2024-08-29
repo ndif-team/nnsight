@@ -1,20 +1,54 @@
 from __future__ import annotations
 
 import gc
+import inspect
+import weakref
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
+from accelerate import init_empty_weights
+from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
 from .. import util
-from ..contexts.Runner import Runner
+from ..contexts.backends import (
+    Backend,
+    BridgeBackend,
+    EditBackend,
+    LocalBackend,
+    NoopBackend,
+    RemoteBackend,
+)
+from ..contexts.session.Session import Session
+from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
-from ..intervention import (HookHandler, InterventionHandler,
-                            InterventionProxy, intervene)
+from ..intervention import (
+    HookHandler,
+    InterventionHandler,
+    InterventionProtocol,
+    InterventionProxy,
+)
 from ..logger import logger
+from ..tracing import protocols
 from ..tracing.Graph import Graph
+
+
+class MetaDispatcher(TorchDispatchMode):
+    """This exists because `with torch.device('meta') is evil.
+
+    Ty Caden
+
+    """
+
+    def __torch_dispatch__(self, func, types, args, kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+
+        if "device" in kwargs or "device" in inspect.signature(func).parameters:
+            kwargs["device"] = "meta"
+        return func(*args, **kwargs)
 
 
 class NNsight:
@@ -25,12 +59,14 @@ class NNsight:
         proxy_class (Type[InterventionProxy]): InterventionProxy like type to use as a Proxy for this Model's inputs and outputs. Can have Model specific functionality added to a new sub-class.
 
     Attributes:
-        model_key (str): String representing what kind of model this is. Usually hugging face repo id of model to load, path to checkpoint, or class name of custom model.
-        args (List[Any]): Positional arguments used to initialize model.
-        kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
-        dispatched (bool): If the _model has been loaded yet with real parameters yet.
-        custom_model (bool): If the value passed to repoid_path_model was a custom model.
+        _model_key (str): String representing what kind of model this is. Usually hugging face repo id of model to load, path to checkpoint, or class name of custom model.
+        _args (List[Any]): Positional arguments used to initialize model.
+        _kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
+        _dispatched (bool): If the _model has been loaded yet with real parameters yet.
+        _custom_model (bool): If the value passed to repoid_path_model was a custom model.
         _model (torch.nn.Module): Underlying torch module.
+        _envoy (Envoy): Envoy for underlying model.
+        _session (Session): Session object if in a Session.
     """
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
@@ -40,6 +76,7 @@ class NNsight:
         model_key: Union[str, torch.nn.Module],
         *args,
         dispatch: bool = False,
+        meta_buffers: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -53,6 +90,8 @@ class NNsight:
         self._custom_model = False
 
         self._model: torch.nn.Module = None
+        self._session: Session = None
+        self._default_graph: Graph = None
 
         logger.info(f"Initializing `{self._model_key}`...")
 
@@ -66,17 +105,16 @@ class NNsight:
 
         # Otherwise load from _load(...).
         if not self._custom_model:
-            # accelerate.init_empty_weights makes all parameters loaded on the 'meta' device.
-            # Also do .to('meta') because why not.
-            with accelerate.init_empty_weights(include_buffers=True):
-                self._model = self._load(self._model_key, *args, **kwargs).to("meta")
+            # Load skeleton of model by putting all tensors on meta.
+            with init_empty_weights(include_buffers=meta_buffers):
+                self._model = self._load(self._model_key, *args, **kwargs)
 
         self._envoy = Envoy(self._model)
 
         if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
-                    
+
         logger.info(f"Initialized `{self._model_key}`")
 
     def trace(
@@ -84,9 +122,11 @@ class NNsight:
         *inputs: Any,
         trace: bool = True,
         invoker_args: Dict[str, Any] = None,
-        scan: bool = True,
+        backend: Union[Backend, str] = None,
+        remote: bool = False,
+        scan: bool = False,
         **kwargs: Dict[str, Any],
-    ) -> Union[Runner, Any]:
+    ) -> Union[Tracer, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
 
         In short, allows access to the future inputs and outputs of modules in order to trace what operations you would like to perform on them.
@@ -96,13 +136,15 @@ class NNsight:
             inputs (tuple[Any])
             trace (bool, optional): If to open a tracing context. Otherwise immediately run the model and return the raw output. Defaults to True.
             invoker_args (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
-            kwargs (Dict[str, Any]): Keyword arguments passed to Runner/Tracer initialization, and then downstream to the model's ._execute(...) method.
+            kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
+            backend (Union[Backend, str]): Backend for this Tracer object.
+            remote (bool): Use RemoteBackend with default url.
 
         Raises:
             ValueError: If trace is False and no inputs were provided (nothing to run with)
 
         Returns:
-            Union[Runner, Any]: Either the Runner used for tracing, or the raw output if trace is False.
+            Union[Tracer, Any]: Either the Tracer used for tracing, or the raw output if trace is False.
 
         Examples:
 
@@ -165,14 +207,44 @@ class NNsight:
 
                 print(output1)
                 print(output2)
-
-
-
-            For a proxy tensor with 3 tokens.
         """
 
-        # Create Runner/Tracer object.
-        runner = Runner(self, **kwargs)
+        # TODO raise error/warning if trying to use one backend with another condition satisfied?
+
+        bridge = None
+
+        if backend is not None:
+            pass
+
+        elif self._session is not None:
+
+            backend = BridgeBackend(weakref.proxy(self._session.bridge))
+
+            bridge = self._session.bridge
+
+        # If remote, use RemoteBackend with default url.
+        elif remote:
+
+            backend = RemoteBackend()
+
+        # By default, use LocalBackend.
+        elif backend is None:
+
+            backend = LocalBackend()
+
+        # If backend is a string, assume RemoteBackend url.
+        elif isinstance(backend, str):
+
+            backend = RemoteBackend(backend)
+
+        # Create Tracer object.
+        if self._default_graph is not None:
+
+            graph = self._default_graph.copy()
+
+            tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
+        else:
+            tracer = Tracer(backend, self, bridge=bridge, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -185,30 +257,158 @@ class NNsight:
             # We'll also save the output of the model and return its value directly.
             if not trace:
 
-                with runner:
-                    with runner.invoke(*inputs, **invoker_args):
+                with tracer:
+                    with tracer.invoke(*inputs, **invoker_args):
 
                         output = self._envoy.output.save()
 
                 return output.value
 
             # Otherwise open an invoker context with the give args.
-            runner.invoke(*inputs, **invoker_args).__enter__()
+            tracer.invoke(*inputs, **invoker_args)
 
         # If trace is False, you had to have provided an input.
         if not trace:
 
             raise ValueError("Can't execute on no inputs!")
 
-        return runner
+        return tracer
+
+    def scan(self, *inputs, **kwargs) -> Tracer:
+        """Context just to populate fake tenor proxy values using scan and validate.
+        Useful when looking for just the shapes of future tensors
+
+        Examples:
+
+            .. code-block:: python
+
+                with model.scan(" "):
+
+                    dim = model.module.output.shape[-1]
+
+                print(dim)
+
+        Returns:
+            Tracer: Tracer context with Noop backend.
+        """
+
+        return self.trace(
+            *inputs, **kwargs, scan=True, validate=True, backend=NoopBackend()
+        )
+
+    def edit(
+        self,
+        *inputs: Any,
+        inplace: bool = False,
+        return_context: bool = False,
+        **kwargs: Dict[str, Any],
+    ) -> Union[Tracer, Any]:
+        """Create a trace context with an edit backend and apply a list of edits.
+
+        The edit backend sets a default graph on an NNsight model copy which is
+        run on future trace calls.
+
+        This operation is not inplace!
+
+        Args:
+            inputs (tuple[Any])
+            inplace (bool): If True, makes edits in-place.
+            return_context (bool): If True, returns the editor Tracer context.
+            kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's ._execute(...) method.
+
+        Returns:
+            Union[Tracer, Any]: Either the Tracer used for tracing, or the raw output if trace is False.
+
+        Example:
+            .. code-block:: python
+            from nnsight import LanguageModel
+
+            gpt2 = LanguageModel("openai-community/gpt2)
+            
+            class ComplexModule(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.one = WrapperModule()
+
+                def forward(self, x):
+                    return self.one(x)
+
+            l0 = gpt2.transformer.h[0]
+            l0.attachment = ComplexModule()
+
+            with gpt2.edit("test") as gpt2_edited:
+                acts = l0.output[0]
+                l0.output[0][:] = l0.attachment(acts, hook=True)
+
+            with gpt2.trace(MSG_prompt):
+                original = l0.output[0].clone().save()
+                l0.output[0][:] *= 0.0
+                original_output = gpt2.output.logits.save()
+
+            with gpt2_edited.trace(MSG_prompt):
+                one = l0.attachment.one.output.clone().save()
+                l0.attachment.output *= 0.0
+                edited_output = gpt2.output.logits.save()
+            
+            print(original_output)
+            print(edited_output)
+        """
+        model_to_edit = self
+        if not inplace:
+            model_to_edit = self._shallow_copy()
+
+        return model_to_edit.trace(
+            *inputs,
+            validate=kwargs.pop("validate", False),
+            return_context=return_context,
+            **kwargs,
+            backend=EditBackend(),
+        )
+
+    def session(
+        self,
+        backend: Union[Backend, str] = None,
+        remote: bool = False,
+        **kwargs,
+    ) -> Session:
+        """Create a session context using a Session.
+
+        Args:
+            backend (Backend): Backend for this Session object.
+            remote (bool): Use RemoteBackend with default url.
+
+        Returns:
+            Session: Session.
+        """
+
+        # If remote, use RemoteBackend with default url.
+        if remote:
+
+            backend = RemoteBackend()
+
+        # By default, use LocalBackend.
+        elif backend is None:
+
+            backend = LocalBackend()
+
+        # If backend is a string, assume RemoteBackend url.
+        elif isinstance(backend, str):
+
+            backend = RemoteBackend(backend)
+
+        session = Session(backend, self, **kwargs)
+
+        self._session = session
+
+        return session
 
     def interleave(
         self,
         fn: Callable,
         intervention_graph: Graph,
-        *inputs: List[Any],
+        *inputs: List[List[Any]],
         **kwargs,
-    ) -> Any:
+    ) -> None:
         """Runs some function with some inputs and some graph with the appropriate contexts for this model.
 
         Loads and dispatched ._model if not already done so.
@@ -224,10 +424,7 @@ class NNsight:
         Args:
             fn (Callable): Function or method to run.
             intervention_graph (Graph): Intervention graph to interleave with model's computation graph.
-            inputs (List[Any]): Inputs to give to function.
-
-        Returns:
-            Any: Output of model.
+            inputs (List[List[Any]]): List of multiple groups of inputs to give to function for each invoker.
         """
 
         # Loads and dispatched ._model if not already done so.
@@ -236,30 +433,51 @@ class NNsight:
 
         logger.info(f"Running `{self._model_key}`...")
 
-        intervention_graph.compile(self._model)
+        # We need to pre-process and batch all inputs as (inputs) is a list of each set of inputs from each invocation.
+        batch_groups = []
+        batch_start = 0
+        batched_input = None
+        batch_size = 0
 
-        inputs, total_batch_size = self._prepare_inputs(*inputs)
+        for _inputs in inputs:
 
-        intervention_handler = InterventionHandler(intervention_graph, total_batch_size)
+            _inputs, batch_size = self._prepare_inputs(*_inputs)
+
+            batch_groups.append((batch_start, batch_size))
+            batch_start += batch_size
+
+            batched_input = self._batch_inputs(batched_input, *_inputs)
+
+        if len(inputs) > 0:
+            inputs, batch_size = self._prepare_inputs(*batched_input)
+
+        intervention_handler = InterventionHandler(
+            intervention_graph, batch_groups, batch_size
+        )
+
+        module_paths = InterventionProtocol.get_interventions(
+            intervention_graph
+        ).keys()
 
         with HookHandler(
             self._model,
-            list(intervention_graph.argument_node_names.keys()),
-            input_hook=lambda activations, module_path: intervene(
+            list(module_paths),
+            input_hook=lambda activations, module_path: InterventionProtocol.intervene(
                 activations, module_path, "input", intervention_handler
             ),
-            output_hook=lambda activations, module_path: intervene(
+            output_hook=lambda activations, module_path: InterventionProtocol.intervene(
                 activations, module_path, "output", intervention_handler
             ),
         ):
-            output = fn(*inputs, **kwargs)
+            try:
+                fn(*inputs, **kwargs)
+            except protocols.EarlyStopProtocol.EarlyStopException:
+                # TODO: Log.
+                for node in intervention_graph.nodes.values():
+                    if not node.executed():
+                        node.clean()
 
         logger.info(f"Completed `{self._model_key}`")
-
-        # gc.collect()
-        # torch.cuda.empty_cache()
-
-        return output
 
     def dispatch_model(self, *args, **kwargs) -> None:
         """Dispatch ._model to have real parameters  using ._load(...)."""
@@ -286,6 +504,10 @@ class NNsight:
         self._model = self._model.to(*args, **kwargs)
 
         return self
+    
+    def clear_edits(self) -> None:
+        """Resets the default graph of this model."""
+        self._default_graph = None
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
@@ -298,8 +520,10 @@ class NNsight:
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
-        if key not in ('_model', '_model_key') and isinstance(value, torch.nn.Module):
-            
+        if key not in ("_model", "_model_key") and isinstance(
+            value, torch.nn.Module
+        ):
+
             setattr(self._envoy, key, value)
 
         else:
@@ -334,7 +558,9 @@ class NNsight:
 
             return AutoModel.from_config(config, trust_remote_code=True)
 
-        return accelerate.load_checkpoint_and_dispatch(self._model, repo_id, **kwargs)
+        return accelerate.load_checkpoint_and_dispatch(
+            self._model, repo_id, **kwargs
+        )
 
     def _execute(self, *prepared_inputs: Any, **kwargs) -> Any:
         """Virtual method to run the underlying ._model with some inputs.
@@ -404,3 +630,15 @@ class NNsight:
             )
 
         return batched_inputs
+
+    def _shallow_copy(self) -> Self:
+        """ Creates a new instance copy of the same class with the all the attributes of the original instance.
+
+        Returns:
+            Self: NNsightModel        
+        """
+        copy = self.__class__.__new__(self.__class__)
+        for key, value in self.__dict__.items():
+            copy.__dict__[key] = value
+
+        return copy
