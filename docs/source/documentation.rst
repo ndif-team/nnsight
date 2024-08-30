@@ -7,7 +7,8 @@ Documentation
    documentation/models
    documentation/envoy
    documentation/contexts
-   documentation/util
-   documentation/intervention
    documentation/tracing
+   documentation/intervention
+   documentation/schema
+   documentation/util
    documentation/patching
