@@ -19,22 +19,22 @@ This version significantly enhances the library's remote execution capabilities.
 
 ### New Features
 
-- <ins>Session context</ins>: efficiently package multi-tracing experiments into a single request, enabling faster, more scalable remote experimentation.
+- [<ins>Session context</ins>](https://nnsight.net/notebooks/features/sessions/): efficiently package multi-tracing experiments into a single request, enabling faster, more scalable remote experimentation.
 
-- <ins>Iterator context</ins>: define an intervention loop for iterative execution.
+- [<ins>Iterator context</ins>](https://nnsight.net/notebooks/features/iterator/): define an intervention loop for iterative execution.
 
-- <ins>Model editing</ins>: alter a model by setting default edits and interventions in an editing context, applied before each forward pass.
+- [<ins>Model editing</ins>](nnsight.net/notebooks/features/model_editing/): alter a model by setting default edits and interventions in an editing context, applied before each forward pass.
 
-- <ins>Early stopping</ins>: interrup a model's forward pass at a chosen module before execution completes. 
+- [<ins>Early stopping</ins>](https://nnsight.net/notebooks/features/early_stopping/): interrup a model's forward pass at a chosen module before execution completes. 
 
-- <ins>Conditional context</ins>: define interventions within a Conditional context, executed only when the specified condition evaluates to be True.
+- [<ins>Conditional context</ins>](https://nnsight.net/notebooks/features/conditionals/): define interventions within a Conditional context, executed only when the specified condition evaluates to be True.
 
-- <ins>Scanning context</ins>: perform exclusive model scanning to gather important insights.
+- [<ins>Scanning context</ins>](https://nnsight.net/notebooks/features/scan_validate/): perform exclusive model scanning to gather important insights.
 
-- <ins>`nnsight` builtins<ins>: define traceable `Python` builtins as part of the intervention graph.
+- <ins>`nnsight` builtins</ins>: define traceable `Python` builtins as part of the intervention graph.
 
 - <ins>Proxy update</ins>: assign new values to existing proxies. 
      
 - <ins>In-Trace logging</ins>: add log statements to be called during the intervention graph execution.
 
-- <ins>Traceable function calls</ins>: make unsupported functions traceable by the intervention graph. Note that all pytorch functions are now traceable by `nnsight` by default.
+- [<ins>Traceable function calls</ins>](https://nnsight.net/notebooks/features/custom_functions/): make unsupported functions traceable by the intervention graph. Note that [<ins>all pytorch functions are now traceable</ins>](https://nnsight.net/notebooks/features/operations/) by `nnsight` by default.
