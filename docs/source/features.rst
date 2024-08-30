@@ -59,6 +59,24 @@ Features
             </div>
          </div>
 
+   .. grid-item-card::
+      :link: notebooks/features/scan_validate.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-binoculars fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Scan and Validate</h5>
+               <p class="card-text">Debugging tensor shapes</p>
+            </div>
+         </div>
+
    .. grid-item-card:: 
       :link: notebooks/features/operations.ipynb
       :class-card: surface
