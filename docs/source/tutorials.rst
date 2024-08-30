@@ -29,7 +29,7 @@ Tutorials
    :gutter: 3
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/walkthrough.ipynb
+      :link: notebooks/tutorials/1-walkthrough.ipynb
       :class-card: surface
       :class-body: surface
 
@@ -46,7 +46,7 @@ Tutorials
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/ioi_patching.ipynb
+      :link: notebooks/tutorials/activation_patching.ipynb
       :class-card: surface
       :class-body: surface
 
@@ -80,7 +80,7 @@ Tutorials
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/logit_lens.ipynb
+      :link: notebooks/tutorials/boundless_DAS.ipynb
       :class-card: surface
       :class-body: surface
 
@@ -88,50 +88,16 @@ Tutorials
 
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-arrow-down-a-z fa-2x"></i>
+               <i class="fa-solid fa-magnifying-glass fa-2x"></i>
             </div> 
             <div>
-               <h5 class="card-title">Logit Lens</h5>
-               <p class="card-text">Decode activations</p>
+               <h5 class="card-title">Boundless DAS</h5>
+               <p class="card-text">Identifying Causal Mechanisms in Alpaca</p>
             </div>
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/future_lens.ipynb
-      :class-card: surface
-      :class-body: surface
-
-      .. raw:: html
-
-         <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-eye fa-2x"></i>
-            </div> 
-            <div>
-               <h5 class="card-title">Future Lens</h5>
-               <p class="card-text">Probe future tokens</p>
-            </div>
-         </div>
-
-   .. grid-item-card:: 
-      :link: notebooks/tutorials/function_vectors.ipynb
-      :class-card: surface
-      :class-body: surface
-
-      .. raw:: html
-
-         <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-rocket fa-2x"></i>
-            </div> 
-            <div>
-               <h5 class="card-title">Function Vectors</h5>
-               <p class="card-text">Lambdas</p>
-            </div>
-         </div>
-
-   .. grid-item-card:: 
-      :link: notebooks/tutorials/sae.ipynb
+      :link: notebooks/tutorials/dict_learning.ipynb
       :class-card: surface
       :class-body: surface
 
@@ -148,18 +114,21 @@ Tutorials
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/boundless_DAS.ipynb
-      :class-card: code-surface
-      :class-body: code-surface
+      :link: notebooks/tutorials/logit_lens.ipynb
+      :class-card: surface
+      :class-body: surface
 
       .. raw:: html
 
          <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-arrow-down-a-z fa-2x"></i>
+            </div> 
             <div>
-               <h5 class="code-surface card-title">Boundless DAS</h5>
+               <h5 class="card-title">Logit Lens</h5>
+               <p class="card-text">Decode activations</p>
             </div>
          </div>
-
 
 .. toctree::
    :glob:
