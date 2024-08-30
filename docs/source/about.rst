@@ -27,7 +27,7 @@ An API for transparent science on black-box AI.
     models, but they do not let you see model internals.
 
     The nnsight library is different: it gives you full access to all the neural network internals.
-    When used together with a remote service like the `National Deep Inference Facility <https://ndif.us/>`_ (NDIF),
+    When used together with a remote service like the `National Deep Inference Fabric <https://ndif.us/>`_ (NDIF),
     it lets you run experiments on huge open models easily, with full transparent access.
     The nnsight library is also terrific for studying smaller local models.
 

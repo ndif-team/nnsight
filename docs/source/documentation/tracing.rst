@@ -12,3 +12,11 @@ nnsight.tracing
 
 .. automodule:: nnsight.tracing.Proxy
    :members:
+
+.. automodule:: nnsight.tracing.protocols
+   :members:
+
+.. automodule:: nnsight.tracing.Bridge
+   :members:
+
+

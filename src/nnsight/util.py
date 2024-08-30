@@ -1,24 +1,42 @@
 """Module for utility functions and classes used throughout the package."""
 
-import time
+import importlib
 import types
 from functools import wraps
-from typing import Any, Callable, Collection, Type
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import torch
 
+if TYPE_CHECKING:
+    from .tracing.Node import Node
 
-def apply(data: Collection, fn: Callable, cls: Type, inplace:bool=False) -> Collection:
+# TODO Have an Exception you can raise to stop apply early
+
+def apply(
+    data: Any, fn: Callable, cls: Type, inplace: bool = False
+) -> Collection:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
-        data (Collection): Collection to apply function to.
+        data (Any): Collection of data to apply function to.
         fn (Callable): Function to apply.
         cls (type): Type or Types to apply function to.
+        inplace (bool): If to apply the fn inplace. (For lists and dicts)
 
     Returns:
-        Collection: Same kind of collection as data, after then fn has been applied to members of given type.
+        Any: Same kind of collection as data, after then fn has been applied to members of given type.
     """
+
     if isinstance(data, cls):
         return fn(data)
 
@@ -31,17 +49,20 @@ def apply(data: Collection, fn: Callable, cls: Type, inplace:bool=False) -> Coll
             return data
         return [apply(_data, fn, cls, inplace=inplace) for _data in data]
 
-    if data_type == tuple:
+    elif data_type == tuple:
         return tuple([apply(_data, fn, cls, inplace=inplace) for _data in data])
 
-    if data_type == dict:
+    elif data_type == dict:
         if inplace:
             for key, value in data.items():
                 data[key] = apply(value, fn, cls, inplace=inplace)
             return data
-        return {key: apply(value, fn, cls, inplace=inplace) for key, value in data.items()}
+        return {
+            key: apply(value, fn, cls, inplace=inplace)
+            for key, value in data.items()
+        }
 
-    if data_type == slice:
+    elif data_type == slice:
         return slice(
             apply(data.start, fn, cls, inplace=inplace),
             apply(data.stop, fn, cls, inplace=inplace),
@@ -102,16 +123,17 @@ def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
     return object
 
 
-def meta_deepcopy(self: torch.nn.parameter.Parameter, memo):
-    if id(self) in memo:
-        return memo[id(self)]
-    else:
-        result = type(self)(
-            torch.empty_like(self.data, dtype=self.data.dtype, device="meta"),
-            self.requires_grad,
-        )
-        memo[id(self)] = result
-        return result
+def to_import_path(type: type) -> str:
+
+    return f"{type.__module__}.{type.__name__}"
+
+
+def from_import_path(import_path: str) -> type:
+
+    *import_path, classname = import_path.split(".")
+    import_path = ".".join(import_path)
+
+    return getattr(importlib.import_module(import_path), classname)
 
 
 class WrapperModule(torch.nn.Module):
