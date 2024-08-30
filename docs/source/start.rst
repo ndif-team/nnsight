@@ -14,6 +14,7 @@ To get started with NNsight, install it with ``pip``.
 
    pip install nnsight
 
+Please give the project a :ndif:`star on Github` to support the project. NNsight is open-source and you can read and clone the full source at https://github.com/ndif-team/nnsight.
 
 First Steps
 -----------
