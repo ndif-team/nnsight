@@ -171,16 +171,13 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         if self.tokenizer is None:
             if tokenizer_kwargs is None:
                 tokenizer_kwargs = {}
-            kwarg_pad = tokenizer_kwargs.pop("padding_side", None)
-            if kwarg_pad is not None and kwarg_pad != "left":
-                warnings.warn(
-                    "NNsight LanguageModel requires padding_side='left' for tokenizers, setting it to 'left'"
-                )
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, config=config, padding_side="left", **tokenizer_kwargs
+                repo_id, config=config, **tokenizer_kwargs
             )
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            if not hasattr(self.tokenizer.pad_token, 'pad_token'):
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
             if (
                 patch_llama_scan
