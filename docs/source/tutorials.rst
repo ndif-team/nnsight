@@ -29,7 +29,7 @@ Tutorials
    :gutter: 3
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/1-walkthrough.ipynb
+      :link: notebooks/tutorials/walkthrough.ipynb
       :class-card: surface
       :class-body: surface
 
