@@ -53,6 +53,9 @@ class RemoteMixin(LocalMixin):
 
         raise NotImplementedError()
 
+    def remote_backend_cleanup(self):
+        raise NotImplementedError(0)
+
 
 class RemoteBackend(LocalBackend):
     """Backend to execute a context object via a remote service.
@@ -112,6 +115,8 @@ class RemoteBackend(LocalBackend):
                 request = self.request(obj)
 
             self.non_blocking_request(request=request)
+
+        obj.remote_backend_cleanup()
 
     def handle_response(self, data: Any) -> "ResponseModel":
         """Handles incoming response data.

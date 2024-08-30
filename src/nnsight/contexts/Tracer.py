@@ -179,6 +179,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         for node_name, node_value in value.items():
             self.graph.nodes[node_name]._value = node_value
 
+    def remote_backend_cleanup(self):
+        
         graph = self.graph
         graph.alive = False
 
