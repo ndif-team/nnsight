@@ -131,11 +131,9 @@ class Session(GraphBasedContext, RemoteMixin):
         self, value: Dict[int, Dict[str, Any]]
     ):
 
-        graphs = list(self.bridge.id_to_graph.values())
+        for graph_id, saves in value.items():
 
-        for i, (graph_id, saves) in enumerate(value.items()):
-
-            graph = graphs[i]
+            graph = self.bridge.id_to_graph[graph_id]
 
             for node_name, node_value in saves.items():
                 graph.nodes[node_name]._value = node_value
