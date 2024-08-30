@@ -131,16 +131,26 @@ class Session(GraphBasedContext, RemoteMixin):
         self, value: Dict[int, Dict[str, Any]]
     ):
 
-        for graph_id, saves in value.items():
+        graphs = list(self.bridge.id_to_graph.values())
 
-            graph = self.bridge.id_to_graph[graph_id]
+        for i, (graph_id, saves) in enumerate(value.items()):
+
+            graph = graphs[i]
 
             for node_name, node_value in saves.items():
                 graph.nodes[node_name]._value = node_value
 
             graph.alive = False
 
+    def remote_backend_cleanup(self):
+
         self.bridge = weakref.proxy(self.bridge)
+
+        graph = self.graph
+        graph.alive = False
+
+        if not isinstance(graph, weakref.ProxyType):
+            self.graph = weakref.proxy(graph)
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

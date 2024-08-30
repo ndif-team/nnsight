@@ -54,7 +54,7 @@ class RemoteMixin(LocalMixin):
         raise NotImplementedError()
 
     def remote_backend_cleanup(self):
-        raise NotImplementedError(0)
+        raise NotImplementedError()
 
 
 class RemoteBackend(LocalBackend):
