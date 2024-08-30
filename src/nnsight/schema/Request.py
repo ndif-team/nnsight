@@ -20,8 +20,9 @@ class RequestModel(BaseModel):
     model_key: str
 
     id: str = None
-    session_id: str = None
     received: datetime = None
+
+    session_id: Optional[str] = None
 
     def deserialize(self, model: NNsight) -> "RemoteMixin":
         

@@ -5,19 +5,20 @@ import yaml
 from pydantic import BaseModel
 
 class ApiConfigModel(BaseModel):
-    HOST: str
-    SSL: bool
-    APIKEY: Optional[str]
+    HOST: str = "ndif.dev"
+    SSL: bool = True
+    APIKEY: Optional[str] = None
+    JOB_ID:Optional[str] = None
 
 
 class AppConfigModel(BaseModel):
-    LOGGING: bool
-    REMOTE_LOGGING: bool
+    LOGGING: bool = False
+    REMOTE_LOGGING: bool = True
 
 
 class ConfigModel(BaseModel):
-    API: ApiConfigModel
-    APP: AppConfigModel
+    API: ApiConfigModel = ApiConfigModel()
+    APP: AppConfigModel = AppConfigModel()
 
     def set_default_api_key(self, apikey: str):
 
