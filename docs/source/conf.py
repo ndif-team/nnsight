@@ -16,10 +16,10 @@ extensions = [
     "sphinx_design",  # Boostrap design components
     "nbsphinx",  # Jupyter notebook support
     "sphinx.ext.viewcode",  # Add source links to the generated HTML files
+    "sphinx.ext.extlinks",  # Add external links
 ]
 
 templates_path = ["_templates"]
-exclude_patterns = []
 fixed_sidebar = True
 
 # HTML Output Options
@@ -48,12 +48,12 @@ html_theme_options = {
     "icon_links": [
         {
             "name": "GitHub",
-            "url": "https://github.com/JadenFiotto-Kaufman/nnsight",
+            "url": "https://github.com/ndif-team/nnsight",
             "icon": "fa-brands fa-github",
         },
         {
             "name": "Discord",
-            "url": "https://discord.gg/6uFJmCSwW7",
+            "url": "https://forms.gle/1Y6myaXYzSh3oHf56",
             "icon": "fa-brands fa-discord",
         },
         {
@@ -65,8 +65,10 @@ html_theme_options = {
     ],
     "show_prev_next": False,
     "pygment_dark_style": "monokai",
-    "pygment_light_style": "solarized-light"
 }
+
+extlinks = {'ndif': ('https://%s.com/ndif-team/nnsight',
+                      '%s')}
 
 html_js_files = [
     'js/custom.js',

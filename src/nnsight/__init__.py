@@ -1,11 +1,23 @@
-from functools import wraps
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+#                                                                                                                       #
+#      ::::    ::: ::::    :::  :::::::: ::::::::::: ::::::::  :::    ::: :::::::::::       :::::::       ::::::::      #
+#      :+:+:   :+: :+:+:   :+: :+:    :+:    :+:    :+:    :+: :+:    :+:     :+:          :+:   :+:     :+:    :+:     #
+#      :+:+:+  +:+ :+:+:+  +:+ +:+           +:+    +:+        +:+    +:+     +:+          +:+  :+:+            +:+     #
+#      +#+ +:+ +#+ +#+ +:+ +#+ +#++:++#++    +#+    :#:        +#++:++#++     +#+          +#+ + +:+         +#++:      #
+#      +#+  +#+#+# +#+  +#+#+#        +#+    +#+    +#+   +#+# +#+    +#+     +#+          +#+#  +#+            +#+     #
+#      #+#   #+#+# #+#   #+#+# #+#    #+#    #+#    #+#    #+# #+#    #+#     #+#          #+#   #+# #+# #+#    #+#     #
+#      ###    #### ###    ####  ######## ########### ########  ###    ###     ###           #######  ###  ########      #
+#                                                                                                                       #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 import os
+from functools import wraps
 from typing import Dict, Union
 
-import yaml
 import torch
+import yaml
+
 from .patching import *
-from .pydantics.Config import ConfigModel
+from .schema.Config import ConfigModel
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
@@ -14,7 +26,6 @@ with open(os.path.join(PATH, "config.yaml"), "r") as file:
 from .logger import logger, remote_logger
 from .models.NNsightModel import NNsight
 from .models.LanguageModel import LanguageModel
-
 from .patching import Patch, Patcher
 from .tracing.Proxy import proxy_wrapper
 
@@ -24,19 +35,17 @@ remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
 
-from inspect import getmembers, isfunction, isbuiltin
+import math
+from inspect import getmembers, isbuiltin, isfunction
 
 import einops
-import math
+
 for key, value in getmembers(einops.einops, isfunction):
     DEFAULT_PATCHER.add(Patch(einops.einops, proxy_wrapper(value), key))
 for key, value in getmembers(math, isbuiltin):
     DEFAULT_PATCHER.add(Patch(math, proxy_wrapper(value), key))
 
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.zeros), "zeros"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.ones), "ones"))
-DEFAULT_PATCHER.add(Patch(torch, proxy_wrapper(torch.rand), "rand"))
-
+# Tensor creation operations
 from torch._subclasses.fake_tensor import FakeTensor
 
 
@@ -81,7 +90,11 @@ def onehot_wrapper(fn):
 
 
 DEFAULT_PATCHER.add(
-    Patch(torch.nn.functional, onehot_wrapper(torch.nn.functional.one_hot), "one_hot")
+    Patch(
+        torch.nn.functional,
+        onehot_wrapper(torch.nn.functional.one_hot),
+        "one_hot",
+    )
 )
 
 
@@ -93,11 +106,18 @@ def noop_wrapper(fn):
     return noop
 
 
-DEFAULT_PATCHER.add(Patch(FakeTensor, noop_wrapper(FakeTensor.tolist), "tolist"))
+DEFAULT_PATCHER.add(
+    Patch(FakeTensor, noop_wrapper(FakeTensor.tolist), "tolist")
+)
 
 import warnings
-
+_str = str
 try:
+    
+    
+
+    from torch.amp.autocast_mode import autocast, is_autocast_available
+
     # Hacky patch to get around the fact this init method has no handling for 'meta' tensors.
     def autoamp_init(
         self,
@@ -106,48 +126,36 @@ try:
         enabled: bool = True,
         cache_enabled: Optional[bool] = None,
     ):
+        if not isinstance(device_type, _str):
+            raise ValueError(
+                f"Expected `device_type` of type `str`, got: `{type(device_type)}`"
+            )
+        if dtype is None:
+            if device_type == "meta":
+                dtype = torch.get_autocast_dtype("cpu")
+            else:
+                dtype = torch.get_autocast_dtype(device_type)
         if torch._jit_internal.is_scripting():
             self._enabled = enabled
             self.device = device_type
             self.fast_dtype = dtype
-            # TODO: support get_autocast_gpu/cpu_dtype
             assert dtype is not None
             return
         self.device = device_type
+        if not is_autocast_available(self.device):
+            raise RuntimeError(
+                f"User specified an unsupported autocast device_type '{self.device}'"
+            )
         self.custom_backend_name = torch._C._get_privateuse1_backend_name()
-
-        if self.device == "cuda":
-            self.fast_dtype = torch.get_autocast_gpu_dtype()
-        ### PATCH ###
-        elif self.device == "meta":
-            self.fast_dtype = torch.get_autocast_cpu_dtype()
-        ### PATCH ###
-        elif self.device == "cpu":
-            self.fast_dtype = torch.get_autocast_cpu_dtype()
-        elif self.device == "xpu":
-            self.fast_dtype = torch.xpu.get_autocast_xpu_dtype()  # type: ignore[attr-defined]
-        elif self.device == "ipu":
-            self.fast_dtype = torch.get_autocast_ipu_dtype()  # type: ignore[attr-defined]
-        elif self.device == "hpu":
-            self.fast_dtype = torch.hpu.get_autocast_hpu_dtype()  # type: ignore[attr-defined]
-        elif self.device == "xla":
-            self.fast_dtype = torch.get_autocast_xla_dtype()  # type: ignore[attr-defined]
-        elif self.device == self.custom_backend_name:
+        self.fast_dtype = torch.get_autocast_dtype(self.device)
+        if self.device == self.custom_backend_name:
             necessary_funcs = [
-                "is_autocast_enabled",
-                "set_autocast_enabled",
-                "get_autocast_dtype",
-                "set_autocast_dtype",
                 "get_amp_supported_dtype",
             ]
             message = f"Tried to use AMP with the `{self.custom_backend_name}` backend, but the backend has not "
             message += "registered a module or  the module miss some necessary funcs. The backend should register "
             message += "a module by `torch._register_device_module`, and the module must have these funcs: \n"
-            message += "`is_autocast_enabled() -> bool`, `set_autocast_enabled(bool) -> None`, "
-            message += "`get_autocast_dtype() -> torch.dtype`, `set_autocast_dtype(torch.dtype) "
-            message += (
-                "-> None` and `get_amp_supported_dtype() -> List[torch.dtype]`. \n"
-            )
+            message += "`get_amp_supported_dtype() -> List[torch.dtype]`. \n"
 
             assert hasattr(torch, self.custom_backend_name), message
             self.custom_device_mod = getattr(torch, self.custom_backend_name)
@@ -156,11 +164,6 @@ try:
                     message + f"But the func `{func}` is missing. \n"
                 )
 
-            self.fast_dtype = self.custom_device_mod.get_autocast_dtype()
-        else:
-            raise RuntimeError(
-                f"User specified an unsupported autocast device_type '{self.device}'"
-            )
         self._cache_enabled = torch.is_autocast_cache_enabled()
         if (
             enabled
@@ -182,7 +185,8 @@ try:
                 error_message = "In CPU autocast, but the target dtype is not supported. Disabling autocast.\n"
                 error_message += "CPU Autocast only supports dtype of "
                 error_message += (
-                    ", ".join(str(dtype) for dtype in supported_dtype) + " currently."
+                    ", ".join(str(dtype) for dtype in supported_dtype)
+                    + " currently."
                 )
                 warnings.warn(error_message)
                 enabled = False
@@ -213,7 +217,8 @@ try:
                 error_message = f"In {self.custom_backend_name} autocast, but the target dtype is not supported. "
                 error_message += f"Disabling autocast.\n {self.custom_backend_name} Autocast only supports dtypes of "
                 error_message += (
-                    ", ".join(str(dtype) for dtype in supported_dtype) + " currently."
+                    ", ".join(str(dtype) for dtype in supported_dtype)
+                    + " currently."
                 )
                 warnings.warn(error_message)
                 enabled = False
@@ -230,9 +235,7 @@ try:
             supported_dtype = [torch.float16, torch.bfloat16]
             if self.fast_dtype not in supported_dtype:
                 error_message = "In XLA autocast, but the target dtype is not supported. Disabling autocast.\n"
-                error_message += (
-                    "XLA Autocast only supports dtype of torch.bfloat16 currently."
-                )
+                error_message += "XLA Autocast only supports dtype of torch.bfloat16 currently."
                 warnings.warn(error_message)
                 enabled = False
         self._enabled = enabled
@@ -247,8 +250,8 @@ except:
 try:
 
     from accelerate.utils.modeling import (
-        is_npu_available,
         check_device_same,
+        is_npu_available,
         is_xpu_available,
     )
 
@@ -261,7 +264,9 @@ try:
         value: Optional[torch.Tensor] = None,
         dtype: Optional[Union[str, torch.dtype]] = None,
         fp16_statistics: Optional[torch.HalfTensor] = None,
-        tied_params_map: Optional[Dict[int, Dict[torch.device, torch.Tensor]]] = None,
+        tied_params_map: Optional[
+            Dict[int, Dict[torch.device, torch.Tensor]]
+        ] = None,
     ):
         """
         A helper function to set a given tensor (parameter of buffer) of a module on a specific device (note that doing
@@ -296,7 +301,10 @@ try:
                 module = new_module
             tensor_name = splits[-1]
 
-        if tensor_name not in module._parameters and tensor_name not in module._buffers:
+        if (
+            tensor_name not in module._parameters
+            and tensor_name not in module._buffers
+        ):
             raise ValueError(
                 f"{module} does not have a parameter or a buffer named {tensor_name}."
             )
@@ -311,16 +319,18 @@ try:
             and value.data_ptr() in tied_params_map
             and device in tied_params_map[value.data_ptr()]
         ):
-            module._parameters[tensor_name] = tied_params_map[value.data_ptr()][device]
+            module._parameters[tensor_name] = tied_params_map[value.data_ptr()][
+                device
+            ]
             return
         elif (
             tied_params_map is not None
             and old_value.data_ptr() in tied_params_map
             and device in tied_params_map[old_value.data_ptr()]
         ):
-            module._parameters[tensor_name] = tied_params_map[old_value.data_ptr()][
-                device
-            ]
+            module._parameters[tensor_name] = tied_params_map[
+                old_value.data_ptr()
+            ][device]
             return
 
         if (
@@ -361,7 +371,8 @@ try:
                 param is not None
                 and param.device.type != "cuda"
                 and torch.device(device).type == "cuda"
-                and param_cls.__name__ in ["Int8Params", "FP4Params", "Params4bit"]
+                and param_cls.__name__
+                in ["Int8Params", "FP4Params", "Params4bit"]
             ):
                 device_quantization = device
                 device = "cpu"
@@ -372,7 +383,10 @@ try:
                 device = f"xpu:{device}"
             if value is None:
                 new_value = old_value.to(device)
-                if dtype is not None and device in ["meta", torch.device("meta")]:
+                if dtype is not None and device in [
+                    "meta",
+                    torch.device("meta"),
+                ]:
                     if not str(old_value.dtype).startswith(
                         ("torch.uint", "torch.int", "torch.bool")
                     ):
@@ -417,7 +431,9 @@ try:
                         new_value.SCB = new_value.SCB.to("cpu")
                     else:
                         new_value = param_cls(
-                            new_value, requires_grad=old_value.requires_grad, **kwargs
+                            new_value,
+                            requires_grad=old_value.requires_grad,
+                            **kwargs,
                         ).to(device)
                 elif param_cls.__name__ in ["QTensor", "QBitsTensor"]:
                     new_value = torch.nn.Parameter(
@@ -436,7 +452,9 @@ try:
 
                 module._parameters[tensor_name] = new_value
                 if fp16_statistics is not None:
-                    module._parameters[tensor_name].SCB = fp16_statistics.to(device)
+                    module._parameters[tensor_name].SCB = fp16_statistics.to(
+                        device
+                    )
                     del fp16_statistics
                 # as we put the weight to meta, it doesn't have SCB attr anymore. make sure that it is not a meta weight
                 if (
@@ -513,3 +531,19 @@ except:
 
 
 DEFAULT_PATCHER.__enter__()
+
+from .contexts.GraphBasedContext import GlobalTracingContext
+
+bool = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bool
+bytes = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytes
+int = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.int
+float = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.float
+str = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.str
+complex = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.complex
+bytearray = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytearray
+tuple = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.tuple
+list = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.list
+set = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.set
+dict = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.dict
+apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
+log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
