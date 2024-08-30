@@ -97,23 +97,6 @@ Tutorials
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/future_lens.ipynb
-      :class-card: surface
-      :class-body: surface
-
-      .. raw:: html
-
-         <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-eye fa-2x"></i>
-            </div> 
-            <div>
-               <h5 class="card-title">Future Lens</h5>
-               <p class="card-text">Probe future tokens</p>
-            </div>
-         </div>
-
-   .. grid-item-card:: 
       :link: notebooks/tutorials/function_vectors.ipynb
       :class-card: surface
       :class-body: surface
