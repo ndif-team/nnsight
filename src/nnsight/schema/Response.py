@@ -44,8 +44,6 @@ class ResponseModel(BaseModel):
     received: datetime = None
     session_id: Optional[str] = None
 
-    result: Optional[Union[bytes, ResultModel]] = None
-
     def __str__(self) -> str:
         return f"{self.id} - {self.status.name}: {self.description}"
 

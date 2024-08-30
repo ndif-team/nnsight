@@ -124,6 +124,7 @@ class NNsight:
         invoker_args: Dict[str, Any] = None,
         backend: Union[Backend, str] = None,
         remote: bool = False,
+        blocking: bool = True,
         scan: bool = False,
         **kwargs: Dict[str, Any],
     ) -> Union[Tracer, Any]:
@@ -225,7 +226,7 @@ class NNsight:
         # If remote, use RemoteBackend with default url.
         elif remote:
 
-            backend = RemoteBackend()
+            backend = RemoteBackend(blocking=blocking)
 
         # By default, use LocalBackend.
         elif backend is None:
@@ -235,7 +236,7 @@ class NNsight:
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
 
-            backend = RemoteBackend(backend)
+            backend = RemoteBackend(host=backend, blocking=blocking)
 
         # Create Tracer object.
         if self._default_graph is not None:
@@ -324,7 +325,7 @@ class NNsight:
             from nnsight import LanguageModel
 
             gpt2 = LanguageModel("openai-community/gpt2)
-            
+
             class ComplexModule(torch.nn.Module):
                 def __init__(self):
                     super().__init__()
@@ -349,7 +350,7 @@ class NNsight:
                 one = l0.attachment.one.output.clone().save()
                 l0.attachment.output *= 0.0
                 edited_output = gpt2.output.logits.save()
-            
+
             print(original_output)
             print(edited_output)
         """
@@ -369,6 +370,7 @@ class NNsight:
         self,
         backend: Union[Backend, str] = None,
         remote: bool = False,
+        blocking: bool = True,
         **kwargs,
     ) -> Session:
         """Create a session context using a Session.
@@ -384,7 +386,7 @@ class NNsight:
         # If remote, use RemoteBackend with default url.
         if remote:
 
-            backend = RemoteBackend()
+            backend = RemoteBackend(blocking=blocking)
 
         # By default, use LocalBackend.
         elif backend is None:
@@ -394,7 +396,7 @@ class NNsight:
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
 
-            backend = RemoteBackend(backend)
+            backend = RemoteBackend(host=backend, blocking=blocking)
 
         session = Session(backend, self, **kwargs)
 
@@ -504,7 +506,7 @@ class NNsight:
         self._model = self._model.to(*args, **kwargs)
 
         return self
-    
+
     def clear_edits(self) -> None:
         """Resets the default graph of this model."""
         self._default_graph = None
@@ -632,10 +634,10 @@ class NNsight:
         return batched_inputs
 
     def _shallow_copy(self) -> Self:
-        """ Creates a new instance copy of the same class with the all the attributes of the original instance.
+        """Creates a new instance copy of the same class with the all the attributes of the original instance.
 
         Returns:
-            Self: NNsightModel        
+            Self: NNsightModel
         """
         copy = self.__class__.__new__(self.__class__)
         for key, value in self.__dict__.items():
