@@ -14,7 +14,6 @@ from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
 
 if TYPE_CHECKING:
-    from ..intervention import InterventionProxy
     from ..models.mixins import RemoteableMixin
     from ..models.NNsightModel import NNsight
 
