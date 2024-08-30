@@ -1,0 +1,159 @@
+<!-- Styles which override PyData site-wide themeing for the front page. -->
+<style>
+    .bd-main .bd-content .bd-article-container {
+        max-width: 100%;  /* default is 60em */
+    }
+
+    .bd-article-container {
+        padding-left: 0px !important;
+        padding-right: 0px !important;
+        padding-bottom: 0px !important;
+    }
+
+    .bd-page-width {
+        max-width: 100%;  /* default is 88rem */
+    }
+
+    .bd-header__inner {
+        max-width: 88rem !important;
+    }
+
+    .bd-footer__inner {
+        max-width: 88rem !important;
+    }
+
+    .bd-footer {
+        background: var(--pst-color-background) !important;
+    }
+</style>
+
+<div class="fixed-background"></div>
+
+<section class="hero col-lg-6 col-8 container">
+    <div class="row h-100 align-items-center">
+        <div class="col-md-6">
+            <h1 class="display-5 fw-bold lh-1 mb-3">Interpretable Neural Networks</h1>
+            <p class="lead">NNsight (/ɛn.saɪt/) is a package for interpreting and manipulating the internals of models.</p>
+            <div class="d-grid gap-2 d-md-flex">
+                <a href="start" role="button" class="btn btn-primary primary btn-md px-4">Start</a>
+                <a href="documentation" role="button" class="btn btn-outline-secondary secondary btn-md px-4">Docs</a>
+                <a href="features" role="button" class="btn btn-outline-secondary btn-md secondary px-4">Tutorials</a>
+                <a href="about" role="button" class="btn btn-outline-secondary btn-md secondary px-4">About</a>
+            </div>
+        </div>
+        <div class="col-md-6 d-none d-md-block text-center">
+            <img src="_static/images/nnsight_logo.svg" class="img-fluid transparent hero-image" alt="NNsight Logo" loading="lazy">
+        </div>
+    </div>
+</section>
+
+<div class="surface pb-5">
+<section class="col-lg-6 col-8 container pb-5">
+
+
+        <div class="row g-5 align-items-center" style="height: 45vh">
+
+            <div class="col-md-5">
+                <div style="width: 100%; margin: auto;">
+                    <h3 class="fw-bold lh-1 mb-3 mt-0">Wrap Any PyTorch Model</h3>
+                    <p class="lead" id="myElement">The NNsight class object wraps a given PyTorch model, enabling tracing capabilities.</p>
+                    <a href="start">Get Started →</a>
+                </div>
+            </div>
+
+            <div class="col-md-7 d-none d-md-block">
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">nnsight</span> <span class="kn">import</span> <span class="n">NNsight</span><span class="p">,</span> <span class="n">LanguageModel</span>
+
+<span class="n">net</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Sequential</span><span class="p">(</span><span class="n">OrderedDict</span><span class="p">([</span>
+    <span class="p">(</span><span class="s1">&#39;layer1&#39;</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">input_size</span><span class="p">,</span> <span class="n">hidden_dims</span><span class="p">)),</span>
+    <span class="p">(</span><span class="s1">&#39;layer2&#39;</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Linear</span><span class="p">(</span><span class="n">hidden_dims</span><span class="p">,</span> <span class="n">output_size</span><span class="p">)),</span>
+<span class="p">]))</span>
+
+<span class="n">model</span> <span class="o">=</span> <span class="n">NNsight</span><span class="p">(</span><span class="n">net</span><span class="p">)</span>
+
+<span class="c1"># or</span>
+
+<span class="n">transformer</span> <span class="o">=</span> <span class="n">LanguageModel</span><span class="p">(</span><span class="s1">&#39;openai-community/gpt2&#39;</span><span class="p">)</span>
+</pre></div>
+            </div>
+
+        </div>
+        <div class="row g-5 align-items-center" style="height: 35vh">
+
+            <div class="col-md-5">
+                <div style="width: 100%; margin: auto;">
+                <h3 class="fw-bold lh-1 mb-3 mt-0">Access Hidden States</h3>
+                <p class="lead" id="myElement">Easily expose Module inputs and outputs.</p>
+                <a href="notebooks/tutorials/walkthrough">Walkthrough →</a>
+            </div>
+            </div>
+
+            <div class="col-md-7 d-none d-md-block">
+
+<div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">(</span><span class="s1">&#39;Who invented neural networks?&#39;</span><span class="p">):</span>
+
+    <span class="n">hidden_state_output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer1</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+    <span class="n">hidden_state_input</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">layer2</span><span class="o">.</span><span class="n">input</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+    <span class="n">output</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">hidden_state_output</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">hidden_state_input</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+</pre></div>
+
+            </div>
+        </div>
+        <div class="row g-5 align-items-center" style="height: 45vh">
+            <div class="col-md-5">
+                <div style="width: 100%; margin:auto;">
+                    <h3 class="fw-bold lh-1 mb-3 mt-0">Develop Complex Interventions</h3>
+                    <p class="lead" id="myElement">Edit Module outputs and measure effects.</p>
+                    <a href="tutorials">Tutorials →</a>
+                </div>
+            </div>
+            <!-- CODE BLOCK NUMBER THREE -->
+            <div class="col-md-7 d-none d-md-block">
+<div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">model</span><span class="o">.</span><span class="n">trace</span><span class="p">()</span> <span class="k">as</span> <span class="n">tracer</span><span class="p">:</span>
+
+    <span class="k">with</span> <span class="n">tracer</span><span class="o">.</span><span class="n">invoke</span><span class="p">(</span><span class="s1">&#39;The Eiffel Tower is in the city of&#39;</span><span class="p">):</span>
+
+        <span class="n">model</span><span class="o">.</span><span class="n">transformer</span><span class="o">.</span><span class="n">h</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">mlp</span><span class="o">.</span><span class="n">output</span><span class="p">[</span><span class="mi">0</span><span class="p">][:]</span> <span class="o">=</span> <span class="mi">0</span>
+
+        <span class="n">intervention</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">lm_head</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+    <span class="k">with</span> <span class="n">tracer</span><span class="o">.</span><span class="n">invoke</span><span class="p">(</span><span class="s1">&#39;The Eiffel Tower is in the city of&#39;</span><span class="p">):</span>
+
+        <span class="n">original</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">lm_head</span><span class="o">.</span><span class="n">output</span><span class="o">.</span><span class="n">argmax</span><span class="p">(</span><span class="n">dim</span><span class="o">=-</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">save</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+</pre></div>
+            </div>
+            <!-- END OF CODE BLOCK NUMBER THREE -->
+        </div>
+</section>
+</div>
+
+
+<script>
+
+    // Fix navbar to top of page
+    var navbar = document.querySelector('.navbar');
+
+    if (navbar) {
+        navbar.style.position = 'fixed';
+    } else {
+        console.log(".navbar element does not exist.");
+    }
+
+    // Remove article padding so content background is flush with sides
+    var article = document.querySelector('.bd-article');
+
+    if (article) {
+        article.style.paddingTop = '0';
+        article.style.paddingLeft = '0';
+    } else {
+        console.log(".article element does not exist.");
+    }
+
+</script>

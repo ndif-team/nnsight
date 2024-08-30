@@ -13,35 +13,39 @@ html[data-theme="dark"] {
     --pst-color-heading-color: #CECDC3;
     --pst-color-border: #1C1B1A;
     --pst-color-panel-background: #1C1B1A;
+    --output-bg-color: #343331;
 }
 
 html[data-theme="light"] {
-    --pst-color-secondary: #ce5d97;
+    --output-bg-color: #d8ebfb;
     --pst-color-primary: #4385be;
+    --pst-color-secondary: #ce5d97;
     --pst-color-primary-highlight: #ce5d97;
-    --pst-color-background: #FFFCF0;
-    --pst-color-on-background: #F2F0E5;
-    --pst-color-surface: #E6E4D9;
-    --pst-color-on-surface: #100F0F;
-    --pst-color-text-base: #100F0F;
-    --pst-color-text-muted: #100F0F;
-    --pst-color-heading-color: #100F0F;
-    --pst-color-border: #F2F0E5;
-    --pst-color-panel-background: #F2F0E5;
 }
 
-/* Editing the default width for pydata content */
 
-.bd-main .bd-content .bd-article-container {
-    max-width: 80%;  /* default is 60em */
+/* Notebook h1 section heading styles */
+.nb-heading {
+    margin-top: 2.5rem;
 }
 
-/* Front page buttons and hero */
-
-.hero {
-    height: 60vh !important;
+/* Remove the shadow on the pydata navbar */
+.bd-header {
+    box-shadow: none !important;
 }
 
+/* Hide the theme version note at the bottom of the page */
+.theme-version {
+    visibility: hidden;
+}
+
+/* code cell output */
+.output_area {
+    background-color: var(--output-bg-color);
+    margin-left: 10px !important;
+}
+
+/* Coloring, mostly for buttons */
 .primary {
     background-color : var(--pst-color-primary) !important;
     border-color : var(--pst-color-primary) !important;
@@ -58,23 +62,4 @@ html[data-theme="light"] {
     background-color : transparent !important;
     border-color : var(--pst-color-on-surface) !important;
     color: var(--pst-color-on-surface) !important;
-}
-
-
-/* Hide the theme version note at the bottom of the page */
-
-.theme-version {
-    visibility: hidden;
-}
-
-.text {
-    color : var(--pst-color-on-surface) !important;
-}
-
-/* Default surface style for cards */
-
-.surface {
-    background-color : var(--pst-color-surface) !important;
-    color : var(--pst-color-on-surface) !important;
-    border-color: var(--pst-color-surface) !important;
 }

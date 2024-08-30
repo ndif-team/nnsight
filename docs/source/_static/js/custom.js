@@ -22,12 +22,13 @@ function initVanta() {
       }
       
       const darkMode = document.documentElement.dataset.theme === 'dark';
-      const color = darkMode ? 0xCECDC3 : 0x100F0F; // Example dark mode color
-      const color2 = darkMode ? 0xCECDC3 : 0x100F0F; // Adjust color2 for dark mode as needed
-      const backgroundColor = darkMode ? 0x100F0F : 0xFFFCF0; // Adjust background color for dark mode
+      const color = darkMode ? 0xCECDC3 : 0x000000; // Example dark mode color
+      const color2 = darkMode ? 0xCECDC3 : 0x000000; // Adjust color2 for dark mode as needed
+      const backgroundColor = darkMode ? 0x100F0F : 0xFFFFFF; // Adjust background color for dark mode
+      const size = darkMode ? 0.50 : 1.00; // Adjust size for dark mode as needed
 
       vantaEffect = VANTA.DOTS({
-        el: "#canvas",
+        el: ".fixed-background",
         mouseControls: false,
         touchControls: false,
         gyroControls: false,
@@ -38,7 +39,7 @@ function initVanta() {
         color: color,
         color2: color2,
         backgroundColor: backgroundColor,
-        size: 0.50,
+        size: size,
         spacing: 10.00,
         showLines: false
       });
@@ -61,41 +62,6 @@ var observer = new MutationObserver(function(mutations) {
 // Start observing the document element for attribute changes
 observer.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
 
-
-
-document.addEventListener('DOMContentLoaded', (event) => {
-  var listItems = document.querySelectorAll('#list-tab .list-group-item');
-  listItems.forEach(function (listItem) {
-    listItem.addEventListener('click', function (e) {
-      e.preventDefault();
-      var tabPaneId = this.getAttribute('href');
-
-      // Remove active class from all list items
-      listItems.forEach(function (item) {
-        item.classList.remove('active');
-      });
-
-      // Add active class to the clicked list item
-      this.classList.add('active');
-
-      // Hide all tab panes
-      var tabPanes = document.querySelectorAll('.tab-content .tab-pane');
-      tabPanes.forEach(function (tabPane) {
-        tabPane.classList.remove('show');
-        tabPane.classList.remove('active');
-      });
-
-      // Show the clicked tab pane
-      var activeTabPane = document.querySelector(tabPaneId);
-      activeTabPane.classList.add('active');
-
-      // We need to manually add 'show' class after a slight delay to trigger fade effect
-      setTimeout(function () {
-        activeTabPane.classList.add('show');
-      }, 150); // Adjust delay as needed
-    });
-  });
-});
 
 document.addEventListener("DOMContentLoaded", function() {
   fetch("https://ndif.dev/ping")
