@@ -10,17 +10,16 @@ The :class:`HookModel <nnsight.intervention.HookModel>` provides a context manag
 from __future__ import annotations
 
 import inspect
-from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, Dict, List, Union
 from collections import defaultdict
+from contextlib import AbstractContextManager
+from typing import Any, Callable, Collection, Dict, List, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
-from .contexts.Conditional import Conditional
-
 from . import util
+from .contexts.Conditional import Conditional
 from .tracing import protocols
 from .tracing.Graph import Graph
 from .tracing.Node import Node
@@ -183,7 +182,9 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("shape")
 
-        return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
+        return util.apply(
+            self.node.proxy_value, lambda x: x.shape, torch.Tensor
+        )
 
     @property
     def device(self) -> Collection[torch.device]:
@@ -202,7 +203,9 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("device")
 
-        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
+        return util.apply(
+            self.node.proxy_value, lambda x: x.device, torch.Tensor
+        )
 
     @property
     def dtype(self) -> Collection[torch.device]:
@@ -221,7 +224,9 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("dtype")
 
-        return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
+        return util.apply(
+            self.node.proxy_value, lambda x: x.dtype, torch.Tensor
+        )
 
 
 class InterventionProtocol(Protocol):
@@ -417,7 +422,9 @@ class InterventionProtocol(Protocol):
 
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
-                if call_iter != intervention_handler.count(intervention_node_name):
+                if call_iter != intervention_handler.count(
+                    intervention_node_name
+                ):
 
                     continue
 
