@@ -5,12 +5,15 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from diffusers import DiffusionPipeline, SchedulerMixin
 from PIL import Image
+from torch._guards import detect_fake_mode
 from transformers import BatchEncoding, CLIPTextModel, CLIPTokenizer
+from typing_extensions import Self
 
+from .. import util
+from ..envoy import Envoy
 from .mixins import GenerationMixin
 from .NNsightModel import NNsight
-from torch._guards import detect_fake_mode
-from .. import util
+
 
 class Diffuser(util.WrapperModule):
     def __init__(self, *args, **kwargs) -> None:
@@ -23,7 +26,7 @@ class Diffuser(util.WrapperModule):
                 setattr(self, key, value)
 
         self.tokenizer = self.pipeline.tokenizer
-                
+
     @torch.no_grad()
     def scan(
         self,
@@ -123,7 +126,7 @@ class Diffuser(util.WrapperModule):
         latent_model_input = (
             torch.cat([latents] * 2) if do_classifier_free_guidance else latents
         )
-        
+
         # predict the noise residual
         noise_pred = self.pipeline.unet(
             latent_model_input,
@@ -150,8 +153,12 @@ class Diffuser(util.WrapperModule):
 
 
 class DiffusionModel(GenerationMixin, NNsight):
+
+    def __new__(cls, *args, **kwargs) -> Self | Envoy:
+        return object.__new__(cls)
+
     def __init__(self, *args, **kwargs) -> None:
-        
+
         self._model: Diffuser = None
 
         super().__init__(*args, **kwargs)
@@ -178,10 +185,10 @@ class DiffusionModel(GenerationMixin, NNsight):
         self,
         inputs: Union[str, List[str]],
     ) -> Any:
-        
+
         if isinstance(inputs, str):
             inputs = [inputs]
-        
+
         return (inputs,), len(inputs)
 
     # def _forward(self, inputs, *args, n_imgs=1, img_size=512, **kwargs) -> None:
@@ -197,38 +204,38 @@ class DiffusionModel(GenerationMixin, NNsight):
     #         encoder_hidden_states=text_embeddings,
     #     ).sample
 
-    def _batch_inputs(self,         batched_inputs: Optional[Dict[str, Any]],
-        prepared_inputs: BatchEncoding,) -> torch.Tensor:
-        
+    def _batch_inputs(
+        self,
+        batched_inputs: Optional[Dict[str, Any]],
+        prepared_inputs: BatchEncoding,
+    ) -> torch.Tensor:
+
         if batched_inputs is None:
-            
+
             return prepared_inputs
-        
+
         return batched_inputs + prepared_inputs
-    
+
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
         device = next(self._model.parameters()).device
 
         return self._model.unet(
             prepared_inputs,
-            *args
-            **kwargs,
+            *args**kwargs,
         )
 
-    def _execute_generate(
-        self, prepared_inputs: Any, *args, **kwargs
-    ):
+    def _execute_generate(self, prepared_inputs: Any, *args, **kwargs):
         device = next(self._model.parameters()).device
-        
+
         if detect_fake_mode(prepared_inputs):
-            
+
             output = self._model.scan(*prepared_inputs)
-            
+
         else:
 
             output = self._model.pipeline(prepared_inputs, *args, **kwargs)
-            
+
         output = self._model(output)
 
         return output

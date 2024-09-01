@@ -18,6 +18,8 @@ from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
 
+from nnsight.envoy import Envoy
+
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
 from . import NNsight
@@ -48,9 +50,7 @@ class TokenIndexer:
 
         return self.proxy[:, key]
 
-    def __setitem__(
-        self, key: int, value: Union[LanguageModelProxy, Any]
-    ) -> None:
+    def __setitem__(self, key: int, value: Union[LanguageModelProxy, Any]) -> None:
         key = self.convert_idx(key)
 
         self.proxy[:, key] = value
@@ -134,6 +134,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
     proxy_class = LanguageModelProxy
 
+    def __new__(cls, *args, **kwargs) -> Self | Envoy:
+        return object.__new__(cls)
+
     def __init__(
         self,
         model_key: Union[str, torch.nn.Module],
@@ -176,7 +179,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                 repo_id, config=config, **tokenizer_kwargs
             )
 
-            if not hasattr(self.tokenizer.pad_token, 'pad_token'):
+            if not hasattr(self.tokenizer.pad_token, "pad_token"):
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
             if (
@@ -235,9 +238,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             inputs = [{"input_ids": ids} for ids in inputs]
             return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
-        return self.tokenizer(
-            inputs, return_tensors="pt", padding=True, **kwargs
-        )
+        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
 
     def _prepare_inputs(
         self,
@@ -268,9 +269,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                         ai, -len(attn_mask) :
                     ] = attn_mask
 
-                new_inputs["attention_mask"] = tokenized_inputs[
-                    "attention_mask"
-                ]
+                new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
 
             if "labels" in inputs:
                 labels = self._tokenize(inputs["labels"], **kwargs)
@@ -312,9 +311,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         if "labels" in prepared_inputs:
             batched_inputs["labels"].extend(prepared_inputs["labels"])
         if "attention_mask" in prepared_inputs:
-            batched_inputs["attention_mask"].extend(
-                prepared_inputs["attention_mask"]
-            )
+            batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
 
         return (batched_inputs,)
 
@@ -347,9 +344,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {
-                "repo_id": self._model_key
-            }  # , "torch_dtype": str(self._model.dtype)}
+            {"repo_id": self._model_key}  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
