@@ -53,14 +53,13 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         Returns:
             InterventionProxy: Proxy of applying that function.
         """
-        
-        
+
         proxy_value = inspect._empty
-                
+
         if validate is False:
-            
+
             proxy_value = None
-        
+
         return self.graph.create(
             target=target,
             proxy_value=proxy_value,
@@ -182,12 +181,12 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
         """NNsight helper method to create a traceable list."""
 
         return self.apply(list, *args, **kwargs)
-    
+
     def set(self, *args, **kwargs) -> InterventionProxy:
         """NNsight helper method to create a traceable set."""
 
         return self.apply(set, *args, **kwargs)
-    
+
     def dict(self, *args, **kwargs) -> InterventionProxy:
         """NNsight helper method to create a traceable dictionary."""
 
@@ -247,15 +246,17 @@ from inspect import getmembers, isclass
 from torch.utils import data
 
 
-def global_patch(fn):
+def global_patch(fn, applied_fn=None):
+
+    if applied_fn is None:
+
+        applied_fn = fn
 
     @wraps(fn)
     def inner(*args, **kwargs):
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
-            fn,
-            *args,
-            **kwargs
+            applied_fn, *args, **kwargs
         )
 
     return inner
@@ -272,8 +273,18 @@ class GlobalTracingContext(GraphBasedContext):
     TORCH_HANDLER: GlobalTracingContext.GlobalTracingTorchHandler
     PATCHER: Patcher = Patcher(
         [
-            Patch(torch.nn, global_patch(torch.nn.Parameter), "Parameter"),
-            Patch(data, global_patch(data.DataLoader), "DataLoader"),   
+            Patch(
+                torch.nn.Parameter,
+                global_patch(
+                    torch.nn.Parameter.__init__, applied_fn=torch.nn.Parameter
+                ),
+                "__init__",
+            ),
+            Patch(
+                data.DataLoader,
+                global_patch(data.DataLoader.__init__, applied_fn=data.DataLoader),
+                "__init__",
+            ),
             Patch(torch, global_patch(torch.arange), "arange"),
             Patch(torch, global_patch(torch.empty), "empty"),
             Patch(torch, global_patch(torch.eye), "eye"),
@@ -288,7 +299,7 @@ class GlobalTracingContext(GraphBasedContext):
             Patch(torch, global_patch(torch.zeros), "zeros"),
         ]
         + [
-            Patch(torch.optim, global_patch(value), key)
+            Patch(value, global_patch(value.__init__, applied_fn=value), "__init__")
             for key, value in getmembers(torch.optim, isclass)
             if issubclass(value, torch.optim.Optimizer)
         ]
@@ -304,9 +315,7 @@ class GlobalTracingContext(GraphBasedContext):
 
             if "_VariableFunctionsClass" in func.__qualname__:
                 return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
-                    func,
-                    *args,
-                    **kwargs
+                    func, *args, **kwargs
                 )
 
             return func(*args, **kwargs)
@@ -391,9 +400,7 @@ class GlobalTracingContext(GraphBasedContext):
 
         assert GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph is None
 
-        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = (
-            graph_based_context.graph
-        )
+        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = graph_based_context.graph
 
         GlobalTracingContext.TORCH_HANDLER.__enter__()
         GlobalTracingContext.PATCHER.__enter__()
@@ -440,6 +447,4 @@ class GlobalTracingContext(GraphBasedContext):
 
 
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()
-GlobalTracingContext.TORCH_HANDLER = (
-    GlobalTracingContext.GlobalTracingTorchHandler()
-)
+GlobalTracingContext.TORCH_HANDLER = GlobalTracingContext.GlobalTracingTorchHandler()
