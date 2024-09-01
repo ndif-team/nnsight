@@ -71,6 +71,10 @@ class NNsight:
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
 
+    # For type hinting Envoy
+    def __new__(cls, *args, **kwargs) -> Self | Envoy:
+        return super().__new__(cls)
+
     def __init__(
         self,
         model_key: Union[str, torch.nn.Module],
@@ -79,7 +83,6 @@ class NNsight:
         meta_buffers: bool = True,
         **kwargs,
     ) -> None:
-        super().__init__()
 
         self._model_key = model_key
 
@@ -457,9 +460,7 @@ class NNsight:
             intervention_graph, batch_groups, batch_size
         )
 
-        module_paths = InterventionProtocol.get_interventions(
-            intervention_graph
-        ).keys()
+        module_paths = InterventionProtocol.get_interventions(intervention_graph).keys()
 
         with HookHandler(
             self._model,
@@ -522,15 +523,13 @@ class NNsight:
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
-        if key not in ("_model", "_model_key") and isinstance(
-            value, torch.nn.Module
-        ):
+        if key not in ("_model", "_model_key") and isinstance(value, torch.nn.Module):
 
             setattr(self._envoy, key, value)
 
         else:
 
-            super().__setattr__(key, value)
+            object.__setattr__(self, key, value)
 
     def __getattr__(self, key: Any) -> Union[Envoy, InterventionProxy, Any]:
         """Wrapper of ._envoy's attributes to access module's inputs and outputs.
@@ -560,9 +559,7 @@ class NNsight:
 
             return AutoModel.from_config(config, trust_remote_code=True)
 
-        return accelerate.load_checkpoint_and_dispatch(
-            self._model, repo_id, **kwargs
-        )
+        return accelerate.load_checkpoint_and_dispatch(self._model, repo_id, **kwargs)
 
     def _execute(self, *prepared_inputs: Any, **kwargs) -> Any:
         """Virtual method to run the underlying ._model with some inputs.

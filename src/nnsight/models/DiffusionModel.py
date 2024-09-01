@@ -5,8 +5,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from diffusers import DiffusionPipeline
 from transformers import BatchEncoding
+from typing_extensions import Self
 
 from .. import util
+from ..envoy import Envoy
 from .mixins import GenerationMixin
 from .NNsightModel import NNsight
 
@@ -25,6 +27,10 @@ class Diffuser(util.WrapperModule):
 
 
 class DiffusionModel(GenerationMixin, NNsight):
+
+    def __new__(cls, *args, **kwargs) -> Self | Envoy:
+        return object.__new__(cls)
+
     def __init__(self, *args, **kwargs) -> None:
 
         self._model: Diffuser = None
