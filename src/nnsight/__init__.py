@@ -547,3 +547,4 @@ set = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.set
 dict = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.dict
 apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
 log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
+cond = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.cond
