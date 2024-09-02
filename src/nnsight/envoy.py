@@ -17,7 +17,7 @@ class Envoy:
     Proxies of the underlying module's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:
-        _module_path (str): String representing the attribute path of this Envoy's module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsight on initialization of meta model.
+        path (str): String representing the attribute path of this Envoy's module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsight on initialization of meta model.
         _fake_outputs (List[torch.Tensor]): List of 'meta' tensors built from the outputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
         _fake_inputs (List[torch.Tensor]): List of 'meta' tensors built from the inputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
         output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this Envoy's module. Reset on forward pass.
@@ -28,7 +28,7 @@ class Envoy:
 
     def __init__(self, module: torch.nn.Module, module_path: str = ""):
 
-        self._module_path = module_path
+        self.path = module_path
 
         self._fake_outputs: List[torch.Tensor] = []
         self._fake_inputs: List[torch.Tensor] = []
@@ -77,7 +77,7 @@ class Envoy:
             name (str): name of envoy/attribute.
         """
 
-        envoy = Envoy(module, module_path=f"{self._module_path}.{name}")
+        envoy = Envoy(module, module_path=f"{self.path}.{name}")
 
         self._sub_envoys.append(envoy)
 
@@ -240,7 +240,7 @@ class Envoy:
         return self
 
     def modules(
-        self, include_fn: Callable = None, names: bool = False, envoys: List = None
+        self, include_fn: Callable[[Envoy], bool] = None, names: bool = False, envoys: List = None
     ) -> List[Envoy]:
         """Returns all Envoys in the Envoy tree.
 
@@ -262,7 +262,7 @@ class Envoy:
 
         if included:
             if names:
-                envoys.append((self._module_path, self))
+                envoys.append((self.path, self))
             else:
                 envoys.append(self)
 
@@ -425,7 +425,7 @@ class Envoy:
             hook = True
 
         return protocols.ApplyModuleProtocol.add(
-            self._tracer.graph, self._module_path, *args, hook=hook, **kwargs
+            self._tracer.graph, self.path, *args, hook=hook, **kwargs
         )
 
     @property
@@ -453,7 +453,7 @@ class Envoy:
             else:
                 fake_output = self._fake_outputs[self._call_iter]
 
-            module_path = f"{self._module_path}.output"
+            module_path = f"{self.path}.output"
 
             self._output = InterventionProtocol.add(
                 self._tracer.graph,
@@ -505,7 +505,7 @@ class Envoy:
             else:
                 fake_input = self._fake_inputs[self._call_iter]
 
-            module_path = f"{self._module_path}.input"
+            module_path = f"{self.path}.input"
 
             self._input = InterventionProtocol.add(
                 self._tracer.graph,

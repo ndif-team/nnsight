@@ -77,22 +77,6 @@ Features
             </div>
          </div>
 
-   .. grid-item-card:: 
-      :link: notebooks/features/token_indexing.ipynb
-      :class-card: surface
-      :class-body: surface
-
-      .. raw:: html
-
-         <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-regular fa-object-ungroup fa-2x"></i>
-            </div> 
-            <div>
-               <h5 class="card-title">Multi-Token Indexing</h5>
-               <p class="card-text">Easy token indexing</p>
-            </div>
-         </div>
 
    .. grid-item-card:: 
       :link: notebooks/features/operations.ipynb
