@@ -246,20 +246,28 @@ from inspect import getmembers, isclass
 from torch.utils import data
 
 
-def global_patch(fn, applied_fn=None):
+def global_patch(root, name: str) -> Patch:
 
-    if applied_fn is None:
-
-        applied_fn = fn
+    fn = getattr(root, name)
 
     @wraps(fn)
     def inner(*args, **kwargs):
 
-        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
-            applied_fn, *args, **kwargs
-        )
+        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(fn, *args, **kwargs)
 
-    return inner
+    return Patch(root, inner, name)
+
+
+def global_patch_class(cls: type) -> Patch:
+
+    fn = cls.__new__
+
+    @wraps(fn)
+    def inner(cls, *args, **kwargs):
+
+        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(cls, *args, **kwargs)
+
+    return Patch(cls, inner, "__new__")
 
 
 class GlobalTracingContext(GraphBasedContext):
@@ -273,33 +281,23 @@ class GlobalTracingContext(GraphBasedContext):
     TORCH_HANDLER: GlobalTracingContext.GlobalTracingTorchHandler
     PATCHER: Patcher = Patcher(
         [
-            Patch(
-                torch.nn.Parameter,
-                global_patch(
-                    torch.nn.Parameter.__init__, applied_fn=torch.nn.Parameter
-                ),
-                "__init__",
-            ),
-            Patch(
-                data.DataLoader,
-                global_patch(data.DataLoader.__init__, applied_fn=data.DataLoader),
-                "__init__",
-            ),
-            Patch(torch, global_patch(torch.arange), "arange"),
-            Patch(torch, global_patch(torch.empty), "empty"),
-            Patch(torch, global_patch(torch.eye), "eye"),
-            Patch(torch, global_patch(torch.full), "full"),
-            Patch(torch, global_patch(torch.linspace), "linspace"),
-            Patch(torch, global_patch(torch.logspace), "logspace"),
-            Patch(torch, global_patch(torch.ones), "ones"),
-            Patch(torch, global_patch(torch.rand), "rand"),
-            Patch(torch, global_patch(torch.randint), "randint"),
-            Patch(torch, global_patch(torch.randn), "randn"),
-            Patch(torch, global_patch(torch.randperm), "randperm"),
-            Patch(torch, global_patch(torch.zeros), "zeros"),
+            global_patch_class(torch.nn.Parameter),
+            global_patch_class(data.DataLoader),
+            global_patch(torch, "arange"),
+            global_patch(torch, "empty"),
+            global_patch(torch, "eye"),
+            global_patch(torch, "full"),
+            global_patch(torch, "linspace"),
+            global_patch(torch, "logspace"),
+            global_patch(torch, "ones"),
+            global_patch(torch, "rand"),
+            global_patch(torch, "randint"),
+            global_patch(torch, "randn"),
+            global_patch(torch, "randperm"),
+            global_patch(torch, "zeros"),
         ]
         + [
-            Patch(value, global_patch(value.__init__, applied_fn=value), "__init__")
+            global_patch_class(value)
             for key, value in getmembers(torch.optim, isclass)
             if issubclass(value, torch.optim.Optimizer)
         ]
