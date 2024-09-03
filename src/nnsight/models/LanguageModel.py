@@ -175,6 +175,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             if tokenizer_kwargs is None:
                 tokenizer_kwargs = {}
 
+            if "padding_side" not in tokenizer_kwargs:
+                tokenizer_kwargs["padding_side"] = "left"
+
             self.tokenizer = AutoTokenizer.from_pretrained(
                 repo_id, config=config, **tokenizer_kwargs
             )
