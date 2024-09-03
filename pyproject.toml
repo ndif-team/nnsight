@@ -23,7 +23,7 @@ dependencies = [
     "python-socketio[client]",
     "tokenizers>=0.13.0",
     "pydantic>=2.4.0",
-    "torch>=2.1.0",
+    "torch>=2.4.0",
     "sentencepiece",
     "torchvision",
     "accelerate",
