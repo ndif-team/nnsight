@@ -253,19 +253,31 @@ def global_patch(root, name: str) -> Patch:
     @wraps(fn)
     def inner(*args, **kwargs):
 
-        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(fn, *args, **kwargs)
+        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
+            fn, *args, **kwargs
+        )
 
     return Patch(root, inner, name)
 
 
 def global_patch_class(cls: type) -> Patch:
 
+    if cls.__new__ is object.__new__:
+
+        def super_new(cls, *args, **kwargs):
+
+            return object.__new__(cls)
+
+        cls.__new__ = super_new
+
     fn = cls.__new__
 
     @wraps(fn)
     def inner(cls, *args, **kwargs):
 
-        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(cls, *args, **kwargs)
+        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(
+            cls, *args, **kwargs
+        )
 
     return Patch(cls, inner, "__new__")
 
@@ -398,7 +410,9 @@ class GlobalTracingContext(GraphBasedContext):
 
         assert GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph is None
 
-        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = graph_based_context.graph
+        GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph = (
+            graph_based_context.graph
+        )
 
         GlobalTracingContext.TORCH_HANDLER.__enter__()
         GlobalTracingContext.PATCHER.__enter__()
@@ -445,4 +459,6 @@ class GlobalTracingContext(GraphBasedContext):
 
 
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()
-GlobalTracingContext.TORCH_HANDLER = GlobalTracingContext.GlobalTracingTorchHandler()
+GlobalTracingContext.TORCH_HANDLER = (
+    GlobalTracingContext.GlobalTracingTorchHandler()
+)
