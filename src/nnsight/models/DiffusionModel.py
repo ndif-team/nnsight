@@ -28,7 +28,7 @@ class Diffuser(util.WrapperModule):
 
 class DiffusionModel(GenerationMixin, NNsight):
 
-    def __new__(cls, *args, **kwargs) -> Self | Envoy:
+    def __new__(cls, *args, **kwargs) -> Self | Envoy | Diffuser:
         return object.__new__(cls)
 
     def __init__(self, *args, **kwargs) -> None:
@@ -72,9 +72,9 @@ class DiffusionModel(GenerationMixin, NNsight):
 
         if batched_inputs is None:
 
-            return prepared_inputs
+            return (prepared_inputs, )
 
-        return batched_inputs + prepared_inputs
+        return (batched_inputs + prepared_inputs, )
 
     def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
 
@@ -96,8 +96,11 @@ class DiffusionModel(GenerationMixin, NNsight):
 
         if seed is not None:
 
-            generator = generator.manual_seed(seed)
-
+            if isinstance(prepared_inputs, list):
+                generator = [torch.Generator().manual_seed(seed) for _ in range(len(prepared_inputs))]
+            else:
+                generator = generator.manual_seed(seed)
+            
         output = self._model.pipeline(
             prepared_inputs, *args, generator=generator, **kwargs
         )
