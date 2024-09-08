@@ -184,6 +184,8 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
             if not hasattr(self.tokenizer.pad_token, "pad_token"):
                 self.tokenizer.pad_token = self.tokenizer.eos_token
+                
+        if self._model is None:
 
             if (
                 patch_llama_scan
