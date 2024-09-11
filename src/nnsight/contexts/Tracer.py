@@ -66,6 +66,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         # Module Envoys need to know about the current Tracer to create the correct proxies.
         self.model._envoy._set_tracer(weakref.proxy(self))
 
+        self.logged_request = None
+
     def __getattr__(self, key: Any) -> Any:
         """Wrapper of .model._envoy's attributes to access module Envoy inputs and outputs.
 
@@ -176,9 +178,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
     def remote_backend_handle_result_value(self, value: Dict[str, Any]) -> None:
 
-        # TODO : graph mismatch handle. hash json ?
-        for node_name, node_value in value.items():
-            self.graph.nodes[node_name]._value = node_value
+        self.logged_request = value
 
     def remote_backend_cleanup(self):
         

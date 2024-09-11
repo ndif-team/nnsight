@@ -247,33 +247,7 @@ class RemoteBackend(LocalBackend):
             request (RequestModel): Request.
         """
 
-        from ...schema.Response import ResponseModel
-
-        # Create a socketio connection to the server.
-        with socketio.SimpleClient(
-            logger=logger, reconnection_attempts=10
-        ) as sio:
-            # Connect
-            sio.connect(
-                self.ws_address,
-                socketio_path="/ws/socket.io",
-                transports=["websocket"],
-                wait_timeout=10,
-            )
-
-            # Give request session ID so server knows to respond via websockets to us.
-            request.session_id = sio.sid
-
-            # Submit request via
-            self.submit_request(request)
-
-            # Loop until
-            while True:
-                if (
-                    self.handle_response(sio.receive()[1]).status
-                    == ResponseModel.JobStatus.COMPLETED
-                ):
-                    break
+        self.handle_result(request)
 
     def non_blocking_request(self, request: "RequestModel" = None):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
