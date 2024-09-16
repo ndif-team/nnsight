@@ -29,7 +29,7 @@ class Invoker(AbstractContextManager):
         scan (bool): If to execute the model using `FakeTensor` in order to update the potential sizes/dtypes of all modules' Envoys' inputs/outputs as well as validate things work correctly.
             Scanning is not free computation wise so you may want to turn this to false when running in a loop.
             When making interventions, you made get shape errors if scan is false as it validates operations based on shapes so
-            for looped calls where shapes are consistent, you may want to have scan=True for the first loop. Defaults to True.
+            for looped calls where shapes are consistent, you may want to have scan=True for the first loop. Defaults to False.
         kwargs (Dict[str,Any]): Keyword arguments passed to the model's _prepare_inputs method.
         scanning (bool): If currently scanning.
     """
