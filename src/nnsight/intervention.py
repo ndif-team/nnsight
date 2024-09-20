@@ -66,6 +66,14 @@ class InterventionProxy(Proxy):
 
         return self
 
+    def stream(
+        self, callback: Callable, threaded: bool = True
+    ) -> InterventionProxy:
+
+        protocols.SteamingProtocol.add(self.node, callback, threaded=threaded)
+
+        return self
+
     def stop(self) -> InterventionProxy:
         """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed..
 

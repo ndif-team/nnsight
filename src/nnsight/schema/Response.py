@@ -35,11 +35,12 @@ class ResponseModel(BaseModel):
         RUNNING = "RUNNING"
         COMPLETED = "COMPLETED"
         LOG = "LOG"
+        STREAM = "STREAM"
         ERROR = "ERROR"
 
     id: str
     status: JobStatus
-    description: str
+    description: str | bytes
 
     received: datetime = None
     session_id: Optional[str] = None

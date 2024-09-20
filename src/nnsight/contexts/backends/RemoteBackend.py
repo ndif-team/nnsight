@@ -52,6 +52,15 @@ class RemoteMixin(LocalMixin):
         """
 
         raise NotImplementedError()
+    
+    def remote_backend_handle_stream_value(self, value: Any) -> None:
+        """Should handle post-processed stream value.
+
+        Args:
+            value (Any): Result.
+        """
+
+        raise NotImplementedError()
 
     def remote_backend_cleanup(self):
         raise NotImplementedError()
@@ -81,6 +90,7 @@ class RemoteBackend(LocalBackend):
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
         self.handle_result = None
+        self.handle_stream = None
 
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
@@ -98,6 +108,7 @@ class RemoteBackend(LocalBackend):
     def __call__(self, obj: RemoteMixin):
 
         self.handle_result = obj.remote_backend_handle_result_value
+        self.handle_stream = obj.remote_backend_handle_stream_value
 
         if self.blocking:
 
@@ -187,6 +198,10 @@ class RemoteBackend(LocalBackend):
             # Handle result
             self.handle_result(result.value)
 
+        elif response.status == ResponseModel.JobStatus.STREAM:
+            
+            result_bytes = io.BytesIO(response.description)
+            
         # Or if there was some error.
         elif response.status == ResponseModel.JobStatus.ERROR:
             raise Exception(str(response))

@@ -1,7 +1,9 @@
+import asyncio
 import inspect
 import weakref
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from threading import Thread
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -485,7 +487,7 @@ class BridgeProtocol(Protocol):
 
         # Value node is Lock Node's only arg
         value_node: "Node" = lock_node.args[0]
-        
+
         if value_node.done():
 
             # Set value to that of the value Node.
@@ -672,7 +674,7 @@ class ValueProtocol(Protocol):
 
     @classmethod
     def execute(cls, node: Node) -> None:
-        
+
         node.set_value(node.args[0])
 
     @classmethod
@@ -963,3 +965,40 @@ class UpdateProtocol(Protocol):
             "arg_kname": defaultdict(lambda: None),  # Argument label key word
             "edge": defaultdict(lambda: "solid"),
         }  # Argument edge display
+
+
+class SteamingProtocol(Protocol):
+
+    attachment_name = "nnsight_callbacks"
+
+    @classmethod
+    def add_callback(cls, node: Node, callback: Callable) -> None:
+
+        if cls.attachment_name not in node.graph.attachments:
+
+            node.graph.attachments[cls.attachment_name] = {}
+
+        node.graph.attachments[cls.attachment_name][node.name] = callback
+
+    @classmethod
+    def add(cls, node: Node, callback: Callable, threaded:bool = True) -> None:
+
+        proxy = node.create(target=cls, proxy_value=None, args=[node, threaded])
+
+        cls.add_callback(proxy.node, callback)
+
+    @classmethod
+    def execute(cls, node: Node):
+
+        value = node.args[0].value
+        threaded = node.args[1]
+
+        callback = node.graph.attachments[cls.attachment_name][node.name]
+
+        if threaded:
+           
+            Thread(target=callback, args=(value,)).start()
+
+        else:
+
+            callback(value)
