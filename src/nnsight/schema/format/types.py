@@ -4,10 +4,11 @@ import weakref
 from types import BuiltinFunctionType
 from types import FunctionType as FuncType
 from types import MethodDescriptorType
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, Strict, field_validator
+from pydantic import (BaseModel, ConfigDict, Field, Strict, field_validator,
+                      model_serializer)
 from pydantic.functional_validators import AfterValidator
 from typing_extensions import Annotated
 
@@ -50,6 +51,14 @@ class BaseNNsightModel(BaseModel):
     def deserialize(self, handler: DeserializeHandler):
         raise NotImplementedError()
 
+def try_deserialize(value: BaseNNsightModel | Any, handler: DeserializeHandler):
+    
+    if isinstance(value, BaseNNsightModel):
+        
+        return value.deserialize(handler)
+    
+    return value
+
 
 ### Custom Pydantic types for all supported base types
 class NodeModel(BaseNNsightModel):
@@ -66,11 +75,30 @@ class NodeModel(BaseNNsightModel):
 
     name: str
     target: Union[FunctionModel, FunctionType]
-    args: List[ValueTypes]
-    kwargs: Dict[str, ValueTypes]
-    condition: Union[
-        NodeReferenceType, NodeModel.Reference, PrimitiveModel, PrimitiveType
-    ]
+    args: List[ValueTypes] = []
+    kwargs: Dict[str, ValueTypes] = {}
+    condition: None | Union[
+        NodeReferenceType, NodeModel.Reference
+    ] = None
+    
+    @model_serializer(mode='wrap')
+    def serialize_model(self, handler):
+            
+        dump = handler(self)
+        
+        if self.condition is None:
+            
+            dump.pop('condition')
+            
+        if not self.kwargs:
+            
+            dump.pop('kwargs')
+            
+        if not self.args:
+            
+            dump.pop('args')
+            
+        return dump
 
     def deserialize(self, handler: DeserializeHandler) -> Node:
 
@@ -80,14 +108,15 @@ class NodeModel(BaseNNsightModel):
         node = handler.graph.create(
             proxy_value=None,
             target=self.target.deserialize(handler),
-            args=[value.deserialize(handler) for value in self.args],
+            args=[try_deserialize(value, handler) for value in self.args],
             kwargs={
-                key: value.deserialize(handler) for key, value in self.kwargs.items()
+                key: try_deserialize(value, handler) for key, value in self.kwargs.items()
             },
             name=self.name,
         ).node
 
-        node.cond_dependency = self.condition.deserialize(handler)
+        node.cond_dependency = try_deserialize(self.condition, handler)
+        
         if isinstance(node.cond_dependency, Node):
             node.cond_dependency.listeners.append(weakref.proxy(node))
 
@@ -98,17 +127,6 @@ class NodeModel(BaseNNsightModel):
             node.target.compile(node)
 
         return node
-
-
-class PrimitiveModel(BaseNNsightModel):
-
-    type_name: Literal["PRIMITIVE"] = "PRIMITIVE"
-
-    value: PRIMITIVE
-
-    def deserialize(self, handler: DeserializeHandler) -> PRIMITIVE:
-        return self.value
-
 
 class TensorModel(BaseNNsightModel):
 
@@ -133,9 +151,9 @@ class SliceModel(BaseNNsightModel):
     def deserialize(self, handler: DeserializeHandler) -> slice:
 
         return slice(
-            self.start.deserialize(handler),
-            self.stop.deserialize(handler),
-            self.step.deserialize(handler),
+            try_deserialize(self.start, handler),
+            try_deserialize(self.stop, handler),
+            try_deserialize(self.step, handler)
         )
 
 
@@ -158,7 +176,7 @@ class ListModel(BaseNNsightModel):
     values: List[ValueTypes]
 
     def deserialize(self, handler: DeserializeHandler) -> list:
-        return [value.deserialize(handler) for value in self.values]
+        return [try_deserialize(value, handler) for value in self.values]
 
 
 class TupleModel(BaseNNsightModel):
@@ -168,7 +186,7 @@ class TupleModel(BaseNNsightModel):
     values: List[ValueTypes]
 
     def deserialize(self, handler: DeserializeHandler) -> tuple:
-        return tuple([value.deserialize(handler) for value in self.values])
+        return tuple([try_deserialize(value, handler) for value in self.values])
 
 
 class DictModel(BaseNNsightModel):
@@ -178,7 +196,7 @@ class DictModel(BaseNNsightModel):
     values: Dict[str, ValueTypes]
 
     def deserialize(self, handler: DeserializeHandler) -> dict:
-        return {key: value.deserialize(handler) for key, value in self.values.items()}
+        return {key: try_deserialize(value, handler) for key, value in self.values.items()}
 
 
 class FunctionWhitelistError(Exception):
@@ -253,10 +271,10 @@ class TracerModel(BaseNNsightModel):
 
         handler.graph = graph
 
-        kwargs = {key: value.deserialize(handler) for key, value in self.kwargs.items()}
+        kwargs = {key: try_deserialize(value, handler) for key, value in self.kwargs.items()}
 
         invoker_inputs = [
-            invoker_input.deserialize(handler) for invoker_input in self.invoker_inputs
+            try_deserialize(invoker_input, handler) for invoker_input in self.invoker_inputs
         ]
 
         tracer = Tracer(
@@ -287,7 +305,7 @@ class IteratorModel(BaseNNsightModel):
 
         handler.graph = graph
 
-        data = self.data.deserialize(handler)
+        data = try_deserialize(self.data, handler)
 
         iterator = Iterator(data, None, bridge=handler.bridge, graph=graph)
 
@@ -327,10 +345,6 @@ GraphType = Annotated[
             id=value.id, sequential=value.sequential, nodes=value.nodes
         )
     ),
-]
-
-PrimitiveType = Annotated[
-    PRIMITIVE, AfterValidator(lambda value: PrimitiveModel(value=value))
 ]
 
 TensorType = Annotated[
@@ -414,7 +428,6 @@ TOTYPES = Union[
     NodeModel.Reference,
     SliceModel,
     TensorModel,
-    PrimitiveModel,
     TupleModel,
     ListModel,
     DictModel,
@@ -428,7 +441,6 @@ FROMTYPES = Union[
     NodeReferenceType,
     SliceType,
     TensorType,
-    PrimitiveType,
     TupleType,
     ListType,
     DictType,
@@ -437,6 +449,7 @@ FROMTYPES = Union[
 
 ### Final registration
 ValueTypes = Union[
+    PRIMITIVE,
     Annotated[
         TOTYPES,
         Field(discriminator="type_name"),
