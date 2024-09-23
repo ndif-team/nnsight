@@ -105,9 +105,7 @@ class NNsight:
             self._custom_model = True
             self._dispatched = True
             self._model = model_key
-
-        # Otherwise load from _load(...).
-        if not self._custom_model:
+        else: # Otherwise load from _load(...).
             # Load skeleton of model by putting all tensors on meta.
             with init_empty_weights(include_buffers=meta_buffers):
                 self._model = self._load(self._model_key, *args, **kwargs)
