@@ -35,17 +35,6 @@ def update_function(function: str | Callable, new_function: Callable):
     
     FUNCTIONS_WHITELIST[function] = new_function
 
-def update_function(function: str | Callable, new_function: Callable):
-    
-    if not isinstance(function, str):
-        
-        function = get_function_name(function)
-        
-    new_function.__name__ = function
-    
-    FUNCTIONS_WHITELIST[function] = new_function
-
-
 FUNCTIONS_WHITELIST = {}
 
 ### Torch functions

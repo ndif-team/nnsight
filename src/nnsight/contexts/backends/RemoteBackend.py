@@ -11,11 +11,12 @@ from tqdm import tqdm
 from ... import CONFIG
 from ...logger import logger, remote_logger
 from .LocalBackend import LocalBackend, LocalMixin
-
+from ...tracing import protocols
 if TYPE_CHECKING:
 
     from ...schema.Request import RequestModel
     from ...schema.Response import ResponseModel
+    from ...tracing.Node import Node
 
 
 class RemoteMixin(LocalMixin):
@@ -53,17 +54,35 @@ class RemoteMixin(LocalMixin):
 
         raise NotImplementedError()
     
-    def remote_backend_handle_stream_value(self, value: Any) -> None:
-        """Should handle post-processed stream value.
+    def remote_backend_get_stream_node(self, name: str, graph_id:str) -> "Node":
+        """Should get stream Node.
 
         Args:
-            value (Any): Result.
+            name (str): Name of node.
+            graph_id (str): Graph id.
         """
 
         raise NotImplementedError()
+    
+    
+    @classmethod
+    def remote_stream_encode(self, node: Node) -> bytes:
+
+        data = io.BytesIO()
+
+        torch.save(
+            {"name": node.name, "graph_id": node.graph.id, "value": node.value},
+            data,
+        )
+
+        return data.read()
+
 
     def remote_backend_cleanup(self):
         raise NotImplementedError()
+    
+    
+    
 
 
 class RemoteBackend(LocalBackend):
@@ -89,9 +108,7 @@ class RemoteBackend(LocalBackend):
         self.ssl = CONFIG.API.SSL if ssl is None else ssl
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
-        self.handle_result = None
-        self.handle_stream = None
-
+        
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
@@ -107,15 +124,11 @@ class RemoteBackend(LocalBackend):
 
     def __call__(self, obj: RemoteMixin):
 
-        self.handle_result = obj.remote_backend_handle_result_value
-        self.handle_stream = obj.remote_backend_handle_stream_value
-
         if self.blocking:
 
-            request = self.request(obj)
 
             # Do blocking request.
-            self.blocking_request(request)
+            self.blocking_request(obj)
 
         else:
 
@@ -125,11 +138,11 @@ class RemoteBackend(LocalBackend):
 
                 request = self.request(obj)
 
-            self.non_blocking_request(request=request)
+            self.non_blocking_request(request)
 
         obj.remote_backend_cleanup()
 
-    def handle_response(self, data: Any) -> "ResponseModel":
+    def handle_response(self, object:RemoteMixin, data: Any) -> "ResponseModel":
         """Handles incoming response data.
 
         Parses it into the `ResponseModel` pydantic object.
@@ -139,6 +152,7 @@ class RemoteBackend(LocalBackend):
         Use the backend object's .handle_result method to handle the decoded result.
 
         Args:
+            object (RemoteMixin): Remote object.
             data (Any): Json data to concert to `ResponseModel`
 
         Raises:
@@ -196,11 +210,18 @@ class RemoteBackend(LocalBackend):
             result_bytes.close()
 
             # Handle result
-            self.handle_result(result.value)
+            object.remote_backend_handle_result_value(result.value)
 
         elif response.status == ResponseModel.JobStatus.STREAM:
             
-            result_bytes = io.BytesIO(response.description)
+            result = io.BytesIO(response.data)
+            result.seek(0)
+            
+            result = torch.load(result, map_location="cpu", weights_only=False)
+            
+            node = object.remote_backend_get_stream_node(result['name'], result['graph_id'])
+            
+            protocols.StreamingProtocol.execute_callback(node, result['value'])
             
         # Or if there was some error.
         elif response.status == ResponseModel.JobStatus.ERROR:
@@ -255,14 +276,16 @@ class RemoteBackend(LocalBackend):
 
             raise Exception(response.reason)
 
-    def blocking_request(self, request: "RequestModel"):
+    def blocking_request(self, object: RemoteMixin):
         """Send intervention request to the remote service while waiting for updates via websocket.
 
         Args:
-            request (RequestModel): Request.
+            obj (RemoteMixin): Remote object..
         """
 
         from ...schema.Response import ResponseModel
+        
+        request = self.request(object)
 
         # Create a socketio connection to the server.
         with socketio.SimpleClient(
@@ -285,7 +308,7 @@ class RemoteBackend(LocalBackend):
             # Loop until
             while True:
                 if (
-                    self.handle_response(sio.receive()[1]).status
+                    self.handle_response(object, sio.receive()[1]).status
                     == ResponseModel.JobStatus.COMPLETED
                 ):
                     break

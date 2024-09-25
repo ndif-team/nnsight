@@ -16,6 +16,7 @@ from .Invoker import Invoker
 if TYPE_CHECKING:
     from ..models.mixins import RemoteableMixin
     from ..models.NNsightModel import NNsight
+    from ..tracing.Node import Node
 
 
 class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
@@ -179,6 +180,9 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         # TODO : graph mismatch handle. hash json ?
         for node_name, node_value in value.items():
             self.graph.nodes[node_name]._value = node_value
+            
+    def remote_backend_get_stream_node(self, name: str, graph_id: str) -> "Node":
+        return self.graph.nodes[name]
 
     def remote_backend_cleanup(self):
         

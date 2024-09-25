@@ -70,7 +70,7 @@ class InterventionProxy(Proxy):
         self, callback: Callable, threaded: bool = True
     ) -> InterventionProxy:
 
-        protocols.SteamingProtocol.add(self.node, callback, threaded=threaded)
+        protocols.StreamingProtocol.add(self.node, callback, threaded=threaded)
 
         return self
 

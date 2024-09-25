@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import weakref
 from collections import defaultdict
+from io import BytesIO
 from threading import Thread
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 
@@ -967,12 +968,12 @@ class UpdateProtocol(Protocol):
         }  # Argument edge display
 
 
-class SteamingProtocol(Protocol):
+class StreamingProtocol(Protocol):
 
-    attachment_name = "nnsight_callbacks"
+    attachment_name = "nnsight_streaming_callbacks"
 
     @classmethod
-    def add_callback(cls, node: Node, callback: Callable) -> None:
+    def add_callback(cls, node: "Node", callback: Callable) -> None:
 
         if cls.attachment_name not in node.graph.attachments:
 
@@ -981,7 +982,30 @@ class SteamingProtocol(Protocol):
         node.graph.attachments[cls.attachment_name][node.name] = callback
 
     @classmethod
-    def add(cls, node: Node, callback: Callable, threaded:bool = True) -> None:
+    def get_callback(cls, node: "Node"):
+
+        return node.graph.attachments[cls.attachment_name][node.name]
+
+    @classmethod
+    def execute_callback(cls, node: "Node", value: Any = inspect._empty):
+
+        if value is inspect._empty:
+            value = node.args[0].value
+
+        threaded = node.args[1]
+
+        callback = cls.get_callback(node)
+
+        if threaded:
+
+            Thread(target=callback, args=(value,)).start()
+
+        else:
+
+            callback(value)
+
+    @classmethod
+    def add(cls, node: Node, callback: Callable, threaded: bool = True) -> None:
 
         proxy = node.create(target=cls, proxy_value=None, args=[node, threaded])
 
@@ -990,15 +1014,6 @@ class SteamingProtocol(Protocol):
     @classmethod
     def execute(cls, node: Node):
 
-        value = node.args[0].value
-        threaded = node.args[1]
+        cls.execute_callback(node)
 
-        callback = node.graph.attachments[cls.attachment_name][node.name]
-
-        if threaded:
-           
-            Thread(target=callback, args=(value,)).start()
-
-        else:
-
-            callback(value)
+        node.set_value(None)

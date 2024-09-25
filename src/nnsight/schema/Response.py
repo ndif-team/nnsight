@@ -40,9 +40,10 @@ class ResponseModel(BaseModel):
 
     id: str
     status: JobStatus
-    description: str | bytes
-
-    received: datetime = None
+    description: str
+    
+    data: Optional[bytes] = None
+    received: Optional[datetime] = None
     session_id: Optional[str] = None
 
     def __str__(self) -> str:
