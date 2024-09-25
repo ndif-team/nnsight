@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import weakref
 from typing import TYPE_CHECKING, Any, Callable
 
 import requests
@@ -10,8 +11,9 @@ from tqdm import tqdm
 
 from ... import CONFIG
 from ...logger import logger, remote_logger
-from .LocalBackend import LocalBackend, LocalMixin
 from ...tracing import protocols
+from .LocalBackend import LocalBackend, LocalMixin
+
 if TYPE_CHECKING:
 
     from ...schema.Request import RequestModel
@@ -53,8 +55,10 @@ class RemoteMixin(LocalMixin):
         """
 
         raise NotImplementedError()
-    
-    def remote_backend_get_stream_node(self, name: str, graph_id:str) -> "Node":
+
+    def remote_backend_get_stream_node(
+        self, name: str, graph_id: str
+    ) -> "Node":
         """Should get stream Node.
 
         Args:
@@ -63,26 +67,16 @@ class RemoteMixin(LocalMixin):
         """
 
         raise NotImplementedError()
-    
-    
+
     @classmethod
-    def remote_stream_encode(self, node: Node) -> bytes:
+    def remote_stream_format(self, node: Node) -> bytes:
 
-        data = io.BytesIO()
-
-        torch.save(
+        return (
             {"name": node.name, "graph_id": node.graph.id, "value": node.value},
-            data,
         )
-
-        return data.read()
-
 
     def remote_backend_cleanup(self):
         raise NotImplementedError()
-    
-    
-    
 
 
 class RemoteBackend(LocalBackend):
@@ -108,10 +102,12 @@ class RemoteBackend(LocalBackend):
         self.ssl = CONFIG.API.SSL if ssl is None else ssl
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
-        
+
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
+
+        self.object: RemoteMixin = None
 
     def request(self, obj: RemoteMixin):
 
@@ -124,8 +120,9 @@ class RemoteBackend(LocalBackend):
 
     def __call__(self, obj: RemoteMixin):
 
-        if self.blocking:
+        self.object = weakref.proxy(obj)
 
+        if self.blocking:
 
             # Do blocking request.
             self.blocking_request(obj)
@@ -142,7 +139,7 @@ class RemoteBackend(LocalBackend):
 
         obj.remote_backend_cleanup()
 
-    def handle_response(self, object:RemoteMixin, data: Any) -> "ResponseModel":
+    def handle_response(self, response: "ResponseModel") -> None:
         """Handles incoming response data.
 
         Parses it into the `ResponseModel` pydantic object.
@@ -152,8 +149,7 @@ class RemoteBackend(LocalBackend):
         Use the backend object's .handle_result method to handle the decoded result.
 
         Args:
-            object (RemoteMixin): Remote object.
-            data (Any): Json data to concert to `ResponseModel`
+            response (Any): Json data to concert to `ResponseModel`
 
         Raises:
             Exception: If the job's status is `ResponseModel.JobStatus.ERROR`
@@ -162,10 +158,7 @@ class RemoteBackend(LocalBackend):
             ResponseModel: ResponseModel.
         """
 
-        from ...schema.Response import ResponseModel, ResultModel
-
-        # Load the data into the ResponseModel pydantic class.
-        response = ResponseModel(**data)
+        from ...schema.Response import ResultModel
 
         # Log response for user
         remote_logger.info(str(response))
@@ -210,19 +203,18 @@ class RemoteBackend(LocalBackend):
             result_bytes.close()
 
             # Handle result
-            object.remote_backend_handle_result_value(result.value)
+            self.object.remote_backend_handle_result_value(result.value)
 
         elif response.status == ResponseModel.JobStatus.STREAM:
-            
-            result = io.BytesIO(response.data)
-            result.seek(0)
-            
-            result = torch.load(result, map_location="cpu", weights_only=False)
-            
-            node = object.remote_backend_get_stream_node(result['name'], result['graph_id'])
-            
-            protocols.StreamingProtocol.execute_callback(node, result['value'])
-            
+
+            node = self.object.remote_backend_get_stream_node(
+                response.data["name"], response.data["graph_id"]
+            )
+
+            protocols.StreamingProtocol.execute_callback(
+                node, response.data["value"]
+            )
+
         # Or if there was some error.
         elif response.status == ResponseModel.JobStatus.ERROR:
             raise Exception(str(response))
@@ -284,7 +276,7 @@ class RemoteBackend(LocalBackend):
         """
 
         from ...schema.Response import ResponseModel
-        
+
         request = self.request(object)
 
         # Create a socketio connection to the server.
@@ -307,10 +299,13 @@ class RemoteBackend(LocalBackend):
 
             # Loop until
             while True:
-                if (
-                    self.handle_response(object, sio.receive()[1]).status
-                    == ResponseModel.JobStatus.COMPLETED
-                ):
+
+                response = sio.receive()[1]
+                response = ResponseModel.unpickle(response)
+
+                self.handle_response(response)
+
+                if response == ResponseModel.JobStatus.COMPLETED:
                     break
 
     def non_blocking_request(self, request: "RequestModel" = None):

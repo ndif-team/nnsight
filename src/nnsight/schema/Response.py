@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import logging
 from datetime import datetime
 from enum import Enum
@@ -20,13 +21,15 @@ class ResultModel(BaseModel):
     def from_graph(cls, graph: Graph) -> Dict[str, Any]:
 
         saves = {
-            name: util.apply(node.value, lambda x: x.detach().cpu(), torch.Tensor)
+            name: util.apply(
+                node.value, lambda x: x.detach().cpu(), torch.Tensor
+            )
             for name, node in graph.nodes.items()
             if node.done()
         }
 
         return saves
- 
+
 
 class ResponseModel(BaseModel):
     class JobStatus(Enum):
@@ -40,8 +43,8 @@ class ResponseModel(BaseModel):
 
     id: str
     status: JobStatus
-    description: str
-    
+
+    description: Optional[str] = ""
     data: Optional[bytes] = None
     received: Optional[datetime] = None
     session_id: Optional[str] = None
@@ -56,3 +59,21 @@ class ResponseModel(BaseModel):
             logger.info(str(self))
 
         return self
+
+    def pickle(self) -> bytes:
+
+        with io.BytesIO() as file:
+
+            torch.save(self.model_dump(exclude_unset=True), file)
+
+            file.seek(0)
+
+            return file.read()
+
+    @classmethod
+    def unpickle(cls, data: bytes) -> ResponseModel:
+
+        with io.BytesIO(data) as file:
+            return ResponseModel(
+                **torch.load(file, map_location="cpu", weights_only=False)
+            )
