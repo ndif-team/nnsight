@@ -13,6 +13,13 @@ import os
 from functools import wraps
 from typing import Dict, Union
 
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("nnsight")
+except PackageNotFoundError:
+    __version__ = "unknown version"
+
 import torch
 import yaml
 
