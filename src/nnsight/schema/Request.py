@@ -51,6 +51,10 @@ class RequestModel(BaseModel):
 
 class StreamValueModel(BaseModel):
     
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True, protected_namespaces=()
+    )
+    
     model_key: str
     value: ValueTypes
     
