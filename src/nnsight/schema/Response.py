@@ -45,7 +45,7 @@ class ResponseModel(BaseModel):
     status: JobStatus
 
     description: Optional[str] = ""
-    data: Optional[bytes] = None
+    data: Optional[Any] = None
     received: Optional[datetime] = None
     session_id: Optional[str] = None
 

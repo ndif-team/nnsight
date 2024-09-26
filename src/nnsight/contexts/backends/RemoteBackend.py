@@ -56,24 +56,15 @@ class RemoteMixin(LocalMixin):
 
         raise NotImplementedError()
 
-    def remote_backend_get_stream_node(
-        self, name: str, graph_id: str
-    ) -> "Node":
-        """Should get stream Node.
-
-        Args:
-            name (str): Name of node.
-            graph_id (str): Graph id.
-        """
+    def remote_backend_get_stream_node(self, *args) -> None:
+        """Inject streamed data into object."""
 
         raise NotImplementedError()
 
     @classmethod
     def remote_stream_format(self, node: Node) -> bytes:
 
-        return (
-            {"name": node.name, "graph_id": node.graph.id, "value": node.value},
-        )
+        return node.name, node.graph.id
 
     def remote_backend_cleanup(self):
         raise NotImplementedError()
@@ -158,7 +149,7 @@ class RemoteBackend(LocalBackend):
             ResponseModel: ResponseModel.
         """
 
-        from ...schema.Response import ResultModel
+        from ...schema.Response import ResponseModel, ResultModel
 
         # Log response for user
         remote_logger.info(str(response))
@@ -207,12 +198,12 @@ class RemoteBackend(LocalBackend):
 
         elif response.status == ResponseModel.JobStatus.STREAM:
 
-            node = self.object.remote_backend_get_stream_node(
-                response.data["name"], response.data["graph_id"]
-            )
+            *args, value = response.data
+
+            node = self.object.remote_backend_get_stream_node(*args)
 
             protocols.StreamingProtocol.execute_callback(
-                node, response.data["value"]
+                node, value
             )
 
         # Or if there was some error.
@@ -231,6 +222,8 @@ class RemoteBackend(LocalBackend):
             (ResponseModel): Response.
         """
 
+        from ...schema.Response import ResponseModel
+
         response = requests.post(
             f"{self.address}/request",
             json=request.model_dump(exclude=["id", "received"]),
@@ -239,7 +232,9 @@ class RemoteBackend(LocalBackend):
 
         if response.status_code == 200:
 
-            return self.handle_response(response.json())
+            response = ResponseModel(**response.json())
+
+            return self.handle_response(response)
 
         else:
 
@@ -255,6 +250,8 @@ class RemoteBackend(LocalBackend):
             (ResponseModel): Response.
         """
 
+        from ...schema.Response import ResponseModel
+
         response = requests.get(
             f"{self.address}/response/{self.job_id}",
             headers={"ndif-api-key": self.api_key},
@@ -262,7 +259,9 @@ class RemoteBackend(LocalBackend):
 
         if response.status_code == 200:
 
-            return self.handle_response(response.json())
+            response = ResponseModel(**response.json())
+
+            return self.handle_response(response)
 
         else:
 
@@ -305,7 +304,7 @@ class RemoteBackend(LocalBackend):
 
                 self.handle_response(response)
 
-                if response == ResponseModel.JobStatus.COMPLETED:
+                if response.status == ResponseModel.JobStatus.COMPLETED:
                     break
 
     def non_blocking_request(self, request: "RequestModel" = None):
