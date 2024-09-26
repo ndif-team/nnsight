@@ -968,73 +968,54 @@ class UpdateProtocol(Protocol):
         }  # Argument edge display
 
 
-class StreamingProtocol(Protocol):
-
-    attachment_name = "nnsight_streaming_callbacks"
+class StreamingDownloadProtocol(Protocol):
 
     @classmethod
-    def add_callback(cls, node: "Node", callback: Callable) -> None:
-        """Add callback to attachment on Graph.
-
-        Args:
-            node (Node): Node to add callback for
-            callback (Callable): Callback to add.
-        """
-
-        if cls.attachment_name not in node.graph.attachments:
-
-            node.graph.attachments[cls.attachment_name] = {}
-
-        node.graph.attachments[cls.attachment_name][node.name] = callback
-
-    @classmethod
-    def get_callback(cls, node: "Node") -> Callable:
-        """Gets callback from attachments.
-
-        Args:
-            node (Node): Streaming Node to get callback for
-
-        Returns:
-            Callable: Callabck.
-        """
-
-        return node.graph.attachments[cls.attachment_name][node.name]
-
-    @classmethod
-    def execute_callback(cls, node: "Node", value: Any = inspect._empty):
-        """Execute the callback for give streaming node.
-
-        Args:
-            node (Node): Node to get callback and execute for.
-            value (Any, optional): Value to execute callback with. 
-                If no value provided, gets the value from the streaming node's first argument.
-        """
-
-        if value is inspect._empty:
-            value = node.args[0].value
-
-        threaded = node.args[1]
-
-        callback = cls.get_callback(node)
-
-        callback(value)
-
-    @classmethod
-    def add(cls, node: Node, callback: Callable) -> "InterventionProxy":
+    def add(cls, node: Node) -> "InterventionProxy":
         """Add streaming node to intervention graph. Adds callback as an attachment to Graph.
 
         Args:
             node (Node): Node to get value from for streaming callback.
-            callback (Callable): Callback to execute when given Node's value is available.
         """
 
-        proxy = node.create(target=cls, proxy_value=None, args=[node])
-
-        cls.add_callback(proxy.node, callback)
+        return node.create(target=cls, proxy_value=None, args=[node])
 
     @classmethod
-    def execute(cls, node: Node):
+    def execute(cls, node: "Node"):
 
-        cls.execute_callback(node)
+        value_node = node.args[0]
 
-        node.set_value(None)
+        node.set_value(value_node.value)
+
+
+class StreamingUploadProtocol(Protocol):
+
+    send: Callable = None
+
+    @classmethod
+    def set(cls, fn: Callable):
+
+        cls.send = Callable
+
+    @classmethod
+    def add(cls, node: Node) -> "InterventionProxy":
+        """Add streaming node to intervention graph. Adds callback as an attachment to Graph.
+
+        Args:
+            node (Node): Node to get value from for streaming callback.
+        """
+
+        return node.create(target=cls, proxy_value=None, args=[node])
+
+    @classmethod
+    def execute(cls, node: "Node"):
+
+        value_node = node.args[0]
+
+        if cls.send is not None:
+
+            cls.send(value_node.value)
+
+        else:
+
+            node.set_value(value_node.value)

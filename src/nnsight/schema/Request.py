@@ -43,8 +43,21 @@ class RequestModel(BaseModel):
 
         handler = DeserializeHandler(model=model)
 
-        object = TypeAdapter(
+        object: OBJECT_TYPES = TypeAdapter(
             OBJECT_TYPES, config=RequestModel.model_config
         ).validate_python(json.loads(self.object))
 
         return object.deserialize(handler)
+
+class StreamValueModel(BaseModel):
+    
+    model_key: str
+    value: ValueTypes
+    
+    def deserialize(self, model:NNsight):
+        
+        handler = DeserializeHandler(model=model)
+        
+        return self.value.deserialize(handler)
+        
+        

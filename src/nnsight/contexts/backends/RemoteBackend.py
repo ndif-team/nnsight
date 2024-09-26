@@ -228,7 +228,7 @@ class RemoteBackend(LocalBackend):
 
             node = self.object.remote_backend_get_stream_node(*args)
 
-            protocols.StreamingProtocol.execute_callback(node, value)
+            node.set_value(value)
 
     def submit_request(self, request: "RequestModel") -> "ResponseModel":
         """Sends request to the remote endpoint and handles the response object.
@@ -294,6 +294,10 @@ class RemoteBackend(LocalBackend):
 
         from ...schema.Response import ResponseModel
 
+        protocols.StreamingUploadProtocol.set(
+            lambda *args: self.stream_send(*args)
+        )
+
         # Create a socketio connection to the server.
         with socketio.SimpleClient(
             logger=logger, reconnection_attempts=10
@@ -322,6 +326,30 @@ class RemoteBackend(LocalBackend):
 
                 if response.status == ResponseModel.JobStatus.COMPLETED:
                     break
+
+        protocols.StreamingUploadProtocol.set(None)
+
+    def stream_send(self, value: Any):
+
+        from ...schema.Request import StreamValueModel
+
+        request = StreamValueModel(
+            model_key=self.object.remote_backend_get_model_key(), value=value
+        )
+
+        response = requests.post(
+            f"{self.address}/stream",
+            json=request.model_dump(),
+            headers={"ndif-api-key": self.api_key},
+        )
+
+        if response.status_code == 200:
+
+            pass
+
+        else:
+
+            raise Exception(response.reason)
 
     def non_blocking_request(self, request: "RequestModel" = None):
         """Send intervention request to the remote service if request provided. Otherwise get job status.

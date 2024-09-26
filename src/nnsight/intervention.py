@@ -66,31 +66,25 @@ class InterventionProxy(Proxy):
         return self
 
     def stream(
-        self, callback: Callable
+        self
     ) -> InterventionProxy:
-        """Streams value of this node when it becomes available to some callback.
+        """Streams value of this node when it becomes available.
 
-        Args:
-            callback (Callable): Callback.
-
-        Returns:
-            InterventionProxy: Original Proxy.
-        """
-
-        protocols.StreamingProtocol.add(self.node, callback)
-
-        return self
-
-    def stop(self) -> InterventionProxy:
-        """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed..
 
         Returns:
             InterventionProxy: Proxy.
         """
 
-        protocols.EarlyStopProtocol.add(self.node.graph, self.node)
+        return protocols.StreamingDownloadProtocol.add(self.node)
+    
+    def upload(self) -> InterventionProxy:
+        
+        return protocols.StreamingUploadProtocol.add(self.node)
 
-        return self
+    def stop(self) -> None:
+        """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed.."""
+
+        protocols.EarlyStopProtocol.add(self.node.graph, self.node)
 
     def update(self, value: Union[Node, Any]) -> InterventionProxy:
         """Updates the value of the Proxy via the creation of the UpdateProtocol node.
