@@ -334,11 +334,11 @@ class RemoteBackend(LocalBackend):
     def stream_send(self, value: Any):
 
         from ...schema.Request import StreamValueModel
-
+        
         request = StreamValueModel(
             model_key=self.object.remote_backend_get_model_key(), value=value
         )
-
+        
         response = requests.post(
             f"{self.address}/stream",
             json=request.model_dump(),
@@ -424,8 +424,6 @@ def preprocess(request: "RequestModel", streaming: bool = False):
                     for node in node.listeners:
 
                         if node.target is not protocols.StreamingUploadProtocol:
-
-                            print("popped", node.name)
 
                             graph_model.nodes.pop(node.name, None)
                             exceptions.pop(
