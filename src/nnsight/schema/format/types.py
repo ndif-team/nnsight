@@ -7,7 +7,7 @@ from types import MethodDescriptorType
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import (BaseModel, ConfigDict, Field, Strict, field_validator,
+from pydantic import (BaseModel, ConfigDict, Field, PrivateAttr, Strict, field_validator,
                       model_serializer)
 from pydantic.functional_validators import AfterValidator
 from typing_extensions import Annotated
@@ -209,7 +209,6 @@ class FunctionModel(BaseNNsightModel):
 
     function_name: str
 
-    @field_validator("function_name")
     @classmethod
     def check_function_whitelist(cls, qualname: str) -> str:
         if qualname not in FUNCTIONS_WHITELIST:
@@ -220,12 +219,17 @@ class FunctionModel(BaseNNsightModel):
         return qualname
 
     def deserialize(self, handler: DeserializeHandler) -> FUNCTION:
+        
+        FunctionModel.check_function_whitelist(self.function_name)
+        
         return FUNCTIONS_WHITELIST[self.function_name]
 
 
 class GraphModel(BaseNNsightModel):
 
     type_name: Literal["GRAPH"] = "GRAPH"
+    
+    graph: Graph = Field(exclude=True)
 
     id: int
     sequential: bool
@@ -342,7 +346,7 @@ GraphType = Annotated[
     Graph,
     AfterValidator(
         lambda value: GraphModel(
-            id=value.id, sequential=value.sequential, nodes=value.nodes
+            id=value.id, sequential=value.sequential, nodes=value.nodes, graph=value
         )
     ),
 ]

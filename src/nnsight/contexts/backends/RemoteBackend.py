@@ -298,6 +298,8 @@ class RemoteBackend(LocalBackend):
             lambda *args: self.stream_send(*args)
         )
 
+        preprocess(request, streaming=True)
+
         # Create a socketio connection to the server.
         with socketio.SimpleClient(
             logger=logger, reconnection_attempts=10
@@ -392,3 +394,74 @@ class RemoteBackend(LocalBackend):
                 CONFIG.save()
 
                 raise e
+
+
+def preprocess(request: "RequestModel", streaming: bool = False):
+
+    from ...schema.format.functions import get_function_name
+    from ...schema.format.types import FunctionModel, GraphModel, NodeModel
+
+    exceptions = {}
+
+    def inner(graph_model: GraphModel):
+
+        graph = graph_model.graph
+
+        for node_name, node_model in list(graph_model.nodes.items()):
+
+            node = graph.nodes[node_name]
+
+            node.reset()
+
+            function_name = node_model.target.function_name
+
+            if streaming and function_name == get_function_name(
+                protocols.StreamingDownloadProtocol
+            ):
+
+                def pop_stream_listeners(node: "Node"):
+
+                    for node in node.listeners:
+
+                        if node.target is not protocols.StreamingUploadProtocol:
+
+                            print("popped", node.name)
+
+                            graph_model.nodes.pop(node.name, None)
+                            exceptions.pop(
+                                f"{graph_model.id}_{node.name}", None
+                            )
+
+                            pop_stream_listeners(node)
+
+                        else:
+
+                            graph_model.nodes[node.name].args = [
+                                NodeModel.Reference(name=node_name)
+                            ]
+
+                pop_stream_listeners(node)
+
+            elif function_name == get_function_name(
+                protocols.LocalBackendExecuteProtocol
+            ):
+
+                inner(node_model.args[0].graph)
+
+            else:
+
+                if node_name in graph_model.nodes:
+
+                    try:
+
+                        FunctionModel.check_function_whitelist(function_name)
+
+                    except Exception as e:
+
+                        exceptions[f"{graph_model.id}_{node_name}"] = e
+
+    inner(request.object.graph)
+
+    for exception in exceptions.values():
+
+        raise exception

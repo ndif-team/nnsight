@@ -995,7 +995,7 @@ class StreamingUploadProtocol(Protocol):
     @classmethod
     def set(cls, fn: Callable):
 
-        cls.send = Callable
+        cls.send = fn
 
     @classmethod
     def add(cls, node: Node) -> "InterventionProxy":
