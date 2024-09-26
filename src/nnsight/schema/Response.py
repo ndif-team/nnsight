@@ -55,12 +55,20 @@ class ResponseModel(BaseModel):
     def log(self, logger: logging.Logger) -> ResponseModel:
         if self.status == ResponseModel.JobStatus.ERROR:
             logger.error(str(self))
+            raise SystemExit("Remote exception.")
+        elif self.status ==  ResponseModel.JobStatus.STREAM:
+            pass
         else:
             logger.info(str(self))
 
         return self
 
     def pickle(self) -> bytes:
+        """Pickles self and returns bytes.
+
+        Returns:
+            bytes: Pickled ResponseModel
+        """
 
         with io.BytesIO() as file:
 
@@ -72,6 +80,14 @@ class ResponseModel(BaseModel):
 
     @classmethod
     def unpickle(cls, data: bytes) -> ResponseModel:
+        """Loads a ResponseModel from pickled bytes.
+
+        Args:
+            data (bytes): Pickled ResoonseModel.
+
+        Returns:
+            ResponseModel: Response.
+        """
 
         with io.BytesIO(data) as file:
             return ResponseModel(

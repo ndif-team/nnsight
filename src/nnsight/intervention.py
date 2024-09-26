@@ -19,7 +19,6 @@ from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from . import util
-from .contexts.Conditional import Conditional
 from .tracing import protocols
 from .tracing.Graph import Graph
 from .tracing.Node import Node
@@ -67,10 +66,18 @@ class InterventionProxy(Proxy):
         return self
 
     def stream(
-        self, callback: Callable, threaded: bool = True
+        self, callback: Callable
     ) -> InterventionProxy:
+        """Streams value of this node when it becomes available to some callback.
 
-        protocols.StreamingProtocol.add(self.node, callback, threaded=threaded)
+        Args:
+            callback (Callable): Callback.
+
+        Returns:
+            InterventionProxy: Original Proxy.
+        """
+
+        protocols.StreamingProtocol.add(self.node, callback)
 
         return self
 

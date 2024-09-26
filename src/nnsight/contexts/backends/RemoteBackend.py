@@ -56,13 +56,25 @@ class RemoteMixin(LocalMixin):
 
         raise NotImplementedError()
 
-    def remote_backend_get_stream_node(self, *args) -> None:
-        """Inject streamed data into object."""
+    def remote_backend_get_stream_node(self, *args) -> "Node":
+        """Get streaming node on the client side based on arguments returned from `RemoteMixin.remote_stream_format`
+
+        Returns:
+            Node: Streaming node on the client side.
+        """
 
         raise NotImplementedError()
 
     @classmethod
-    def remote_stream_format(self, node: Node) -> bytes:
+    def remote_stream_format(self, node: Node) -> Any:
+        """Returns arguments needed to get the correct streaming node on the client side.
+
+        Args:
+            node (Node): Streaming node on the server side.
+
+        Returns:
+            Any: Arguments
+        """
 
         return node.name, node.graph.id
 
@@ -100,23 +112,30 @@ class RemoteBackend(LocalBackend):
 
         self.object: RemoteMixin = None
 
-    def request(self, obj: RemoteMixin):
+    def request(self) -> "RequestModel":
+        """Gets RequestModel based on intervention object.
 
-        model_key = obj.remote_backend_get_model_key()
+        Returns:
+            RequestModel: RequestModel
+        """
+
+        model_key = self.object.remote_backend_get_model_key()
 
         from ...schema.Request import RequestModel
 
         # Create request using pydantic to parse the object itself.
-        return RequestModel(object=obj, model_key=model_key)
+        return RequestModel(object=self.object, model_key=model_key)
 
-    def __call__(self, obj: RemoteMixin):
+    def __call__(self, object: RemoteMixin):
 
-        self.object = weakref.proxy(obj)
+        self.object = weakref.proxy(object)
 
         if self.blocking:
 
+            request = self.request()
+
             # Do blocking request.
-            self.blocking_request(obj)
+            self.blocking_request(request)
 
         else:
 
@@ -124,11 +143,11 @@ class RemoteBackend(LocalBackend):
 
             if not self.job_id:
 
-                request = self.request(obj)
+                request = self.request()
 
             self.non_blocking_request(request)
 
-        obj.remote_backend_cleanup()
+        self.object.remote_backend_cleanup()
 
     def handle_response(self, response: "ResponseModel") -> None:
         """Handles incoming response data.
@@ -152,65 +171,64 @@ class RemoteBackend(LocalBackend):
         from ...schema.Response import ResponseModel, ResultModel
 
         # Log response for user
-        remote_logger.info(str(response))
+        response.log(remote_logger)
 
         # If the status of the response is completed, update the local nodes that the user specified to save.
         # Then disconnect and continue.
         if response.status == ResponseModel.JobStatus.COMPLETED:
-            # Create BytesIO object to store bytes received from server in.
-            result_bytes = io.BytesIO()
-            result_bytes.seek(0)
 
-            # Get result from result url using job id.
-            with requests.get(
-                url=f"{self.address}/result/{response.id}",
-                stream=True,
-            ) as stream:
-                # Total size of incoming data.
-                total_size = float(stream.headers["Content-length"])
+            # If the response has no result data, it was too big and we need to stream it from the server.
+            if response.data is None:
+                # Create BytesIO object to store bytes received from server in.
+                result_bytes = io.BytesIO()
+                result_bytes.seek(0)
 
-                with tqdm(
-                    total=total_size,
-                    unit="B",
-                    unit_scale=True,
-                    desc="Downloading result",
-                ) as progress_bar:
-                    # chunk_size=None so server determines chunk size.
-                    for data in stream.iter_content(chunk_size=None):
-                        progress_bar.update(len(data))
-                        result_bytes.write(data)
+                # Get result from result url using job id.
+                with requests.get(
+                    url=f"{self.address}/result/{response.id}",
+                    stream=True,
+                ) as stream:
+                    # Total size of incoming data.
+                    total_size = float(stream.headers["Content-length"])
 
-            # Move cursor to beginning of bytes.
-            result_bytes.seek(0)
+                    with tqdm(
+                        total=total_size,
+                        unit="B",
+                        unit_scale=True,
+                        desc="Downloading result",
+                    ) as progress_bar:
+                        # chunk_size=None so server determines chunk size.
+                        for data in stream.iter_content(chunk_size=None):
+                            progress_bar.update(len(data))
+                            result_bytes.write(data)
 
-            # Decode bytes with pickle and then into pydantic object.
-            result: "ResultModel" = ResultModel(
-                **torch.load(
+                # Move cursor to beginning of bytes.
+                result_bytes.seek(0)
+
+                # Decode bytes with pickle and then into pydantic object.
+                result = torch.load(
                     result_bytes, map_location="cpu", weights_only=False
                 )
-            )
 
-            # Close bytes
-            result_bytes.close()
+                # Close bytes
+                result_bytes.close()
+
+            else:
+
+                result = response.data
+
+            result = ResultModel(**result)
 
             # Handle result
             self.object.remote_backend_handle_result_value(result.value)
 
         elif response.status == ResponseModel.JobStatus.STREAM:
 
-            *args, value = response.data
+            args, value = response.data
 
             node = self.object.remote_backend_get_stream_node(*args)
 
-            protocols.StreamingProtocol.execute_callback(
-                node, value
-            )
-
-        # Or if there was some error.
-        elif response.status == ResponseModel.JobStatus.ERROR:
-            raise Exception(str(response))
-
-        return response
+            protocols.StreamingProtocol.execute_callback(node, value)
 
     def submit_request(self, request: "RequestModel") -> "ResponseModel":
         """Sends request to the remote endpoint and handles the response object.
@@ -267,16 +285,14 @@ class RemoteBackend(LocalBackend):
 
             raise Exception(response.reason)
 
-    def blocking_request(self, object: RemoteMixin):
+    def blocking_request(self, request: "RequestModel"):
         """Send intervention request to the remote service while waiting for updates via websocket.
 
         Args:
-            obj (RemoteMixin): Remote object..
+            request (RequestModel):Request.
         """
 
         from ...schema.Response import ResponseModel
-
-        request = self.request(object)
 
         # Create a socketio connection to the server.
         with socketio.SimpleClient(

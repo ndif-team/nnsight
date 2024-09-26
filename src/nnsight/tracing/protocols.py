@@ -974,6 +974,12 @@ class StreamingProtocol(Protocol):
 
     @classmethod
     def add_callback(cls, node: "Node", callback: Callable) -> None:
+        """Add callback to attachment on Graph.
+
+        Args:
+            node (Node): Node to add callback for
+            callback (Callable): Callback to add.
+        """
 
         if cls.attachment_name not in node.graph.attachments:
 
@@ -982,12 +988,27 @@ class StreamingProtocol(Protocol):
         node.graph.attachments[cls.attachment_name][node.name] = callback
 
     @classmethod
-    def get_callback(cls, node: "Node"):
+    def get_callback(cls, node: "Node") -> Callable:
+        """Gets callback from attachments.
+
+        Args:
+            node (Node): Streaming Node to get callback for
+
+        Returns:
+            Callable: Callabck.
+        """
 
         return node.graph.attachments[cls.attachment_name][node.name]
 
     @classmethod
     def execute_callback(cls, node: "Node", value: Any = inspect._empty):
+        """Execute the callback for give streaming node.
+
+        Args:
+            node (Node): Node to get callback and execute for.
+            value (Any, optional): Value to execute callback with. 
+                If no value provided, gets the value from the streaming node's first argument.
+        """
 
         if value is inspect._empty:
             value = node.args[0].value
@@ -996,18 +1017,18 @@ class StreamingProtocol(Protocol):
 
         callback = cls.get_callback(node)
 
-        if threaded:
-
-            Thread(target=callback, args=(value,)).start()
-
-        else:
-
-            callback(value)
+        callback(value)
 
     @classmethod
-    def add(cls, node: Node, callback: Callable, threaded: bool = True) -> None:
+    def add(cls, node: Node, callback: Callable) -> "InterventionProxy":
+        """Add streaming node to intervention graph. Adds callback as an attachment to Graph.
 
-        proxy = node.create(target=cls, proxy_value=None, args=[node, threaded])
+        Args:
+            node (Node): Node to get value from for streaming callback.
+            callback (Callable): Callback to execute when given Node's value is available.
+        """
+
+        proxy = node.create(target=cls, proxy_value=None, args=[node])
 
         cls.add_callback(proxy.node, callback)
 
