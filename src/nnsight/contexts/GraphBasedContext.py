@@ -136,6 +136,10 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             data (Any): Data to print.
         """
         self.apply(print, *data)
+        
+    def upload(self, data:Any) -> InterventionProxy:
+        
+        return protocols.StreamingUploadProtocol.add(self.graph, data)
 
     def bool(self, *args, **kwargs) -> InterventionProxy:
         """NNsight helper method to create a traceable bool."""

@@ -76,10 +76,6 @@ class InterventionProxy(Proxy):
         """
 
         return protocols.StreamingDownloadProtocol.add(self.node)
-    
-    def upload(self) -> InterventionProxy:
-        
-        return protocols.StreamingUploadProtocol.add(self.node)
 
     def stop(self) -> None:
         """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed.."""

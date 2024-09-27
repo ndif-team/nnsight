@@ -548,3 +548,4 @@ dict = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.dict
 apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
 log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
 cond = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.cond
+upload = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.upload

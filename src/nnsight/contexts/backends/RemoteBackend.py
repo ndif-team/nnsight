@@ -294,10 +294,6 @@ class RemoteBackend(LocalBackend):
 
         from ...schema.Response import ResponseModel
 
-        protocols.StreamingUploadProtocol.set(
-            lambda *args: self.stream_send(*args)
-        )
-
         preprocess(request, streaming=True)
 
         # Create a socketio connection to the server.
@@ -316,7 +312,11 @@ class RemoteBackend(LocalBackend):
             request.session_id = sio.sid
 
             # Submit request via
-            self.submit_request(request)
+            response = self.submit_request(request)
+
+            protocols.StreamingUploadProtocol.set(
+                lambda *args: self.stream_send(*args, job_id=response.id, sio=sio)
+            )
 
             # Loop until
             while True:
@@ -331,27 +331,13 @@ class RemoteBackend(LocalBackend):
 
         protocols.StreamingUploadProtocol.set(None)
 
-    def stream_send(self, value: Any):
+    def stream_send(self, value: Any, job_id: str, sio:socketio.SimpleClient):
 
         from ...schema.Request import StreamValueModel
-        
-        request = StreamValueModel(
-            model_key=self.object.remote_backend_get_model_key(), value=value
-        )
-        
-        response = requests.post(
-            f"{self.address}/stream",
-            json=request.model_dump(),
-            headers={"ndif-api-key": self.api_key},
-        )
 
-        if response.status_code == 200:
+        request = StreamValueModel(model_key=job_id, value=value)
 
-            pass
-
-        else:
-
-            raise Exception(response.reason)
+        sio.emit('stream_upload', data=request.model_dump())
 
     def non_blocking_request(self, request: "RequestModel" = None):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
@@ -434,9 +420,10 @@ def preprocess(request: "RequestModel", streaming: bool = False):
 
                         else:
 
-                            graph_model.nodes[node.name].args = [
+                            graph_model.nodes[node.name].args = []
+                            graph_model.nodes[node.name].kwargs[node_name] = (
                                 NodeModel.Reference(name=node_name)
-                            ]
+                            )
 
                 pop_stream_listeners(node)
 

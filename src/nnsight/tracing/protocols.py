@@ -998,14 +998,14 @@ class StreamingUploadProtocol(Protocol):
         cls.send = fn
 
     @classmethod
-    def add(cls, node: Node) -> "InterventionProxy":
+    def add(cls, graph: "Graph", value:Any) -> "InterventionProxy":
         """Add streaming node to intervention graph. Adds callback as an attachment to Graph.
 
         Args:
-            node (Node): Node to get value from for streaming callback.
+            graph (graph): Node to get value from for streaming callback.
         """
 
-        return node.create(target=cls, proxy_value=None, args=[node])
+        return graph.create(target=cls, proxy_value=None, args=[value])
 
     @classmethod
     def execute(cls, node: "Node"):
@@ -1015,6 +1015,8 @@ class StreamingUploadProtocol(Protocol):
         if cls.send is not None:
 
             cls.send(value_node.value)
+            
+            node.update_dependencies()
 
         else:
 
