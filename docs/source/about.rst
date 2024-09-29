@@ -53,7 +53,7 @@ Here is how it looks:
     :linenos:
 
     from nnsight import LanguageModel
-    model = LanguageModel('meta-llama/Llama-2-70b-hf')
+    model = LanguageModel('meta-llama/Meta-Llama-3.1-70B')
     with model.trace('The Eiffel Tower is in the city of ', remote=True):
         hidden_state = model.layers[10].input[0].save()  # save one hidden state
         model.layers[11].mlp.output = 0  # change one MLP module output
