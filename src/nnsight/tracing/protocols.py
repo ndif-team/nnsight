@@ -141,9 +141,7 @@ class ApplyModuleProtocol(Protocol):
         except:
             device = None
 
-        args, kwargs = node.prepare_inputs(
-            (node.args, node.kwargs), device=device
-        )
+        args, kwargs = node.prepare_inputs((node.args, node.kwargs), device=device)
 
         module_path, *args = args
 
@@ -445,9 +443,7 @@ class BridgeProtocol(Protocol):
 
     class BridgeException(Exception):
         def __init__(self):
-            super.__init__(
-                "Must define a Session context to make use of the Bridge"
-            )
+            super.__init__("Must define a Session context to make use of the Bridge")
 
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
@@ -745,9 +741,7 @@ class ConditionalProtocol(Protocol):
     attachment_name = "nnsight_conditional_manager"
 
     @classmethod
-    def add(
-        cls, graph: "Graph", condition: Union["Node", Any]
-    ) -> "InterventionProxy":
+    def add(cls, graph: "Graph", condition: Union["Node", Any]) -> "InterventionProxy":
 
         return graph.create(target=cls, proxy_value=True, args=[condition])
 
@@ -794,9 +788,7 @@ class ConditionalProtocol(Protocol):
         return cls.attachment_name in graph.attachments.keys()
 
     @classmethod
-    def get_conditional(
-        cls, graph: "Graph", cond_node_name: str
-    ) -> "Conditional":
+    def get_conditional(cls, graph: "Graph", cond_node_name: str) -> "Conditional":
         """Gets the ConditionalProtocol node by its name.
 
         Args:
@@ -866,9 +858,7 @@ class ConditionalProtocol(Protocol):
             bool: Whether the Node is conditioned.
         """
 
-        return node.graph.attachments[cls.attachment_name].is_node_conditioned(
-            node
-        )
+        return node.graph.attachments[cls.attachment_name].is_node_conditioned(node)
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
@@ -903,9 +893,7 @@ class UpdateProtocol(Protocol):
     """
 
     @classmethod
-    def add(
-        cls, node: "Node", new_value: Union[Node, Any]
-    ) -> "InterventionProxy":
+    def add(cls, node: "Node", new_value: Union[Node, Any]) -> "InterventionProxy":
         """Creates an UpdateProtocol node.
 
         Args:
@@ -940,9 +928,7 @@ class UpdateProtocol(Protocol):
         if value_node.target == BridgeProtocol:
             value_node._value = new_value
             bridge = BridgeProtocol.get_bridge(value_node.graph)
-            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[
-                value_node.args[1]
-            ]
+            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
             value_node = lock_node.args[0]
 
         value_node._value = new_value
@@ -972,16 +958,21 @@ class StreamingDownloadProtocol(Protocol):
 
     @classmethod
     def add(cls, node: Node) -> "InterventionProxy":
-        """Add streaming node to intervention graph. Adds callback as an attachment to Graph.
+        """Add streaming download Node to the intervention graph.
 
         Args:
-            node (Node): Node to get value from for streaming callback.
+            node (Node): Node to download value of locally when available remotely.
         """
 
         return node.create(target=cls, proxy_value=None, args=[node])
 
     @classmethod
     def execute(cls, node: "Node"):
+        """When executing remotely, the local version of this Node type has its value set directly by `RemoteBackend`, not via `.execute(...)`
+        The remote version streams the value in a ResponseModel object.
+
+        Is a no-op when not executing remotely.
+        """
 
         value_node = node.args[0]
 
@@ -998,26 +989,35 @@ class StreamingUploadProtocol(Protocol):
         cls.send = fn
 
     @classmethod
-    def add(cls, graph: "Graph", value:Any) -> "InterventionProxy":
-        """Add streaming node to intervention graph. Adds callback as an attachment to Graph.
+    def add(cls, graph: "Graph", value: Any) -> "InterventionProxy":
+        """Add streaming upload Node to the intervention graph.
 
         Args:
-            graph (graph): Node to get value from for streaming callback.
+            graph (Graph): Graph to add Node to.
+            value (Any): Value to upload remotely when available locally.
         """
 
         return graph.create(target=cls, proxy_value=None, args=[value])
 
     @classmethod
     def execute(cls, node: "Node"):
+        """When executing remotely, the local version of this Node calls `cls.send` to upload the its value to a waiting remote service.
+        The remote version blocks and waits until it receives the value from its local counterpart.
 
-        value_node = node.args[0]
+        Is a no-op when not executing remotely.
+
+        Args:
+            node (Node): Node to upload remotely.
+        """
+
+        value = node.prepare_inputs(node.args[0])
 
         if cls.send is not None:
 
-            cls.send(value_node.value)
-            
+            cls.send(value)
+
             node.update_dependencies()
 
         else:
 
-            node.set_value(value_node.value)
+            node.set_value(value)

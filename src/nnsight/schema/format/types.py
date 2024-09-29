@@ -240,6 +240,7 @@ class GraphModel(BaseNNsightModel):
 
     type_name: Literal["GRAPH"] = "GRAPH"
 
+    # We have a reference to the real Graph in the pydantic to be used by optimization logic
     graph: Graph = Field(exclude=True, default=None, validate_default=False)
 
     id: int

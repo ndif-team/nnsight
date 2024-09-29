@@ -51,7 +51,8 @@ class InterventionProxy(Proxy):
         self._grad: InterventionProxy
 
     def save(self) -> InterventionProxy:
-        """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
+        """Adds a lock Node to prevent its value from being cleared where normally it would be cleared when its no longer needed to save memory.
+        Used to access values outside of the tracing context, after execution.
 
         Returns:
             InterventionProxy: Proxy.
@@ -65,17 +66,29 @@ class InterventionProxy(Proxy):
 
         return self
 
-    def stream(
-        self
-    ) -> InterventionProxy:
-        """Streams value of this node when it becomes available.
+    def local(self) -> InterventionProxy:
+        """Streams value of this node locally when it becomes available remotely.
+        This then kicks off execution of the local intervention graph up until it hits an upload Node created from `remote()`.
 
+        Is a no-op when not executing remotely.
 
         Returns:
             InterventionProxy: Proxy.
         """
 
         return protocols.StreamingDownloadProtocol.add(self.node)
+
+    def remote(self) -> InterventionProxy:
+        """Streams value of this node remotely when it becomes available locally.
+        The remote service will block until the local value is uploaded and received.
+
+        Is a no-op when not executing remotely.
+
+        Returns:
+            InterventionProxy: Proxy.
+        """
+
+        return protocols.StreamingUploadProtocol.add(self.node.graph, self.node)
 
     def stop(self) -> None:
         """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed.."""
@@ -187,9 +200,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("shape")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.shape, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
     @property
     def device(self) -> Collection[torch.device]:
@@ -208,9 +219,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("device")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.device, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
 
     @property
     def dtype(self) -> Collection[torch.device]:
@@ -229,9 +238,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("dtype")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.dtype, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
 
 class InterventionProtocol(Protocol):
@@ -427,9 +434,7 @@ class InterventionProtocol(Protocol):
 
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
-                if call_iter != intervention_handler.count(
-                    intervention_node_name
-                ):
+                if call_iter != intervention_handler.count(intervention_node_name):
 
                     continue
 

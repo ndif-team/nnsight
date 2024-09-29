@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import weakref
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Tuple
 
 import requests
 import socketio
@@ -56,6 +56,8 @@ class RemoteMixin(LocalMixin):
 
         raise NotImplementedError()
 
+    # Following two methods are really only necessary because how you get a node in Tracer is different than Session
+    # due to one have many graphs and the other on one.
     def remote_backend_get_stream_node(self, *args) -> "Node":
         """Get streaming node on the client side based on arguments returned from `RemoteMixin.remote_stream_format`
 
@@ -66,7 +68,7 @@ class RemoteMixin(LocalMixin):
         raise NotImplementedError()
 
     @classmethod
-    def remote_stream_format(self, node: Node) -> Any:
+    def remote_stream_format(self, node: Node) -> Tuple[Any]:
         """Returns arguments needed to get the correct streaming node on the client side.
 
         Args:
@@ -128,6 +130,8 @@ class RemoteBackend(LocalBackend):
 
     def __call__(self, object: RemoteMixin):
 
+        # We need to reference the object's RemoteMixin methods so we need to access it.
+        # Make sure its weak reference to avoid reference loops on a potentially large object.
         self.object = weakref.proxy(object)
 
         if self.blocking:
@@ -141,18 +145,20 @@ class RemoteBackend(LocalBackend):
 
             request = None
 
+            # If self.job_id is empty, it means were sending a new job.
             if not self.job_id:
 
                 request = self.request()
-
+                
+            # Otherwise we are getting the status / result of the existing job.
             self.non_blocking_request(request)
 
+        # Cleanup
         self.object.remote_backend_cleanup()
 
     def handle_response(self, response: "ResponseModel") -> None:
         """Handles incoming response data.
 
-        Parses it into the `ResponseModel` pydantic object.
         Logs the response object.
         If the job is completed, retrieve and stream the result from the remote endpoint.
         Use torch.load to decode and load the `ResultModel` into memory.
@@ -173,8 +179,7 @@ class RemoteBackend(LocalBackend):
         # Log response for user
         response.log(remote_logger)
 
-        # If the status of the response is completed, update the local nodes that the user specified to save.
-        # Then disconnect and continue.
+        # If job is completed:
         if response.status == ResponseModel.JobStatus.COMPLETED:
 
             # If the response has no result data, it was too big and we need to stream it from the server.
@@ -217,17 +222,24 @@ class RemoteBackend(LocalBackend):
 
                 result = response.data
 
+            # Load into pydantic object from dict.
             result = ResultModel(**result)
 
             # Handle result
+            # This injects the .saved() values
             self.object.remote_backend_handle_result_value(result.value)
 
+        # If were receiving a streamed value:
         elif response.status == ResponseModel.JobStatus.STREAM:
 
+            # First item is arguments on how the RemoteMixin can get the correct StreamingDownload node.
+            # Second item is the steamed value from the remote service.
             args, value = response.data
 
+            # Get the local stream node in our intervention graph
             node = self.object.remote_backend_get_stream_node(*args)
 
+            # Inject it into the local intervention graph to kick off local execution.
             node.set_value(value)
 
     def submit_request(self, request: "RequestModel") -> "ResponseModel":
@@ -294,6 +306,8 @@ class RemoteBackend(LocalBackend):
 
         from ...schema.Response import ResponseModel
 
+        # We need to do some processing / optimizations on both the graph were sending remotely
+        # and our local intervention graph. In order handle the more complex Protocols for streaming.
         preprocess(request, streaming=True)
 
         # Create a socketio connection to the server.
@@ -314,24 +328,45 @@ class RemoteBackend(LocalBackend):
             # Submit request via
             response = self.submit_request(request)
 
+            # We need to tell the StreamingUploadProtocol how to use our websocket connection
+            # so it can upload values during execution to our job.
             protocols.StreamingUploadProtocol.set(
                 lambda *args: self.stream_send(*args, job_id=response.id, sio=sio)
             )
 
-            # Loop until
-            while True:
+            try:
+                # Loop until
+                while True:
 
-                response = sio.receive()[1]
-                response = ResponseModel.unpickle(response)
+                    # Get pickled bytes value from the websocket.
+                    response = sio.receive()[1]
+                    # Convert to pydantic object.
+                    response = ResponseModel.unpickle(response)
 
-                self.handle_response(response)
+                    # Handle the response.
+                    self.handle_response(response)
 
-                if response.status == ResponseModel.JobStatus.COMPLETED:
-                    break
+                    # Break when completed.
+                    if response.status == ResponseModel.JobStatus.COMPLETED:
+                        break
+                    
+            except Exception as e:
+                
+                raise e
+            
+            finally:
 
-        protocols.StreamingUploadProtocol.set(None)
+                # Clear StreamingUploadProtocol state
+                protocols.StreamingUploadProtocol.set(None)
 
     def stream_send(self, value: Any, job_id: str, sio:socketio.SimpleClient):
+        """Upload some value to the remote service for some job id.
+
+        Args:
+            value (Any): Value to upload
+            job_id (str): Job id.
+            sio (socketio.SimpleClient): Connected websocket client.
+        """
 
         from ...schema.Request import StreamValueModel
 
@@ -383,41 +418,76 @@ class RemoteBackend(LocalBackend):
 
 
 def preprocess(request: "RequestModel", streaming: bool = False):
+    """Optimizes the local and remote graph to handle streaming. Is required to use streaming protocols.
+
+    Args:
+        request (RequestModel): Request to optimize.
+        streaming (bool, optional): If streaming. Defaults to False.
+
+    Raises:
+        exception: _description_
+    """
 
     from ...schema.format.functions import get_function_name
     from ...schema.format.types import FunctionModel, GraphModel, NodeModel
 
+    # Exceptions might be resolved later during optimization so exceptions
+    # are stored here to added and removed.
+    # If there are any still in here after optimization, it raises the first one.
     exceptions = {}
 
     def inner(graph_model: GraphModel):
+        """Optimizes the given remote GraphModel
 
+        Args:
+            graph_model (GraphModel): Remote Graph Model to send remotely.
+        """
+
+        # GraphModel has an un-serialized reference to the real local Graph.
         graph = graph_model.graph
 
         for node_name, node_model in list(graph_model.nodes.items()):
 
+            # Get local nnsight Node
             node = graph.nodes[node_name]
 
-            node.reset()
-
+            # Get name of Node.target
             function_name = node_model.target.function_name
 
+            # If its a streaming download Node, we need to recursively remove these Nodes from the remote GraphModel.
+            # This is because we will be executing these nodes only locally when the root streaming node is download.
+            # This recursion ends at a streaming Upload Node and will resume remote execution of the intervention graph.
             if streaming and function_name == get_function_name(
                 protocols.StreamingDownloadProtocol
             ):
 
                 def pop_stream_listeners(node: "Node"):
+                    """Recursively removes listeners of streaming download nodes.
+
+                    Args:
+                        node (Node): Node.
+                    """
 
                     for node in node.listeners:
+                        
+                        # Also reset it to prepare for its local execution.
+                        node.reset()
 
                         if node.target is not protocols.StreamingUploadProtocol:
 
+                            # Remove from remote GraphModel
                             graph_model.nodes.pop(node.name, None)
+                            # Also remove the exception for it.
                             exceptions.pop(
                                 f"{graph_model.id}_{node.name}", None
                             )
 
                             pop_stream_listeners(node)
 
+                        # We also need to replace all args / dependencies of Upload Nodes to be the root stream Download Nodes.
+                        # This is because remote Upload nodes cant depend on nodes that will be local of course.
+                        # However it does need to depend on its root stream Download Nodes so the remote service only executes and waits at an Upload
+                        # AFTER it sends any values via the stream Download Nodes.
                         else:
 
                             graph_model.nodes[node.name].args = []
@@ -427,26 +497,30 @@ def preprocess(request: "RequestModel", streaming: bool = False):
 
                 pop_stream_listeners(node)
 
+            # Recurse into inner graphs.
             elif function_name == get_function_name(
                 protocols.LocalBackendExecuteProtocol
             ):
 
                 inner(node_model.args[0].graph)
 
-            else:
 
+            else:
+                # If its still a node that will be executed remotely:
                 if node_name in graph_model.nodes:
 
+                    # We need to see if its whitelisted.
                     try:
 
                         FunctionModel.check_function_whitelist(function_name)
-
+                    # Put exception in dict as it may be removed during further iterations.
                     except Exception as e:
 
                         exceptions[f"{graph_model.id}_{node_name}"] = e
 
     inner(request.object.graph)
 
+    # Raise any leftover exceptions
     for exception in exceptions.values():
 
         raise exception

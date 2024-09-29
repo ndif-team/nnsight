@@ -411,6 +411,7 @@ class Node:
             self.destroy()
 
     def update_listeners(self):
+        """Updates remaining_dependencies of listeners. If they are now fulfilled, execute them."""
 
         for listener in self.listeners:
             listener.remaining_dependencies -= 1
@@ -419,6 +420,7 @@ class Node:
                 listener.execute()
 
     def update_dependencies(self):
+        """Updates remaining_listeners of dependencies. If they are now redundant, destroy them."""
         
         for dependency in self.arg_dependencies:
             dependency.remaining_listeners -= 1
