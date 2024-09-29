@@ -231,7 +231,7 @@ class RemoteBackend(LocalBackend):
 
         # If were receiving a streamed value:
         elif response.status == ResponseModel.JobStatus.STREAM:
-
+            
             # First item is arguments on how the RemoteMixin can get the correct StreamingDownload node.
             # Second item is the steamed value from the remote service.
             args, value = response.data
@@ -245,6 +245,8 @@ class RemoteBackend(LocalBackend):
 
             # Inject it into the local intervention graph to kick off local execution.
             node.set_value(value)
+            
+            node.remaining_dependencies -= 1
 
     def submit_request(self, request: "RequestModel") -> "ResponseModel":
         """Sends request to the remote endpoint and handles the response object.

@@ -5,15 +5,9 @@ import warnings
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
+                          AutoTokenizer, BatchEncoding, PreTrainedModel,
+                          PreTrainedTokenizer)
 from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
@@ -108,6 +102,21 @@ class LanguageModelProxy(InterventionProxy):
         """Property as alias for InterventionProxy.token"""
         return self.token
 
+class Generator(WrapperModule):
+    
+    class Streamer(WrapperModule):
+        
+        def put(self, *args):
+            
+            return self(*args)
+    
+    def __init__(self) -> None:
+        
+        super().__init__()
+        
+        self.streamer = Generator.Streamer()
+        
+        
 
 class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
     """LanguageModels are NNsight wrappers around transformers language models.
@@ -155,7 +164,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         if isinstance(model_key, torch.nn.Module):
 
-            setattr(model_key, "generator", WrapperModule())
+            setattr(model_key, "generator", Generator())
 
         super().__init__(model_key, *args, **kwargs)
 
@@ -197,7 +206,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
             model = self.automodel.from_config(config, trust_remote_code=True)
 
-            setattr(model, "generator", WrapperModule())
+            setattr(model, "generator", Generator())
 
             return model
 
@@ -211,7 +220,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
-        setattr(model, "generator", WrapperModule())
+        setattr(model, "generator", Generator())
 
         return model
 
@@ -333,6 +342,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
     def _execute_generate(
         self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
     ):
+        
+        if 'streamer' not in kwargs:
+            kwargs['streamer'] = self._model.generator.streamer
 
         device = next(self._model.parameters()).device
 
