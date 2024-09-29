@@ -275,13 +275,18 @@ class Node:
             kwargs=kwargs,
         )
 
-    def reset(self) -> None:
+    def reset(self, propagate: bool = False) -> None:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = len(self.arg_dependencies) + int(
             not (self.cond_dependency is None)
         )
+
+        if propagate:
+            for node in self.listeners:
+                if node.executed():
+                    node.reset(propagate=True)
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
@@ -362,7 +367,7 @@ class Node:
         Lets protocol execute if target is str.
         Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
-
+    
         try:
 
             if isinstance(self.target, type) and issubclass(
@@ -383,13 +388,13 @@ class Node:
                 self.set_value(output)
 
         except Exception as e:
-
+            
             raise type(e)(
                 f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
-            ) from e
-
+            ) from e     
+            
         finally:
-            self.remaining_dependencies -= 1
+            self.remaining_dependencies -= 1       
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
@@ -409,7 +414,7 @@ class Node:
 
         if self.done() and self.redundant():
             self.destroy()
-
+            
     def update_listeners(self):
         """Updates remaining_dependencies of listeners. If they are now fulfilled, execute them."""
 
@@ -421,7 +426,7 @@ class Node:
 
     def update_dependencies(self):
         """Updates remaining_listeners of dependencies. If they are now redundant, destroy them."""
-        
+
         for dependency in self.arg_dependencies:
             dependency.remaining_listeners -= 1
 

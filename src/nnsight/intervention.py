@@ -431,10 +431,12 @@ class InterventionProtocol(Protocol):
                 batch_start, batch_size = intervention_handler.batch_groups[
                     batch_group_idx
                 ]
-
+                if call_iter == -1:
+                    node.reset(propagate=True)
+                    
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
-                if call_iter != intervention_handler.count(intervention_node_name):
+                elif call_iter != intervention_handler.count(intervention_node_name):
 
                     continue
 

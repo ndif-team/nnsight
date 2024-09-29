@@ -149,7 +149,7 @@ class RemoteBackend(LocalBackend):
             if not self.job_id:
 
                 request = self.request()
-                
+
             # Otherwise we are getting the status / result of the existing job.
             self.non_blocking_request(request)
 
@@ -238,6 +238,10 @@ class RemoteBackend(LocalBackend):
 
             # Get the local stream node in our intervention graph
             node = self.object.remote_backend_get_stream_node(*args)
+
+            # If its already been executed, it must mean this intervention subgraph should be executed every time.
+            if node.executed():
+                node.reset(propagate=True)
 
             # Inject it into the local intervention graph to kick off local execution.
             node.set_value(value)
@@ -331,7 +335,9 @@ class RemoteBackend(LocalBackend):
             # We need to tell the StreamingUploadProtocol how to use our websocket connection
             # so it can upload values during execution to our job.
             protocols.StreamingUploadProtocol.set(
-                lambda *args: self.stream_send(*args, job_id=response.id, sio=sio)
+                lambda *args: self.stream_send(
+                    *args, job_id=response.id, sio=sio
+                )
             )
 
             try:
@@ -349,17 +355,17 @@ class RemoteBackend(LocalBackend):
                     # Break when completed.
                     if response.status == ResponseModel.JobStatus.COMPLETED:
                         break
-                    
+
             except Exception as e:
-                
+
                 raise e
-            
+
             finally:
 
                 # Clear StreamingUploadProtocol state
                 protocols.StreamingUploadProtocol.set(None)
 
-    def stream_send(self, value: Any, job_id: str, sio:socketio.SimpleClient):
+    def stream_send(self, value: Any, job_id: str, sio: socketio.SimpleClient):
         """Upload some value to the remote service for some job id.
 
         Args:
@@ -372,7 +378,7 @@ class RemoteBackend(LocalBackend):
 
         request = StreamValueModel(model_key=job_id, value=value)
 
-        sio.emit('stream_upload', data=request.model_dump())
+        sio.emit("stream_upload", data=request.model_dump())
 
     def non_blocking_request(self, request: "RequestModel" = None):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
@@ -469,7 +475,7 @@ def preprocess(request: "RequestModel", streaming: bool = False):
                     """
 
                     for node in node.listeners:
-                        
+
                         # Also reset it to prepare for its local execution.
                         node.reset()
 
@@ -503,7 +509,6 @@ def preprocess(request: "RequestModel", streaming: bool = False):
             ):
 
                 inner(node_model.args[0].graph)
-
 
             else:
                 # If its still a node that will be executed remotely:
