@@ -215,7 +215,8 @@ class RemoteBackend(LocalBackend):
 
         else:
 
-            raise Exception(response.reason)
+            msg = response.json()['detail']
+            raise ConnectionError(msg)
 
     def get_response(self) -> "ResponseModel":
         """Retrieves and handles the response object from the remote endpoint.
