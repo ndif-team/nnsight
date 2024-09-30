@@ -19,6 +19,7 @@ from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from . import util
+from .patching import Patch, Patcher
 from .tracing import protocols
 from .tracing.Graph import Graph
 from .tracing.Node import Node
@@ -200,7 +201,9 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("shape")
 
-        return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
+        return util.apply(
+            self.node.proxy_value, lambda x: x.shape, torch.Tensor
+        )
 
     @property
     def device(self) -> Collection[torch.device]:
@@ -219,7 +222,9 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("device")
 
-        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
+        return util.apply(
+            self.node.proxy_value, lambda x: x.device, torch.Tensor
+        )
 
     @property
     def dtype(self) -> Collection[torch.device]:
@@ -238,7 +243,9 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("dtype")
 
-        return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
+        return util.apply(
+            self.node.proxy_value, lambda x: x.dtype, torch.Tensor
+        )
 
 
 class InterventionProtocol(Protocol):
@@ -431,12 +438,16 @@ class InterventionProtocol(Protocol):
                 batch_start, batch_size = intervention_handler.batch_groups[
                     batch_group_idx
                 ]
+
+                # If this node will be executed for multiple iterations, we need to reset the sub-graph to b executed once more
                 if call_iter == -1:
                     node.reset(propagate=True)
-                    
+
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
-                elif call_iter != intervention_handler.count(intervention_node_name):
+                elif call_iter != intervention_handler.count(
+                    intervention_node_name
+                ):
 
                     continue
 
@@ -464,8 +475,10 @@ class InterventionProtocol(Protocol):
                         torch.Tensor,
                     )
 
-                # Value injection.
-                node.set_value(value)
+                # If this Node may be executed more than once, we need to defer any Node destruction until after interleaving.
+                with intervention_handler.defer_destruction(call_iter == -1):
+                    # Value injection.
+                    node.set_value(value)
 
                 # Check if through the previous value injection, there was a 'swap' intervention.
                 # This would mean we want to replace activations for this batch with some other ones.
@@ -607,6 +620,7 @@ class InterventionHandler:
         self.batch_groups = batch_groups
         self.batch_size = batch_size
         self.call_counter: Dict[str, int] = {}
+        self.destruction_deferrer = DestructionDeferrer()
 
     def count(self, name: str) -> int:
         """Increments the count of times a given Intervention Node has tried to be executed and returns the count.
@@ -627,3 +641,55 @@ class InterventionHandler:
             self.call_counter[name] += 1
 
         return self.call_counter[name]
+
+    def defer_destruction(self, defer: bool):
+
+        self.destruction_deferrer.defer = defer
+
+        return self.destruction_deferrer
+
+    def destroy(self):
+
+        self.destruction_deferrer.destroy()
+
+
+class DestructionDeferrer:
+
+    def __init__(self, defer: bool = False) -> None:
+
+        self.defer = defer
+        self.deferred_nodes: Dict[str, Node] = {}
+        self.patcher = Patcher(
+            [
+                Patch(
+                    Node,
+                    lambda node: self.deferred_nodes.update({node.name: node}),
+                    "destroy",
+                )
+            ]
+        )
+
+    def __enter__(self):
+
+        if self.defer:
+
+            self.patcher.__enter__()
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+
+        if self.defer:
+
+            self.patcher.__exit__(None, None, None)
+
+        if isinstance(exc_val, BaseException):
+            raise exc_val
+
+    def destroy(self):
+
+        for node in self.deferred_nodes.values():
+
+            node.destroy()
+
+        self.deferred_nodes = {}
