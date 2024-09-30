@@ -245,8 +245,8 @@ class RemoteBackend(LocalBackend):
 
             # Inject it into the local intervention graph to kick off local execution.
             node.set_value(value)
-            
-            node.remaining_dependencies -= 1
+                        
+            node.remaining_dependencies = -1
 
     def submit_request(self, request: "RequestModel") -> "ResponseModel":
         """Sends request to the remote endpoint and handles the response object.
