@@ -62,6 +62,6 @@ class StreamValueModel(BaseModel):
         
         handler = DeserializeHandler(model=model)
         
-        return self.value.deserialize(handler)
-        
+        return try_deserialize(self.value, handler)
+                
         
