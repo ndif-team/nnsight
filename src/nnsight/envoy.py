@@ -26,9 +26,15 @@ class Envoy:
         _tracer (nnsight.context.Tracer.Tracer): Object which adds this Envoy's module's output and input proxies to an intervention graph. Must be set on Envoys objects manually by the Tracer.
     """
 
-    def __init__(self, module: torch.nn.Module, module_path: str = ""):
+    def __init__(
+        self,
+        module: torch.nn.Module,
+        module_path: str = "",
+        rename_modules_dict: Dict[str, str] | None = None,
+    ):
 
         self.path = module_path
+        self.rename_modules_dict = rename_modules_dict
 
         self._fake_outputs: List[torch.Tensor] = []
         self._fake_inputs: List[torch.Tensor] = []
@@ -77,9 +83,12 @@ class Envoy:
             name (str): name of envoy/attribute.
         """
 
-        envoy = Envoy(module, module_path=f"{self.path}.{name}")
+        envoy = Envoy(module, module_path=f"{self.path}.{name}", rename_modules_dict=self.rename_modules_dict)
 
         self._sub_envoys.append(envoy)
+
+        if self.rename_modules_dict is not None and name in self.rename_modules_dict:
+            name = self.rename_modules_dict[name]
 
         # If the module already has a sub-module named 'input' or 'output',
         # mount the proxy access to 'nns_input' or 'nns_output instead.
