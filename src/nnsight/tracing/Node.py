@@ -279,7 +279,7 @@ class Node:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = len(self.arg_dependencies) + int(
+        self.remaining_dependencies = sum([not node.executed() for node in self.arg_dependencies]) + int(
             not (self.cond_dependency is None)
         )
 
