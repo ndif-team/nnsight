@@ -307,6 +307,7 @@ class GlobalTracingContext(GraphBasedContext):
             global_patch(torch, "randn"),
             global_patch(torch, "randperm"),
             global_patch(torch, "zeros"),
+            global_patch(torch, "cat")
         ]
         + [
             global_patch_class(value)
