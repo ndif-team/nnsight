@@ -21,7 +21,7 @@ Here is a simple example where we run the nnsight API locally on gpt2 and save t
 ```python
 from nnsight import LanguageModel
 
-model = LanguageModel('openai-community/gpt2', device_map='auto')
+model = LanguageModel('openai-community/gpt2', device_map='auto') as tracer:
 
 with model.trace('The Eiffel Tower is in the city of'):
 
