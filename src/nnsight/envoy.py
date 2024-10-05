@@ -204,7 +204,11 @@ class Envoy:
                 envoy._clear(propagate=True)
 
     def _hook(
-        self, module: torch.nn.Module, input: Any, input_kwargs: Dict, output: Any
+        self,
+        module: torch.nn.Module,
+        input: Any,
+        input_kwargs: Dict,
+        output: Any,
     ):
 
         if self._scanning():
@@ -216,7 +220,16 @@ class Envoy:
             self._fake_outputs.append(output)
             self._fake_inputs.append(input)
 
-    def next(self, increment: int = 1, propagate: bool = False) -> Envoy:
+    def next(self, increment: int = 1, propagate: bool = True) -> Envoy:
+        """By default, this modules inputs and outputs only refer to the first time its called. Use `.next()`to select which iteration .input an .output refer to.
+
+        Args:
+            increment (int, optional): How many iterations to jump. Defaults to 1.
+            propagate (bool, optional): If to also call `.next()` on all sub envoys/modules.. Defaults to True.
+
+        Returns:
+            Envoy: Self.
+        """
 
         self._call_iter += increment
 
@@ -225,6 +238,24 @@ class Envoy:
         if propagate:
             for envoy in self._sub_envoys:
                 envoy.next(increment=increment, propagate=True)
+
+        return self
+
+    def all(self, propagate: bool = True) -> Envoy:
+        """By default, this modules inputs and outputs only refer to the first time its called. Use `.all()`to have .input and .output refer to all iterations.
+
+        Args:
+            propagate (bool, optional): If to also call `.all()` on all sub envoys/modules.. Defaults to True.
+
+        Returns:
+            Envoy: Self.
+        """
+
+        self._call_iter = -1
+
+        if propagate:
+            for envoy in self._sub_envoys:
+                envoy.all(propagate=True)
 
         return self
 
@@ -240,7 +271,10 @@ class Envoy:
         return self
 
     def modules(
-        self, include_fn: Callable[[Envoy], bool] = None, names: bool = False, envoys: List = None
+        self,
+        include_fn: Callable[[Envoy], bool] = None,
+        names: bool = False,
+        envoys: List = None,
     ) -> List[Envoy]:
         """Returns all Envoys in the Envoy tree.
 
@@ -541,13 +575,13 @@ class Envoy:
         """
 
         return self.inputs[0][0]
-    
+
     @input.setter
     def input(self, value: Union[InterventionProxy, Any]) -> None:
         """Setting the value of the input's first positionl argument in the model's module.
-        
+
         Args;
             value (Union[InterventionProxy, Any]): Value to set the input to.
         """
-        
+
         self.inputs = ((value,) + self.inputs[0][1:],) + (self.inputs[1:])

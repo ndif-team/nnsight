@@ -50,7 +50,9 @@ class TokenIndexer:
 
         return self.proxy[:, key]
 
-    def __setitem__(self, key: int, value: Union[LanguageModelProxy, Any]) -> None:
+    def __setitem__(
+        self, key: int, value: Union[LanguageModelProxy, Any]
+    ) -> None:
         key = self.convert_idx(key)
 
         self.proxy[:, key] = value
@@ -109,6 +111,23 @@ class LanguageModelProxy(InterventionProxy):
         return self.token
 
 
+class Generator(WrapperModule):
+
+    class Streamer(WrapperModule):
+
+        def put(self, *args):
+            return self(*args)
+
+        def end(self):
+            pass
+
+    def __init__(self) -> None:
+
+        super().__init__()
+
+        self.streamer = Generator.Streamer()
+
+
 class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
     """LanguageModels are NNsight wrappers around transformers language models.
 
@@ -155,7 +174,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         if isinstance(model_key, torch.nn.Module):
 
-            setattr(model_key, "generator", WrapperModule())
+            setattr(model_key, "generator", Generator())
 
         super().__init__(model_key, *args, **kwargs)
 
@@ -184,7 +203,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
             if not hasattr(self.tokenizer.pad_token, "pad_token"):
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-                
+
         if self._model is None:
 
             if (
@@ -197,7 +216,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
             model = self.automodel.from_config(config, trust_remote_code=True)
 
-            setattr(model, "generator", WrapperModule())
+            setattr(model, "generator", Generator())
 
             return model
 
@@ -211,7 +230,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
         model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
 
-        setattr(model, "generator", WrapperModule())
+        setattr(model, "generator", Generator())
 
         return model
 
@@ -243,7 +262,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             inputs = [{"input_ids": ids} for ids in inputs]
             return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
-        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
+        return self.tokenizer(
+            inputs, return_tensors="pt", padding=True, **kwargs
+        )
 
     def _prepare_inputs(
         self,
@@ -274,7 +295,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                         ai, -len(attn_mask) :
                     ] = attn_mask
 
-                new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
+                new_inputs["attention_mask"] = tokenized_inputs[
+                    "attention_mask"
+                ]
 
             if "labels" in inputs:
                 labels = self._tokenize(inputs["labels"], **kwargs)
@@ -316,7 +339,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         if "labels" in prepared_inputs:
             batched_inputs["labels"].extend(prepared_inputs["labels"])
         if "attention_mask" in prepared_inputs:
-            batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
+            batched_inputs["attention_mask"].extend(
+                prepared_inputs["attention_mask"]
+            )
 
         return (batched_inputs,)
 
@@ -334,6 +359,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
     ):
 
+        if "streamer" not in kwargs:
+            kwargs["streamer"] = self._model.generator.streamer
+
         device = next(self._model.parameters()).device
 
         output = self._model.generate(
@@ -349,7 +377,9 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {"repo_id": self._model_key}  # , "torch_dtype": str(self._model.dtype)}
+            {
+                "repo_id": self._model_key
+            }  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
