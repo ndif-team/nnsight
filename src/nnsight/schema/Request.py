@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import zlib
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Union
 
-import msgspec
 from pydantic import BaseModel, ConfigDict, TypeAdapter, field_serializer
 
 from .. import NNsight
@@ -19,12 +17,11 @@ OBJECT_TYPES = Union[SessionType, TracerType, SessionModel, TracerModel]
 
 class RequestModel(BaseModel):
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True, protected_namespaces=()
+    )
 
-    object: str | bytes | OBJECT_TYPES
-    msgspec: bool = False
-    zlib: bool = False
-
+    object: str | OBJECT_TYPES
     model_key: str
 
     id: str = None
@@ -37,67 +34,33 @@ class RequestModel(BaseModel):
         self, object: Union[SessionType, TracerType, SessionModel, TracerModel]
     ) -> str:
 
-        if isinstance(object, (str, bytes)):
+        if isinstance(object, str):
             return object
 
-        self.msgspec = True
-        self.zlib = True
-
-        data = msgspec.json.encode(object)
-        data = zlib.compress(data)
-
-        return data
+        return object.model_dump_json()
 
     def deserialize(self, model: NNsight) -> "RemoteMixin":
 
         handler = DeserializeHandler(model=model)
 
-        object = self.object
-
-        if self.zlib:
-            object = zlib.decompress(object)
-        if self.msgspec:
-            object = msgspec.json.decode(object)
-
         object: OBJECT_TYPES = TypeAdapter(
             OBJECT_TYPES, config=RequestModel.model_config
-        ).validate_python(object)
+        ).validate_python(json.loads(self.object))
 
         return object.deserialize(handler)
 
-
 class StreamValueModel(BaseModel):
-
-    model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
-
-    value: str | bytes | ValueTypes
-
-    msgspec: bool = False
-    zlib: bool = False
-
-    @field_serializer("value")
-    def serialize_object(self, value: Union[ValueTypes]) -> str:
-
-        if isinstance(value, (str, bytes)):
-            return value
-
-        self.msgspec = True
-        self.zlib = True
-
-        data = msgspec.json.encode(value)
-        data = zlib.compress(data)
-
-        return data
-
-    def deserialize(self, model: NNsight):
-
+    
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True, protected_namespaces=()
+    )
+    
+    value: ValueTypes
+    
+    def deserialize(self, model:NNsight):
+        
         handler = DeserializeHandler(model=model)
-
-        value = self.value
-
-        if self.zlib:
-            value = zlib.decompress(value)
-        if self.msgspec:
-            value = msgspec.json.decode(value)
-
-        return try_deserialize(value, handler)
+        
+        return try_deserialize(self.value, handler)
+                
+        
