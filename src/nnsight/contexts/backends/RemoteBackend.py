@@ -378,9 +378,9 @@ class RemoteBackend(LocalBackend):
 
         from ...schema.Request import StreamValueModel
 
-        request = StreamValueModel(model_key=job_id, value=value)
+        request = StreamValueModel(value=value)
 
-        sio.emit("stream_upload", data=request.model_dump())
+        sio.emit("stream_upload", data=(request.model_dump_json(), job_id))
 
     def non_blocking_request(self, request: "RequestModel" = None):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
