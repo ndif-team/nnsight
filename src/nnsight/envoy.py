@@ -142,12 +142,28 @@ class Envoy:
         if propagate:
             for envoy in self._sub_envoys:
                 envoy._set_tracer(tracer, propagate=True)
+                
+                
+    def _tracing(self) -> bool:
+        """Whether or not tracing.
+
+        Returns:
+            bool: Is tracing.
+        """
+
+        try:
+
+            return self._tracer.graph.alive
+
+        except:
+
+            return False
 
     def _scanning(self) -> bool:
         """Whether or not in scanning mode. Checks the current Tracer's Invoker.
 
         Returns:
-            bool: _description_
+            bool: Is scanning.
         """
 
         try:
@@ -420,6 +436,9 @@ class Envoy:
         Returns:
             InterventionProxy: Module call proxy.
         """
+        
+        if not self._tracing():
+            return self._module(*args, **kwargs)
 
         if isinstance(self._tracer.backend, EditBackend):
             hook = True
