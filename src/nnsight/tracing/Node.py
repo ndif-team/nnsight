@@ -385,7 +385,7 @@ class Node:
         except Exception as e:
 
             raise type(e)(
-                f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
+                f"Above exception when executing Node: '{self.name}' in Graph: '{self.graph.id}'. Did you call `.output` instead of `.output()`?"
             ) from e
 
         finally:
