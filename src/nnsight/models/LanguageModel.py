@@ -23,7 +23,7 @@ from nnsight.envoy import Envoy
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
 from . import NNsight
-from .mixins import GenerationMixin, RemoteableMixin
+from .mixins import RemoteableMixin
 
 
 class TokenIndexer:
@@ -109,7 +109,7 @@ class LanguageModelProxy(InterventionProxy):
         return self.token
 
 
-class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
+class LanguageModel(RemoteableMixin):
     """LanguageModels are NNsight wrappers around transformers language models.
 
     Inputs can be in the form of:
@@ -131,31 +131,32 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         model (PreTrainedModel): Meta version of underlying auto model.
 
     """
+    
+    __addons__ = {
+        'generator', 1
+    }
+    
+    __methods__ = {'generate'}
 
     proxy_class = LanguageModelProxy
+    tokenizer: PreTrainedTokenizer
 
-    def __new__(cls, *args, **kwargs) -> Self | Envoy:
+    def __new__(cls, *args, **kwargs) -> Self | Envoy | PreTrainedModel:
         return object.__new__(cls)
 
     def __init__(
         self,
         model_key: Union[str, torch.nn.Module],
         *args,
-        tokenizer: Optional[PreTrainedTokenizer] = None,
         automodel: Type[AutoModel] = AutoModelForCausalLM,
         **kwargs,
     ) -> None:
-        self.tokenizer: PreTrainedTokenizer = tokenizer
-        self._model: PreTrainedModel = None
+      
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
             else getattr(modeling_auto, automodel)
         )
-
-        if isinstance(model_key, torch.nn.Module):
-
-            setattr(model_key, "generator", WrapperModule())
 
         super().__init__(model_key, *args, **kwargs)
 

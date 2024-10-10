@@ -5,7 +5,7 @@ from ...util import from_import_path, to_import_path
 
 
 class RemoteableMixin(NNsight):
-
+    
     def _remoteable_model_key(self) -> str:
 
         raise NotImplementedError()

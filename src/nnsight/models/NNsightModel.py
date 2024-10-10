@@ -1,14 +1,10 @@
 from __future__ import annotations
-
-import gc
-import inspect
 import weakref
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import torch
 from accelerate import init_empty_weights
-from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
@@ -34,23 +30,6 @@ from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 
-
-class MetaDispatcher(TorchDispatchMode):
-    """This exists because `with torch.device('meta') is evil.
-
-    Ty Caden
-
-    """
-
-    def __torch_dispatch__(self, func, types, args, kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-
-        if "device" in kwargs or "device" in inspect.signature(func).parameters:
-            kwargs["device"] = "meta"
-        return func(*args, **kwargs)
-
-
 class NNsight:
     """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
 
@@ -68,6 +47,9 @@ class NNsight:
         _envoy (Envoy): Envoy for underlying model.
         _session (Session): Session object if in a Session.
     """
+    
+    __addons__ = {}
+    __methods__ = set()
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
     tracer_class: Type[Tracer] = Tracer
@@ -118,12 +100,17 @@ class NNsight:
         if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
             self.dispatch_model()
+            
+        self._compile()
+        
+        for name, addon in self.__addons__.items():
+            
+            if isinstance(addon, type):
+                addon = addon()
+                
+            self._envoy._add_envoy(addon, name)
 
         logger.info(f"Initialized `{self._model_key}`")
-
-    def __call__(self, *args, **kwargs):
-
-        return self._envoy(*args, **kwargs)
 
     def trace(
         self,
@@ -533,6 +520,35 @@ class NNsight:
     def clear_edits(self) -> None:
         """Resets the default graph of this model."""
         self._default_graph = None
+        
+        
+    def _compile(self):
+        
+        def inner(cls: type):
+        
+            for base in cls.__bases__:
+                
+                if issubclass(base, NNsight):
+                    
+                    self.__addons__.update(base.__addons__)
+                    self.__methods__.update(base.__methods__)
+                    
+                    inner(base)
+        
+        inner(self.__class__)
+        
+        
+    def _shallow_copy(self) -> Self:
+        """Creates a new instance copy of the same class with the all the attributes of the original instance.
+
+        Returns:
+            Self: NNsightModel
+        """
+        copy = self.__class__.__new__(self.__class__)
+        for key, value in self.__dict__.items():
+            copy.__dict__[key] = value
+
+        return copy
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
@@ -560,6 +576,9 @@ class NNsight:
             Any: Attribute.
         """
         return getattr(self._envoy, key)
+    
+
+
 
     ### NNsight VIRTUAL METHODS BELOW #####################################
 
@@ -652,14 +671,3 @@ class NNsight:
 
         return batched_inputs
 
-    def _shallow_copy(self) -> Self:
-        """Creates a new instance copy of the same class with the all the attributes of the original instance.
-
-        Returns:
-            Self: NNsightModel
-        """
-        copy = self.__class__.__new__(self.__class__)
-        for key, value in self.__dict__.items():
-            copy.__dict__[key] = value
-
-        return copy
