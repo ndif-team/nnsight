@@ -59,6 +59,8 @@ class Node:
 
         state["graph"] = weakref.proxy(state["graph"])
         state["listeners"] = [weakref.proxy(listener) for listener in self.listeners]
+        
+        self.__dict__.update(state)
 
     def __init__(
         self,

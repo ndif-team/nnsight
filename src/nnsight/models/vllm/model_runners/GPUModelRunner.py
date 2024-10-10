@@ -26,8 +26,8 @@ from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata, ModelRunner
 from vllm.worker.model_runner_base import dump_input_when_exception
 
-from ....intervention import InterventionHandler, InterventionProtocol
-from ...NNsightModel import NNsight
+from ....intervention import InterventionHandler
+from .. import VLLM
 from ..sampling import NNsightSamplingMetadata
 
 if TYPE_CHECKING:
@@ -39,7 +39,6 @@ class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMe
 
     sampling_metadata: Optional["NNsightSamplingMetadata"] = None
 
-
 class NNsightGPUModelRunner(ModelRunner):
 
     _model_input_cls: Type[NNsightModelInputForGPUWithSamplingMetadata] = (
@@ -50,12 +49,12 @@ class NNsightGPUModelRunner(ModelRunner):
 
         super().__init__(*args, **kwargs)
 
-        self.model: NNsight
+        self.model: VLLM
 
     def load_model(self) -> None:
         super().load_model()
 
-        self.model = NNsight(self.model)
+        self.model = VLLM(self.model)
 
     def prepare_model_input(
         self,
@@ -169,6 +168,8 @@ class NNsightGPUModelRunner(ModelRunner):
             model_forward_start = torch.cuda.Event(enable_timing=True)
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
+            
+        ## NNSIGHT #########################################
 
         intervention_graph = model_input.sampling_metadata.intervention_graph
         intervention_graph.alive = True
@@ -182,45 +183,8 @@ class NNsightGPUModelRunner(ModelRunner):
         
         intervention_handler.batch_size = len(model_input.input_tokens)
 
-        def get_output_node(graph: Graph):
-
-            attachment_name = "output_node"
-
-            if attachment_name not in graph.attachments:
-
-                node = (
-                    InterventionProtocol.add(
-                        intervention_graph,
-                        proxy_value=None,
-                        args=[".output", 0, 0],
-                    )
-                    .save()
-                    .node
-                )
-
-                InterventionProtocol.compile_node(node)
-
-                graph.attachments[attachment_name] = node
-
-            node = graph.attachments[attachment_name]
-            
-            node.reset()
-
-            node.args[1] = len(intervention_handler.batch_groups)
-
-            intervention_handler.batch_groups.append(
-                (0, intervention_handler.batch_size)
-            )
-            
-            call_counter[node.name] = 0
-            
-            return node
-
-
-        output_node = get_output_node(intervention_graph)
-
         with set_forward_context(model_input.attn_metadata):
-            self.model.interleave(
+            hidden_or_intermediate_states = self.model.interleave(
                 self.model._model,
                 intervention_graph,
                 intervention_handler=intervention_handler,
@@ -233,9 +197,8 @@ class NNsightGPUModelRunner(ModelRunner):
                 **seqlen_agnostic_kwargs,
             )
 
-            hidden_or_intermediate_states = output_node.value
-            
-            output_node.destroy()
+                        
+            ###########################################
             
         if (
             self.observability_config is not None
@@ -267,6 +230,8 @@ class NNsightGPUModelRunner(ModelRunner):
         logits = self.model.compute_logits(
             hidden_or_intermediate_states, model_input.sampling_metadata
         )
+        
+        logits = self.model.logits(logits)
 
         if not self.is_driver_worker:
             return []
@@ -279,6 +244,7 @@ class NNsightGPUModelRunner(ModelRunner):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+        output.sampled_token_ids = self.model.tokens(output.sampled_token_ids)
         if (
             self.observability_config is not None
             and self.observability_config.collect_model_forward_time

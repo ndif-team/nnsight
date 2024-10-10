@@ -95,6 +95,9 @@ class NNsightSamplingMetadata(SamplingMetadata):
             )
             for t, seq_ids in categorized_sample_indices.items()
         }
+        
+        
+        ### NNSIGHT ###########################################
 
         intervention_graphs = {}
         batch_groups = []
@@ -122,7 +125,6 @@ class NNsightSamplingMetadata(SamplingMetadata):
 
                     batch_size = query_lens[idx]
             
-                    
                     if seq_group_batch_group >= len(batch_groups):
                         batch_start = sum(batch_groups[-1]) if len(batch_groups) > 0 else 0
                         batch_groups.append((batch_start, batch_size))
@@ -149,6 +151,7 @@ class NNsightSamplingMetadata(SamplingMetadata):
             call_counter = InterventionHandler.persistent_call_counter(intervention_graph)
         else:
             call_counter = None
+        ###########################################
 
         sampling_metadata = NNsightSamplingMetadata(
             seq_groups=seq_groups,

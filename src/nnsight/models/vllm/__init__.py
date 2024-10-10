@@ -14,16 +14,13 @@ from .executors.GPUExecutor import NNsightGPUExecutor
 from .sampling import NNsightSamplingParams
 
 try:
-    from vllm.distributed import (
-        destroy_distributed_environment,
-        destroy_model_parallel,
-        init_distributed_environment,
-        initialize_model_parallel,
-    )
+    from vllm.distributed import (destroy_distributed_environment,
+                                  destroy_model_parallel,
+                                  init_distributed_environment,
+                                  initialize_model_parallel)
     from vllm.engine.arg_utils import EngineArgs
+    from vllm.entrypoints.llm import LLM
     from vllm.model_executor.model_loader.loader import _initialize_model
-
-    from .entrypoints.llm import NNsightVLLM
 except Exception as e:
 
     raise type(e)(
@@ -72,7 +69,7 @@ class VLLMTracer(Tracer):
                 inputs.append(input)
                 params.append(param)
 
-            llm_engine: NNsightVLLM = self.model._model.llm_engine
+            llm_engine: LLM = self.model._model.llm_engine
 
         output = llm_engine.generate(inputs, sampling_params=params)
 
@@ -128,6 +125,24 @@ class VLLM(GenerationMixin):
                 setattr(self, name, child)
 
             self.llm_engine = llm_engine
+            
+            self.logits = WrapperModule()
+            self.tokens = WrapperModule()
+            
+    def __init__(
+        self,
+        model_key: Union[str, torch.nn.Module],
+        *args,
+       
+        **kwargs,
+    ) -> None:
+      
+        if isinstance(model_key, torch.nn.Module):
+            
+            model_key.logits = WrapperModule()
+            model_key.tokens = WrapperModule()
+
+        super().__init__(model_key, *args, **kwargs)
 
     def _load(self, repo_id: str, **kwargs) -> VLLModel:
 
@@ -178,7 +193,7 @@ class VLLM(GenerationMixin):
             destroy_model_parallel()
             destroy_distributed_environment()
 
-            llm = NNsightVLLM(
+            llm = LLM(
                 repo_id, **kwargs, distributed_executor_backend=NNsightGPUExecutor
             )
 

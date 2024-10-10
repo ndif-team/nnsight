@@ -323,6 +323,7 @@ class InterventionProtocol(Protocol):
                     if node.name in graph.nodes:
                         graph_id_to_invoker_groups[graph.id].add(invoker_group)
                         graph_id_to_intervention_node[graph.id].append(node)
+                        break
                         
         global_offset = 0
                         

@@ -421,7 +421,7 @@ class NNsight:
         *inputs: List[List[Any]],
         intervention_handler: InterventionHandler = None,
         **kwargs,
-    ) -> None:
+    ) -> Any:
         """Runs some function with some inputs and some graph with the appropriate contexts for this model.
 
         Loads and dispatched ._model if not already done so.
@@ -438,6 +438,8 @@ class NNsight:
             fn (Callable): Function or method to run.
             intervention_graph (Graph): Intervention graph to interleave with model's computation graph.
             inputs (List[List[Any]]): List of multiple groups of inputs to give to function for each invoker.
+        Returns:
+            Any: Result of fn.   
         """
 
         # Loads and dispatched ._model if not already done so.
@@ -469,14 +471,14 @@ class NNsight:
             ),
         ):
             try:
-                fn(*inputs, **kwargs)
+                return fn(*inputs, **kwargs)
             except protocols.EarlyStopProtocol.EarlyStopException:
                 # TODO: Log.
                 for node in intervention_graph.nodes.values():
                     if not node.executed():
                         node.clean()
-
-        logger.info(f"Completed `{self._model_key}`")
+            finally:
+                logger.info(f"Completed `{self._model_key}`")
 
     def batch(
         self, invoker_inputs: Tuple[Tuple[Any]]
