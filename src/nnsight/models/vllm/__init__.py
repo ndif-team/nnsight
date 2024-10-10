@@ -1,7 +1,5 @@
 import weakref
-from typing import Any, Dict, List, Optional, Tuple, Union
 
-import torch
 
 from ...contexts import resolve_dependencies
 from ...contexts.backends import Backend
@@ -9,10 +7,9 @@ from ...contexts.Tracer import Tracer
 from ...tracing import protocols
 from ...tracing.Graph import Graph
 from ...util import WrapperModule
-from ..mixins import GenerationMixin
 from .executors.GPUExecutor import NNsightGPUExecutor
 from .sampling import NNsightSamplingParams
-
+from ..NNsightModel import NNsight
 try:
     from vllm.distributed import (destroy_distributed_environment,
                                   destroy_model_parallel,
@@ -82,7 +79,7 @@ class VLLMTracer(Tracer):
         return graph
 
 
-class VLLM(GenerationMixin):
+class VLLM(NNsight):
     """NNsight wrapper to conduct interventions on a vLLM inference engine.
 
     .. code-block:: python
@@ -104,47 +101,8 @@ class VLLM(GenerationMixin):
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     """
-
-    tracer_class = VLLMTracer
-
-    class VLLModel(WrapperModule):
-        """Pytorch Wrapper for the vLLM engine to work seamlessly with NNsight.
-
-        Attributes:
-            model (torch.nn.Module): Underlying model of the vLLM instance.
-            llm_engine (vllm.LLM): vLLM inference engine instance.
-        """
-
-        def __init__(self, model:torch.nn.Module, llm_engine=None) -> None:
-            
-         
-
-            super().__init__()
-
-            for name, child in model.named_children():
-                setattr(self, name, child)
-
-            self.llm_engine = llm_engine
-            
-            self.logits = WrapperModule()
-            self.tokens = WrapperModule()
-            
-    def __init__(
-        self,
-        model_key: Union[str, torch.nn.Module],
-        *args,
-       
-        **kwargs,
-    ) -> None:
-      
-        if isinstance(model_key, torch.nn.Module):
-            
-            model_key.logits = WrapperModule()
-            model_key.tokens = WrapperModule()
-
-        super().__init__(model_key, *args, **kwargs)
-
-    def _load(self, repo_id: str, **kwargs) -> VLLModel:
+    
+    def _load(self, repo_id: str, **kwargs):
 
         if self._model is None:
 
@@ -163,57 +121,34 @@ class VLLM(GenerationMixin):
 
             # starting the distributed environment
             init_distributed_environment(
-                engine_config_dict["parallel_config"].world_size,
+                1,
                 0,
                 "tcp://127.0.0.1:47303",
                 0,
-                backend="nccl",
+                backend="gloo",
             )
 
             # start tensor parallel group
-            initialize_model_parallel(
-                engine_config_dict["parallel_config"].tensor_parallel_size,
-                engine_config_dict["parallel_config"].pipeline_parallel_size,
-                "nccl",
-            )
+            initialize_model_parallel(backend="gloo")
 
             # initialize the model
             model = _initialize_model(
-                model_config=engine_config_dict["model_config"],
-                load_config=engine_config_dict["load_config"],
-                lora_config=None,
-                cache_config=engine_config_dict["cache_config"],
-                scheduler_config=engine_config_dict["scheduler_config"],
+                engine_config_dict["model_config"],
+                engine_config_dict["load_config"],
+                None,
+                engine_config_dict["cache_config"]
             )
-
-            return VLLM.VLLModel(model)
-        else:
-
-            # destroy the distributed environment created from the initial model initialization
+            
             destroy_model_parallel()
             destroy_distributed_environment()
+
+            return model
+        else:
 
             llm = LLM(
                 repo_id, **kwargs, distributed_executor_backend=NNsightGPUExecutor
             )
 
-            self._model.llm_engine = llm
+            self.vllm_entrypoint = llm
 
             return self._model
-
-    # def _prepare_inputs(self, *inputs: Union[List[str], str]) -> Tuple[Tuple[List[str]], int]:
-    #     if isinstance(inputs[0], list):
-    #         return inputs, len(inputs[0])
-    #     else:
-    #         return ([inputs[0]],), 1
-
-    # def _batch_inputs(
-    #     self,
-    #     batched_inputs: Optional[Tuple[List[str]]],
-    #     prepared_inputs: List[str],
-    # ) -> Tuple[List[str]]:
-    #     if batched_inputs is None:
-
-    #         return (prepared_inputs, )
-
-    #     return (batched_inputs[0] + prepared_inputs, )

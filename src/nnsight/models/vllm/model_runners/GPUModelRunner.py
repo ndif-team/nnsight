@@ -16,8 +16,6 @@ from typing import (
 import torch
 import torch.distributed
 
-from nnsight.schema.Response import ResultModel
-from nnsight.tracing.Graph import Graph
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
