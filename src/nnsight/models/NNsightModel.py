@@ -70,6 +70,7 @@ class NNsight:
     """
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
+    tracer_class: Type[Tracer] = Tracer
 
     # For type hinting Envoy
     def __new__(cls, *args, **kwargs) -> Self | Envoy:
@@ -119,9 +120,9 @@ class NNsight:
             self.dispatch_model()
 
         logger.info(f"Initialized `{self._model_key}`")
-        
+
     def __call__(self, *args, **kwargs):
-        
+
         return self._envoy(*args, **kwargs)
 
     def trace(
@@ -250,9 +251,11 @@ class NNsight:
 
             graph = self._default_graph.copy()
 
-            tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
+            tracer = self.tracer_class(
+                backend, self, bridge=bridge, graph=graph, **kwargs
+            )
         else:
-            tracer = Tracer(backend, self, bridge=bridge, **kwargs)
+            tracer = self.tracer_class(backend, self, bridge=bridge, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -416,6 +419,7 @@ class NNsight:
         fn: Callable,
         intervention_graph: Graph,
         *inputs: List[List[Any]],
+        intervention_handler: InterventionHandler = None,
         **kwargs,
     ) -> None:
         """Runs some function with some inputs and some graph with the appropriate contexts for this model.
@@ -443,26 +447,14 @@ class NNsight:
         logger.info(f"Running `{self._model_key}`...")
 
         # We need to pre-process and batch all inputs as (inputs) is a list of each set of inputs from each invocation.
-        batch_groups = []
-        batch_start = 0
-        batched_input = None
-        batch_size = 0
+        if intervention_handler is None:
+            inputs, batch_groups = self.batch(inputs)
 
-        for _inputs in inputs:
-
-            _inputs, batch_size = self._prepare_inputs(*_inputs)
-
-            batch_groups.append((batch_start, batch_size))
-            batch_start += batch_size
-
-            batched_input = self._batch_inputs(batched_input, *_inputs)
-
-        if len(inputs) > 0:
-            inputs, batch_size = self._prepare_inputs(*batched_input)
-
-        intervention_handler = InterventionHandler(
-            intervention_graph, batch_groups, batch_size
-        )
+            intervention_handler = InterventionHandler(batch_groups)
+            
+        InterventionProtocol.compile(intervention_graph)
+    
+        intervention_handler.graph = intervention_graph
 
         module_paths = InterventionProtocol.get_interventions(intervention_graph).keys()
 
@@ -485,6 +477,30 @@ class NNsight:
                         node.clean()
 
         logger.info(f"Completed `{self._model_key}`")
+
+    def batch(
+        self, invoker_inputs: Tuple[Tuple[Any]]
+    ) -> Tuple[Tuple[Any], List[Tuple[int, int]]]:
+
+        batch_groups = []
+        batch_start = 0
+        batched_input = None
+
+        for i, inputs in enumerate(invoker_inputs):
+            inputs, batch_size = self._prepare_inputs(*inputs)
+
+            batch_groups.append((batch_start, batch_size))
+
+            batched_input = self._batch_inputs(batched_input, *inputs)
+            
+            batch_start += batch_size
+
+        if batched_input is not None:
+            batched_input, _ = self._prepare_inputs(*batched_input)
+        else:
+            batched_input = tuple()
+
+        return batched_input, batch_groups
 
     def dispatch_model(self, *args, **kwargs) -> None:
         """Dispatch ._model to have real parameters  using ._load(...)."""
