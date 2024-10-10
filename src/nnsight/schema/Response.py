@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import logging
 from datetime import datetime
 from enum import Enum
@@ -20,13 +21,15 @@ class ResultModel(BaseModel):
     def from_graph(cls, graph: Graph) -> Dict[str, Any]:
 
         saves = {
-            name: util.apply(node.value, lambda x: x.detach().cpu(), torch.Tensor)
+            name: util.apply(
+                node.value, lambda x: x.detach().cpu(), torch.Tensor
+            )
             for name, node in graph.nodes.items()
             if node.done()
         }
 
         return saves
- 
+
 
 class ResponseModel(BaseModel):
     class JobStatus(Enum):
@@ -35,13 +38,15 @@ class ResponseModel(BaseModel):
         RUNNING = "RUNNING"
         COMPLETED = "COMPLETED"
         LOG = "LOG"
+        STREAM = "STREAM"
         ERROR = "ERROR"
 
     id: str
     status: JobStatus
-    description: str
 
-    received: datetime = None
+    description: Optional[str] = ""
+    data: Optional[Any] = None
+    received: Optional[datetime] = None
     session_id: Optional[str] = None
 
     def __str__(self) -> str:
@@ -50,7 +55,41 @@ class ResponseModel(BaseModel):
     def log(self, logger: logging.Logger) -> ResponseModel:
         if self.status == ResponseModel.JobStatus.ERROR:
             logger.error(str(self))
+            raise SystemExit("Remote exception.")
+        elif self.status ==  ResponseModel.JobStatus.STREAM:
+            pass
         else:
             logger.info(str(self))
 
         return self
+
+    def pickle(self) -> bytes:
+        """Pickles self and returns bytes.
+
+        Returns:
+            bytes: Pickled ResponseModel
+        """
+
+        with io.BytesIO() as file:
+
+            torch.save(self.model_dump(exclude_unset=True), file)
+
+            file.seek(0)
+
+            return file.read()
+
+    @classmethod
+    def unpickle(cls, data: bytes) -> ResponseModel:
+        """Loads a ResponseModel from pickled bytes.
+
+        Args:
+            data (bytes): Pickled ResoonseModel.
+
+        Returns:
+            ResponseModel: Response.
+        """
+
+        with io.BytesIO(data) as file:
+            return ResponseModel(
+                **torch.load(file, map_location="cpu", weights_only=False)
+            )
