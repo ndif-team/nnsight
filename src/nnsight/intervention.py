@@ -12,16 +12,16 @@ from __future__ import annotations
 import inspect
 from collections import defaultdict
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, Dict, List, Tuple, Union
+from typing import (Any, Callable, Collection, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from . import util
-from .contexts.Conditional import Conditional
 from .tracing import protocols
-from .tracing.Graph import Graph
+from .tracing.Graph import Graph, MultiGraph
 from .tracing.Node import Node
 from .tracing.protocols import Protocol
 from .tracing.Proxy import Proxy
@@ -235,6 +235,7 @@ class InterventionProtocol(Protocol):
     """
 
     attachment_name = "nnsight_module_nodes"
+    attachment_flag_name = "nnsight_compiled"
     condition: bool = False
 
     @classmethod
@@ -244,7 +245,7 @@ class InterventionProtocol(Protocol):
         proxy_value: Any,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
-    ) -> Proxy:
+    ) -> InterventionProxy:
         """Adds an InterventionProtocol Node to a Graph.
 
         Args:
@@ -263,15 +264,13 @@ class InterventionProtocol(Protocol):
             proxy_value=proxy_value, target=cls, args=args, kwargs=kwargs
         )
 
-        cls.compile(proxy.node)
-
         return proxy
-
+    
     @classmethod
-    def compile(cls, node: Node) -> None:
-
+    def compile_node(cls, node:Node) -> None:
+        
         graph = node.graph
-
+        
         module_path, *_ = node.args
 
         # Add attachment if it does not exist.
@@ -287,9 +286,64 @@ class InterventionProtocol(Protocol):
 
         # Append the newly created nodes name.
         arguments[module_path].append(node.name)
+        
 
     @classmethod
-    def get_interventions(cls, graph: "Graph") -> Dict:
+    def compile(cls, graph: Graph) -> None:
+        
+        if graph.attachments.get(cls.attachment_flag_name, False):
+            return
+        
+        for node in graph.nodes.values():
+            
+            if node.target is not InterventionProtocol:
+                continue
+
+            cls.compile_node(node)
+            
+        graph.attachments[cls.attachment_flag_name] = True
+           
+        
+    @classmethod
+    def shift(cls, mgraph:MultiGraph) -> MultiGraph:
+        
+        InterventionProtocol.compile(mgraph) 
+        
+        intervention_nodes = InterventionProtocol.get_interventions(mgraph).values()
+        
+        graph_id_to_invoker_groups = defaultdict(set)
+        graph_id_to_intervention_node = defaultdict(list)
+        
+        for nodes in intervention_nodes:
+            for node in nodes:
+                
+                invoker_group = node.args[1]
+                
+                for graph in mgraph:
+                    if node.name in graph.nodes:
+                        graph_id_to_invoker_groups[graph.id].add(invoker_group)
+                        graph_id_to_intervention_node[graph.id].append(node)
+                        
+        global_offset = 0
+                        
+        for graph_id, invoker_groups in graph_id_to_invoker_groups.items():
+            
+            min_group = min(invoker_groups)
+            max_group = max(invoker_groups)
+            
+            offset = global_offset - min_group
+            
+            for node in graph_id_to_intervention_node[graph_id]:
+                
+                node.args[1] += offset
+            
+            global_offset += max_group + 1
+                
+        
+        return mgraph
+
+    @classmethod
+    def get_interventions(cls, graph: "Graph") -> Dict[str, List[Node]]:
         """Returns mapping from module_paths to  InterventionNode names added to the given Graph.
 
         Args:
@@ -410,20 +464,16 @@ class InterventionProtocol(Protocol):
 
             # Multiple intervention nodes can have same module_path if there are multiple invocations.
             for intervention_node_name in intervention_node_names:
-
+            
                 node = intervention_handler.graph.nodes[intervention_node_name]
 
                 # Args for intervention nodes are (module_path, batch_group_idx, call_iter).
                 _, batch_group_idx, call_iter = node.args
-
-                batch_start, batch_size = intervention_handler.batch_groups[
-                    batch_group_idx
-                ]
-
+                
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
                 if call_iter != intervention_handler.count(
-                    intervention_node_name
+                    intervention_node_name, 
                 ):
 
                     continue
@@ -433,6 +483,10 @@ class InterventionProtocol(Protocol):
                 narrowed = False
 
                 if len(intervention_handler.batch_groups) > 1:
+                    
+                    batch_start, batch_size = intervention_handler.batch_groups[
+                        batch_group_idx
+                    ]
 
                     def narrow(acts: torch.Tensor):
 
@@ -586,15 +640,17 @@ class InterventionHandler:
 
     Like the Intervention Graph, the total batch size that is being executed, and a counter for how many times an Intervention node has been attempted to be executed.
     """
-
+    
+    attachment_name = "nnsight_call_counter"
+    
     def __init__(
-        self, graph: Graph, batch_groups: List[Tuple[int, int]], batch_size: int
+        self, batch_groups: List[Tuple[int, int]], call_counter:Dict[str, int] = None, graph:Graph = None
     ) -> None:
 
         self.graph = graph
         self.batch_groups = batch_groups
-        self.batch_size = batch_size
-        self.call_counter: Dict[str, int] = {}
+        self.call_counter: Dict[str, int] = defaultdict(lambda : 0) if call_counter is None else call_counter
+        self.batch_size = sum(self.batch_groups[-1])
 
     def count(self, name: str) -> int:
         """Increments the count of times a given Intervention Node has tried to be executed and returns the count.
@@ -606,12 +662,47 @@ class InterventionHandler:
             int: Count.
         """
 
-        if name not in self.call_counter:
+        count = self.call_counter[name]
+        
+        self.call_counter[name] += 1
 
-            self.call_counter[name] = 0
-
-        else:
-
-            self.call_counter[name] += 1
-
-        return self.call_counter[name]
+        return count
+    class MultiCounter(dict):
+        
+        def __init__(self, mgraph:MultiGraph,graph_id_to_call_counter: Dict[int,Dict[str,int]]):
+            
+            self.mgraph = mgraph
+            self.graph_id_to_call_counter = graph_id_to_call_counter
+            
+        def __getitem__(self, key: Any) -> Any:
+            return self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key]
+        
+        def __setitem__(self, key: Any, value: Any) -> None:
+            self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key] = value
+    
+    @classmethod
+    def persistent_call_counter(cls, graph:Graph) -> dict:
+        
+        def inner(graph:Graph): 
+              
+            if cls.attachment_name not in graph.attachments:
+                
+                graph.attachments[cls.attachment_name] = defaultdict(lambda : 0)
+                
+            return graph.attachments[cls.attachment_name]
+        
+        if isinstance(graph, MultiGraph):
+            graph_id_to_call_counter = {}
+            
+            mgraph = graph
+        
+            for graph in mgraph:
+                
+                graph_id_to_call_counter[graph.id] = inner(graph)
+                
+            return InterventionHandler.MultiCounter(mgraph)
+            
+            
+        return inner(graph)
+            
+    
