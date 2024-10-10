@@ -39,6 +39,7 @@ class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMe
 
     sampling_metadata: Optional["NNsightSamplingMetadata"] = None
 
+
 class NNsightGPUModelRunner(ModelRunner):
 
     _model_input_cls: Type[NNsightModelInputForGPUWithSamplingMetadata] = (
@@ -168,52 +169,87 @@ class NNsightGPUModelRunner(ModelRunner):
             model_forward_start = torch.cuda.Event(enable_timing=True)
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
-            
+
         ## NNSIGHT #########################################
 
         intervention_graph = model_input.sampling_metadata.intervention_graph
         intervention_graph.alive = True
-        
+
         batch_groups = model_input.sampling_metadata.batch_groups
         call_counter = model_input.sampling_metadata.call_counter
-        
+
         intervention_handler = InterventionHandler(
             batch_groups, call_counter=call_counter
         )
-        
+
         intervention_handler.batch_size = len(model_input.input_tokens)
 
-        with set_forward_context(model_input.attn_metadata):
-            hidden_or_intermediate_states = self.model.interleave(
-                self.model._model,
-                intervention_graph,
-                intervention_handler=intervention_handler,
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
-                intermediate_tensors=intermediate_tensors,
-                **MultiModalInputs.as_kwargs(multi_modal_kwargs, device=self.device),
-                **seqlen_agnostic_kwargs,
+        def inner():
+
+            with set_forward_context(model_input.attn_metadata):
+                hidden_or_intermediate_states = self.model._model(
+                    input_ids=model_input.input_tokens,
+                    positions=model_input.input_positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=model_input.attn_metadata,
+                    intermediate_tensors=intermediate_tensors,
+                    **MultiModalInputs.as_kwargs(
+                        multi_modal_kwargs, device=self.device
+                    ),
+                    **seqlen_agnostic_kwargs,
+                )
+
+            if (
+                self.observability_config is not None
+                and self.observability_config.collect_model_forward_time
+            ):
+                model_forward_end.record()
+
+            # Compute the logits in the last pipeline stage.
+            if not get_pp_group().is_last_rank:
+                if (
+                    self.is_driver_worker
+                    and hidden_or_intermediate_states is not None
+                    and isinstance(hidden_or_intermediate_states, IntermediateTensors)
+                    and self.observability_config is not None
+                    and self.observability_config.collect_model_forward_time
+                ):
+                    model_forward_end.synchronize()
+                    model_forward_time = model_forward_start.elapsed_time(
+                        model_forward_end
+                    )
+                    orig_model_forward_time = 0.0
+                    if intermediate_tensors is not None:
+                        orig_model_forward_time = intermediate_tensors.tensors.get(
+                            "model_forward_time", torch.tensor(0.0)
+                        ).item()
+                    hidden_or_intermediate_states.tensors["model_forward_time"] = (
+                        torch.tensor(model_forward_time + orig_model_forward_time)
+                    )
+                return hidden_or_intermediate_states
+
+            logits = self.model.compute_logits(
+                hidden_or_intermediate_states, model_input.sampling_metadata
             )
 
-                        
-            ###########################################
-            
-        if (
-            self.observability_config is not None
-            and self.observability_config.collect_model_forward_time
-        ):
-            model_forward_end.record()
+            logits = self.model.logits(logits)
 
-        # Compute the logits in the last pipeline stage.
-        if not get_pp_group().is_last_rank:
+            if not self.is_driver_worker:
+                return []
+
+            if model_input.async_callback is not None:
+                model_input.async_callback()
+
+            # Sample the next token.
+            output: SamplerOutput = self.model.sample(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
+            output.sampled_token_ids = self.model.tokens(output.sampled_token_ids)
             if (
-                self.is_driver_worker
-                and hidden_or_intermediate_states is not None
-                and isinstance(hidden_or_intermediate_states, IntermediateTensors)
-                and self.observability_config is not None
+                self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
+                and output is not None
             ):
                 model_forward_end.synchronize()
                 model_forward_time = model_forward_start.elapsed_time(model_forward_end)
@@ -222,64 +258,33 @@ class NNsightGPUModelRunner(ModelRunner):
                     orig_model_forward_time = intermediate_tensors.tensors.get(
                         "model_forward_time", torch.tensor(0.0)
                     ).item()
-                hidden_or_intermediate_states.tensors["model_forward_time"] = (
-                    torch.tensor(model_forward_time + orig_model_forward_time)
-                )
-            return hidden_or_intermediate_states
+                # If there are multiple workers, we are still tracking the latency
+                # from the start time of the driver worker to the end time of the
+                # driver worker. The model forward time will then end up covering
+                # the communication time as well.
+                output.model_forward_time = orig_model_forward_time + model_forward_time
 
-        logits = self.model.compute_logits(
-            hidden_or_intermediate_states, model_input.sampling_metadata
+            if self.return_hidden_states:
+                # we only need to pass hidden states of most recent token
+                assert model_input.sampling_metadata is not None
+                indices = model_input.sampling_metadata.selected_token_indices
+                if model_input.is_prompt:
+                    hidden_states = hidden_or_intermediate_states.index_select(
+                        0, indices
+                    )
+                    output.prefill_hidden_states = hidden_or_intermediate_states
+                elif decode_meta.use_cuda_graph:
+                    hidden_states = hidden_or_intermediate_states[: len(indices)]
+                else:
+                    hidden_states = hidden_or_intermediate_states
+
+                output.hidden_states = hidden_states
+
+            return output
+
+        output = self.model.interleave(
+            inner,
+            intervention_graph,
+            intervention_handler=intervention_handler,
         )
-        
-        logits = self.model.logits(logits)
-
-        if not self.is_driver_worker:
-            return []
-
-        if model_input.async_callback is not None:
-            model_input.async_callback()
-
-        # Sample the next token.
-        output: SamplerOutput = self.model.sample(
-            logits=logits,
-            sampling_metadata=model_input.sampling_metadata,
-        )
-        output.sampled_token_ids = self.model.tokens(output.sampled_token_ids)
-        if (
-            self.observability_config is not None
-            and self.observability_config.collect_model_forward_time
-            and output is not None
-        ):
-            model_forward_end.synchronize()
-            model_forward_time = model_forward_start.elapsed_time(model_forward_end)
-            orig_model_forward_time = 0.0
-            if intermediate_tensors is not None:
-                orig_model_forward_time = intermediate_tensors.tensors.get(
-                    "model_forward_time", torch.tensor(0.0)
-                ).item()
-            # If there are multiple workers, we are still tracking the latency
-            # from the start time of the driver worker to the end time of the
-            # driver worker. The model forward time will then end up covering
-            # the communication time as well.
-            output.model_forward_time = orig_model_forward_time + model_forward_time
-
-        if self.return_hidden_states:
-            # we only need to pass hidden states of most recent token
-            assert model_input.sampling_metadata is not None
-            indices = model_input.sampling_metadata.selected_token_indices
-            if model_input.is_prompt:
-                hidden_states = hidden_or_intermediate_states.index_select(0, indices)
-                output.prefill_hidden_states = hidden_or_intermediate_states
-            elif decode_meta.use_cuda_graph:
-                hidden_states = hidden_or_intermediate_states[: len(indices)]
-            else:
-                hidden_states = hidden_or_intermediate_states
-
-            output.hidden_states = hidden_states
-
-        # output = NNsightSamplerOutput(
-        #     **{key: getattr(output, key) for key in output.__struct_fields__},
-        #     nnsight_result=nnsight_result,
-        # )
-
         return [output]
