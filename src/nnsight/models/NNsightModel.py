@@ -246,9 +246,9 @@ class NNsight:
 
             graph = self._default_graph.copy()
 
-            tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
+            tracer = Tracer(backend, self, bridge=bridge, graph=graph, scan=scan, **kwargs)
         else:
-            tracer = Tracer(backend, self, bridge=bridge, **kwargs)
+            tracer = Tracer(backend, self, bridge=bridge, scan=scan, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
