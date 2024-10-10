@@ -179,6 +179,8 @@ class NNsightGPUModelRunner(ModelRunner):
         intervention_handler = InterventionHandler(
             batch_groups, call_counter=call_counter
         )
+        
+        intervention_handler.batch_size = len(model_input.input_tokens)
 
         def get_output_node(graph: Graph):
 
