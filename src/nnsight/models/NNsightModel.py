@@ -81,6 +81,7 @@ class NNsight:
         *args,
         dispatch: bool = False,
         meta_buffers: bool = True,
+        rename_modules_dict: Dict[str, str] | None = None,
         **kwargs,
     ) -> None:
 
@@ -112,7 +113,7 @@ class NNsight:
             with init_empty_weights(include_buffers=meta_buffers):
                 self._model = self._load(self._model_key, *args, **kwargs)
 
-        self._envoy = Envoy(self._model)
+        self._envoy = Envoy(self._model, rename_modules_dict=rename_modules_dict)
 
         if dispatch and not self._dispatched:
             # Dispatch ._model on initialization vs lazy dispatching.
