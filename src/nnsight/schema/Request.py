@@ -55,13 +55,12 @@ class StreamValueModel(BaseModel):
         arbitrary_types_allowed=True, protected_namespaces=()
     )
     
-    model_key: str
     value: ValueTypes
     
     def deserialize(self, model:NNsight):
         
         handler = DeserializeHandler(model=model)
         
-        return self.value.deserialize(handler)
-        
+        return try_deserialize(self.value, handler)
+                
         
