@@ -120,12 +120,6 @@ class NodeModel(BaseNNsightModel):
         if isinstance(node.cond_dependency, Node):
             node.cond_dependency.listeners.append(weakref.proxy(node))
 
-        if isinstance(node.target, type) and issubclass(
-            node.target, protocols.Protocol
-        ):
-
-            node.target.compile(node)
-
         return node
 
 class TensorModel(BaseNNsightModel):
