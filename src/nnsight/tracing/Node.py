@@ -403,20 +403,30 @@ class Node:
 
         logger.info(f"=> SET({self.name})")
 
+        self.update_listeners()
+
+        self.update_dependencies()
+
+        if self.done() and self.redundant():
+            self.destroy()
+
+    def update_listeners(self):
+        """Updates remaining_dependencies of listeners. If they are now fulfilled, execute them."""
+
         for listener in self.listeners:
             listener.remaining_dependencies -= 1
 
             if listener.fulfilled() and not self.graph.sequential:
                 listener.execute()
 
+    def update_dependencies(self):
+        """Updates remaining_listeners of dependencies. If they are now redundant, destroy them."""
+        
         for dependency in self.arg_dependencies:
             dependency.remaining_listeners -= 1
 
             if dependency.redundant():
                 dependency.destroy()
-
-        if self.done() and self.redundant():
-            self.destroy()
 
     def destroy(self) -> None:
         """Removes the reference to the node's value and logs it's destruction."""
@@ -461,7 +471,11 @@ class Node:
 
         styles = {
             "node": {"color": "black", "shape": "ellipse"},
-            "label": (self.target if isinstance(self.target, str) else self.target.__name__),
+            "label": (
+                self.target
+                if isinstance(self.target, str)
+                else self.target.__name__
+            ),
             "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
             "arg_kname": defaultdict(lambda: None),
             "edge": defaultdict(lambda: "solid"),
@@ -473,7 +487,9 @@ class Node:
             self.target, protocols.Protocol
         ):
             styles = self.target.style()
-            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
+            viz_graph.add_node(
+                node_name, label=styles["label"], **styles["node"]
+            )
             if (
                 recursive
                 and self.target == protocols.LocalBackendExecuteProtocol
@@ -500,7 +516,9 @@ class Node:
                             viz_graph, recursive, node_name + "_"
                         )
         else:
-            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
+            viz_graph.add_node(
+                node_name, label=styles["label"], **styles["node"]
+            )
 
         def visualize_args(arg_collection):
             """Recursively visualizes the arguments of this node.
@@ -518,9 +536,11 @@ class Node:
                     if isinstance(arg, Iterable):
                         for element in arg:
                             if isinstance(element, Node):
-                                dep_name = element.visualize(viz_graph, recursive, backend_name)
+                                dep_name = element.visualize(
+                                    viz_graph, recursive, backend_name
+                                )
                                 iter_val_dependencies.append(dep_name)
-                    
+
                     name = node_name
                     if isinstance(arg, torch.Tensor):
                         name += f"_Tensor_{key}"
@@ -541,7 +561,9 @@ class Node:
                     viz_graph.add_node(name, label=label, **styles["arg"][key])
 
                     for dep_name in iter_val_dependencies:
-                        viz_graph.add_edge(dep_name, name, style="dashed", color="gray")
+                        viz_graph.add_edge(
+                            dep_name, name, style="dashed", color="gray"
+                        )
 
                 viz_graph.add_edge(name, node_name, style=styles["edge"][key])
 
