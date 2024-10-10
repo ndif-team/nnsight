@@ -47,8 +47,6 @@ class NNsight:
         _envoy (Envoy): Envoy for underlying model.
         _session (Session): Session object if in a Session.
     """
-    
-    __addons__ = {}
     __methods__ = set()
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
@@ -534,7 +532,6 @@ class NNsight:
                 
                 if issubclass(base, NNsight):
                     
-                    self.__addons__.update(base.__addons__)
                     self.__methods__.update(base.__methods__)
                     
                     inner(base)
