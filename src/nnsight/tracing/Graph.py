@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import inspect
 import tempfile
-from typing import Callable, Dict, Optional, Type
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Type
 
 from PIL import Image as PILImage
 
 from .. import util
 from ..util import apply
 from .Node import Node
-from .protocols import EarlyStopProtocol, Protocol
+from .protocols import EarlyStopProtocol
 from .Proxy import Proxy
 from .util import validate
 
@@ -78,9 +78,7 @@ class Graph:
 
         if self.sequential:
             is_stopped_early: bool = False
-            early_stop_execption: Optional[
-                EarlyStopProtocol.EarlyStopException
-            ] = None
+            early_stop_execption: Optional[EarlyStopProtocol.EarlyStopException] = None
             for node in self.nodes.values():
                 if not is_stopped_early:
                     if node.fulfilled():
@@ -96,9 +94,7 @@ class Graph:
                 raise early_stop_execption
         else:
 
-            root_nodes = [
-                node for node in self.nodes.values() if node.fulfilled()
-            ]
+            root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
 
             for node in root_nodes:
                 node.execute()
@@ -130,72 +126,74 @@ class Graph:
 
             node.proxy_value = validate(node.target, *node.args, **node.kwargs)
 
-        # Get name of target.
-        name = (
-            node.target
-            if isinstance(node.target, str)
-            else node.target.__name__
-        )
+        node_name = self.node_name(node.target)
 
-        # Init name_idx tracker for this Node's name if not already added.
-        if name not in self.name_idx:
-            self.name_idx[name] = 0
-
-        # If Node's name is not set, set it to the name_idxed version.
         if node.name is None:
-            node.name = f"{name}_{self.name_idx[name]}"
-
-        # Increment name_idx for name.
-        self.name_idx[name] += 1
+            node.name = node_name
 
         # Add Node.
         self.nodes[node.name] = node
 
-    def copy(self):
-        """Copy constructs a new Graph and then recursively
-        creates new Nodes on the graph.
-        """
-        new_graph = Graph(
-            validate=self.validate,
-            sequential=self.sequential,
-            proxy_class=self.proxy_class,
-        )
+    def node_name(self, target: Callable):
 
-        def compile(graph: Graph, old_node: Node):
-            if old_node.name in graph.nodes:
-                return graph.nodes[old_node.name]
+        target_name = target.__name__
+
+        # Init name_idx tracker for this Node's name if not already added.
+        if target_name not in self.name_idx:
+            self.name_idx[target_name] = 0
+
+        node_name = f"{target_name}_{self.name_idx[target_name]}"
+
+        # Increment name_idx for name.
+        self.name_idx[target_name] += 1
+
+        return node_name
+
+    def copy(self, graph: Graph = None, return_mapping: bool = False):
+
+        if graph is None:
+
+            graph = Graph(
+                validate=self.validate,
+                sequential=self.sequential,
+                proxy_class=self.proxy_class,
+            )
+
+        mapping = {}
+
+        def _copy(node: Node):
+
+            name = node.name
+
+            if name in graph.nodes and name in mapping:
+                return graph.nodes[mapping[name]]
 
             node = graph.create(
-                target=old_node.target,
-                name=old_node.name,
+                target=node.target,
                 proxy_value=None,
-                args=apply(old_node.args, lambda x: compile(graph, x), Node),
-                kwargs=apply(
-                    old_node.kwargs, lambda x: compile(graph, x), Node
-                ),
+                args=apply(node.args, lambda x: _copy(x), Node),
+                kwargs=apply(node.kwargs, lambda x: _copy(x), Node),
             ).node
 
-            if isinstance(node.target, type) and issubclass(
-                node.target, Protocol
-            ):
-                node.target.compile(node)
+            mapping[name] = node.name
 
             return node
 
-        # To preserve order
-        nodes = {}
+        nodes = {**graph.nodes}
 
         for node in self.nodes.values():
+            
+            node = _copy(node)
 
-            compile(new_graph, node)
+            nodes[node.name] = node
 
-            # To preserve order
-            nodes[node.name] = new_graph.nodes[node.name]
+        graph.nodes = nodes
 
-        # To preserve order
-        new_graph.nodes = nodes
+        if return_mapping:
+            mapping = {v: k for k, v in mapping.items()}
+            return (graph, mapping)
 
-        return new_graph
+        return graph
 
     def vis(
         self,
@@ -229,9 +227,7 @@ class Graph:
 
         graph: pgv.AGraph = pgv.AGraph(strict=True, directed=True)
 
-        graph.graph_attr.update(
-            label=title, fontsize="20", labelloc="t", labeljust="c"
-        )
+        graph.graph_attr.update(label=title, fontsize="20", labelloc="t", labeljust="c")
 
         for node in self.nodes.values():
             # draw bottom up
@@ -276,3 +272,22 @@ class Graph:
             result += f"  %{node}\n"
 
         return result
+
+
+class MultiGraph(Graph):
+    
+    def __init__(self, graphs:List[Graph]) -> None:
+        
+        super().__init__()
+        
+        self.id_to_graphs = {graph.id:graph for graph in graphs}
+                
+        for graph in self:
+            
+            self.nodes.update({f"{key}_{graph.id}":value for key, value in graph.nodes.items()})    
+            
+            
+    def __iter__(self) -> Iterator[Graph]:
+        return list(self.id_to_graphs.values())
+
+    
