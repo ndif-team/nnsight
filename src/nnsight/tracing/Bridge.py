@@ -43,6 +43,10 @@ class Bridge:
             graph (Graph): Graph to add.
         """
 
+        # all inner graphs have the same debug setting as the session graph
+        if len(self.graph_stack) > 0:
+            graph.debug = self.graph_stack[0].debug
+
         protocols.BridgeProtocol.set_bridge(graph, self)
 
         self.id_to_graph[graph.id] = graph

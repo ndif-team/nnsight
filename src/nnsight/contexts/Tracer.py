@@ -38,6 +38,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         graph: Graph = None,
         bridge: Bridge = None,
         return_context: bool = False,
+        debug: bool = False,
         **kwargs,
     ) -> None:
 
@@ -52,6 +53,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
             bridge=bridge,
             proxy_class=model.proxy_class,
             validate=validate,
+            debug=debug,
             sequential=False,
         )
 
