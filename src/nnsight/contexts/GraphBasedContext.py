@@ -136,6 +136,18 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             data (Any): Data to print.
         """
         self.apply(print, *data)
+        
+    def remote(self, data:Any) -> InterventionProxy:
+        """Streams data remotely when it becomes available locally.
+        The remote service will block until the local value is uploaded and received.
+
+        Is a no-op when not executing remotely.
+
+        Returns:
+            InterventionProxy: Proxy.
+        """
+        
+        return protocols.StreamingUploadProtocol.add(self.graph, data)
 
     def bool(self, *args, **kwargs) -> InterventionProxy:
         """NNsight helper method to create a traceable bool."""

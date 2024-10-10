@@ -12,6 +12,7 @@ from typing import (
     Optional,
     Tuple,
     Type,
+    TypeVar,
     Union,
 )
 
@@ -22,8 +23,10 @@ if TYPE_CHECKING:
 
 # TODO Have an Exception you can raise to stop apply early
 
+T = TypeVar('T')
+
 def apply(
-    data: Any, fn: Callable, cls: Type, inplace: bool = False
+    data: Any, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
 ) -> Collection:
     """Applies some function to all members of a collection of a give type (or types)
 
