@@ -135,6 +135,9 @@ def from_import_path(import_path: str) -> type:
 
     return getattr(importlib.import_module(import_path), classname)
 
+def weakref_to_obj(weakref:Any):
+    
+    return weakref.__repr__.__self__
 
 class WrapperModule(torch.nn.Module):
     """Simple torch module which passes it's input through. Useful for hooking.

@@ -46,10 +46,6 @@ class Protocol:
         pass
 
     @classmethod
-    def compile(cls, node: "Node") -> None:
-        pass
-
-    @classmethod
     def style(cls) -> Dict[str, Any]:
         """Visualization style for this protocol node.
 
