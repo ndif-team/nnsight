@@ -40,6 +40,13 @@ class Graph:
         
     """
 
+    def __getstate__(self) -> Dict:
+        return {"id": self.id, "nodes": self.nodes, "name_idx": self.name_idx}
+
+    def __setstate__(self, state: Dict) -> None:
+
+        self.__dict__.update(state)
+
     def __init__(
         self,
         proxy_class: Type[Proxy] = Proxy,
@@ -182,7 +189,7 @@ class Graph:
         nodes = {**graph.nodes}
 
         for node in self.nodes.values():
-            
+
             node = _copy(node)
 
             nodes[node.name] = node
@@ -275,19 +282,18 @@ class Graph:
 
 
 class MultiGraph(Graph):
-    
-    def __init__(self, graphs:List[Graph]) -> None:
-        
+
+    def __init__(self, graphs: List[Graph]) -> None:
+
         super().__init__()
-        
-        self.id_to_graphs = {graph.id:graph for graph in graphs}
-                
+
+        self.id_to_graphs = {graph.id: graph for graph in graphs}
+
         for graph in self:
-            
-            self.nodes.update({f"{key}_{graph.id}":value for key, value in graph.nodes.items()})    
-            
-            
+
+            self.nodes.update(
+                {f"{key}_{graph.id}": value for key, value in graph.nodes.items()}
+            )
+
     def __iter__(self) -> Iterator[Graph]:
         return list(self.id_to_graphs.values())
-
-    

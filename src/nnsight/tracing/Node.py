@@ -46,6 +46,20 @@ class Node:
         value (Any): Actual value to be populated during execution.
     """
 
+    def __getstate__(self) -> Dict:
+
+        state = self.__dict__.copy()
+
+        state["graph"] = util.weakref_to_obj(self.graph)
+        state["listeners"] = [
+            util.weakref_to_obj(listener) for listener in self.listeners
+        ]
+
+    def __setstate__(self, state: Dict) -> None:
+
+        state["graph"] = weakref.proxy(state["graph"])
+        state["listeners"] = [weakref.proxy(listener) for listener in self.listeners]
+
     def __init__(
         self,
         target: Union[Callable, str],
@@ -84,9 +98,7 @@ class Node:
         self.preprocess()
 
         # Node.graph is a weak reference to avoid reference loops.
-        self.graph = (
-            weakref.proxy(self.graph) if self.graph is not None else None
-        )
+        self.graph = weakref.proxy(self.graph) if self.graph is not None else None
 
         self.name: str = name
 
@@ -156,9 +168,7 @@ class Node:
             if conditional_node:
                 if all(
                     [
-                        not protocols.ConditionalProtocol.is_node_conditioned(
-                            arg
-                        )
+                        not protocols.ConditionalProtocol.is_node_conditioned(arg)
                         for arg in self.arg_dependencies
                     ]
                 ):
@@ -461,7 +471,9 @@ class Node:
 
         styles = {
             "node": {"color": "black", "shape": "ellipse"},
-            "label": (self.target if isinstance(self.target, str) else self.target.__name__),
+            "label": (
+                self.target if isinstance(self.target, str) else self.target.__name__
+            ),
             "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
             "arg_kname": defaultdict(lambda: None),
             "edge": defaultdict(lambda: "solid"),
@@ -474,10 +486,7 @@ class Node:
         ):
             styles = self.target.style()
             viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
-            if (
-                recursive
-                and self.target == protocols.LocalBackendExecuteProtocol
-            ):
+            if recursive and self.target == protocols.LocalBackendExecuteProtocol:
                 # recursively draw all sub-graphs
                 for sub_node in self.args[0].graph.nodes.values():
                     # draw root nodes and attach them to their LocalBackendExecuteProtocol node
@@ -518,9 +527,11 @@ class Node:
                     if isinstance(arg, Iterable):
                         for element in arg:
                             if isinstance(element, Node):
-                                dep_name = element.visualize(viz_graph, recursive, backend_name)
+                                dep_name = element.visualize(
+                                    viz_graph, recursive, backend_name
+                                )
                                 iter_val_dependencies.append(dep_name)
-                    
+
                     name = node_name
                     if isinstance(arg, torch.Tensor):
                         name += f"_Tensor_{key}"
@@ -550,9 +561,7 @@ class Node:
         visualize_args(self.kwargs.items())
 
         if isinstance(self.cond_dependency, Node):
-            name = self.cond_dependency.visualize(
-                viz_graph, recursive, backend_name
-            )
+            name = self.cond_dependency.visualize(viz_graph, recursive, backend_name)
             viz_graph.add_edge(
                 name, node_name, style=styles["edge"][None], color="#FF8C00"
             )
