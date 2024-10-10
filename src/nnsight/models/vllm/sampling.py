@@ -18,9 +18,8 @@ from ...tracing.Graph import Graph, MultiGraph
 
 class NNsightSamplingParams(SamplingParams):
 
-    intervention_graph: Optional[Union[Graph, int]] = None
+    intervention_graph: Optional[Graph] = None
     invoker_group: Optional[int] = None
-    result: Optional[Dict[str, Any]] = {}
 
     def clone(self) -> "SamplingParams":
         """Deep copy excluding LogitsProcessor objects.
@@ -38,8 +37,6 @@ class NNsightSamplingParams(SamplingParams):
 
         if self.intervention_graph is not None:
             memo[id(self.intervention_graph)] = self.intervention_graph
-
-        memo[id(self.result)] = self.result
 
         return copy.deepcopy(self, memo=memo)
 
@@ -99,7 +96,7 @@ class NNsightSamplingMetadata(SamplingMetadata):
             for t, seq_ids in categorized_sample_indices.items()
         }
 
-        intervention_graphs = []
+        intervention_graphs = {}
         batch_groups = []
         batch_groups_offset = 0
 
@@ -113,13 +110,11 @@ class NNsightSamplingMetadata(SamplingMetadata):
                 
                 if isinstance(seq_group_intervention_graph, Graph):
                     
-                    intervention_graphs.append(seq_group_intervention_graph)
+                    if seq_group_intervention_graph.id not in intervention_graphs:
+                    
+                        intervention_graphs[seq_group_intervention_graph.id] = seq_group_intervention_graph
 
-                    batch_groups_offset = len(batch_groups)
-                                            
-                    seq_group_intervention_graph = seq_group_intervention_graph.id
-
-                if isinstance(seq_group_intervention_graph, int):
+                        batch_groups_offset = len(batch_groups)
 
                     seq_group_batch_group = (
                         seq_group.sampling_params.invoker_group + batch_groups_offset
@@ -144,9 +139,9 @@ class NNsightSamplingMetadata(SamplingMetadata):
         if n_graphs== 0:
             intervention_graph = None
         elif n_graphs == 1:
-            intervention_graph = intervention_graphs[0]
+            intervention_graph = list(intervention_graphs.values())[0]
         else:
-            intervention_graph = MultiGraph(intervention_graphs)
+            intervention_graph = MultiGraph(intervention_graphs.values())
             
             InterventionProtocol.shift(intervention_graph)
 

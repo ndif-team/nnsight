@@ -63,11 +63,9 @@ class VLLMTracer(Tracer):
 
             for input in invoker_input:
                 
-                intervention_graph = self.graph if len(params) == 0 else self.graph.id
-
                 param = NNsightSamplingParams(
                     **self._kwargs,
-                    intervention_graph=intervention_graph,
+                    intervention_graph=self.graph,
                     invoker_group=invoker_group,
                 )
 
