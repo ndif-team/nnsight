@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import traceback
 import weakref
 from collections import defaultdict
 from collections.abc import Iterable
@@ -87,6 +88,8 @@ class Node:
         self.graph = (
             weakref.proxy(self.graph) if self.graph is not None else None
         )
+
+        self.meta_data = self._meta_data()
 
         self.name: str = name
 
@@ -383,11 +386,29 @@ class Node:
                 self.set_value(output)
 
         except Exception as e:
+            if self.graph and self.graph.debug:
+                if type(e) != protocols.EarlyStopProtocol.EarlyStopException:
+                    if self.attached():
+                        print(f"\n{self.meta_data['traceback']}\n" + \
+                            "NNsightError: The exception below was the direct cause of this exception.\n")
+                        
+                        # Kill all the graphs in the Session to signal that an error occured
+                        # This way only the traceback of the Node responsible for the error gets printed out
+                        self.graph.alive = False
+                        if protocols.BridgeProtocol.has_bridge(self.graph):
+                            bridge = protocols.BridgeProtocol.get_bridge(self.graph)
 
-            raise type(e)(
-                f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
-            ) from e
+                            def kill_graph(graph: "Graph") -> None:
+                                """Sets the graph.alive attribute to False"""
+                                graph.alive = False
 
+                            [kill_graph(g) for g in bridge.graph_stack]
+                    # Propagate original error
+                    raise e
+            else: 
+                raise type(e)(
+                    f"Above exception occured when executing Node: '{self.name}' in Graph: '{self.graph.id}'"
+                ) from e
         finally:
             self.remaining_dependencies -= 1
 
@@ -558,6 +579,41 @@ class Node:
             )
 
         return node_name
+    
+    def _meta_data(self) -> Dict[str, Any]:
+        """ Creates a dictionary of meta-data for this node.
+        Contains the following key-value pairs:
+            - traceback: Optional[str]: If the Graph is in debug mode, 
+                a traceback string is compiled to be used if the execution of this Node raises an error.
+        
+        Returns:
+            Dict[str, Any]: Meta-Data dictionary.
+        """
+
+        meta_data = dict()
+
+        def traceback_str() -> str:
+            """ Compiles a string of all the lines in the Traceback up until nnsight code is called.
+            Returns:
+                Str: Call Stack
+            """
+
+            traceback_str = "Traceback (most recent call last):\n"
+            stack = traceback.extract_stack()
+            # Exclude the last frame which is the current function (print_call_stack)
+            for frame in stack:
+                if "nnsight/src/nnsight/" not in str(frame.filename):
+                    traceback_str += f"  File \"{frame.filename}\", line {frame.lineno}, in {frame.name}\n"
+                    traceback_str += f"    {frame.line}\n"
+                else:
+                    break
+
+            return traceback_str
+
+        if self.attached() and self.graph.debug:
+            meta_data["traceback"] = traceback_str()
+
+        return meta_data
 
     def __str__(self) -> str:
         args = util.apply(self.args, lambda x: f"'{x}'", str)

@@ -37,6 +37,10 @@ class Graph:
             When this is set to `True`, `Node`s attempt to be executed in the order they were added to the `Graph` when calling `.execute(). \
             Otherwise, all nodes are checked to be fulfilled (they have no dependencies). These are root nodes and they are then executed in the order they were added.
 
+        debug (bool): If to print out user-friendly tracebacks when execution error occurs. Defaults to False.
+
+            When this is set to `True` and an error occurs during the execution of a Node, only the traceback of the Node responsible for the error gets printed out.
+            If this graph has any inner graphs, then they will all inheret the same debug value irrespective of what the user specifies.
         
     """
 
@@ -46,6 +50,7 @@ class Graph:
         validate: bool = False,
         sequential: bool = True,
         graph_id: int = None,
+        debug: bool = False,
     ) -> None:
 
         self.id = graph_id or id(self)
@@ -53,6 +58,7 @@ class Graph:
         self.proxy_class = proxy_class
         self.validate = validate
         self.sequential = sequential
+        self.debug = debug
 
         self.alive = True
 
