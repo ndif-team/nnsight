@@ -12,14 +12,14 @@ from __future__ import annotations
 import inspect
 from collections import defaultdict
 from contextlib import AbstractContextManager
-from typing import (Any, Callable, Collection, Dict, List, Optional, Tuple,
-                    Union)
+from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from . import util
+from .patching import Patch, Patcher
 from .tracing import protocols
 from .tracing.Graph import Graph, MultiGraph
 from .tracing.Node import Node
@@ -52,7 +52,8 @@ class InterventionProxy(Proxy):
         self._grad: InterventionProxy
 
     def save(self) -> InterventionProxy:
-        """Method when called, indicates to the intervention graph to not delete the tensor values of the result.
+        """Adds a lock Node to prevent its value from being cleared where normally it would be cleared when its no longer needed to save memory.
+        Used to access values outside of the tracing context, after execution.
 
         Returns:
             InterventionProxy: Proxy.
@@ -66,16 +67,34 @@ class InterventionProxy(Proxy):
 
         return self
 
-    def stop(self) -> InterventionProxy:
-        """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed..
+    def local(self) -> InterventionProxy:
+        """Streams value of this node locally when it becomes available remotely.
+        This then kicks off execution of the local intervention graph up until it hits an upload Node created from `remote()`.
+
+        Is a no-op when not executing remotely.
 
         Returns:
             InterventionProxy: Proxy.
         """
 
-        protocols.EarlyStopProtocol.add(self.node.graph, self.node)
+        return protocols.StreamingDownloadProtocol.add(self.node)
 
-        return self
+    def remote(self) -> InterventionProxy:
+        """Streams value of this node remotely when it becomes available locally.
+        The remote service will block until the local value is uploaded and received.
+
+        Is a no-op when not executing remotely.
+
+        Returns:
+            InterventionProxy: Proxy.
+        """
+
+        return protocols.StreamingUploadProtocol.add(self.node.graph, self.node)
+
+    def stop(self) -> None:
+        """Method when called, indicates to the intervention graph to stop the execution of the model after this Proxy/Node is completed.."""
+
+        protocols.EarlyStopProtocol.add(self.node.graph, self.node)
 
     def update(self, value: Union[Node, Any]) -> InterventionProxy:
         """Updates the value of the Proxy via the creation of the UpdateProtocol node.
@@ -182,9 +201,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("shape")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.shape, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
     @property
     def device(self) -> Collection[torch.device]:
@@ -203,9 +220,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("device")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.device, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
 
     @property
     def dtype(self) -> Collection[torch.device]:
@@ -224,9 +239,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("dtype")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.dtype, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
 
 class InterventionProtocol(Protocol):
@@ -265,12 +278,12 @@ class InterventionProtocol(Protocol):
         )
 
         return proxy
-    
+
     @classmethod
-    def compile_node(cls, node:Node) -> None:
-        
+    def compile_node(cls, node: Node) -> None:
+
         graph = node.graph
-        
+
         module_path, *_ = node.args
 
         # Add attachment if it does not exist.
@@ -286,61 +299,58 @@ class InterventionProtocol(Protocol):
 
         # Append the newly created nodes name.
         arguments[module_path].append(node.name)
-        
 
     @classmethod
     def compile(cls, graph: Graph) -> None:
-        
+
         if graph.attachments.get(cls.attachment_flag_name, False):
             return
-        
+
         for node in graph.nodes.values():
-            
+
             if node.target is not InterventionProtocol:
                 continue
 
             cls.compile_node(node)
-            
+
         graph.attachments[cls.attachment_flag_name] = True
-           
-        
+
     @classmethod
-    def shift(cls, mgraph:MultiGraph) -> MultiGraph:
-        
-        InterventionProtocol.compile(mgraph) 
-        
+    def shift(cls, mgraph: MultiGraph) -> MultiGraph:
+
+        InterventionProtocol.compile(mgraph)
+
         intervention_nodes = InterventionProtocol.get_interventions(mgraph).values()
-        
+
         graph_id_to_invoker_groups = defaultdict(set)
         graph_id_to_intervention_node = defaultdict(list)
-        
+
         for nodes in intervention_nodes:
             for node in nodes:
-                
+
                 invoker_group = node.args[1]
-                
+
                 for graph in mgraph:
                     if node.name in graph.nodes:
                         graph_id_to_invoker_groups[graph.id].add(invoker_group)
                         graph_id_to_intervention_node[graph.id].append(node)
                         break
-                        
+
         global_offset = 0
-                        
+
         for graph_id, invoker_groups in graph_id_to_invoker_groups.items():
-            
+
             min_group = min(invoker_groups)
             max_group = max(invoker_groups)
-            
+
             offset = global_offset - min_group
-            
+
             for node in graph_id_to_intervention_node[graph_id]:
-                
+
                 node.args[1] += offset
-            
+
             global_offset += max_group + 1
-                
-        
+
         return mgraph
 
     @classmethod
@@ -465,17 +475,19 @@ class InterventionProtocol(Protocol):
 
             # Multiple intervention nodes can have same module_path if there are multiple invocations.
             for intervention_node_name in intervention_node_names:
-            
+
                 node = intervention_handler.graph.nodes[intervention_node_name]
 
                 # Args for intervention nodes are (module_path, batch_group_idx, call_iter).
                 _, batch_group_idx, call_iter = node.args
-                
+
+                # If this node will be executed for multiple iterations, we need to reset the sub-graph to b executed once more
+                if call_iter == -1:
+                    node.reset(propagate=True)
+
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
-                if call_iter != intervention_handler.count(
-                    intervention_node_name, 
-                ):
+                elif call_iter != intervention_handler.count(intervention_node_name):
 
                     continue
 
@@ -484,7 +496,7 @@ class InterventionProtocol(Protocol):
                 narrowed = False
 
                 if len(intervention_handler.batch_groups) > 1:
-                    
+
                     batch_start, batch_size = intervention_handler.batch_groups[
                         batch_group_idx
                     ]
@@ -507,8 +519,10 @@ class InterventionProtocol(Protocol):
                         torch.Tensor,
                     )
 
-                # Value injection.
-                node.set_value(value)
+                # If this Node may be executed more than once, we need to defer any Node destruction until after interleaving.
+                with intervention_handler.defer_destruction(call_iter == -1):
+                    # Value injection.
+                    node.set_value(value)
 
                 # Check if through the previous value injection, there was a 'swap' intervention.
                 # This would mean we want to replace activations for this batch with some other ones.
@@ -641,17 +655,23 @@ class InterventionHandler:
 
     Like the Intervention Graph, the total batch size that is being executed, and a counter for how many times an Intervention node has been attempted to be executed.
     """
-    
+
     attachment_name = "nnsight_call_counter"
-    
+
     def __init__(
-        self, batch_groups: List[Tuple[int, int]], call_counter:Dict[str, int] = None, graph:Graph = None
+        self,
+        batch_groups: List[Tuple[int, int]],
+        call_counter: Dict[str, int] = None,
+        graph: Graph = None,
     ) -> None:
 
         self.graph = graph
         self.batch_groups = batch_groups
-        self.call_counter: Dict[str, int] = defaultdict(lambda : 0) if call_counter is None else call_counter
+        self.call_counter: Dict[str, int] = (
+            defaultdict(lambda: 0) if call_counter is None else call_counter
+        )
         self.batch_size = sum(self.batch_groups[-1])
+        self.destruction_deferrer = InterventionHandler.DestructionDeferrer()
 
     def count(self, name: str) -> int:
         """Increments the count of times a given Intervention Node has tried to be executed and returns the count.
@@ -664,46 +684,99 @@ class InterventionHandler:
         """
 
         count = self.call_counter[name]
-        
+
         self.call_counter[name] += 1
 
         return count
+
     class MultiCounter(dict):
-        
-        def __init__(self, mgraph:MultiGraph,graph_id_to_call_counter: Dict[int,Dict[str,int]]):
-            
+
+        def __init__(
+            self,
+            mgraph: MultiGraph,
+            graph_id_to_call_counter: Dict[int, Dict[str, int]],
+        ):
+
             self.mgraph = mgraph
             self.graph_id_to_call_counter = graph_id_to_call_counter
-            
+
         def __getitem__(self, key: Any) -> Any:
             return self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key]
-        
+
         def __setitem__(self, key: Any, value: Any) -> None:
             self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key] = value
-    
+
     @classmethod
-    def persistent_call_counter(cls, graph:Graph) -> dict:
-        
-        def inner(graph:Graph): 
-              
+    def persistent_call_counter(cls, graph: Graph) -> dict:
+
+        def inner(graph: Graph):
+
             if cls.attachment_name not in graph.attachments:
-                
-                graph.attachments[cls.attachment_name] = defaultdict(lambda : 0)
-                
+
+                graph.attachments[cls.attachment_name] = defaultdict(lambda: 0)
+
             return graph.attachments[cls.attachment_name]
-        
+
         if isinstance(graph, MultiGraph):
             graph_id_to_call_counter = {}
-            
+
             mgraph = graph
-        
+
             for graph in mgraph:
-                
+
                 graph_id_to_call_counter[graph.id] = inner(graph)
-                
+
             return InterventionHandler.MultiCounter(mgraph)
-            
-            
+
         return inner(graph)
-            
-    
+
+    def defer_destruction(self, defer: bool):
+
+        self.destruction_deferrer.defer = defer
+
+        return self.destruction_deferrer
+
+    def destroy(self):
+
+        self.destruction_deferrer.destroy()
+
+    class DestructionDeferrer:
+
+        def __init__(self, defer: bool = False) -> None:
+
+            self.defer = defer
+            self.deferred_nodes: Dict[str, Node] = {}
+            self.patcher = Patcher(
+                [
+                    Patch(
+                        Node,
+                        lambda node: self.deferred_nodes.update({node.name: node}),
+                        "destroy",
+                    )
+                ]
+            )
+
+        def __enter__(self):
+
+            if self.defer:
+
+                self.patcher.__enter__()
+
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+
+            if self.defer:
+
+                self.patcher.__exit__(None, None, None)
+
+            if isinstance(exc_val, BaseException):
+                raise exc_val
+
+        def destroy(self):
+
+            for node in self.deferred_nodes.values():
+
+                node.destroy()
+
+            self.deferred_nodes = {}
