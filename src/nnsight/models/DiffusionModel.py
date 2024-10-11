@@ -54,7 +54,7 @@ class DiffusionModel(GenerationMixin, NNsight):
 
         return model
 
-    def _prepare_inputs(
+    def _prepare_input(
         self,
         inputs: Union[str, List[str]],
     ) -> Any:
@@ -64,7 +64,7 @@ class DiffusionModel(GenerationMixin, NNsight):
 
         return (inputs,), len(inputs)
 
-    def _batch_inputs(
+    def _batch(
         self,
         batched_inputs: Optional[Dict[str, Any]],
         prepared_inputs: BatchEncoding,

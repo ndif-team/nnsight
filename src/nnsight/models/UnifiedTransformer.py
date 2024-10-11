@@ -42,7 +42,7 @@ class UnifiedTransformer(LanguageModel):
 
         super().__init__(hooked_model, tokenizer=self.tokenizer, *args, **kwargs)
 
-    def _prepare_inputs(
+    def _prepare_input(
         self,
         inputs: Union[
             str,
@@ -81,7 +81,7 @@ class UnifiedTransformer(LanguageModel):
 
         return (inputs,), len(inputs["input"])
 
-    def _batch_inputs(
+    def _batch(
         self,
         batched_inputs: Dict,
         prepared_inputs: BatchEncoding,

@@ -480,11 +480,11 @@ class InterventionProtocol(Protocol):
 
                 # Args for intervention nodes are (module_path, batch_group_idx, call_iter).
                 _, batch_group_idx, call_iter = node.args
-
+                
                 # If this node will be executed for multiple iterations, we need to reset the sub-graph to b executed once more
                 if call_iter == -1:
                     node.reset(propagate=True)
-
+                
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
                 elif call_iter != intervention_handler.count(intervention_node_name):
@@ -660,13 +660,13 @@ class InterventionHandler:
 
     def __init__(
         self,
-        batch_groups: List[Tuple[int, int]],
+        batch_groups: List[Tuple[int, int]] = None,
         call_counter: Dict[str, int] = None,
         graph: Graph = None,
     ) -> None:
 
         self.graph = graph
-        self.batch_groups = batch_groups
+        self.batch_groups = [] if batch_groups is None else batch_groups
         self.call_counter: Dict[str, int] = (
             defaultdict(lambda: 0) if call_counter is None else call_counter
         )

@@ -1,11 +1,11 @@
 from typing_extensions import Self
 
-from ... import NNsight
 from ...util import from_import_path, to_import_path
+from .meta import MetaMixin
 
 
-class RemoteableMixin(NNsight):
-    
+class RemoteableMixin(MetaMixin):
+
     def _remoteable_model_key(self) -> str:
 
         raise NotImplementedError()
