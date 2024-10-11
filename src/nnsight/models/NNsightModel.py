@@ -34,7 +34,6 @@ from ..intervention import (
     InterventionProtocol,
     InterventionProxy,
 )
-from ..tracing import protocols
 from ..tracing.Graph import Graph
 
 
