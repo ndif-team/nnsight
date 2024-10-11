@@ -6,15 +6,17 @@ from torch.nn.modules import Module
 
 
 from ...contexts import resolve_dependencies
-from ...contexts.backends import Backend
 from ...contexts.Tracer import Tracer
 from ...tracing import protocols
 from ...tracing.Graph import Graph
 from ...util import WrapperModule
 from .executors.GPUExecutor import NNsightGPUExecutor
+from .executors.RayGPUExecutor import NNsightRayGPUExecutor
 from .sampling import NNsightSamplingParams
 from ..NNsightModel import NNsight
 from ..mixins import RemoteableMixin
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+
 try:
     from vllm.distributed import (destroy_distributed_environment,
                                   destroy_model_parallel,
@@ -61,9 +63,10 @@ class VLLMTracer(Tracer):
                 invoker_input = [invoker_input]
 
             for input in invoker_input:
-                
+                kwargs_copy = self._kwargs.copy()
+                kwargs_copy.pop("generate", None)
                 param = NNsightSamplingParams(
-                    **self._kwargs,
+                    **kwargs_copy,
                     intervention_graph=self.graph,
                     invoker_group=invoker_group,
                 )
@@ -108,7 +111,7 @@ class VLLM(RemoteableMixin):
     """
     
     
-    def _load_meta(self, repo_id:str, *args, **kwargs):
+    def _load_meta(self, repo_id:str, **kwargs):
 
 
         # no parallelism during initialization
@@ -138,21 +141,37 @@ class VLLM(RemoteableMixin):
 
         # initialize the model
         model = _initialize_model(
-            engine_config_dict["model_config"],
-            engine_config_dict["load_config"],
-            None,
-            engine_config_dict["cache_config"]
+            model_config=engine_config_dict["model_config"],
+            load_config=engine_config_dict["load_config"],
+            lora_config=None,
+            cache_config=engine_config_dict["cache_config"],
+            scheduler_config=engine_config_dict["scheduler_config"],
         )
+
+        vllm_model = VLLM.VLLModel(model)
+
+        vllm_model.tokenizer = init_tokenizer_from_configs(
+            model_config=engine_config_dict["model_config"],
+            scheduler_config=engine_config_dict["scheduler_config"],
+            parallel_config=engine_config_dict["parallel_config"],
+            enable_lora=bool(engine_config_dict["lora_config"])
+        ).tokenizer
         
         destroy_model_parallel()
         destroy_distributed_environment()
 
-        return model
-    
+        return vllm_model
+        
     def _load(self, repo_id: str, **kwargs):
 
+          
+
+        distributed_executor_backend = NNsightGPUExecutor
+        if "tensor_parallel_size" in kwargs.keys() and kwargs["tensor_parallel_size"] > 1:
+            distributed_executor_backend = NNsightRayGPUExecutor
+
         llm = LLM(
-            repo_id, **kwargs, distributed_executor_backend=NNsightGPUExecutor
+            repo_id, **kwargs, distributed_executor_backend=distributed_executor_backend
         )
 
         self.vllm_entrypoint = llm
