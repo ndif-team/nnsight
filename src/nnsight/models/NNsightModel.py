@@ -525,6 +525,10 @@ class NNsight:
             )
 
         return getattr(self._envoy, key)
+    
+    
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._envoy(*args, **kwargs)
 
     ### NNsight VIRTUAL METHODS BELOW #####################################
 

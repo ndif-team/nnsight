@@ -1,6 +1,7 @@
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
+from nnsight.models.NNsightModel import NNsight
 import torch
 import torch.distributed
 
@@ -331,7 +332,8 @@ class NNsightGPUModelRunner(ModelRunner):
 
             return output
 
-        output = self.model.interleave(
+        output = NNsight.interleave(
+            self.model,
             inner,
             intervention_graph,
             intervention_handler=intervention_handler,
