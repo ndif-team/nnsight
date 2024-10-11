@@ -46,6 +46,24 @@ class Node:
         value (Any): Actual value to be populated during execution.
     """
 
+    def __getstate__(self) -> Dict:
+
+        state = self.__dict__.copy()
+
+        state["graph"] = util.weakref_to_obj(self.graph)
+        state["listeners"] = [
+            util.weakref_to_obj(listener) for listener in self.listeners
+        ]
+
+    def __setstate__(self, state: Dict) -> None:
+
+        state["graph"] = weakref.proxy(state["graph"])
+        state["listeners"] = [
+            weakref.proxy(listener) for listener in self.listeners
+        ]
+
+        self.__dict__.update(state)
+
     def __init__(
         self,
         target: Union[Callable, str],
@@ -214,25 +232,11 @@ class Node:
 
         if not self.attached():
 
-            graph: "Graph" = None
+            from ..contexts.GraphBasedContext import GlobalTracingContext
 
-            def find_attached_graph(node: Union[Proxy, Node]):
+            if GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
 
-                if isinstance(node, Proxy):
-
-                    node = node.node
-
-                nonlocal graph
-
-                if node.attached():
-
-                    graph = node.graph
-
-            util.apply((args, kwargs), find_attached_graph, (Proxy, Node))
-
-            if graph is not None:
-
-                return graph.create(
+                return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.create(
                     target=target,
                     name=name,
                     proxy_value=proxy_value,
@@ -279,9 +283,9 @@ class Node:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = sum([not node.executed() for node in self.arg_dependencies]) + int(
-            not (self.cond_dependency is None)
-        )
+        self.remaining_dependencies = sum(
+            [not node.executed() for node in self.arg_dependencies]
+        ) + int(not (self.cond_dependency is None))
 
         if propagate:
             for node in self.listeners:
@@ -367,7 +371,7 @@ class Node:
         Lets protocol execute if target is str.
         Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
-    
+
         try:
 
             if isinstance(self.target, type) and issubclass(
@@ -388,13 +392,13 @@ class Node:
                 self.set_value(output)
 
         except Exception as e:
-            
+
             raise type(e)(
                 f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
-            ) from e     
-            
+            ) from e
+
         finally:
-            self.remaining_dependencies -= 1       
+            self.remaining_dependencies -= 1
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
@@ -414,7 +418,7 @@ class Node:
 
         if self.done() and self.redundant():
             self.destroy()
-            
+
     def update_listeners(self):
         """Updates remaining_dependencies of listeners. If they are now fulfilled, execute them."""
 
@@ -492,6 +496,7 @@ class Node:
             self.target, protocols.Protocol
         ):
             styles = self.target.style()
+
             viz_graph.add_node(
                 node_name, label=styles["label"], **styles["node"]
             )
@@ -499,6 +504,7 @@ class Node:
                 recursive
                 and self.target == protocols.LocalBackendExecuteProtocol
             ):
+
                 # recursively draw all sub-graphs
                 for sub_node in self.args[0].graph.nodes.values():
                     # draw root nodes and attach them to their LocalBackendExecuteProtocol node

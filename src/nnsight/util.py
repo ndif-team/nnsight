@@ -9,6 +9,7 @@ from typing import (
     Callable,
     Collection,
     Dict,
+    Generic,
     Optional,
     Tuple,
     Type,
@@ -23,7 +24,8 @@ if TYPE_CHECKING:
 
 # TODO Have an Exception you can raise to stop apply early
 
-T = TypeVar('T')
+T = TypeVar("T")
+
 
 def apply(
     data: Any, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
@@ -139,6 +141,11 @@ def from_import_path(import_path: str) -> type:
     return getattr(importlib.import_module(import_path), classname)
 
 
+def weakref_to_obj(weakref: Any):
+
+    return weakref.__repr__.__self__
+
+
 class WrapperModule(torch.nn.Module):
     """Simple torch module which passes it's input through. Useful for hooking.
     If there is only one argument, returns the first element.
@@ -149,3 +156,15 @@ class WrapperModule(torch.nn.Module):
             args = args[0]
 
         return args
+
+
+H = TypeVar("H")
+P = TypeVar("P")
+
+
+class TypeHint(Generic[H]):
+    pass
+
+
+def hint(cls: Type[P | TypeHint[H]]) -> Union[Type[H], Type[P]]:
+    return cls

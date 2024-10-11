@@ -471,7 +471,7 @@ class Envoy:
             InterventionProxy: Module call proxy.
         """
         
-        if not self._tracing():
+        if not self._tracing() or self._scanning():
             return self._module(*args, **kwargs)
 
         if isinstance(self._tracer.backend, EditBackend):

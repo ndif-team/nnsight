@@ -37,15 +37,15 @@ class Invoker(AbstractContextManager):
     def __init__(
         self,
         tracer: "Tracer",
-        *inputs: Any,
+        *args,
         scan: bool = False,
         **kwargs,
     ) -> None:
 
         self.tracer = tracer
-        self.inputs = inputs
+        self.input = (args, kwargs)
+        
         self.scan = scan
-        self.kwargs = kwargs
 
         self.scanning = False
 
@@ -71,28 +71,28 @@ class Invoker(AbstractContextManager):
         # Set self.inputs to be the proxy_value so we can prepare_inputs, get the batch size, and scan.
         if self.tracer.model._session is not None:
 
-            self.inputs, has_proxies_in_inputs = check_for_dependencies(
-                self.inputs
+            self.input, has_proxies_in_inputs = check_for_dependencies(
+                self.input
             )
 
         with GlobalTracingContext.exit_global_tracing_context():
 
             if not has_proxies_in_inputs:
 
-                self.inputs, batch_size = self.tracer.model._prepare_inputs(
-                    *self.inputs, **self.kwargs
+                self.input, batch_size = self.tracer.model._prepare_input(
+                    *self.input[0], **self.input[1]
                 )
 
             if self.scan:
 
-                inputs = self.inputs
+                input = self.input
 
                 if has_proxies_in_inputs:
 
-                    inputs = util.apply(inputs, lambda x: x.proxy_value, Node)
+                    input = util.apply(input, lambda x: x.proxy_value, Node)
 
-                    inputs, batch_size = self.tracer.model._prepare_inputs(
-                        *inputs, **self.kwargs
+                    input, batch_size = self.tracer.model._prepare_input(
+                        *input[0], **input[1]
                     )
 
                 self.tracer.model._envoy._clear()
@@ -112,8 +112,10 @@ class Invoker(AbstractContextManager):
                         shape_env=ShapeEnv(assume_static_by_default=True),
                     ) as fake_mode:
                         with FakeCopyMode(fake_mode):
-                            self.tracer.model._execute(
-                                *copy.deepcopy(inputs),
+                            fn = self.tracer.model._execute if self.tracer.method is None else getattr(self.tracer.model, self.tracer.method)
+                            fn(
+                                *copy.deepcopy(input[0]),
+                                **copy.deepcopy(input[1]),
                                 **copy.deepcopy(self.tracer._kwargs),
                             )
 
@@ -122,7 +124,7 @@ class Invoker(AbstractContextManager):
             else:
                 self.tracer.model._envoy._reset()
 
-            self.tracer._invoker_inputs.append(self.inputs)
+            self.tracer._invoker_inputs.append(self.input)
 
         return self
 

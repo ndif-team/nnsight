@@ -12,7 +12,7 @@ from __future__ import annotations
 import inspect
 from collections import defaultdict
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, Dict, List, Tuple, Union
+from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -21,7 +21,7 @@ from typing_extensions import Self
 from . import util
 from .patching import Patch, Patcher
 from .tracing import protocols
-from .tracing.Graph import Graph
+from .tracing.Graph import Graph, MultiGraph
 from .tracing.Node import Node
 from .tracing.protocols import Protocol
 from .tracing.Proxy import Proxy
@@ -201,9 +201,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("shape")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.shape, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
 
     @property
     def device(self) -> Collection[torch.device]:
@@ -222,9 +220,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("device")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.device, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
 
     @property
     def dtype(self) -> Collection[torch.device]:
@@ -243,9 +239,7 @@ class InterventionProxy(Proxy):
 
             return super().__getattr__("dtype")
 
-        return util.apply(
-            self.node.proxy_value, lambda x: x.dtype, torch.Tensor
-        )
+        return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
 
 
 class InterventionProtocol(Protocol):
@@ -254,6 +248,7 @@ class InterventionProtocol(Protocol):
     """
 
     attachment_name = "nnsight_module_nodes"
+    attachment_flag_name = "nnsight_compiled"
     condition: bool = False
 
     @classmethod
@@ -263,7 +258,7 @@ class InterventionProtocol(Protocol):
         proxy_value: Any,
         args: List[Any] = None,
         kwargs: Dict[str, Any] = None,
-    ) -> Proxy:
+    ) -> InterventionProxy:
         """Adds an InterventionProtocol Node to a Graph.
 
         Args:
@@ -282,12 +277,10 @@ class InterventionProtocol(Protocol):
             proxy_value=proxy_value, target=cls, args=args, kwargs=kwargs
         )
 
-        cls.compile(proxy.node)
-
         return proxy
 
     @classmethod
-    def compile(cls, node: Node) -> None:
+    def compile_node(cls, node: Node) -> None:
 
         graph = node.graph
 
@@ -308,7 +301,60 @@ class InterventionProtocol(Protocol):
         arguments[module_path].append(node.name)
 
     @classmethod
-    def get_interventions(cls, graph: "Graph") -> Dict:
+    def compile(cls, graph: Graph) -> None:
+
+        if graph.attachments.get(cls.attachment_flag_name, False):
+            return
+
+        for node in graph.nodes.values():
+
+            if node.target is not InterventionProtocol:
+                continue
+
+            cls.compile_node(node)
+
+        graph.attachments[cls.attachment_flag_name] = True
+
+    @classmethod
+    def shift(cls, mgraph: MultiGraph) -> MultiGraph:
+
+        InterventionProtocol.compile(mgraph)
+
+        intervention_nodes = InterventionProtocol.get_interventions(mgraph).values()
+
+        graph_id_to_invoker_groups = defaultdict(set)
+        graph_id_to_intervention_node = defaultdict(list)
+
+        for nodes in intervention_nodes:
+            for node in nodes:
+
+                invoker_group = node.args[1]
+
+                for graph in mgraph:
+                    if node.name in graph.nodes:
+                        graph_id_to_invoker_groups[graph.id].add(invoker_group)
+                        graph_id_to_intervention_node[graph.id].append(node)
+                        break
+
+        global_offset = 0
+
+        for graph_id, invoker_groups in graph_id_to_invoker_groups.items():
+
+            min_group = min(invoker_groups)
+            max_group = max(invoker_groups)
+
+            offset = global_offset - min_group
+
+            for node in graph_id_to_intervention_node[graph_id]:
+
+                node.args[1] += offset
+
+            global_offset += max_group + 1
+
+        return mgraph
+
+    @classmethod
+    def get_interventions(cls, graph: "Graph") -> Dict[str, List[Node]]:
         """Returns mapping from module_paths to  InterventionNode names added to the given Graph.
 
         Args:
@@ -434,20 +480,14 @@ class InterventionProtocol(Protocol):
 
                 # Args for intervention nodes are (module_path, batch_group_idx, call_iter).
                 _, batch_group_idx, call_iter = node.args
-
-                batch_start, batch_size = intervention_handler.batch_groups[
-                    batch_group_idx
-                ]
-
+                
                 # If this node will be executed for multiple iterations, we need to reset the sub-graph to b executed once more
                 if call_iter == -1:
                     node.reset(propagate=True)
-
+                
                 # Updates the count of intervention node calls.
                 # If count matches call_iter, time to inject value into node.
-                elif call_iter != intervention_handler.count(
-                    intervention_node_name
-                ):
+                elif call_iter != intervention_handler.count(intervention_node_name):
 
                     continue
 
@@ -456,6 +496,10 @@ class InterventionProtocol(Protocol):
                 narrowed = False
 
                 if len(intervention_handler.batch_groups) > 1:
+
+                    batch_start, batch_size = intervention_handler.batch_groups[
+                        batch_group_idx
+                    ]
 
                     def narrow(acts: torch.Tensor):
 
@@ -612,15 +656,22 @@ class InterventionHandler:
     Like the Intervention Graph, the total batch size that is being executed, and a counter for how many times an Intervention node has been attempted to be executed.
     """
 
+    attachment_name = "nnsight_call_counter"
+
     def __init__(
-        self, graph: Graph, batch_groups: List[Tuple[int, int]], batch_size: int
+        self,
+        batch_groups: List[Tuple[int, int]] = None,
+        call_counter: Dict[str, int] = None,
+        graph: Graph = None,
     ) -> None:
 
         self.graph = graph
-        self.batch_groups = batch_groups
-        self.batch_size = batch_size
-        self.call_counter: Dict[str, int] = {}
-        self.destruction_deferrer = DestructionDeferrer()
+        self.batch_groups = [] if batch_groups is None else batch_groups
+        self.call_counter: Dict[str, int] = (
+            defaultdict(lambda: 0) if call_counter is None else call_counter
+        )
+        self.batch_size = sum(self.batch_groups[-1])
+        self.destruction_deferrer = InterventionHandler.DestructionDeferrer()
 
     def count(self, name: str) -> int:
         """Increments the count of times a given Intervention Node has tried to be executed and returns the count.
@@ -632,15 +683,52 @@ class InterventionHandler:
             int: Count.
         """
 
-        if name not in self.call_counter:
+        count = self.call_counter[name]
 
-            self.call_counter[name] = 0
+        self.call_counter[name] += 1
 
-        else:
+        return count
 
-            self.call_counter[name] += 1
+    class MultiCounter(dict):
 
-        return self.call_counter[name]
+        def __init__(
+            self,
+            mgraph: MultiGraph,
+            graph_id_to_call_counter: Dict[int, Dict[str, int]],
+        ):
+
+            self.mgraph = mgraph
+            self.graph_id_to_call_counter = graph_id_to_call_counter
+
+        def __getitem__(self, key: Any) -> Any:
+            return self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key]
+
+        def __setitem__(self, key: Any, value: Any) -> None:
+            self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key] = value
+
+    @classmethod
+    def persistent_call_counter(cls, graph: Graph) -> dict:
+
+        def inner(graph: Graph):
+
+            if cls.attachment_name not in graph.attachments:
+
+                graph.attachments[cls.attachment_name] = defaultdict(lambda: 0)
+
+            return graph.attachments[cls.attachment_name]
+
+        if isinstance(graph, MultiGraph):
+            graph_id_to_call_counter = {}
+
+            mgraph = graph
+
+            for graph in mgraph:
+
+                graph_id_to_call_counter[graph.id] = inner(graph)
+
+            return InterventionHandler.MultiCounter(mgraph)
+
+        return inner(graph)
 
     def defer_destruction(self, defer: bool):
 
@@ -652,44 +740,43 @@ class InterventionHandler:
 
         self.destruction_deferrer.destroy()
 
+    class DestructionDeferrer:
 
-class DestructionDeferrer:
+        def __init__(self, defer: bool = False) -> None:
 
-    def __init__(self, defer: bool = False) -> None:
+            self.defer = defer
+            self.deferred_nodes: Dict[str, Node] = {}
+            self.patcher = Patcher(
+                [
+                    Patch(
+                        Node,
+                        lambda node: self.deferred_nodes.update({node.name: node}),
+                        "destroy",
+                    )
+                ]
+            )
 
-        self.defer = defer
-        self.deferred_nodes: Dict[str, Node] = {}
-        self.patcher = Patcher(
-            [
-                Patch(
-                    Node,
-                    lambda node: self.deferred_nodes.update({node.name: node}),
-                    "destroy",
-                )
-            ]
-        )
+        def __enter__(self):
 
-    def __enter__(self):
+            if self.defer:
 
-        if self.defer:
+                self.patcher.__enter__()
 
-            self.patcher.__enter__()
+            return self
 
-        return self
+        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+            if self.defer:
 
-        if self.defer:
+                self.patcher.__exit__(None, None, None)
 
-            self.patcher.__exit__(None, None, None)
+            if isinstance(exc_val, BaseException):
+                raise exc_val
 
-        if isinstance(exc_val, BaseException):
-            raise exc_val
+        def destroy(self):
 
-    def destroy(self):
+            for node in self.deferred_nodes.values():
 
-        for node in self.deferred_nodes.values():
+                node.destroy()
 
-            node.destroy()
-
-        self.deferred_nodes = {}
+            self.deferred_nodes = {}
