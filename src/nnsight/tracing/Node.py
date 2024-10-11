@@ -390,7 +390,7 @@ class Node:
                 if type(e) != protocols.EarlyStopProtocol.EarlyStopException:
                     if self.attached():
                         print(f"\n{self.meta_data['traceback']}\n" + \
-                            "NNsightError: The exception below was the direct cause of this exception.\n")
+                            f"NNsightError: {str(e)}.\n")
                         
                         # Kill all the graphs in the Session to signal that an error occured
                         # This way only the traceback of the Node responsible for the error gets printed out
@@ -403,8 +403,6 @@ class Node:
                                 graph.alive = False
 
                             [kill_graph(g) for g in bridge.graph_stack]
-                    # Propagate original error
-                    raise e
             else: 
                 raise type(e)(
                     f"Above exception occured when executing Node: '{self.name}' in Graph: '{self.graph.id}'"
