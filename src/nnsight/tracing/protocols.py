@@ -284,12 +284,10 @@ class GradProtocol(Protocol):
 
                 # Set the value of the Node.
                 node.set_value(value)
-
-                if node.attached():
-
-                    # There may be a swap Protocol executed during the resolution of this part of the graph.
-                    # If so get it and replace value with it.
-                    value = SwapProtocol.get_swap(node.graph, value)
+                
+                # There may be a swap Protocol executed during the resolution of this part of the graph.
+                # If so get it and replace value with it.
+                value = SwapProtocol.get_swap(node.graph, value)
 
                 # Don't execute this hook again.
                 backward_idx = -1

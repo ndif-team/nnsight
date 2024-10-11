@@ -50,9 +50,9 @@ class Session(GraphBasedContext, RemoteMixin):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
-        self.model._session = None
-
         super().__exit__(exc_type, exc_val, exc_tb)
+        
+        self.model._session = None
 
     def iter(self, iterable: Iterable, **kwargs) -> Iterator:
         """Creates an Iterator context to iteratively execute an intervention graph, with an update item at each iteration.

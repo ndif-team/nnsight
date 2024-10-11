@@ -82,6 +82,8 @@ class Graph:
 
         Executes all `Node`s sequentially if `Graph.sequential`. Otherwise execute only root `Node`s sequentially.
         """
+        
+        self.alive = False
 
         if self.sequential:
             is_stopped_early: bool = False

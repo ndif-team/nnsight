@@ -1,11 +1,19 @@
 from __future__ import annotations
-import weakref
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-import accelerate
+import weakref
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
+
 import torch
-from accelerate import init_empty_weights
-from transformers import AutoConfig, AutoModel
 from typing_extensions import Self
 
 from .. import util
@@ -26,9 +34,9 @@ from ..intervention import (
     InterventionProtocol,
     InterventionProxy,
 )
-from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
+
 
 class NNsight:
     """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
@@ -38,87 +46,43 @@ class NNsight:
         proxy_class (Type[InterventionProxy]): InterventionProxy like type to use as a Proxy for this Model's inputs and outputs. Can have Model specific functionality added to a new sub-class.
 
     Attributes:
-        _model_key (str): String representing what kind of model this is. Usually hugging face repo id of model to load, path to checkpoint, or class name of custom model.
-        _args (List[Any]): Positional arguments used to initialize model.
-        _kwargs (Dict[str,Any]): Keyword arguments used to initialize model.
-        _dispatched (bool): If the _model has been loaded yet with real parameters yet.
-        _custom_model (bool): If the value passed to repoid_path_model was a custom model.
         _model (torch.nn.Module): Underlying torch module.
         _envoy (Envoy): Envoy for underlying model.
         _session (Session): Session object if in a Session.
     """
-    __methods__ = set()
+
+    __methods__ = dict()
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
-    tracer_class: Type[Tracer] = Tracer
-
-    # For type hinting Envoy
-    def __new__(cls, *args, **kwargs) -> Self | Envoy:
-        return super().__new__(cls)
 
     def __init__(
         self,
-        model_key: Union[str, torch.nn.Module],
-        *args,
-        dispatch: bool = False,
-        meta_buffers: bool = True,
-        **kwargs,
+        model: torch.nn.Module,
     ) -> None:
 
-        self._model_key = model_key
+        self._model: torch.nn.Module = model
+        self._envoy = Envoy(self._model)
 
-        self._args = args
-        self._kwargs = kwargs
+        self._compile()
 
-        self._dispatched = False
-        self._custom_model = False
-
-        self._model: torch.nn.Module = None
         self._session: Session = None
         self._default_graph: Graph = None
 
-        logger.info(f"Initializing `{self._model_key}`...")
+    def __new__(cls, *args, **kwargs) -> Self | Envoy:
+        return super().__new__(cls)
 
-        # Handle passing in a pre-initialized model to wrap.
-        # Therefore the NNsight model is "pre-dispatched".
-        if isinstance(model_key, torch.nn.Module):
-            self._model_key = model_key.__class__.__name__
-            self._custom_model = True
-            self._dispatched = True
-            self._model = model_key
-
-        # Otherwise load from _load(...).
-        if not self._custom_model:
-            # Load skeleton of model by putting all tensors on meta.
-            with init_empty_weights(include_buffers=meta_buffers):
-                self._model = self._load(self._model_key, *args, **kwargs)
-
-        self._envoy = Envoy(self._model)
-
-        if dispatch and not self._dispatched:
-            # Dispatch ._model on initialization vs lazy dispatching.
-            self.dispatch_model()
-            
-        self._compile()
-        
-        for name, addon in self.__addons__.items():
-            
-            if isinstance(addon, type):
-                addon = addon()
-                
-            self._envoy._add_envoy(addon, name)
-
-        logger.info(f"Initialized `{self._model_key}`")
+    #### Public API ##############
 
     def trace(
         self,
         *inputs: Any,
-        trace: bool = True,
-        invoker_args: Dict[str, Any] = None,
-        backend: Union[Backend, str] = None,
+        method: Optional[str] = None,
+        backend: Optional[Union[Backend, str]] = None,
         remote: bool = False,
         blocking: bool = True,
+        trace: bool = True,
         scan: bool = False,
+        invoker_args: Optional[Dict[str, Any]] = None,
         **kwargs: Dict[str, Any],
     ) -> Union[Tracer, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
@@ -236,11 +200,18 @@ class NNsight:
 
             graph = self._default_graph.copy()
 
-            tracer = self.tracer_class(
-                backend, self, bridge=bridge, graph=graph, **kwargs
+            tracer = Tracer(
+                backend,
+                self,
+                bridge=bridge,
+                method=method,
+                graph=graph,
+                **kwargs,
             )
         else:
-            tracer = self.tracer_class(backend, self, bridge=bridge, **kwargs)
+            tracer = Tracer(
+                backend, self, bridge=bridge, method=method, **kwargs
+            )
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -403,7 +374,7 @@ class NNsight:
         self,
         fn: Callable,
         intervention_graph: Graph,
-        *inputs: List[List[Any]],
+        *args,
         intervention_handler: InterventionHandler = None,
         **kwargs,
     ) -> Any:
@@ -422,25 +393,16 @@ class NNsight:
         Args:
             fn (Callable): Function or method to run.
             intervention_graph (Graph): Intervention graph to interleave with model's computation graph.
-            inputs (List[List[Any]]): List of multiple groups of inputs to give to function for each invoker.
         Returns:
-            Any: Result of fn.   
+            Any: Result of fn.
         """
 
-        # Loads and dispatched ._model if not already done so.
-        if not self._dispatched:
-            self.dispatch_model()
-
-        logger.info(f"Running `{self._model_key}`...")
-
-        # We need to pre-process and batch all inputs as (inputs) is a list of each set of inputs from each invocation.
         if intervention_handler is None:
-            inputs, batch_groups = self.batch(inputs)
 
-            intervention_handler = InterventionHandler(batch_groups)
-            
+            intervention_handler = InterventionHandler()
+
         InterventionProtocol.compile(intervention_graph)
-    
+
         intervention_handler.graph = intervention_graph
 
         module_paths = InterventionProtocol.get_interventions(
@@ -458,7 +420,7 @@ class NNsight:
             ),
         ):
             try:
-                return fn(*inputs, **kwargs)
+                return fn(*args, **kwargs)
             except protocols.EarlyStopProtocol.EarlyStopException:
                 # TODO: Log.
                 for node in intervention_graph.nodes.values():
@@ -466,47 +428,6 @@ class NNsight:
                         node.clean()
             finally:
                 intervention_handler.destroy()
-                logger.info(f"Completed `{self._model_key}`")
-
-    def batch(
-        self, invoker_inputs: Tuple[Tuple[Any]]
-    ) -> Tuple[Tuple[Any], List[Tuple[int, int]]]:
-
-        batch_groups = []
-        batch_start = 0
-        batched_input = None
-
-        for i, inputs in enumerate(invoker_inputs):
-            inputs, batch_size = self._prepare_inputs(*inputs)
-
-            batch_groups.append((batch_start, batch_size))
-
-            batched_input = self._batch_inputs(batched_input, *inputs)
-            
-            batch_start += batch_size
-
-        if batched_input is not None:
-            batched_input, _ = self._prepare_inputs(*batched_input)
-        else:
-            batched_input = tuple()
-
-        return batched_input, batch_groups
-
-
-    def dispatch_model(self, *args, **kwargs) -> None:
-        """Dispatch ._model to have real parameters  using ._load(...)."""
-
-        logger.info(f"Dispatching `{self._model_key}`...")
-
-        self._model = self._load(
-            self._model_key, *self._args, *args, **kwargs, **self._kwargs
-        )
-
-        self._envoy._update(self._model)
-
-        self._dispatched = True
-
-        logger.info(f"Dispatched `{self._model_key}`")
 
     def to(self, *args, **kwargs) -> Self:
         """Override torch.nn.Module.to so this returns the NNSight model, not the underlying module when doing: model = model.to(...)
@@ -522,23 +443,23 @@ class NNsight:
     def clear_edits(self) -> None:
         """Resets the default graph of this model."""
         self._default_graph = None
-        
-        
+
+    #### Private API ##############
+
     def _compile(self):
-        
+
         def inner(cls: type):
-        
+
             for base in cls.__bases__:
-                
+
                 if issubclass(base, NNsight):
-                    
+
                     self.__methods__.update(base.__methods__)
-                    
+
                     inner(base)
-        
+
         inner(self.__class__)
-        
-        
+
     def _shallow_copy(self) -> Self:
         """Creates a new instance copy of the same class with the all the attributes of the original instance.
 
@@ -550,6 +471,24 @@ class NNsight:
             copy.__dict__[key] = value
 
         return copy
+
+    @property
+    def device(self) -> Optional[torch.device]:
+
+        try:
+            return next(self._model.parameters()).device
+        except:
+            return None
+
+    def to_device(self, data: Any) -> Any:
+
+        device = self.device
+
+        if device is not None:
+
+            data = util.apply(data, lambda x: x.to(device), torch.Tensor)
+
+        return data
 
     def __repr__(self) -> str:
         """Wrapper of ._model's representation as the NNsight model's representation.
@@ -572,66 +511,33 @@ class NNsight:
 
             object.__setattr__(self, key, value)
 
-    def __getattr__(self, key: Any) -> Union[Envoy, InterventionProxy, Any]:
+    def __getattr__(
+        self, key: Any
+    ) -> Union[Any, InterventionProxy, Envoy, Tracer]:
         """Wrapper of ._envoy's attributes to access module's inputs and outputs.
 
         Returns:
             Any: Attribute.
         """
+
+        if key in self.__methods__:
+            return lambda *args, **kwargs: self.trace(
+                *args, method=self.__methods__[key], **kwargs
+            )
+
         return getattr(self._envoy, key)
-    
-
-
 
     ### NNsight VIRTUAL METHODS BELOW #####################################
 
-    def _load(self, repo_id: str, *args, **kwargs) -> torch.nn.Module:
-        """Virtual method to load the model from scratch.
+    def _execute(self, *args, **kwargs) -> Any:
 
-        Default implementation loads a model from AutoModel.from_config if not dispatched, else uses accelerate.load_checkpoint_and_dispatch.
+        args, kwargs = self.to_device((args, kwargs))
 
-        Args:
-            model_key (str): String value used to load model. Usually huggingface repo_id or checkpoint path.
+        return self._model(*args, **kwargs)
 
-        Returns:
-            torch.nn.Module: Model.
-        """
-
-        if self._model is None:
-
-            config = AutoConfig.from_pretrained(repo_id, *args, **kwargs)
-
-            return AutoModel.from_config(config, trust_remote_code=True)
-
-        return accelerate.load_checkpoint_and_dispatch(
-            self._model, repo_id, **kwargs
-        )
-
-    def _execute(self, *prepared_inputs: Any, **kwargs) -> Any:
-        """Virtual method to run the underlying ._model with some inputs.
-
-        Default implementation util.applies moving all tensors to the device of the first parameter in ._model and passes the values into the model.
-
-        Args:
-            prepared_inputs (tuple[Any]): Prepared inputs.
-        """
-
-        try:
-            device = next(self._model.parameters()).device
-
-            prepared_inputs = util.apply(
-                prepared_inputs, lambda x: x.to(device), torch.Tensor
-            )
-
-        except:
-            pass
-
-        return self._model(
-            *prepared_inputs,
-            **kwargs,
-        )
-
-    def _prepare_inputs(self, *inputs: Any, **kwargs) -> Tuple[Tuple[Any], int]:
+    def _prepare_input(
+        self, *args, **kwargs
+    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
         """Virtual method to prepare inputs before batching and execution and return batch size of prepared_inputs.
 
         Default implementation just returns inputs and length of first input.
@@ -643,13 +549,14 @@ class NNsight:
         Returns:
             Tuple[tuple[Any], int]: Prepared inputs, batch size of inputs.
         """
-        return inputs, len(inputs[0])
+        return (args, kwargs), len(args[0])
 
-    def _batch_inputs(
+    def _batch(
         self,
-        batched_inputs: Optional[Any],
-        *prepared_inputs: Any,
-    ) -> Any:
+        batched_inputs: Optional[Tuple[Tuple[Any], Dict[str, Any]]],
+        *args,
+        **kwargs,
+    ) -> Tuple[Tuple[Any], Dict[str, Any]]:
         """Virtual method to batch together results from _prepare_inputs.
 
         Default implementation returns list of all prepared_inputs.
@@ -663,16 +570,13 @@ class NNsight:
         """
 
         if batched_inputs is None:
-            batched_inputs = prepared_inputs
+            return (args, kwargs)
 
-        else:
+        args = tuple(
+            [
+                torch.concatenate((batched_inputs[i], args[i]))
+                for i in range(len(batched_inputs))
+            ]
+        )
 
-            batched_inputs = tuple(
-                [
-                    torch.concatenate((batched_inputs[i], prepared_inputs[i]))
-                    for i in range(len(batched_inputs))
-                ]
-            )
-
-        return batched_inputs
-
+        return args, kwargs
