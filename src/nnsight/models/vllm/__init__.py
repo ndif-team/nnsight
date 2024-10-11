@@ -1,17 +1,18 @@
 import weakref
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Union
 
 import torch
 
 from ...contexts import resolve_dependencies
-from ...contexts.backends import Backend
 from ...contexts.Tracer import Tracer
 from ...tracing import protocols
 from ...tracing.Graph import Graph
 from ...util import WrapperModule
 from ..mixins import GenerationMixin
 from .executors.GPUExecutor import NNsightGPUExecutor
+from .executors.RayGPUExecutor import NNsightRayGPUExecutor
 from .sampling import NNsightSamplingParams
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 try:
     from vllm.distributed import (destroy_distributed_environment,
@@ -59,9 +60,10 @@ class VLLMTracer(Tracer):
                 invoker_input = [invoker_input]
 
             for input in invoker_input:
-                
+                kwargs_copy = self._kwargs.copy()
+                kwargs_copy.pop("generate", None)
                 param = NNsightSamplingParams(
-                    **self._kwargs,
+                    **kwargs_copy,
                     intervention_graph=self.graph,
                     invoker_group=invoker_group,
                 )
@@ -186,15 +188,28 @@ class VLLM(GenerationMixin):
                 scheduler_config=engine_config_dict["scheduler_config"],
             )
 
-            return VLLM.VLLModel(model)
+            vllm_model = VLLM.VLLModel(model)
+
+            vllm_model.tokenizer = init_tokenizer_from_configs(
+                model_config=engine_config_dict["model_config"],
+                scheduler_config=engine_config_dict["scheduler_config"],
+                parallel_config=engine_config_dict["parallel_config"],
+                enable_lora=bool(engine_config_dict["lora_config"])
+            ).tokenizer
+
+            return vllm_model
         else:
 
             # destroy the distributed environment created from the initial model initialization
             destroy_model_parallel()
             destroy_distributed_environment()
 
+            distributed_executor_backend = NNsightGPUExecutor
+            if "tensor_parallel_size" in kwargs.keys() and kwargs["tensor_parallel_size"] > 1:
+                distributed_executor_backend = NNsightRayGPUExecutor
+
             llm = LLM(
-                repo_id, **kwargs, distributed_executor_backend=NNsightGPUExecutor
+                repo_id, **kwargs, distributed_executor_backend=distributed_executor_backend
             )
 
             self._model.llm_engine = llm

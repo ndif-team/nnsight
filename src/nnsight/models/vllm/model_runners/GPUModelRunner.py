@@ -1,36 +1,26 @@
 import dataclasses
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
 import torch
 import torch.distributed
 
-from nnsight.schema.Response import ResultModel
-from nnsight.tracing.Graph import Graph
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata, ModelRunner
-from vllm.worker.model_runner_base import dump_input_when_exception
+from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
+                                      ModelRunner)
+from vllm.worker.model_runner_base import (
+    _add_attn_metadata_broadcastable_dict,
+    _init_attn_metadata_from_tensor_dict, dump_input_when_exception)
 
 from ....intervention import InterventionHandler
 from .. import VLLM
 from ..sampling import NNsightSamplingMetadata
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
     from ..sampling import NNsightSamplingMetadata
 
@@ -38,6 +28,54 @@ if TYPE_CHECKING:
 class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMetadata):
 
     sampling_metadata: Optional["NNsightSamplingMetadata"] = None
+
+    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
+        tensor_dict = {
+            "input_tokens": self.input_tokens,
+            "input_positions": self.input_positions,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
+            "prompt_adapter_mapping": self.prompt_adapter_mapping,
+            "prompt_adapter_requests": self.prompt_adapter_requests,
+            "virtual_engine": self.virtual_engine,
+            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
+            "finished_requests_ids": self.finished_requests_ids,
+        }
+        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        if self.sampling_metadata is not None:
+            tensor_dict["selected_token_indices"] = (
+                self.sampling_metadata.selected_token_indices)
+            tensor_dict["intervention_graph"] = self.sampling_metadata.intervention_graph
+            tensor_dict["call_counter"] = self.sampling_metadata.call_counter
+            tensor_dict["batch_group"] = self.sampling_metadata.batch_groups
+        return tensor_dict
+    
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls,
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "ModelInputForGPUWithSamplingMetadata":
+        selected_token_indices = tensor_dict.pop("selected_token_indices", None)
+        intervention_graph = tensor_dict.pop("intervention_graph", None)
+        intervention_graph.attachments = dict()
+        call_counter = tensor_dict.pop("call_counter", None)
+        batch_groups = tensor_dict.pop("batch_group", None)
+        if selected_token_indices is not None:
+            tensor_dict["sampling_metadata"] = NNsightSamplingMetadata(
+                seq_groups=None,
+                selected_token_indices=selected_token_indices,
+                categorized_sample_indices=None,
+                num_prompts=0,
+                intervention_graph=intervention_graph,
+                call_counter=call_counter,
+                batch_groups=batch_groups
+            )
+        if attn_backend is not None:
+            tensor_dict = _init_attn_metadata_from_tensor_dict(
+                attn_backend, tensor_dict)
+        return cls(**tensor_dict)
 
 
 class NNsightGPUModelRunner(ModelRunner):
@@ -56,6 +94,17 @@ class NNsightGPUModelRunner(ModelRunner):
         super().load_model()
 
         self.model = VLLM(self.model)
+
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> NNsightModelInputForGPUWithSamplingMetadata:
+        model_input = \
+            NNsightModelInputForGPUWithSamplingMetadata.from_broadcasted_tensor_dict(
+                tensor_dict,
+                attn_backend=self.attn_backend,
+            )
+        return model_input
 
     def prepare_model_input(
         self,
