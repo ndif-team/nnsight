@@ -706,15 +706,25 @@ class InterventionHandler:
         def __setitem__(self, key: Any, value: Any) -> None:
             self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key] = value
 
+        def __getstate__(self):
+            state = dict()
+            state["mgraph"] = self.mgraph
+            state["graph_id_to_call_counter"] = self.graph_id_to_call_counter
+
+            return state
+        
+        def __setstate__(self, state: Dict) -> None:
+            self.__dict__.update(state)
+    
     @classmethod
     def persistent_call_counter(cls, graph: Graph) -> dict:
 
         def inner(graph: Graph):
 
             if cls.attachment_name not in graph.attachments:
-
-                graph.attachments[cls.attachment_name] = defaultdict(lambda: 0)
-
+                
+                graph.attachments[cls.attachment_name] = defaultdict(int)
+                
             return graph.attachments[cls.attachment_name]
 
         if isinstance(graph, MultiGraph):

@@ -50,18 +50,19 @@ class Node:
 
         state = self.__dict__.copy()
 
+        state.pop("proxy")
         state["graph"] = util.weakref_to_obj(self.graph)
         state["listeners"] = [
             util.weakref_to_obj(listener) for listener in self.listeners
-        ]
+        ] 
+
+        return state
 
     def __setstate__(self, state: Dict) -> None:
 
         state["graph"] = weakref.proxy(state["graph"])
-        state["listeners"] = [
-            weakref.proxy(listener) for listener in self.listeners
-        ]
-
+        state["listeners"] = [weakref.proxy(listener) for listener in state["listeners"]]
+        
         self.__dict__.update(state)
 
     def __init__(

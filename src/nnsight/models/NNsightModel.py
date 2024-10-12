@@ -1,49 +1,31 @@
 from __future__ import annotations
 
 import weakref
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-)
+from typing import (Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar,
+                    Union)
 
 import torch
 from typing_extensions import Self
 
 from .. import util
-from ..contexts.backends import (
-    Backend,
-    BridgeBackend,
-    EditBackend,
-    LocalBackend,
-    NoopBackend,
-    RemoteBackend,
-)
+from ..contexts.backends import (Backend, BridgeBackend, EditBackend,
+                                 LocalBackend, NoopBackend, RemoteBackend)
 from ..contexts.session.Session import Session
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
-from ..intervention import (
-    HookHandler,
-    InterventionHandler,
-    InterventionProtocol,
-    InterventionProxy,
-)
+from ..intervention import (HookHandler, InterventionHandler,
+                            InterventionProtocol, InterventionProxy)
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 
 
 class NNsight:
-    """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
+    """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality.
 
     Class Attributes:
 
         proxy_class (Type[InterventionProxy]): InterventionProxy like type to use as a Proxy for this Model's inputs and outputs. Can have Model specific functionality added to a new sub-class.
+        __methods__ (Dict[str,str]):
 
     Attributes:
         _model (torch.nn.Module): Underlying torch module.
@@ -51,7 +33,7 @@ class NNsight:
         _session (Session): Session object if in a Session.
     """
 
-    __methods__ = dict()
+    __methods__: Dict[str, str] = dict()
 
     proxy_class: Type[InterventionProxy] = InterventionProxy
 
@@ -209,9 +191,7 @@ class NNsight:
                 **kwargs,
             )
         else:
-            tracer = Tracer(
-                backend, self, bridge=bridge, method=method, **kwargs
-            )
+            tracer = Tracer(backend, self, bridge=bridge, method=method, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -405,9 +385,7 @@ class NNsight:
 
         intervention_handler.graph = intervention_graph
 
-        module_paths = InterventionProtocol.get_interventions(
-            intervention_graph
-        ).keys()
+        module_paths = InterventionProtocol.get_interventions(intervention_graph).keys()
 
         with HookHandler(
             self._model,
@@ -501,9 +479,7 @@ class NNsight:
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
-        if key not in ("_model", "_model_key") and isinstance(
-            value, torch.nn.Module
-        ):
+        if key not in ("_model", "_model_key") and isinstance(value, torch.nn.Module):
 
             setattr(self._envoy, key, value)
 
@@ -511,9 +487,7 @@ class NNsight:
 
             object.__setattr__(self, key, value)
 
-    def __getattr__(
-        self, key: Any
-    ) -> Union[Any, InterventionProxy, Envoy, Tracer]:
+    def __getattr__(self, key: Any) -> Union[Any, InterventionProxy, Envoy, Tracer]:
         """Wrapper of ._envoy's attributes to access module's inputs and outputs.
 
         Returns:
@@ -526,6 +500,9 @@ class NNsight:
             )
 
         return getattr(self._envoy, key)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._envoy(*args, **kwargs)
 
     ### NNsight VIRTUAL METHODS BELOW #####################################
 

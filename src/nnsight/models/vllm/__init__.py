@@ -1,20 +1,25 @@
 import weakref
+from typing import Any, Callable, Dict, List, Tuple, Union
 
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
-from ...contexts import resolve_dependencies
-from ...contexts.backends import Backend
-from ...contexts.Tracer import Tracer
+from ...envoy import Envoy
 from ...tracing import protocols
 from ...tracing.Graph import Graph
-from ...util import WrapperModule
+from ...util import TypeHint, WrapperModule, hint
+from ..mixins import RemoteableMixin
 from .executors.GPUExecutor import NNsightGPUExecutor
+from .executors.RayGPUExecutor import NNsightRayGPUExecutor
 from .sampling import NNsightSamplingParams
-from ..NNsightModel import NNsight
+
 try:
-    from vllm.distributed import (destroy_distributed_environment,
-                                  destroy_model_parallel,
-                                  init_distributed_environment,
-                                  initialize_model_parallel)
+    from vllm.distributed import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
     from vllm.engine.arg_utils import EngineArgs
     from vllm.entrypoints.llm import LLM
     from vllm.model_executor.model_loader.loader import _initialize_model
@@ -26,60 +31,8 @@ except Exception as e:
     ) from e
 
 
-class VLLMTracer(Tracer):
-
-    def local_backend_execute(self) -> Graph:
-
-        if not self.model._dispatched:
-            self.model.dispatch_model()
-
-        self.model: VLLM
-
-        self.graph.reset()
-
-        invoker_inputs = self._invoker_inputs
-
-        # If ths graph has a Bridge, we need to check for Nodes in the input itself.
-        if protocols.BridgeProtocol.has_bridge(self.graph):
-
-            invoker_inputs = resolve_dependencies(invoker_inputs)
-
-        self.graph.execute()
-
-        inputs = []
-        params = []
-
-        for invoker_group, invoker_input in enumerate(invoker_inputs):
-            invoker_input = invoker_input[0]
-
-            if not type(invoker_input) is list:
-                invoker_input = [invoker_input]
-
-            for input in invoker_input:
-                
-                param = NNsightSamplingParams(
-                    **self._kwargs,
-                    intervention_graph=self.graph,
-                    invoker_group=invoker_group,
-                )
-
-                inputs.append(input)
-                params.append(param)
-
-            llm_engine: LLM = self.model._model.llm_engine
-
-        output = llm_engine.generate(inputs, sampling_params=params)
-
-        graph = self.graph
-        graph.alive = False
-
-        if not isinstance(graph, weakref.ProxyType):
-            self.graph = weakref.proxy(graph)
-
-        return graph
-
-
-class VLLM(NNsight):
+@hint
+class VLLM(RemoteableMixin, TypeHint[Union[LLM, Envoy]]):
     """NNsight wrapper to conduct interventions on a vLLM inference engine.
 
     .. code-block:: python
@@ -101,54 +54,165 @@ class VLLM(NNsight):
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     """
-    
+
+    __methods__ = {"generate": "_execute"}
+
+    def __init__(self, *args, **kwargs) -> None:
+
+        self.vllm_entrypoint: LLM = None
+        self.tokenizer: AnyTokenizer = None
+
+        super().__init__(*args, **kwargs)
+
+        self.logits = WrapperModule()
+        self.tokens = WrapperModule()
+
+    def _load_meta(self, repo_id: str, **kwargs):
+
+        # no parallelism during initialization
+        kwargs["tensor_parallel_size"] = 1
+        kwargs["pipeline_parallel_size"] = 1
+
+        # creating vLLM Engine args
+        engine_args = EngineArgs(
+            model=repo_id,
+            **kwargs,
+        )
+
+        # creating the vllm engine configuration
+        engine_config_dict = engine_args.create_engine_config().to_dict()
+
+        # starting the distributed environment
+        init_distributed_environment(
+            1,
+            0,
+            "tcp://127.0.0.1:47303",
+            0,
+            backend="gloo",
+        )
+
+        # start tensor parallel group
+        initialize_model_parallel(backend="gloo")
+
+        # initialize the model
+        model = _initialize_model(
+            model_config=engine_config_dict["model_config"],
+            load_config=engine_config_dict["load_config"],
+            lora_config=None,
+            cache_config=engine_config_dict["cache_config"],
+            scheduler_config=engine_config_dict["scheduler_config"],
+        )
+
+        self.tokenizer = init_tokenizer_from_configs(
+            model_config=engine_config_dict["model_config"],
+            scheduler_config=engine_config_dict["scheduler_config"],
+            parallel_config=engine_config_dict["parallel_config"],
+            enable_lora=bool(engine_config_dict["lora_config"]),
+        ).tokenizer
+
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
+        return model
+
     def _load(self, repo_id: str, **kwargs):
 
-        if self._model is None:
+        distributed_executor_backend = NNsightGPUExecutor
+        if (
+            "tensor_parallel_size" in kwargs.keys()
+            and kwargs["tensor_parallel_size"] > 1
+        ):
+            distributed_executor_backend = NNsightRayGPUExecutor
 
-            # no parallelism during initialization
-            kwargs["tensor_parallel_size"] = 1
-            kwargs["pipeline_parallel_size"] = 1
+        llm = LLM(
+            repo_id,
+            **kwargs,
+            distributed_executor_backend=distributed_executor_backend,
+        )
 
-            # creating vLLM Engine args
-            engine_args = EngineArgs(
-                model=repo_id,
-                **kwargs,
-            )
+        self.vllm_entrypoint = llm
 
-            # creating the vllm engine configuration
-            engine_config_dict = engine_args.create_engine_config().to_dict()
+        return self._model
 
-            # starting the distributed environment
-            init_distributed_environment(
-                1,
-                0,
-                "tcp://127.0.0.1:47303",
-                0,
-                backend="gloo",
-            )
+    def _prepare_input(
+        self, *args, **kwargs
+    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
 
-            # start tensor parallel group
-            initialize_model_parallel(backend="gloo")
+        if "processed" in kwargs:
+            return (args, kwargs), len(args[0])
 
-            # initialize the model
-            model = _initialize_model(
-                engine_config_dict["model_config"],
-                engine_config_dict["load_config"],
-                None,
-                engine_config_dict["cache_config"]
-            )
-            
-            destroy_model_parallel()
-            destroy_distributed_environment()
+        prompts = []
+        params = []
 
-            return model
-        else:
+        for arg in args:
 
-            llm = LLM(
-                repo_id, **kwargs, distributed_executor_backend=NNsightGPUExecutor
-            )
+            if not type(arg) is list:
+                arg = [arg]
 
-            self.vllm_entrypoint = llm
+            for prompt in arg:
 
-            return self._model
+                param = NNsightSamplingParams(
+                    **kwargs,
+                )
+
+                prompts.append(prompt)
+                params.append(param)
+
+        return ((prompts, params), {"processed": True}), len(prompts)
+
+    def _batch(
+        self,
+        batched_inputs: Tuple[Tuple[Any] | protocols.Dict[str, Any]] | None,
+        prompts: List[str],
+        params: List[NNsightSamplingParams],
+        **kwargs,
+    ) -> Tuple[Tuple[Any] | protocols.Dict[str, Any]]:
+
+        if batched_inputs is None:
+            batched_inputs = ([], []), {"invoker_group": 0}
+
+        (bprompts, bparams), kwargs = batched_inputs
+
+        invoker_group = kwargs["invoker_group"]
+
+        for prompt in prompts:
+            bprompts.append(prompt)
+
+        for param in params:
+
+            param.invoker_group = invoker_group
+
+            bparams.append(param)
+
+        kwargs["invoker_group"] += 1
+
+        return (bprompts, bparams), kwargs
+
+    def interleave(
+        self,
+        fn: Callable,
+        intervention_graph: Graph,
+        prompts: List[str],
+        params: List[NNsightSamplingParams],
+        **kwargs,
+    ) -> Any:
+
+        if not self.dispatched:
+            self.dispatch()
+
+        for param in params:
+
+            param.intervention_graph = intervention_graph
+
+        fn(prompts, params, **kwargs)
+
+        intervention_graph.alive = False
+
+    def _execute(
+        self,
+        prompts: List[str],
+        params: List[NNsightSamplingParams],
+        **kwargs,
+    ) -> Any:
+
+        self.vllm_entrypoint.generate(prompts, sampling_params=params)

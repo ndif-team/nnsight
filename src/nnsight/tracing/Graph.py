@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import inspect
 import tempfile
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Type
+from typing import Callable, Dict, Iterator, List, Optional, Type
 
 from PIL import Image as PILImage
 
-from .. import util
 from ..util import apply
 from .Node import Node
 from .protocols import EarlyStopProtocol
@@ -41,7 +40,10 @@ class Graph:
     """
 
     def __getstate__(self) -> Dict:
-        return {"id": self.id, "nodes": self.nodes, "name_idx": self.name_idx}
+        return {"id": self.id, 
+                "nodes": self.nodes, 
+                "name_idx": self.name_idx, 
+                "sequential": self.sequential}
 
     def __setstate__(self, state: Dict) -> None:
 
@@ -296,6 +298,11 @@ class MultiGraph(Graph):
             self.nodes.update(
                 {f"{key}_{graph.id}": value for key, value in graph.nodes.items()}
             )
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        state["id_to_graphs"] = self.id_to_graphs
+        return state
 
     def __iter__(self) -> Iterator[Graph]:
         return list(self.id_to_graphs.values())

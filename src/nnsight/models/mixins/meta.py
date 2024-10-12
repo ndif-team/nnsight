@@ -15,8 +15,8 @@ class MetaMixin(LoadableMixin):
     ) -> None:
 
         self.dispatched = dispatch
-
-        if not isinstance(args[0], torch.nn.Module) or dispatch:
+        
+        if isinstance(args[0], torch.nn.Module) or dispatch:
 
             super().__init__(*args, **kwargs)
 
@@ -38,6 +38,7 @@ class MetaMixin(LoadableMixin):
     def dispatch(self) -> None:
 
         self._model = self._load(*self.args, **self.kwargs)
+        self._envoy._update(self._model)
 
         self.dispatched = True
 
