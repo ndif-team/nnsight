@@ -2,55 +2,323 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+import weakref
 
 import torch
+from typing_extensions import Self
+from contextlib import AbstractContextManager
 
 from .contexts.backends import EditBackend
 from .contexts.Tracer import Tracer
 from .intervention import InterventionProtocol, InterventionProxy
 from .tracing import protocols
 
-
 class Envoy:
-    """Envoy object act as proxies for torch modules within a model's module tree in order to add nnsight functionality.
+    """Envoy objects act as proxies for torch modules themselves within a model's module tree in order to add nnsight functionality.
     Proxies of the underlying module's output and input are accessed by `.output` and `.input` respectively.
 
     Attributes:
-        path (str): String representing the attribute path of this Envoy's module relative the the root model. Separated by '.' e.x ('transformer.h.0.mlp'). Set by NNsight on initialization of meta model.
+        path (str): String representing the attribute path of this Envoy's module relative the the root model. Separated by '.' e.x ('.transformer.h.0.mlp').
+        output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this Envoy's module. Reset on forward pass.
+        inputs (nnsight.intervention.InterventionProxy): Proxy object representing the inputs of this Envoy's module. Proxy is in the form of (Tuple[Tuple[<Positional arg>], Dict[str, <Keyword arg>]])Reset on forward pass.
+        input (nnsight.intervention.InterventionProxy): Alias for the first positional Proxy input i.e Envoy.inputs[0][0]
+        iter (nnsight.envoy.EnvoyIterator): Iterator object allowing selection of specific .input and .output iterations of this Envoy.
+        _module (torch.nn.Module): Underlying torch module.
+        _children (List[Envoy]): Immediate Envoy children of this Envoy.
         _fake_outputs (List[torch.Tensor]): List of 'meta' tensors built from the outputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
         _fake_inputs (List[torch.Tensor]): List of 'meta' tensors built from the inputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
-        output (nnsight.intervention.InterventionProxy): Proxy object representing the output of this Envoy's module. Reset on forward pass.
-        input (nnsight.intervention.InterventionProxy): Proxy object representing the input of this Envoy's module. Reset on forward pass.
-        _call_iter (int): Integer representing the current iteration of this Envoy's module's inputs/outputs.
+        
         _tracer (nnsight.context.Tracer.Tracer): Object which adds this Envoy's module's output and input proxies to an intervention graph. Must be set on Envoys objects manually by the Tracer.
     """
 
     def __init__(self, module: torch.nn.Module, module_path: str = ""):
 
         self.path = module_path
+        
+        self._module = module
+        
+        self._iteration_stack = [0]
 
         self._fake_outputs: List[torch.Tensor] = []
         self._fake_inputs: List[torch.Tensor] = []
 
-        self._output: Optional[InterventionProxy] = None
-        self._input: Optional[InterventionProxy] = None
-
-        self._call_iter = 0
+        self._output_stack: List[Optional[InterventionProxy]] = [None]
+        self._input_stack: List[Optional[InterventionProxy]] = [None]
 
         self._tracer: Tracer = None
 
-        self._module = module
-        self._sub_envoys: List[Envoy] = []
+        self._children: List[Envoy] = []
 
         # Register hook on underlying module to update the _fake_outputs and _fake_inputs on forward pass.
         self._hook_handle = self._module.register_forward_hook(
             self._hook, with_kwargs=True
         )
 
+        # Recurse into PyTorch module tree.
         for name, module in self._module.named_children():
 
             setattr(self, name, module)
+
+    # Public API ################
+
+    def __call__(
+        self, *args: List[Any], hook=False, **kwargs: Dict[str, Any]
+    ) -> InterventionProxy:
+        """Creates a proxy to call the underlying module's forward method with some inputs.
+
+        Returns:
+            InterventionProxy: Module call proxy.
+        """
+
+        if not self._tracing() or self._scanning():
+            return self._module(*args, **kwargs)
+
+        if isinstance(self._tracer.backend, EditBackend):
+            hook = True
+
+        return protocols.ApplyModuleProtocol.add(
+            self._tracer.graph, self.path, *args, hook=hook, **kwargs
+        )
+
+    @property
+    def output(self) -> InterventionProxy:
+        """
+        Calling denotes the user wishes to get the output of the underlying module and therefore we create a Proxy of that request.
+        Only generates a proxy the first time it is references otherwise return the already set one.
+
+        Returns:
+            InterventionProxy: Output proxy.
+        """
+        output = self._output_stack.pop()
+        
+        if output is None:
+
+            if isinstance(self._module, torch.nn.ModuleList):
+
+                output = [envoy.output for envoy in self._children]
+
+                return output
+            else:
+            
+                iteration = self._iteration_stack[-1]
+
+                if len(self._fake_outputs) == 0:
+                    fake_output = inspect._empty
+                elif iteration >= len(self._fake_outputs):
+                    # TODO warning?
+                    fake_output = self._fake_outputs[-1]
+                else:
+                    fake_output = self._fake_outputs[iteration]
+
+                module_path = f"{self.path}.output"
+
+                output = InterventionProtocol.add(
+                    self._tracer.graph,
+                    fake_output,
+                    args=[
+                        module_path,
+                        self._tracer._invoker_group,
+                        iteration,
+                    ],
+                )
+                
+        self._output_stack.append(output)
+
+        return output
+
+    @output.setter
+    def output(self, value: Union[InterventionProxy, Any]) -> None:
+        """
+        Calling denotes the user wishes to set the output of the underlying module and therefore we create a Proxy of that request.
+
+        Args:
+            value (Union[InterventionProxy, Any]): Value to set output to.
+        """
+
+        protocols.SwapProtocol.add(self.output.node, value)
+
+        self._output_stack[-1] = None
+        
+    @property
+    def inputs(self) -> InterventionProxy:
+        """
+        Calling denotes the user wishes to get the input of the underlying module and therefore we create a Proxy of that request.
+        Only generates a proxy the first time it is references otherwise return the already set one.
+
+        Returns:
+            InterventionProxy: Input proxy.
+        """
+        
+        input = self._input_stack.pop()
+        
+        if input is None:
+
+            if isinstance(self._module, torch.nn.ModuleList):
+
+                input = [envoy.input for envoy in self._children]
+
+                return input
+            else:
+            
+                iteration = self._iteration_stack[-1]
+
+                if len(self._fake_inputs) == 0:
+                    fake_input = inspect._empty
+                elif iteration >= len(self._fake_inputs):
+                    # TODO warning?
+                    fake_input = self._fake_inputs[-1]
+                else:
+                    fake_input = self._fake_inputs[iteration]
+
+                module_path = f"{self.path}.input"
+
+                input = InterventionProtocol.add(
+                    self._tracer.graph,
+                    fake_input,
+                    args=[
+                        module_path,
+                        self._tracer._invoker_group,
+                        iteration,
+                    ],
+                )
+                
+        self._input_stack.append(input)
+
+        return input
+
+    @inputs.setter
+    def inputs(self, value: Union[InterventionProxy, Any]) -> None:
+        """
+        Calling denotes the user wishes to set the input of the underlying module and therefore we create a Proxy of that request.
+
+        Args:
+            value (Union[InterventionProxy, Any]): Value to set input to.
+        """
+
+        protocols.SwapProtocol.add(self.inputs.node, value)
+
+        self._input_stack[-1] = None
+    @property
+    def input(self) -> InterventionProxy:
+        """Getting the first positional argument input of the model's module.
+
+        Returns:
+            InterventionProxy: Input proxy.
+        """
+
+        return self.inputs[0][0]
+
+    @input.setter
+    def input(self, value: Union[InterventionProxy, Any]) -> None:
+        """Setting the value of the input's first positional argument in the model's module.
+
+        Args;
+            value (Union[InterventionProxy, Any]): Value to set the input to.
+        """
+
+        self.inputs = ((value,) + self.inputs[0][1:],) + (self.inputs[1:])
+
+    @property
+    def iter(self) -> IterationEnvoy:
+        
+        return IterationEnvoy(self)
+    
+    @iter.setter
+    def iter(self, iteration: Union[int, List[int], slice]) -> None:
+        self._iteration_stack.append(iteration)
+    
+    def next(self, increment: int = 1) -> Envoy:
+        """By default, this modules inputs and outputs only refer to the first time its called. Use `.next()`to select which iteration .input an .output refer to.
+
+        Args:
+            increment (int, optional): How many iterations to jump. Defaults to 1.
+
+        Returns:
+            Envoy: Self.
+        """
+
+        return self.iter[self._iteration_stack[-1] + increment].__enter__()
+
+    def all(self, propagate: bool = True) -> Envoy:
+        """By default, this modules inputs and outputs only refer to the first time its called. Use `.all()`to have .input and .output refer to all iterations.
+
+        Returns:
+            Envoy: Self.
+        """
+
+        return self.iter[:].__enter__()
+
+    def to(self, *args, **kwargs) -> Envoy:
+        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
+
+        Returns:
+            Envoy: Envoy.
+        """
+
+        self._module = self._module.to(*args, **kwargs)
+
+        return self
+
+    def modules(
+        self,
+        include_fn: Callable[[Envoy], bool] = None,
+        names: bool = False,
+        envoys: List = None,
+    ) -> List[Envoy]:
+        """Returns all Envoys in the Envoy tree.
+
+        Args:
+            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+            names (bool, optional): If to include the name/module_path of returned Envoys along with the Envoy itself. Defaults to False.
+
+        Returns:
+            List[Envoy]: Included Envoys
+        """
+
+        if envoys is None:
+            envoys = list()
+
+        included = True
+
+        if include_fn is not None:
+            included = include_fn(self)
+
+        if included:
+            if names:
+                envoys.append((self.path, self))
+            else:
+                envoys.append(self)
+
+        for sub_envoy in self._children:
+            sub_envoy.modules(include_fn=include_fn, names=names, envoys=envoys)
+
+        return envoys
+
+    def named_modules(self, *args, **kwargs) -> List[Tuple[str, Envoy]]:
+        """Returns all Envoys in the Envoy tree along with their name/module_path.
+
+        Args:
+            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+
+        Returns:
+            List[Tuple[str, Envoy]]: Included Envoys and their names/module_paths.
+        """
+
+        return self.modules(*args, **kwargs, names=True)
+
+    def to(self, *args, **kwargs) -> Self:
+        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
+
+        Returns:
+            Envoy: Envoy.
+        """
+
+        self._module = self._module.to(*args, **kwargs)
+
+        return self
+
+    # Private API ###############################
 
     def _update(self, module: torch.nn.Module) -> None:
         """Updates the ._model attribute using a new model of the same architecture.
@@ -67,7 +335,7 @@ class Envoy:
 
         for i, module in enumerate(self._module.children()):
 
-            self._sub_envoys[i]._update(module)
+            self._children[i]._update(module)
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> None:
         """Adds a new Envoy for a given torch module under this Envoy.
@@ -79,7 +347,7 @@ class Envoy:
 
         envoy = Envoy(module, module_path=f"{self.path}.{name}")
 
-        self._sub_envoys.append(envoy)
+        self._children.append(envoy)
 
         # If the module already has a sub-module named 'input' or 'output',
         # mount the proxy access to 'nns_input' or 'nns_output instead.
@@ -140,10 +408,9 @@ class Envoy:
         self._tracer = tracer
 
         if propagate:
-            for envoy in self._sub_envoys:
+            for envoy in self._children:
                 envoy._set_tracer(tracer, propagate=True)
-                
-                
+
     def _tracing(self) -> bool:
         """Whether or not tracing.
 
@@ -174,6 +441,21 @@ class Envoy:
 
             return False
 
+    def _set_iteration(self, iteration:Optional[int] = None, propagate:bool=True) -> None:
+        
+        if iteration is not None:
+            self._iteration_stack.append(iteration)
+            self._output_stack.append(None)
+            self._input_stack.append(None)
+        else:
+            self._iteration_stack.pop()
+            self._output_stack.pop()
+            self._input_stack.pop()
+        
+        if propagate:
+            for envoy in self._children:
+                envoy._set_iteration(iteration, propagate=True)
+    
     def _reset_proxies(self, propagate: bool = True) -> None:
         """Sets proxies to None.
 
@@ -181,11 +463,11 @@ class Envoy:
             propagate (bool, optional): If to propagate to all sub-modules. Defaults to True.
         """
 
-        self._output: InterventionProxy = None
-        self._input: InterventionProxy = None
+        self._output_stack = []
+        self._input_stack = []
 
         if propagate:
-            for envoy in self._sub_envoys:
+            for envoy in self._children:
                 envoy._reset_proxies(propagate=True)
 
     def _reset(self, propagate: bool = True) -> None:
@@ -197,10 +479,10 @@ class Envoy:
 
         self._reset_proxies(propagate=False)
 
-        self._call_iter = 0
+        self._set_iteration(0, propagate=False)
 
         if propagate:
-            for envoy in self._sub_envoys:
+            for envoy in self._children:
                 envoy._reset(propagate=True)
 
     def _clear(self, propagate: bool = True) -> None:
@@ -216,7 +498,7 @@ class Envoy:
         self._fake_inputs = []
 
         if propagate:
-            for envoy in self._sub_envoys:
+            for envoy in self._children:
                 envoy._clear(propagate=True)
 
     def _hook(
@@ -229,113 +511,14 @@ class Envoy:
 
         if self._scanning():
 
-            self._reset_proxies(propagate=False)
-
             input = (input, input_kwargs)
 
             self._fake_outputs.append(output)
             self._fake_inputs.append(input)
 
-    def next(self, increment: int = 1, propagate: bool = True) -> Envoy:
-        """By default, this modules inputs and outputs only refer to the first time its called. Use `.next()`to select which iteration .input an .output refer to.
-
-        Args:
-            increment (int, optional): How many iterations to jump. Defaults to 1.
-            propagate (bool, optional): If to also call `.next()` on all sub envoys/modules.. Defaults to True.
-
-        Returns:
-            Envoy: Self.
-        """
-
-        self._call_iter += increment
-
-        self._reset_proxies(propagate=False)
-
-        if propagate:
-            for envoy in self._sub_envoys:
-                envoy.next(increment=increment, propagate=True)
-
-        return self
-
-    def all(self, propagate: bool = True) -> Envoy:
-        """By default, this modules inputs and outputs only refer to the first time its called. Use `.all()`to have .input and .output refer to all iterations.
-
-        Args:
-            propagate (bool, optional): If to also call `.all()` on all sub envoys/modules.. Defaults to True.
-
-        Returns:
-            Envoy: Self.
-        """
-
-        self._call_iter = -1
-
-        if propagate:
-            for envoy in self._sub_envoys:
-                envoy.all(propagate=True)
-
-        return self
-
-    def to(self, *args, **kwargs) -> Envoy:
-        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
-
-        Returns:
-            Envoy: Envoy.
-        """
-
-        self._module = self._module.to(*args, **kwargs)
-
-        return self
-
-    def modules(
-        self,
-        include_fn: Callable[[Envoy], bool] = None,
-        names: bool = False,
-        envoys: List = None,
-    ) -> List[Envoy]:
-        """Returns all Envoys in the Envoy tree.
-
-        Args:
-            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
-            names (bool, optional): If to include the name/module_path of returned Envoys along with the Envoy itself. Defaults to False.
-
-        Returns:
-            List[Envoy]: Included Envoys
-        """
-
-        if envoys is None:
-            envoys = list()
-
-        included = True
-
-        if include_fn is not None:
-            included = include_fn(self)
-
-        if included:
-            if names:
-                envoys.append((self.path, self))
-            else:
-                envoys.append(self)
-
-        for sub_envoy in self._sub_envoys:
-            sub_envoy.modules(include_fn=include_fn, names=names, envoys=envoys)
-
-        return envoys
-
-    def named_modules(self, *args, **kwargs) -> List[Tuple[str, Envoy]]:
-        """Returns all Envoys in the Envoy tree along with their name/module_path.
-
-        Args:
-            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
-
-        Returns:
-            List[Tuple[str, Envoy]]: Included Envoys and their names/module_paths.
-        """
-
-        return self.modules(*args, **kwargs, names=True)
-
     def _repr_module_list(self):
 
-        list_of_reprs = [repr(item) for item in self._sub_envoys]
+        list_of_reprs = [repr(item) for item in self._children]
         if len(list_of_reprs) == 0:
             return self._module._get_name() + "()"
 
@@ -414,7 +597,7 @@ class Envoy:
             Iterator[Envoy]: Iterator.
         """
 
-        return iter(self._sub_envoys)
+        return iter(self._children)
 
     def __getitem__(self, key: int) -> Envoy:
         """Wrapper method for underlying ModuleList getitem.
@@ -426,7 +609,7 @@ class Envoy:
             Envoy: Envoy.
         """
 
-        return self._sub_envoys[key]
+        return self._children[key]
 
     def __len__(self) -> int:
         """Wrapper method for underlying ModuleList len.
@@ -437,7 +620,10 @@ class Envoy:
 
         return len(self._module)
 
-    def __getattr__(self, key: str) -> Union[Envoy, Any]:
+    def __getattribute__(self, name: str) -> Union[Tracer]:
+        return super().__getattribute__(name)
+   
+    def __getattr__(self, key: str) -> Union[Tracer]:
         """Wrapper method for underlying module's attributes.
 
         Args:
@@ -461,146 +647,70 @@ class Envoy:
         else:
 
             super().__setattr__(key, value)
-
-    def __call__(
-        self, *args: List[Any], hook=False, **kwargs: Dict[str, Any]
-    ) -> InterventionProxy:
-        """Creates a proxy to call the underlying module's forward method with some inputs.
-
-        Returns:
-            InterventionProxy: Module call proxy.
-        """
+  
+class IterationEnvoy(Envoy, AbstractContextManager):
+    
+    def __init__(self, envoy:Envoy) -> None:
         
-        if not self._tracing() or self._scanning():
-            return self._module(*args, **kwargs)
-
-        if isinstance(self._tracer.backend, EditBackend):
-            hook = True
-
-        return protocols.ApplyModuleProtocol.add(
-            self._tracer.graph, self.path, *args, hook=hook, **kwargs
-        )
-
+        self.__dict__.update(envoy.__dict__)
+        
+        self._iteration = self._iteration_stack[-1]  
+        
+        self._open_context = False
+        
     @property
     def output(self) -> InterventionProxy:
-        """
-        Calling denotes the user wishes to get the output of the underlying module and therefore we create a Proxy of that request.
-        Only generates a proxy the first time it is references otherwise return the already set one.
-
-        Returns:
-            InterventionProxy: Output proxy.
-        """
-        if self._output is None:
-
-            if isinstance(self._module, torch.nn.ModuleList):
-
-                self._output = [envoy.output for envoy in self._sub_envoys]
-
-                return self._output
-
-            if len(self._fake_outputs) == 0:
-                fake_output = inspect._empty
-            elif self._call_iter >= len(self._fake_outputs):
-                # TODO warning?
-                fake_output = self._fake_outputs[-1]
-            else:
-                fake_output = self._fake_outputs[self._call_iter]
-
-            module_path = f"{self.path}.output"
-
-            self._output = InterventionProtocol.add(
-                self._tracer.graph,
-                fake_output,
-                args=[
-                    module_path,
-                    len(self._tracer._invoker_inputs) - 1,
-                    self._call_iter,
-                ],
-            )
-
-        return self._output
-
-    @output.setter
-    def output(self, value: Union[InterventionProxy, Any]) -> None:
-        """
-        Calling denotes the user wishes to set the output of the underlying module and therefore we create a Proxy of that request.
-
-        Args:
-            value (Union[InterventionProxy, Any]): Value to set output to.
-        """
-
-        protocols.SwapProtocol.add(self.output.node, value)
-
-        self._output = None
-
-    @property
-    def inputs(self) -> InterventionProxy:
-        """
-        Calling denotes the user wishes to get the input of the underlying module and therefore we create a Proxy of that request.
-        Only generates a proxy the first time it is references otherwise return the already set one.
-
-        Returns:
-            InterventionProxy: Input proxy.
-        """
-        if self._input is None:
-
-            if isinstance(self._module, torch.nn.ModuleList):
-
-                self._input = [envoy.input for envoy in self._sub_envoys]
-
-                return self._input
-
-            if len(self._fake_inputs) == 0:
-                fake_input = inspect._empty
-            elif self._call_iter >= len(self._fake_inputs):
-                # TODO warning?
-                fake_input = self._fake_inputs[-1]
-            else:
-                fake_input = self._fake_inputs[self._call_iter]
-
-            module_path = f"{self.path}.input"
-
-            self._input = InterventionProtocol.add(
-                self._tracer.graph,
-                fake_input,
-                args=[
-                    module_path,
-                    len(self._tracer._invoker_inputs) - 1,
-                    self._call_iter,
-                ],
-            )
-
-        return self._input
-
-    @inputs.setter
-    def inputs(self, value: Union[InterventionProxy, Any]) -> None:
-        """
-        Calling denotes the user wishes to set the input of the underlying module and therefore we create a Proxy of that request.
-
-        Args:
-            value (Union[InterventionProxy, Any]): Value to set input to.
-        """
-
-        protocols.SwapProtocol.add(self.inputs.node, value)
-
-        self._input = None
-
+        
+        self._output_stack.append(None)
+        self._iteration_stack.append(self._iteration)    
+        
+        output = super().output
+        
+        self._output_stack.pop()
+        self._iteration_stack.pop()
+        
+        return output
+    
     @property
     def input(self) -> InterventionProxy:
-        """Getting the first positional argument input of the model's module.
-
-        Returns:
-            InterventionProxy: Input proxy.
-        """
-
-        return self.inputs[0][0]
-
-    @input.setter
-    def input(self, value: Union[InterventionProxy, Any]) -> None:
-        """Setting the value of the input's first positionl argument in the model's module.
-
-        Args;
-            value (Union[InterventionProxy, Any]): Value to set the input to.
-        """
-
-        self.inputs = ((value,) + self.inputs[0][1:],) + (self.inputs[1:])
+        
+        self._input_stack.append(None)
+        self._iteration_stack.append(self._iteration)    
+        
+        input = super().input
+        
+        self._input_stack.pop()
+        self._iteration_stack.pop()    
+        
+        return input
+  
+    def __getitem__(self, key: Union[int, List[int], slice]) -> Self:
+        
+        # TODO: Error if not valid key type
+        
+        if isinstance(key, tuple):
+            
+            key = list(key)
+        
+        self._iteration = key
+        
+        return self        
+        
+    def __enter__(self) -> IterationEnvoy:
+        
+        if not self._open_context:
+         
+            self._set_iteration(self._iteration)
+            
+        self._open_context = True
+        
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        
+        self._set_iteration()
+        
+        self._open_context = False
+        
+        if isinstance(exc_val, BaseException):
+            raise exc_val

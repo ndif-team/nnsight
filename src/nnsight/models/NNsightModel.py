@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import weakref
-from typing import (Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar,
                     Union)
 
 import torch
@@ -31,6 +31,7 @@ class NNsight:
         _model (torch.nn.Module): Underlying torch module.
         _envoy (Envoy): Envoy for underlying model.
         _session (Session): Session object if in a Session.
+        _default_graph (Graph): 
     """
 
     __methods__: Dict[str, str] = dict()
@@ -49,9 +50,6 @@ class NNsight:
 
         self._session: Session = None
         self._default_graph: Graph = None
-
-    def __new__(cls, *args, **kwargs) -> Self | Envoy:
-        return super().__new__(cls)
 
     #### Public API ##############
 
@@ -405,7 +403,7 @@ class NNsight:
                     if not node.executed():
                         node.clean()
             finally:
-                intervention_handler.destroy()
+                intervention_handler.cleanup()
 
     def to(self, *args, **kwargs) -> Self:
         """Override torch.nn.Module.to so this returns the NNSight model, not the underlying module when doing: model = model.to(...)
@@ -414,9 +412,18 @@ class NNsight:
             Envoy: Envoy.
         """
 
-        self._model = self._model.to(*args, **kwargs)
+        self._envoy.to(*args, **kwargs)
 
         return self
+    
+    @property
+    def device(self) -> Optional[torch.device]:
+
+        try:
+            return next(self._model.parameters()).device
+        except:
+            return None
+
 
     def clear_edits(self) -> None:
         """Resets the default graph of this model."""
@@ -450,13 +457,6 @@ class NNsight:
 
         return copy
 
-    @property
-    def device(self) -> Optional[torch.device]:
-
-        try:
-            return next(self._model.parameters()).device
-        except:
-            return None
 
     def to_device(self, data: Any) -> Any:
 
@@ -487,7 +487,7 @@ class NNsight:
 
             object.__setattr__(self, key, value)
 
-    def __getattr__(self, key: Any) -> Union[Any, InterventionProxy, Envoy, Tracer]:
+    def __getattr__(self, key: Any):
         """Wrapper of ._envoy's attributes to access module's inputs and outputs.
 
         Returns:
@@ -557,3 +557,8 @@ class NNsight:
         )
 
         return args, kwargs
+
+
+if TYPE_CHECKING:
+    class NNsight(NNsight, Envoy):
+        pass

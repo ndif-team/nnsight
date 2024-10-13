@@ -54,15 +54,17 @@ class Node:
         state["graph"] = util.weakref_to_obj(self.graph)
         state["listeners"] = [
             util.weakref_to_obj(listener) for listener in self.listeners
-        ] 
+        ]
 
         return state
 
     def __setstate__(self, state: Dict) -> None:
 
         state["graph"] = weakref.proxy(state["graph"])
-        state["listeners"] = [weakref.proxy(listener) for listener in state["listeners"]]
-        
+        state["listeners"] = [
+            weakref.proxy(listener) for listener in state["listeners"]
+        ]
+
         self.__dict__.update(state)
 
     def __init__(
@@ -74,7 +76,6 @@ class Node:
         kwargs: Dict[str, Any] = None,
         name: str = None,
     ) -> None:
-        super().__init__()
 
         if args is None:
             args = list()
@@ -103,9 +104,7 @@ class Node:
         self.preprocess()
 
         # Node.graph is a weak reference to avoid reference loops.
-        self.graph = (
-            weakref.proxy(self.graph) if self.graph is not None else None
-        )
+        self.graph = weakref.proxy(self.graph) if self.graph is not None else None
 
         self.name: str = name
 
@@ -175,9 +174,7 @@ class Node:
             if conditional_node:
                 if all(
                     [
-                        not protocols.ConditionalProtocol.is_node_conditioned(
-                            arg
-                        )
+                        not protocols.ConditionalProtocol.is_node_conditioned(arg)
                         for arg in self.arg_dependencies
                     ]
                 ):
@@ -282,16 +279,19 @@ class Node:
 
     def reset(self, propagate: bool = False) -> None:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
-
+        
         self.remaining_listeners = len(self.listeners)
         self.remaining_dependencies = sum(
             [not node.executed() for node in self.arg_dependencies]
         ) + int(not (self.cond_dependency is None))
-
+        
         if propagate:
             for node in self.listeners:
-                if node.executed():
-                    node.reset(propagate=True)
+                node.reset(propagate=True)
+
+
+
+
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
@@ -482,9 +482,7 @@ class Node:
         styles = {
             "node": {"color": "black", "shape": "ellipse"},
             "label": (
-                self.target
-                if isinstance(self.target, str)
-                else self.target.__name__
+                self.target if isinstance(self.target, str) else self.target.__name__
             ),
             "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
             "arg_kname": defaultdict(lambda: None),
@@ -498,13 +496,8 @@ class Node:
         ):
             styles = self.target.style()
 
-            viz_graph.add_node(
-                node_name, label=styles["label"], **styles["node"]
-            )
-            if (
-                recursive
-                and self.target == protocols.LocalBackendExecuteProtocol
-            ):
+            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
+            if recursive and self.target == protocols.LocalBackendExecuteProtocol:
 
                 # recursively draw all sub-graphs
                 for sub_node in self.args[0].graph.nodes.values():
@@ -528,9 +521,7 @@ class Node:
                             viz_graph, recursive, node_name + "_"
                         )
         else:
-            viz_graph.add_node(
-                node_name, label=styles["label"], **styles["node"]
-            )
+            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
 
         def visualize_args(arg_collection):
             """Recursively visualizes the arguments of this node.
@@ -573,9 +564,7 @@ class Node:
                     viz_graph.add_node(name, label=label, **styles["arg"][key])
 
                     for dep_name in iter_val_dependencies:
-                        viz_graph.add_edge(
-                            dep_name, name, style="dashed", color="gray"
-                        )
+                        viz_graph.add_edge(dep_name, name, style="dashed", color="gray")
 
                 viz_graph.add_edge(name, node_name, style=styles["edge"][key])
 
@@ -584,9 +573,7 @@ class Node:
         visualize_args(self.kwargs.items())
 
         if isinstance(self.cond_dependency, Node):
-            name = self.cond_dependency.visualize(
-                viz_graph, recursive, backend_name
-            )
+            name = self.cond_dependency.visualize(viz_graph, recursive, backend_name)
             viz_graph.add_edge(
                 name, node_name, style=styles["edge"][None], color="#FF8C00"
             )

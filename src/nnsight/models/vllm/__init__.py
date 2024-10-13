@@ -1,13 +1,12 @@
 import weakref
-from typing import Any, Callable, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
-from ...envoy import Envoy
 from ...tracing import protocols
 from ...tracing.Graph import Graph
-from ...util import TypeHint, WrapperModule, hint
+from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .executors.GPUExecutor import NNsightGPUExecutor
 from .executors.RayGPUExecutor import NNsightRayGPUExecutor
@@ -31,8 +30,7 @@ except Exception as e:
     ) from e
 
 
-@hint
-class VLLM(RemoteableMixin, TypeHint[Union[LLM, Envoy]]):
+class VLLM(RemoteableMixin):
     """NNsight wrapper to conduct interventions on a vLLM inference engine.
 
     .. code-block:: python
@@ -216,3 +214,9 @@ class VLLM(RemoteableMixin, TypeHint[Union[LLM, Envoy]]):
     ) -> Any:
 
         self.vllm_entrypoint.generate(prompts, sampling_params=params)
+
+if TYPE_CHECKING:
+    
+    class VLLM(VLLM,LLM):
+        pass
+    

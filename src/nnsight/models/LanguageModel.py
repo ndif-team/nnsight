@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import warnings
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Generic,
@@ -91,11 +92,10 @@ class LanguageModelProxy(InterventionProxy):
         return self.token
 
 
-from ..util import TypeHint, hint
 
 
-@hint
-class LanguageModel(RemoteableMixin, TypeHint[Union[PreTrainedModel]]):
+
+class LanguageModel(RemoteableMixin):
     """LanguageModels are NNsight wrappers around transformers language models.
 
     Inputs can be in the form of:
@@ -421,3 +421,11 @@ class LanguageModel(RemoteableMixin, TypeHint[Union[PreTrainedModel]]):
             key = self.convert_idx(key)
 
             self.proxy[:, key] = value
+
+if TYPE_CHECKING:
+    
+    class LanguageModel(LanguageModel, PreTrainedModel):
+
+        def generate(self, *args, **kwargs) -> Tracer:
+            pass
+    

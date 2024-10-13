@@ -12,7 +12,17 @@ from __future__ import annotations
 import inspect
 from collections import defaultdict
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Collection,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -249,7 +259,6 @@ class InterventionProtocol(Protocol):
 
     attachment_name = "nnsight_module_nodes"
     attachment_flag_name = "nnsight_compiled"
-    condition: bool = False
 
     @classmethod
     def add(
@@ -478,18 +487,29 @@ class InterventionProtocol(Protocol):
 
                 node = intervention_handler.graph.nodes[intervention_node_name]
 
-                # Args for intervention nodes are (module_path, batch_group_idx, call_iter).
-                _, batch_group_idx, call_iter = node.args
-                
-                # If this node will be executed for multiple iterations, we need to reset the sub-graph to b executed once more
-                if call_iter == -1:
-                    node.reset(propagate=True)
-                
-                # Updates the count of intervention node calls.
-                # If count matches call_iter, time to inject value into node.
-                elif call_iter != intervention_handler.count(intervention_node_name):
+                # Args for intervention nodes are (module_path, batch_group, iteration).
+                _, batch_group, iteration = node.args
 
+                # Updates the count of intervention node calls.
+                # If count matches the Node's iteration, its ready to be executed.
+                ready, defer = intervention_handler.count(node.name, iteration)
+
+                # Dont execute if the node isnt ready (call count / iteration) or its noy fulfilled (conditional)
+                if not ready or (not node.fulfilled() and not node.executed()):
                     continue
+
+                # If this execution is possibly not the last time it will be executed,
+                # we need to defer destruction of dependencies outside the sub-graph.
+                if defer:
+                    cls.defer(node)
+
+                # If this node will be executed for multiple iterations, we need to reset the sub-graph to be executed once more.
+                if node.executed() or defer:
+
+                    node.reset(propagate=True)
+
+                # Make the node "executed"
+                node.remaining_dependencies -= 1
 
                 value = activations
 
@@ -498,7 +518,7 @@ class InterventionProtocol(Protocol):
                 if len(intervention_handler.batch_groups) > 1:
 
                     batch_start, batch_size = intervention_handler.batch_groups[
-                        batch_group_idx
+                        batch_group
                     ]
 
                     def narrow(acts: torch.Tensor):
@@ -519,10 +539,8 @@ class InterventionProtocol(Protocol):
                         torch.Tensor,
                     )
 
-                # If this Node may be executed more than once, we need to defer any Node destruction until after interleaving.
-                with intervention_handler.defer_destruction(call_iter == -1):
-                    # Value injection.
-                    node.set_value(value)
+                # Value injection.
+                node.set_value(value)
 
                 # Check if through the previous value injection, there was a 'swap' intervention.
                 # This would mean we want to replace activations for this batch with some other ones.
@@ -546,6 +564,19 @@ class InterventionProtocol(Protocol):
                     activations = value
 
         return activations
+
+    @classmethod
+    def execute(cls, node: Node):
+        # To prevent the node from looking like its executed when calling Graph.execute
+        node.remaining_dependencies += 1
+
+    @classmethod
+    def defer(cls, node: Node) -> None:
+
+        for listener in node.listeners:
+            for dependency in listener.arg_dependencies:
+                dependency.remaining_listeners += 1
+            cls.defer(listener)
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
@@ -671,23 +702,62 @@ class InterventionHandler:
             defaultdict(lambda: 0) if call_counter is None else call_counter
         )
         self.batch_size = sum(self.batch_groups[-1])
-        self.destruction_deferrer = InterventionHandler.DestructionDeferrer()
+        self.deferred = set()
 
-    def count(self, name: str) -> int:
-        """Increments the count of times a given Intervention Node has tried to be executed and returns the count.
+    def count(self, name: str, iteration: Union[int, List[int], slice]) -> bool:
+        """Increments the count of times a given Intervention Node has tried to be executed and returns if the Node is ready and if it needs to be deferred.
 
         Args:
             name (str): Name of intervention node to return count for.
+            iteration (Union[int, List[int], slice]): What iteration(s) this Node should be executed for.
 
         Returns:
-            int: Count.
+            bool: If this Node should be executed on this iteration.
+            bool: If this Node and recursive listeners should have updating their remaining listeners (and therefore their destruction) deferred.
         """
+
+        ready = False
+        defer = False
 
         count = self.call_counter[name]
 
+        if isinstance(iteration, int):
+            ready = count == iteration
+        elif isinstance(iteration, list):
+            iteration.sort()
+
+            ready = count in iteration
+            defer = count != iteration[-1]
+
+        elif isinstance(iteration, slice):
+
+            start = iteration.start or 0
+            stop = iteration.stop
+
+            ready = count >= start and (stop is None or count < stop)
+
+            defer = stop is None or count < stop - 1
+
+        if defer:
+            self.deferred.add(name)
+        else:
+            self.deferred.discard(name)
+
         self.call_counter[name] += 1
 
-        return count
+        return ready, defer
+
+    def cleanup(self) -> None:
+
+        def inner(node: Node):
+
+            for listener in node.listeners:
+                listener.update_dependencies()
+                inner(listener)
+
+        for name in self.deferred:
+
+            inner(self.graph.nodes[name])
 
     class MultiCounter(dict):
 
@@ -712,19 +782,19 @@ class InterventionHandler:
             state["graph_id_to_call_counter"] = self.graph_id_to_call_counter
 
             return state
-        
+
         def __setstate__(self, state: Dict) -> None:
             self.__dict__.update(state)
-    
+
     @classmethod
     def persistent_call_counter(cls, graph: Graph) -> dict:
 
         def inner(graph: Graph):
 
             if cls.attachment_name not in graph.attachments:
-                
+
                 graph.attachments[cls.attachment_name] = defaultdict(int)
-                
+
             return graph.attachments[cls.attachment_name]
 
         if isinstance(graph, MultiGraph):
@@ -740,53 +810,8 @@ class InterventionHandler:
 
         return inner(graph)
 
-    def defer_destruction(self, defer: bool):
 
-        self.destruction_deferrer.defer = defer
+if TYPE_CHECKING:
 
-        return self.destruction_deferrer
-
-    def destroy(self):
-
-        self.destruction_deferrer.destroy()
-
-    class DestructionDeferrer:
-
-        def __init__(self, defer: bool = False) -> None:
-
-            self.defer = defer
-            self.deferred_nodes: Dict[str, Node] = {}
-            self.patcher = Patcher(
-                [
-                    Patch(
-                        Node,
-                        lambda node: self.deferred_nodes.update({node.name: node}),
-                        "destroy",
-                    )
-                ]
-            )
-
-        def __enter__(self):
-
-            if self.defer:
-
-                self.patcher.__enter__()
-
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-
-            if self.defer:
-
-                self.patcher.__exit__(None, None, None)
-
-            if isinstance(exc_val, BaseException):
-                raise exc_val
-
-        def destroy(self):
-
-            for node in self.deferred_nodes.values():
-
-                node.destroy()
-
-            self.deferred_nodes = {}
+    class InterventionProxy(InterventionProxy, torch.Tensor):
+        pass
