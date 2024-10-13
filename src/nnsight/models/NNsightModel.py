@@ -1,20 +1,40 @@
 from __future__ import annotations
 
 import weakref
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar,
-                    Union)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 import torch
 from typing_extensions import Self
 
 from .. import util
-from ..contexts.backends import (Backend, BridgeBackend, EditBackend,
-                                 LocalBackend, NoopBackend, RemoteBackend)
+from ..contexts.backends import (
+    Backend,
+    BridgeBackend,
+    EditBackend,
+    LocalBackend,
+    NoopBackend,
+    RemoteBackend,
+)
 from ..contexts.session.Session import Session
 from ..contexts.Tracer import Tracer
 from ..envoy import Envoy
-from ..intervention import (HookHandler, InterventionHandler,
-                            InterventionProtocol, InterventionProxy)
+from ..intervention import (
+    HookHandler,
+    InterventionHandler,
+    InterventionProtocol,
+    InterventionProxy,
+)
 from ..tracing import protocols
 from ..tracing.Graph import Graph
 
@@ -31,7 +51,7 @@ class NNsight:
         _model (torch.nn.Module): Underlying torch module.
         _envoy (Envoy): Envoy for underlying model.
         _session (Session): Session object if in a Session.
-        _default_graph (Graph): 
+        _default_graph (Graph):
     """
 
     __methods__: Dict[str, str] = dict()
@@ -415,7 +435,7 @@ class NNsight:
         self._envoy.to(*args, **kwargs)
 
         return self
-    
+
     @property
     def device(self) -> Optional[torch.device]:
 
@@ -423,7 +443,6 @@ class NNsight:
             return next(self._model.parameters()).device
         except:
             return None
-
 
     def clear_edits(self) -> None:
         """Resets the default graph of this model."""
@@ -456,7 +475,6 @@ class NNsight:
             copy.__dict__[key] = value
 
         return copy
-
 
     def to_device(self, data: Any) -> Any:
 
@@ -560,5 +578,9 @@ class NNsight:
 
 
 if TYPE_CHECKING:
+
     class NNsight(NNsight, Envoy):
-        pass
+        def __getattribute__(
+            self, name: str
+        ) -> Union[Tracer, Session, Envoy, InterventionProxy, Any]:
+            pass
