@@ -157,14 +157,3 @@ class WrapperModule(torch.nn.Module):
 
         return args
 
-
-H = TypeVar("H")
-P = TypeVar("P")
-
-
-class TypeHint(Generic[H]):
-    pass
-
-
-def hint(cls: Type[P | TypeHint[H]]) -> Union[Type[H], Type[P]]:
-    return cls

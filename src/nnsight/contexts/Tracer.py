@@ -138,9 +138,14 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         if batched_input is None:
             
-            batched_input = tuple(tuple(), dict())
+            batched_input = (((0, -1),), dict())
 
         return batched_input, batch_groups
+    
+    @property
+    def _invoker_group(self):
+        
+        return len(self._invoker_inputs) - 1
 
     ##### BACKENDS ###############################
 
