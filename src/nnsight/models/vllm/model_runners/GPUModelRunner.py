@@ -1,10 +1,10 @@
 import dataclasses
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
-from nnsight.models.NNsightModel import NNsight
 import torch
 import torch.distributed
 
+from nnsight.models.NNsightModel import NNsight
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput

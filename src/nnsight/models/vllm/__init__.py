@@ -1,10 +1,20 @@
-import weakref
-from typing import Any, Callable, Dict, List, Tuple, Union
+from functools import wraps
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
+import torch
+
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 from ...envoy import Envoy
+from ...intervention import InterventionProtocol
+from ...patching import Patch, Patcher
 from ...tracing import protocols
 from ...tracing.Graph import Graph
 from ...util import TypeHint, WrapperModule, hint
@@ -13,13 +23,14 @@ from .executors.GPUExecutor import NNsightGPUExecutor
 from .executors.RayGPUExecutor import NNsightRayGPUExecutor
 from .sampling import NNsightSamplingParams
 
+if TYPE_CHECKING:
+    from ...intervention import InterventionHandler
+
 try:
-    from vllm.distributed import (
-        destroy_distributed_environment,
-        destroy_model_parallel,
-        init_distributed_environment,
-        initialize_model_parallel,
-    )
+    from vllm.distributed import (destroy_distributed_environment,
+                                  destroy_model_parallel,
+                                  init_distributed_environment,
+                                  initialize_model_parallel)
     from vllm.engine.arg_utils import EngineArgs
     from vllm.entrypoints.llm import LLM
     from vllm.model_executor.model_loader.loader import _initialize_model
@@ -110,12 +121,12 @@ class VLLM(RemoteableMixin, TypeHint[Union[LLM, Envoy]]):
             enable_lora=bool(engine_config_dict["lora_config"]),
         ).tokenizer
 
-        destroy_model_parallel()
-        destroy_distributed_environment()
-
         return model
 
     def _load(self, repo_id: str, **kwargs):
+
+        destroy_model_parallel()
+        destroy_distributed_environment()
 
         distributed_executor_backend = NNsightGPUExecutor
         if (
@@ -204,7 +215,70 @@ class VLLM(RemoteableMixin, TypeHint[Union[LLM, Envoy]]):
 
             param.intervention_graph = intervention_graph
 
-        fn(prompts, params, **kwargs)
+        def parallel_intervene(intervene_func: Callable) -> Callable:
+            """ Create an intervene wrapper that handles tensor parallelism execution of vLLM models.
+
+            Args:
+                intervene_func (Callable): intervention function.
+            
+            Returns 
+            """
+
+            @wraps(intervene_func)
+            def parallel_intervene_wrapper(
+                activations: Any, 
+                module_path: str, 
+                module: torch.nn.Module, 
+                key: str, 
+                intervention_handler: "InterventionHandler"
+            ) -> Any:
+                """ InterventionProtocol.intervene wrapper handling the parallelized modules of vLLM.
+                If some activations were parallelized, then they need to be gathered as a full tensor to intervene on them,
+                and then split again before returning them.
+
+                Args:
+                    activations (Any): Either the inputs or outputs of a torch module.
+                    module_path (str): Module path of the current relevant module relative to the root model.
+                    module (torch.nn.Module): Module to be intervened on.
+                    key (str): Key denoting either "input" or "output" of module.
+                    intervention_handler (InterventionHandler): Handler object that stores the intervention graph and keeps track of module call count.
+
+                Returns:
+                    Any: The activations, potentially modified by the intervention graph.
+                """
+                # If the activations are parallelized, they must be gathered before intervening on them
+                if isinstance(module, ColumnParallelLinear) and key == "output" and not module.gather_output:
+                    full_tensor = tensor_model_parallel_all_gather(activations[0])
+                    activations = (full_tensor, ) + activations[1:]
+                if isinstance(module, RowParallelLinear) and key == "input" and module.input_is_parallel:
+                    full_tensor = tensor_model_parallel_all_gather(activations[0][0])
+                    activations = ((full_tensor,) + activations[0][1:], ) + activations[1:]
+
+                activations = intervene_func(activations, module_path, module, key, intervention_handler)
+
+                # If the activations were parallelized originally, they must be split again before returning them
+                if isinstance(module, ColumnParallelLinear) and key == "output" and not module.gather_output:
+                    tp_rank = get_tensor_model_parallel_rank()
+                    splitted_input = split_tensor_along_last_dim(activations[0], num_partitions=get_tensor_model_parallel_world_size())
+                    activations = (splitted_input[tp_rank].contiguous(),) + activations[1:]
+                if isinstance(module, RowParallelLinear) and key == "input" and module.input_is_parallel:
+                    tp_rank = get_tensor_model_parallel_rank()
+                    splitted_input = split_tensor_along_last_dim(activations[0][0], num_partitions=get_tensor_model_parallel_world_size())
+                    activations = ((splitted_input[tp_rank].contiguous(),) + activations[0][1:],) + activations[1:]
+
+                return activations
+            
+            return parallel_intervene_wrapper
+
+        # handle parallelmodules with custom intervene function for inference with tensor parallelism
+        if get_tensor_model_parallel_world_size() > 1:
+            intervene_patch = Patch(InterventionProtocol, parallel_intervene(InterventionProtocol.intervene), "intervene")
+        else:
+            intervene_patch = Patch(InterventionProtocol, InterventionProtocol.intervene, "intervene")
+
+        with Patcher([intervene_patch]):
+
+            fn(prompts, params, **kwargs)
 
         intervention_graph.alive = False
 

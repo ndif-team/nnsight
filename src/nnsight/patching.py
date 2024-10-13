@@ -13,9 +13,9 @@ class Patch:
     """Class representing a replacement of an attribute on a module.
 
     Attributes:
-        obj (Any): Object to replace.
-        replacement (Any): Object that replaces.
         parent (Any): Module or class to replace attribute.
+        replacement (Any): Object that replaces.
+        key (Any): Object to replace.
     """
 
     def __init__(self, parent: Any, replacement: Any, key: str) -> None:

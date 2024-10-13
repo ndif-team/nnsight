@@ -5,11 +5,9 @@ from typing import (
     Any,
     Callable,
     Dict,
-    List,
     Optional,
     Tuple,
     Type,
-    TypeVar,
     Union,
 )
 
@@ -35,6 +33,7 @@ from ..intervention import (
     InterventionProxy,
 )
 from ..tracing.Graph import Graph
+from ..tracing import protocols
 
 
 class NNsight:
@@ -411,11 +410,11 @@ class NNsight:
         with HookHandler(
             self._model,
             list(module_paths),
-            input_hook=lambda activations, module_path: InterventionProtocol.intervene(
-                activations, module_path, "input", intervention_handler
+            input_hook=lambda activations, module_path, module: InterventionProtocol.intervene(
+                activations, module_path, module, "input", intervention_handler
             ),
-            output_hook=lambda activations, module_path: InterventionProtocol.intervene(
-                activations, module_path, "output", intervention_handler
+            output_hook=lambda activations, module_path, module: InterventionProtocol.intervene(
+                activations, module_path, module, "output", intervention_handler
             ),
         ):
             try:

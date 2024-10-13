@@ -438,6 +438,7 @@ class InterventionProtocol(Protocol):
         cls,
         activations: Any,
         module_path: str,
+        module: torch.nn.Module,
         key: str,
         intervention_handler: InterventionHandler,
     ):
@@ -458,6 +459,7 @@ class InterventionProtocol(Protocol):
         Args:
             activations (Any): Either the inputs or outputs of a torch module.
             module_path (str): Module path of the current relevant module relative to the root model.
+            module (torch.nn.Module): Module to be intervened on.
             key (str): Key denoting either "input" or "output" of module.
             intervention_handler (InterventionHandler): Handler object that stores the intervention graph and keeps track of module call count.
 
@@ -621,7 +623,7 @@ class HookHandler(AbstractContextManager):
             if hook_type == "input":
 
                 def input_hook(module, input, kwargs, module_path=module_path):
-                    return self.input_hook((input, kwargs), module_path)
+                    return self.input_hook((input, kwargs), module_path, module)
 
                 self.handles.append(
                     module.register_forward_pre_hook(
@@ -632,7 +634,7 @@ class HookHandler(AbstractContextManager):
             elif hook_type == "output":
 
                 def output_hook(module, input, output, module_path=module_path):
-                    return self.output_hook(output, module_path)
+                    return self.output_hook(output, module_path, module)
 
                 self.handles.append(
                     module.register_forward_hook(output_hook, prepend=True)
