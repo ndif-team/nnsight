@@ -23,7 +23,7 @@ from nnsight import LanguageModel
 
 model = LanguageModel('openai-community/gpt2', device_map='auto')
 
-with model.trace('The Eiffel Tower is in the city of'):
+with model.trace('The Eiffel Tower is in the city of') as tracer:
 
       hidden_states = model.transformer.h[-1].output[0].save()
 

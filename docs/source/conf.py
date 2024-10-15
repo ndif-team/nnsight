@@ -43,9 +43,15 @@ html_context = {
 
 html_theme_options = {
     "show_nav_level": 2,
-    "navbar_end": ["theme-switcher","navbar-icon-links", "ndif_status"],
+    "navbar_end": ["ndif_status", "theme-switcher","navbar-icon-links"],
     "navbar_align": "left",
     "icon_links": [
+        {
+            "name": "Status: Unknown",
+            "url": "/status",
+            "icon": "fa-solid fa-circle-check",
+            "attributes": {"class": "ndif"},
+        },
         {
             "name": "GitHub",
             "url": "https://github.com/ndif-team/nnsight",
@@ -55,12 +61,6 @@ html_theme_options = {
             "name": "Discord",
             "url": "https://forms.gle/1Y6myaXYzSh3oHf56",
             "icon": "fa-brands fa-discord",
-        },
-        {
-            "name": "Status: Unknown",
-            "url": "/status",
-            "icon": "fa-solid fa-circle-check",
-            "attributes": {"class": "ndif"},
         },
     ],
     "show_prev_next": False,
