@@ -619,11 +619,8 @@ class Envoy:
         """
 
         return len(self._module)
-
-    def __getattribute__(self, name: str) -> Union[Tracer]:
-        return super().__getattribute__(name)
    
-    def __getattr__(self, key: str) -> Union[Tracer]:
+    def __getattr__(self, key: str) -> Envoy:
         """Wrapper method for underlying module's attributes.
 
         Args:

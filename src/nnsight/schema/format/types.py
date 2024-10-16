@@ -122,10 +122,10 @@ class NodeModel(BaseNNsightModel):
             name=self.name,
         ).node
 
-        node.cond_dependency = try_deserialize(self.condition, handler)
+        node.condition = try_deserialize(self.condition, handler)
 
-        if isinstance(node.cond_dependency, Node):
-            node.cond_dependency.listeners.append(weakref.proxy(node))
+        if isinstance(node.condition, Node):
+            node.condition.listeners.append(weakref.proxy(node))
 
         return node
 
@@ -238,13 +238,12 @@ class GraphModel(BaseNNsightModel):
     graph: Graph = Field(exclude=True, default=None, validate_default=False)
 
     id: int
-    sequential: bool
     nodes: Dict[str, Union["NodeModel", "NodeType"]]
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
 
         graph = Graph(
-            validate=False, sequential=self.sequential, graph_id=self.id
+            validate=False, graph_id=self.id
         )
 
         handler.graph = graph
@@ -359,7 +358,6 @@ GraphType = Annotated[
     AfterValidator(
         lambda value: GraphModel(
             id=value.id,
-            sequential=value.sequential,
             nodes=value.nodes,
             graph=value,
         )

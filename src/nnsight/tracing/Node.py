@@ -4,7 +4,7 @@ import inspect
 import weakref
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
 
@@ -71,31 +71,26 @@ class Node:
         self,
         target: Union[Callable, str],
         graph: "Graph" = None,
-        proxy_value: Any = inspect._empty,
-        args: List[Any] = None,
-        kwargs: Dict[str, Any] = None,
-        name: str = None,
+        fake_value: Any = inspect._empty,
+        *args,
+        **kwargs,
     ) -> None:
 
-        if args is None:
-            args = list()
-        if kwargs is None:
-            kwargs = dict()
-
         args = list(args)
-
+        
         self.graph: "Graph" = graph
-        self.proxy_value = proxy_value
+        
         self.target = target
-        self.args, self.kwargs = args, kwargs
-
-        self.proxy: Optional[Proxy] = None
+        
+        self.args = args
+        self.kwargs = kwargs
+        
+        self.fake_value = fake_value
 
         self._value: Any = inspect._empty
 
         self.listeners: List[Node] = list()
-        self.arg_dependencies: List[Node] = list()
-        self.cond_dependency: Optional[Node] = None
+        self.dependencies: List[Node] = list()
 
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
@@ -106,28 +101,17 @@ class Node:
         # Node.graph is a weak reference to avoid reference loops.
         self.graph = weakref.proxy(self.graph) if self.graph is not None else None
 
-        self.name: str = name
+        self.executed = False
 
         # If theres an alive Graph, add it.
-        if self.attached():
+        if self.attached:
 
             self.graph.add(self)
 
     def preprocess(self) -> None:
         """Preprocess Node.args and Node.kwargs."""
 
-        # bridge graph redirection
-        if self.attached():
-            self.graph = (
-                protocols.BridgeProtocol.peek_graph(self.graph)
-                if (
-                    self.target.redirect
-                    if isinstance(self.target, type)
-                    and issubclass(self.target, protocols.Protocol)
-                    else True
-                )
-                else self.graph
-            )
+       
 
         def preprocess_node(node: Union[Node, Proxy]):
 
@@ -135,15 +119,11 @@ class Node:
 
                 node = node.node
 
-            if node.done():
+            if node.done:
 
                 return node.value
 
-            if self.attached() and self.graph.id != node.graph.id:
-
-                node = protocols.BridgeProtocol.add(node).node
-
-            self.arg_dependencies.append(node)
+            self.dependencies.append(node)
             # Weakref so no reference loop
             node.listeners.append(weakref.proxy(self))
 
@@ -153,35 +133,6 @@ class Node:
             (self.args, self.kwargs), preprocess_node, (Node, Proxy)
         )
 
-        # conditional context handling
-        if (
-            self.attached()
-            and protocols.ConditionalProtocol.has_conditional(self.graph)
-            and (
-                self.target.condition
-                if isinstance(self.target, type)
-                and issubclass(self.target, protocols.Protocol)
-                else True
-            )
-        ):
-
-            conditional_node = protocols.ConditionalProtocol.peek_conditional(
-                self.graph
-            )
-
-            # only the top dependency needs to add the Conditional as a dependency
-            # if none of the dependent are dependent on the Conditional, then add it
-            if conditional_node:
-                if all(
-                    [
-                        not protocols.ConditionalProtocol.is_node_conditioned(arg)
-                        for arg in self.arg_dependencies
-                    ]
-                ):
-                    self.cond_dependency = conditional_node
-                    conditional_node.listeners.append(weakref.proxy(self))
-
-                protocols.ConditionalProtocol.add_conditioned_node(self)
 
     @property
     def value(self) -> Any:
@@ -194,11 +145,12 @@ class Node:
             ValueError: If the underlying ._value is inspect._empty (therefore never set or destroyed).
         """
 
-        if not self.done():
+        if not self.done:
             raise ValueError("Accessing value before it's been set.")
 
         return self._value
 
+    @property
     def attached(self) -> bool:
         """Checks to see if the weakref to the Graph is alive or dead.
 
@@ -213,14 +165,55 @@ class Node:
         except:
             return False
 
+
+    @property
+    def done(self) -> bool:
+        """Returns true if the value of this node has been set.
+
+        Returns:
+            bool: If done.
+        """
+        return self._value is not inspect._empty
+
+    @property
+    def fulfilled(self) -> bool:
+        """Returns true if remaining_dependencies is 0.
+
+        Returns:
+            bool: If fulfilled.
+        """
+        return self.remaining_dependencies == 0
+    @property
+    def redundant(self) -> bool:
+        """Returns true if remaining_listeners is 0.
+
+        Returns:
+            bool: If redundant.
+        """
+        return self.remaining_listeners == 0
+    
+    def reset(self, propagate: bool = False) -> None:
+        """Resets this Nodes remaining_listeners and remaining_dependencies."""
+        
+        self.executed = False
+        self._value = inspect._empty
+        
+        self.remaining_listeners = len(self.listeners)
+        self.remaining_dependencies = sum(
+            [not node.executed for node in self.dependencies]
+        ) + int(not (self.condition is None))
+        
+        if propagate:
+            for node in self.listeners:
+                node.reset(propagate=True)
+
+
     def create(
         self,
         target: Union[Callable, str],
         proxy_value: Any = inspect._empty,
         args: List[Any] = None,
-        kwargs: Dict[str, Any] = None,
-        name: str = None,
-    ) -> Union[Proxy, Any]:
+        kwargs: Dict[str, Any] = None) -> Union[Proxy, Any]:
         """We use Node.add vs Graph.add in case graph is dead.
         If the graph is dead, we assume this node is ready to execute and therefore we try and execute it and then return its value.
 
@@ -228,15 +221,14 @@ class Node:
             Union[Proxy, Any]: Proxy or value
         """
 
-        if not self.attached():
+        if not self.attached:
 
-            from ..contexts.GraphBasedContext import GlobalTracingContext
+            from ..contexts.Context import GlobalTracingContext
 
             if GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
 
                 return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.create(
                     target=target,
-                    name=name,
                     proxy_value=proxy_value,
                     args=args,
                     kwargs=kwargs,
@@ -246,7 +238,7 @@ class Node:
             node = Node(
                 target=target,
                 graph=None,
-                proxy_value=None,
+                fake_value=None,
                 args=args,
                 kwargs=kwargs,
             )
@@ -271,59 +263,12 @@ class Node:
         # Otherwise just create the Node on the Graph like normal.
         return self.graph.create(
             target=target,
-            name=name,
             proxy_value=proxy_value,
             args=args,
             kwargs=kwargs,
         )
 
-    def reset(self, propagate: bool = False) -> None:
-        """Resets this Nodes remaining_listeners and remaining_dependencies."""
-        
-        self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = sum(
-            [not node.executed() for node in self.arg_dependencies]
-        ) + int(not (self.cond_dependency is None))
-        
-        if propagate:
-            for node in self.listeners:
-                node.reset(propagate=True)
 
-
-
-
-
-    def done(self) -> bool:
-        """Returns true if the value of this node has been set.
-
-        Returns:
-            bool: If done.
-        """
-        return self._value is not inspect._empty
-
-    def executed(self) -> bool:
-        """Returns true if remaining_dependencies is less than 0.
-
-        Returns:
-            bool: If executed.
-        """
-        return self.remaining_dependencies < 0
-
-    def fulfilled(self) -> bool:
-        """Returns true if remaining_dependencies is 0.
-
-        Returns:
-            bool: If fulfilled.
-        """
-        return self.remaining_dependencies == 0
-
-    def redundant(self) -> bool:
-        """Returns true if remaining_listeners is 0.
-
-        Returns:
-            bool: If redundant.
-        """
-        return self.remaining_listeners == 0
 
     @classmethod
     def prepare_inputs(
@@ -344,7 +289,7 @@ class Node:
                 node = node.node
 
             if proxy:
-                return node.proxy_value
+                return node.fake_value
 
             return node.value
 
@@ -372,6 +317,8 @@ class Node:
         Lets protocol execute if target is str.
         Else prepares args and kwargs and passes them to target. Gets output of target and sets the Node's value to it.
         """
+        
+        self.executed = True
 
         try:
 
@@ -394,12 +341,8 @@ class Node:
 
         except Exception as e:
 
-            raise type(e)(
-                f"Above exception when execution Node: '{self.name}' in Graph: '{self.graph.id}'"
-            ) from e
-
-        finally:
-            self.remaining_dependencies -= 1
+            raise e
+       
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
@@ -411,59 +354,56 @@ class Node:
         """
         self._value = value
 
-        logger.info(f"=> SET({self.name})")
-
         self.update_listeners()
 
         self.update_dependencies()
 
-        if self.done() and self.redundant():
+        if self.done and self.redundant:
             self.destroy()
 
     def update_listeners(self):
-        """Updates remaining_dependencies of listeners. If they are now fulfilled, execute them."""
+        """Updates remaining_dependencies of listeners."""
 
         for listener in self.listeners:
             listener.remaining_dependencies -= 1
 
-            if listener.fulfilled() and not self.graph.sequential:
-                listener.execute()
-
     def update_dependencies(self):
         """Updates remaining_listeners of dependencies. If they are now redundant, destroy them."""
 
-        for dependency in self.arg_dependencies:
+        for dependency in self.dependencies:
             dependency.remaining_listeners -= 1
 
-            if dependency.redundant():
+            if dependency.redundant:
                 dependency.destroy()
 
     def destroy(self) -> None:
         """Removes the reference to the node's value and logs it's destruction."""
 
-        logger.info(f"=> DEL({self.name})")
-
         self._value = inspect._empty
-
+        
+    def subgraph(self, subgraph: Optional[Set[int]] = None) -> Set[int]:
+        
+        if subgraph is None:
+            subgraph = set()
+            
+        if self.index in subgraph:
+            return subgraph
+            
+        subgraph.add(self.index)
+        
+        for listener in self.listeners:
+            listener.subgraph(subgraph)
+        
+        return subgraph
+        
     def clean(self) -> None:
         """Clean up dependencies during early execution stop"""
 
-        # BridgeProtocol nodes must clean up their corresponding external proxy
-        if isinstance(self.target, type) and issubclass(
-            self.target, protocols.BridgeProtocol
-        ):
-            bridge = protocols.BridgeProtocol.get_bridge(self.graph)
-            lock_node = bridge.get_graph(self.args[0]).nodes[self.args[1]]
-            lock_dependency = lock_node.args[0]
-            lock_dependency.remaining_listeners -= 1
-            lock_node.destroy()
-            if lock_dependency.redundant():
-                lock_dependency.destroy()
-        else:
-            for dependency in self.arg_dependencies:
-                dependency.remaining_listeners -= 1
-                if dependency.redundant():
-                    dependency.destroy()
+      
+        for dependency in self.dependencies:
+            dependency.remaining_listeners -= 1
+            if dependency.redundant:
+                dependency.destroy()
 
     def visualize(
         self, viz_graph: "AGraph", recursive: bool, backend_name: str = ""
@@ -489,7 +429,7 @@ class Node:
             "edge": defaultdict(lambda: "solid"),
         }
 
-        node_name = backend_name + self.name
+        node_name = backend_name + str(self)
 
         if isinstance(self.target, type) and issubclass(
             self.target, protocols.Protocol
@@ -498,13 +438,13 @@ class Node:
 
             viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
             if recursive and self.target == protocols.LocalBackendExecuteProtocol:
-
+                graph:Graph = self.args[0].graph
                 # recursively draw all sub-graphs
-                for sub_node in self.args[0].graph.nodes.values():
+                for sub_node in graph:
                     # draw root nodes and attach them to their LocalBackendExecuteProtocol node
                     if (
-                        len(sub_node.arg_dependencies)
-                        + int(not (sub_node.cond_dependency is None))
+                        len(sub_node.dependencies)
+                        + int(not (sub_node.condition is None))
                     ) == 0:
                         sub_node_name = sub_node.visualize(
                             viz_graph, recursive, node_name + "_"
@@ -572,8 +512,8 @@ class Node:
 
         visualize_args(self.kwargs.items())
 
-        if isinstance(self.cond_dependency, Node):
-            name = self.cond_dependency.visualize(viz_graph, recursive, backend_name)
+        if isinstance(self.condition, Node):
+            name = self.condition.visualize(viz_graph, recursive, backend_name)
             viz_graph.add_edge(
                 name, node_name, style=styles["edge"][None], color="#FF8C00"
             )
@@ -581,11 +521,7 @@ class Node:
         return node_name
 
     def __str__(self) -> str:
-        args = util.apply(self.args, lambda x: f"'{x}'", str)
-        args = util.apply(args, lambda x: x.name, Node)
-        args = [str(arg) for arg in args]
-
-        return f"{self.name}:[args:({','.join(args)}) l:{len(self.listeners)} a_d:{len(self.arg_dependencies)} c_d{bool(self.cond_dependency)}]"
+        return f"{self.target.__name__} {self.index}"
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

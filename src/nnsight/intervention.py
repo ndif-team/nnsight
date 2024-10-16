@@ -20,6 +20,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Set,
     Tuple,
     Union,
 )
@@ -29,13 +30,12 @@ from torch.utils.hooks import RemovableHandle
 from typing_extensions import Self
 
 from . import util
-from .patching import Patch, Patcher
 from .tracing import protocols
 from .tracing.Graph import Graph, MultiGraph
 from .tracing.Node import Node
-from .tracing.protocols import Protocol
+from .tracing.protocols import Protocol, GradProtocol
 from .tracing.Proxy import Proxy
-
+from .tracing.util import backwards_check
 
 class InterventionProxy(Proxy):
     """Sub-class for Proxy that adds additional user functionality to proxies.
@@ -132,9 +132,8 @@ class InterventionProxy(Proxy):
         Returns:
             Proxy: Grad proxy.
         """
-        if self._grad is None:
 
-            self.__dict__["_grad"] = protocols.GradProtocol.add(self.node)
+        self.__dict__["_grad"] = protocols.GradProtocol.add(self.node)
 
         return self._grad
 
@@ -149,40 +148,6 @@ class InterventionProxy(Proxy):
         protocols.SwapProtocol.add(self.grad.node, value)
 
         self.__dict__["_grad"] = None
-
-    def __call__(self, *args, **kwargs) -> Self:
-
-        # We don't want to call backward on fake tensors.
-        # We also want to track the number of times .backward() has been called so .grad on a Proxy refers to the right backward pass.
-        if (
-            self.node.target is util.fetch_attr
-            and isinstance(self.node.args[1], str)
-            and self.node.args[1] == "backward"
-        ):
-
-            # Clear all .grad proxies so allow users to get the ,.grad of the next backward pass.
-            for node in self.node.graph.nodes.values():
-
-                try:
-
-                    if node.proxy._grad is not None:
-
-                        node.proxy.__dict__["_grad"] = None
-
-                except ReferenceError:
-                    pass
-
-            # Use GradProtocol to increment the tracking of the number of times .backward() has been called.
-            protocols.GradProtocol.increment(self.node.graph)
-
-            return self.node.create(
-                proxy_value=None,
-                target=Proxy.proxy_call,
-                args=[self.node] + list(args),
-                kwargs=kwargs,
-            )
-
-        return super().__call__(*args, **kwargs)
 
     def __setattr__(
         self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
@@ -202,16 +167,16 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.Size]]: Proxy value shape or collection of shapes.
         """
 
-        if not self.node.attached():
+        if not self.node.attached:
 
             return util.apply(self.value, lambda x: x.shape, torch.Tensor)
 
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
-        if self.node.proxy_value is inspect._empty:
+        if self.node.fake_value is inspect._empty:
 
             return super().__getattr__("shape")
 
-        return util.apply(self.node.proxy_value, lambda x: x.shape, torch.Tensor)
+        return util.apply(self.node.fake_value, lambda x: x.shape, torch.Tensor)
 
     @property
     def device(self) -> Collection[torch.device]:
@@ -226,11 +191,11 @@ class InterventionProxy(Proxy):
             return util.apply(self.value, lambda x: x.device, torch.Tensor)
 
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
-        if self.node.proxy_value is inspect._empty:
+        if self.node.fake_value is inspect._empty:
 
             return super().__getattr__("device")
 
-        return util.apply(self.node.proxy_value, lambda x: x.device, torch.Tensor)
+        return util.apply(self.node.fake_value, lambda x: x.device, torch.Tensor)
 
     @property
     def dtype(self) -> Collection[torch.device]:
@@ -240,16 +205,16 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.dtype]]: Proxy value dtype or collection of dtypes.
         """
 
-        if not self.node.attached():
+        if not self.node.attached:
 
             return util.apply(self.value, lambda x: x.dtype, torch.Tensor)
 
         # If we haven't scanned in a proxy_value, just return a proxy to get the attribute.
-        if self.node.proxy_value is inspect._empty:
+        if self.node.fake_value is inspect._empty:
 
             return super().__getattr__("dtype")
 
-        return util.apply(self.node.proxy_value, lambda x: x.dtype, torch.Tensor)
+        return util.apply(self.node.fake_value, lambda x: x.dtype, torch.Tensor)
 
 
 class InterventionProtocol(Protocol):
@@ -289,7 +254,7 @@ class InterventionProtocol(Protocol):
         return proxy
 
     @classmethod
-    def compile_node(cls, node: Node) -> None:
+    def compile_node(cls, node: Node, index:int) -> None:
 
         graph = node.graph
 
@@ -298,49 +263,79 @@ class InterventionProtocol(Protocol):
         # Add attachment if it does not exist.
         if cls.attachment_name not in graph.attachments:
 
-            graph.attachments[cls.attachment_name] = dict()
+            graph.attachments[cls.attachment_name] = defaultdict(list)
 
         # More than one Node can depend on a given input or output, therefore we store a list of node names.
         arguments = graph.attachments[cls.attachment_name]
 
-        if module_path not in arguments:
-            arguments[module_path] = []
-
-        # Append the newly created nodes name.
-        arguments[module_path].append(node.name)
+        # Append the newly created nodes name and subgraph.
+        arguments[module_path].append(node.subgraph())
 
     @classmethod
     def compile(cls, graph: Graph) -> None:
 
         if graph.attachments.get(cls.attachment_flag_name, False):
             return
+        
+        backwards_iteration = 0
 
-        for node in graph.nodes.values():
+        for index, node in enumerate(graph):
+                        
+            if backwards_check(node.target, *node.args):
+                backwards_iteration += 1
+                continue
+            
+            if node.target is GradProtocol:
+                node.kwargs['backwards_iteration'] = backwards_iteration
+                node.kwargs['subgraph'] = node.subgraph()
+                continue
 
             if node.target is not InterventionProtocol:
                 continue
 
-            cls.compile_node(node)
+            cls.compile_node(node, index)
 
         graph.attachments[cls.attachment_flag_name] = True
+        
+    @classmethod
+    def unset(cls, graph:Graph) -> None:
+        graph.attachments[cls.attachment_flag_name] = False
+        
+    @classmethod
+    def get_interventions(cls, graph: "Graph") -> Dict[str, List[Set[int]]]:
+        """Returns mapping from module_paths to InterventionNode subgraphs.
+
+        Args:
+            graph (Graph): Graph.
+
+        Returns:
+            Dict[str, List[Set[int]]]: Interventions.
+        """
+
+        return graph.attachments.get(cls.attachment_name, dict())
 
     @classmethod
     def shift(cls, mgraph: MultiGraph) -> MultiGraph:
 
         InterventionProtocol.compile(mgraph)
 
-        intervention_nodes = InterventionProtocol.get_interventions(mgraph).values()
+        intervention_subgraphs = InterventionProtocol.get_interventions(mgraph).values()
 
         graph_id_to_invoker_groups = defaultdict(set)
         graph_id_to_intervention_node = defaultdict(list)
 
-        for nodes in intervention_nodes:
-            for node in nodes:
+        for subgraph in intervention_subgraphs:
+            for (start, end) in subgraph:
+                
+                node = mgraph[start]
 
                 invoker_group = node.args[1]
+                
+                offset = 0
 
-                for graph in mgraph:
-                    if node.name in graph.nodes:
+                for graph in mgraph.id_to_graphs.values():
+                    offset  += len(graph)
+                    if start < offset:
                         graph_id_to_invoker_groups[graph.id].add(invoker_group)
                         graph_id_to_intervention_node[graph.id].append(node)
                         break
@@ -362,18 +357,6 @@ class InterventionProtocol(Protocol):
 
         return mgraph
 
-    @classmethod
-    def get_interventions(cls, graph: "Graph") -> Dict[str, List[Node]]:
-        """Returns mapping from module_paths to  InterventionNode names added to the given Graph.
-
-        Args:
-            graph (Graph): Graph.
-
-        Returns:
-            Dict: Interventions.
-        """
-
-        return graph.attachments.get(cls.attachment_name, dict())
 
     @classmethod
     def concat(
@@ -454,9 +437,9 @@ class InterventionProtocol(Protocol):
 
         Forms the current module_path key in the form of <module path>.<output/input>
         Checks the graphs InterventionProtocol attachment attribute for this key.
-        If exists, value is a list of node names to iterate through.
-        Node args for intervention type nodes should be ``[module_path, batch_size, batch_start, call_iter]``.
-        Checks and updates the counter for the given intervention node. If counter is not ready yet continue.
+        If exists, value is a list of (start:int, end:int) subgraphs to iterate through.
+        Node args for intervention type nodes should be ``[module_path, (batch_start, batch_size), iteration]``.
+        Checks and updates the counter (number of times this module has been called for this Node) for the given intervention node. If count is not ready yet compared to the iteration, continue.
         Using batch_size and batch_start, apply torch.narrow to tensors in activations to select
         only batch indexed tensors relevant to this intervention node. Sets the value of a node
         using the indexed values. Using torch.narrow returns a view of the tensors as opposed to a copy allowing
@@ -480,22 +463,25 @@ class InterventionProtocol(Protocol):
         interventions = cls.get_interventions(intervention_handler.graph)
 
         if module_path in interventions:
-            intervention_node_names = interventions[module_path]
+            intervention_subgraphs: List[Set[int]] = interventions[module_path]
 
             # Multiple intervention nodes can have same module_path if there are multiple invocations.
-            for intervention_node_name in intervention_node_names:
-
-                node = intervention_handler.graph.nodes[intervention_node_name]
+            # Is a set of node indexes making up the intervention subgraph
+            for subgraph in intervention_subgraphs:
+                
+                index = next(iter(subgraph))
+                
+                node = intervention_handler.graph[index]
 
                 # Args for intervention nodes are (module_path, batch_group, iteration).
                 _, batch_group, iteration = node.args
 
                 # Updates the count of intervention node calls.
                 # If count matches the Node's iteration, its ready to be executed.
-                ready, defer = intervention_handler.count(node.name, iteration)
-
-                # Dont execute if the node isnt ready (call count / iteration) or its noy fulfilled (conditional)
-                if not ready or (not node.fulfilled() and not node.executed()):
+                ready, defer = intervention_handler.count(index, iteration)
+                
+                # Dont execute if the node isnt ready (call count / iteration) or its not fulfilled (conditional)
+                if not ready or (not node.fulfilled and not node.executed):
                     continue
 
                 # If this execution is possibly not the last time it will be executed,
@@ -504,12 +490,9 @@ class InterventionProtocol(Protocol):
                     cls.defer(node)
 
                 # If this node will be executed for multiple iterations, we need to reset the sub-graph to be executed once more.
-                if node.executed() or defer:
+                if node.executed or defer:
 
                     node.reset(propagate=True)
-
-                # Make the node "executed"
-                node.remaining_dependencies -= 1
 
                 value = activations
 
@@ -538,9 +521,14 @@ class InterventionProtocol(Protocol):
                         narrow,
                         torch.Tensor,
                     )
+                    
+                # Make the node "executed"
+                node.executed = True
 
                 # Value injection.
                 node.set_value(value)
+
+                node.graph.execute(subgraph=subgraph)
 
                 # Check if through the previous value injection, there was a 'swap' intervention.
                 # This would mean we want to replace activations for this batch with some other ones.
@@ -568,13 +556,13 @@ class InterventionProtocol(Protocol):
     @classmethod
     def execute(cls, node: Node):
         # To prevent the node from looking like its executed when calling Graph.execute
-        node.remaining_dependencies += 1
+        node.executed = False
 
     @classmethod
     def defer(cls, node: Node) -> None:
 
         for listener in node.listeners:
-            for dependency in listener.arg_dependencies:
+            for dependency in listener.dependencies:
                 dependency.remaining_listeners += 1
             cls.defer(listener)
 
@@ -692,23 +680,23 @@ class InterventionHandler:
     def __init__(
         self,
         batch_groups: List[Tuple[int, int]] = None,
-        call_counter: Dict[str, int] = None,
+        call_counter: Dict[int, int] = None,
         graph: Graph = None,
     ) -> None:
 
         self.graph = graph
         self.batch_groups = [] if batch_groups is None else batch_groups
-        self.call_counter: Dict[str, int] = (
+        self.call_counter: Dict[int, int] = (
             defaultdict(lambda: 0) if call_counter is None else call_counter
         )
         self.batch_size = sum(self.batch_groups[-1])
         self.deferred = set()
 
-    def count(self, name: str, iteration: Union[int, List[int], slice]) -> bool:
+    def count(self, index: int, iteration: Union[int, List[int], slice]) -> bool:
         """Increments the count of times a given Intervention Node has tried to be executed and returns if the Node is ready and if it needs to be deferred.
 
         Args:
-            name (str): Name of intervention node to return count for.
+            index (int): Index of intervention node to return count for.
             iteration (Union[int, List[int], slice]): What iteration(s) this Node should be executed for.
 
         Returns:
@@ -719,7 +707,7 @@ class InterventionHandler:
         ready = False
         defer = False
 
-        count = self.call_counter[name]
+        count = self.call_counter[index]
 
         if isinstance(iteration, int):
             ready = count == iteration
@@ -739,11 +727,11 @@ class InterventionHandler:
             defer = stop is None or count < stop - 1
 
         if defer:
-            self.deferred.add(name)
+            self.deferred.add(index)
         else:
-            self.deferred.discard(name)
+            self.deferred.discard(index)
 
-        self.call_counter[name] += 1
+        self.call_counter[index] += 1
 
         return ready, defer
 
@@ -755,25 +743,25 @@ class InterventionHandler:
                 listener.update_dependencies()
                 inner(listener)
 
-        for name in self.deferred:
+        for index in self.deferred:
 
-            inner(self.graph.nodes[name])
+            inner(self.graph[index])
 
     class MultiCounter(dict):
 
         def __init__(
             self,
             mgraph: MultiGraph,
-            graph_id_to_call_counter: Dict[int, Dict[str, int]],
+            graph_id_to_call_counter: Dict[int, Dict[int, int]],
         ):
 
             self.mgraph = mgraph
             self.graph_id_to_call_counter = graph_id_to_call_counter
 
-        def __getitem__(self, key: Any) -> Any:
-            return self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key]
+        def __getitem__(self, key: int) -> Any:
+            return self.graph_id_to_call_counter[self.mgraph[key].graph.id][key]
 
-        def __setitem__(self, key: Any, value: Any) -> None:
+        def __setitem__(self, key: int, value: Any) -> None:
             self.graph_id_to_call_counter[self.mgraph.nodes[key].graph.id][key] = value
 
         def __getstate__(self):
@@ -802,7 +790,7 @@ class InterventionHandler:
 
             mgraph = graph
 
-            for graph in mgraph:
+            for graph in mgraph.id_to_graphs.values():
 
                 graph_id_to_call_counter[graph.id] = inner(graph)
 
@@ -814,4 +802,19 @@ class InterventionHandler:
 if TYPE_CHECKING:
 
     class InterventionProxy(InterventionProxy, torch.Tensor):
-        pass
+        
+        
+        grad:InterventionProxy = None
+                
+        def __getattribute__(self, key) -> InterventionProxy:
+            pass
+        
+        # def __getattr__(self, key) -> InterventionProxy:
+        #     pass
+        
+        # def __call__(self, *args, **kwargs) -> InterventionProxy:
+        #     pass
+        
+        def argmax(self, *args, **kwargs) -> InterventionProxy:
+            pass
+            

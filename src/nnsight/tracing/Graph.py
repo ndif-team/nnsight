@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import inspect
 import tempfile
-from typing import Callable, Dict, Iterator, List, Optional, Type
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Type, Union, overload
 
 from PIL import Image as PILImage
 
 from ..util import apply
 from .Node import Node
-from .protocols import EarlyStopProtocol
 from .Proxy import Proxy
 from .util import validate
 
@@ -40,10 +39,7 @@ class Graph:
     """
 
     def __getstate__(self) -> Dict:
-        return {"id": self.id, 
-                "nodes": self.nodes, 
-                "name_idx": self.name_idx, 
-                "sequential": self.sequential}
+        return {"id": self.id, "nodes": self.nodes, "name_idx": self.name_idx}
 
     def __setstate__(self, state: Dict) -> None:
 
@@ -53,7 +49,6 @@ class Graph:
         self,
         proxy_class: Type[Proxy] = Proxy,
         validate: bool = False,
-        sequential: bool = True,
         graph_id: int = None,
     ) -> None:
 
@@ -61,54 +56,96 @@ class Graph:
 
         self.proxy_class = proxy_class
         self.validate = validate
-        self.sequential = sequential
 
         self.alive = True
 
-        self.nodes: Dict[str, Node] = dict()
-        self.name_idx: Dict[str, int] = dict()
+        self.nodes: List[Node] = []
 
-        self.attachments = dict()
+        self.attachments = {}
+        
+    @overload
+    def __getitem__(self, key:int) -> Node:
+        ...
+        
+    @overload
+    def __getitem__(self, key:Union[slice, List[int]]) -> List[Node]:
+        ...
+
+    def __getitem__(self, key:Any) -> Union[Node, List[Node]]:
+        return self.nodes[key]
+        
+    def __iter__(self) -> Iterator[Node]:
+        return iter(self.nodes)
+    
+    def __len__(self) -> int:
+        return len(self.nodes)
 
     def reset(self) -> None:
         """Resets the Graph to prepare for a new execution of the Graph.
         Calls `.reset()` on all Nodes.
         """
-
+    
         # Reset Nodes individually.
-        for node in self.nodes.values():
+        for node in self:
             node.reset()
 
-    def execute(self) -> None:
+    def execute(self, subgraph:Optional[Set[int]] = None) -> None:
         """Executes operations of `Graph`.
 
         Executes all `Node`s sequentially if `Graph.sequential`. Otherwise execute only root `Node`s sequentially.
         """
         
         self.alive = False
-
-        if self.sequential:
-            is_stopped_early: bool = False
-            early_stop_execption: Optional[EarlyStopProtocol.EarlyStopException] = None
-            for node in self.nodes.values():
-                if not is_stopped_early:
-                    if node.fulfilled():
-                        try:
-                            node.execute()
-                        except EarlyStopProtocol.EarlyStopException as e:
-                            is_stopped_early = True
-                            early_stop_execption = e
-                            continue
-                else:
-                    node.clean()
-            if is_stopped_early:
-                raise early_stop_execption
+        
+        flag = False
+        
+        if subgraph is None:
+            start, end = 0, len(self) - 1
         else:
+            listed = list(subgraph)
+            start, end = listed[0], listed[-1]
+            
+        for index in range(start, end+1):
+            
+            node = self[index]
 
-            root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
-
-            for node in root_nodes:
+            if node.executed:
+                continue
+            elif flag:
+                if node.fulfilled and index in subgraph :
+                    node.execute()                    
+            elif node.fulfilled:
                 node.execute()
+            elif subgraph is None:
+                break
+            elif index not in subgraph:
+                flag = True
+            
+            if end == index:
+                break
+            
+        # if self.sequential:
+        #     is_stopped_early: bool = False
+        #     early_stop_execption: Optional[EarlyStopProtocol.EarlyStopException] = None
+        #     for node in self.nodes.values():
+        #         if not is_stopped_early:
+        #             if node.fulfilled():
+        #                 try:
+        #                     node.execute()
+        #                 except EarlyStopProtocol.EarlyStopException as e:
+        #                     is_stopped_early = True
+        #                     early_stop_execption = e
+        #                     continue
+        #         else:
+        #             node.clean()
+        #     if is_stopped_early:
+        #         raise early_stop_execption
+        # else:
+
+        #     root_nodes = [node for node in self.nodes.values() if node.fulfilled()]
+
+        #     for node in root_nodes:
+        #         node.execute()
 
     def create(self, *args, **kwargs) -> Proxy:
         """Creates a Node directly on this `Graph` and returns its `Proxy`.
@@ -133,51 +170,29 @@ class Graph:
         """
 
         # If we're validating and the user did not provide a proxy_value, execute the given target with meta proxy values to compute new proxy_value.
-        if self.validate and node.proxy_value is inspect._empty:
+        if self.validate and node.fake_value is inspect._empty:
 
-            node.proxy_value = validate(node.target, *node.args, **node.kwargs)
-
-        node_name = self.node_name(node.target)
-
-        if node.name is None:
-            node.name = node_name
+            node.fake_value = validate(node.target, *node.args, **node.kwargs)
 
         # Add Node.
-        self.nodes[node.name] = node
+        self.nodes.append(node)
 
-    def node_name(self, target: Callable):
+    def copy(self):
 
-        target_name = target.__name__
 
-        # Init name_idx tracker for this Node's name if not already added.
-        if target_name not in self.name_idx:
-            self.name_idx[target_name] = 0
+        graph = Graph(
+            validate=self.validate,
+            proxy_class=self.proxy_class,
+        )
 
-        node_name = f"{target_name}_{self.name_idx[target_name]}"
-
-        # Increment name_idx for name.
-        self.name_idx[target_name] += 1
-
-        return node_name
-
-    def copy(self, graph: Graph = None, return_mapping: bool = False):
-
-        if graph is None:
-
-            graph = Graph(
-                validate=self.validate,
-                sequential=self.sequential,
-                proxy_class=self.proxy_class,
-            )
-
-        mapping = {}
-
+        memo = {}
+        
         def _copy(node: Node):
 
-            name = node.name
+            key = id(node)
 
-            if name in graph.nodes and name in mapping:
-                return graph.nodes[mapping[name]]
+            if key in memo:
+                return memo[key]
 
             node = graph.create(
                 target=node.target,
@@ -185,25 +200,19 @@ class Graph:
                 args=apply(node.args, lambda x: _copy(x), Node),
                 kwargs=apply(node.kwargs, lambda x: _copy(x), Node),
             ).node
-
-            mapping[name] = node.name
+            
+            memo[key] = node
 
             return node
 
-        nodes = {**graph.nodes}
+        nodes = []
 
-        for node in self.nodes.values():
+        for node in self:
 
-            node = _copy(node)
-
-            nodes[node.name] = node
+            nodes.append(_copy(node))
 
         graph.nodes = nodes
-
-        if return_mapping:
-            mapping = {v: k for k, v in mapping.items()}
-            return (graph, mapping)
-
+        
         return graph
 
     def vis(
@@ -277,13 +286,12 @@ class Graph:
                 display_graph(f"{path}/{title}.png")
 
     def __str__(self) -> str:
-        result = ""
+        result = f"Graph: {self.id}:\n"
 
-        for name, node in self.nodes.items():
-            result += f"  %{node}\n"
+        for node in self:
+            result += f"  {str(node)}\n"
 
         return result
-
 
 class MultiGraph(Graph):
 
@@ -304,5 +312,4 @@ class MultiGraph(Graph):
         state["id_to_graphs"] = self.id_to_graphs
         return state
 
-    def __iter__(self) -> Iterator[Graph]:
-        return list(self.id_to_graphs.values())
+

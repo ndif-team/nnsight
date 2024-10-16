@@ -31,8 +31,8 @@ class ConditionalManager():
             conditional_node (Node): ConditionalProtocol node.
         """
 
-        self._conditional_nodes_dict[conditional_node.name] = conditional_node
-        self._conditioned_nodes_dict[conditional_node.name] = set()
+        self._conditional_nodes_dict[conditional_node.index] = conditional_node
+        self._conditioned_nodes_dict[conditional_node.index] = set()
         self._conditional_nodes_stack.append(conditional_node)
 
     def get(self, key: str) -> Conditional:
@@ -69,7 +69,7 @@ class ConditionalManager():
             - node (Node): A node conditioned by the latest Conditional context.
         """
 
-        self._conditioned_nodes_dict[self.peek().name].add(node)
+        self._conditioned_nodes_dict[self.peek().index].add(node)
 
     def is_node_conditioned(self, node: "Node") -> bool:
         """ Returns True if the Node argument is conditioned by the current Conditional context.
@@ -81,7 +81,7 @@ class ConditionalManager():
             bool: Whether the Node is conditioned.
         """
 
-        curr_conditioned_nodes_set = self._conditioned_nodes_dict[self.peek().name]
+        curr_conditioned_nodes_set = self._conditioned_nodes_dict[self.peek().index]
 
         return (node in curr_conditioned_nodes_set)
     

@@ -8,14 +8,14 @@ from ... import util
 from ...tracing import protocols
 from ...tracing.Node import Node
 from .. import check_for_dependencies, resolve_dependencies
-from ..GraphBasedContext import GraphBasedContext
+from ..Context import Context
 
 if TYPE_CHECKING:
     from ...intervention import InterventionProxy
     from ...tracing.Bridge import Bridge
 
 
-class Iterator(GraphBasedContext):
+class Iterator(Context):
     """Intervention loop context for iterative execution of an intervention graph.
 
     Attributes:
@@ -28,6 +28,7 @@ class Iterator(GraphBasedContext):
     ) -> None:
 
         self.data: Iterable = data
+        self.iter_item_index:int = None
         self._return_context: bool = return_context
 
         super().__init__(*args, **kwargs)
@@ -59,6 +60,8 @@ class Iterator(GraphBasedContext):
         iter_item_proxy: "InterventionProxy" = protocols.ValueProtocol.add(
             self.graph, proxy_value
         )
+        
+        self.iter_item_index = iter_item_proxy.node.index
 
         if self._return_context:
             return iter_item_proxy, self
@@ -92,19 +95,13 @@ class Iterator(GraphBasedContext):
                 bridge.locks -= 1
 
             protocols.ValueProtocol.set(
-                self.graph.nodes[f"{protocols.ValueProtocol.__name__}_0"], item
+                self.graph[self.iter_item_index], item
             )
 
             try:
-                self.graph.execute()
+                self.graph.execute(subgraph=set(range(len(self.graph))))
             except protocols.EarlyStopProtocol.EarlyStopException as e:
                 break
-            finally:
-                graph = self.graph
-                graph.alive = False
-
-                if not isinstance(graph, weakref.ProxyType):
-                    self.graph = weakref.proxy(graph)
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

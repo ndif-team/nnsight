@@ -6,3 +6,9 @@ The :class:`Node <nnsight.tracing.Node.Node>` class represents an individual ope
 
 The :class:`Proxy <nnsight.tracing.Proxy.Proxy>` class handles interactions from the user in order to create new `Node`s. There is a `Proxy` for each `Node`.
 """
+
+from .Graph import Graph
+
+from .Node import Node
+
+from .Proxy import Proxy

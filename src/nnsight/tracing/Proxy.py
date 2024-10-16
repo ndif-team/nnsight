@@ -37,7 +37,6 @@ class Proxy:
         self.__dict__["node"] = node
 
         self.node: "Node"
-        self.node.proxy = weakref.proxy(self)
 
     @property
     def value(self) -> Any:
@@ -51,15 +50,15 @@ class Proxy:
 
     def __str__(self) -> str:
 
-        if not self.node.attached():
+        if not self.node.attached:
 
             return str(self.value)
 
-        return f"{type(self).__name__} ({self.node.name}): {self.node.proxy_value if self.node.proxy_value is not inspect._empty else ''}"
+        return f"{type(self).__name__} ({self.node.target.__name__}): {self.node.fake_value if self.node.fake_value is not inspect._empty else ''}"
 
     def __repr__(self) -> str:
 
-        if not self.node.attached():
+        if not self.node.attached:
 
             return repr(self.value)
 
@@ -255,10 +254,10 @@ class Proxy:
         return self.node.create(target=operator.index, args=[self.node])
 
     def __bool__(self) -> bool:
-        return self.node.proxy_value.__bool__()
+        return self.node.fake_value.__bool__()
 
     def __instancecheck__(self, __instance: Any) -> bool:
-        return self.node.proxy_value.__instancecheck__(__instance)
+        return self.node.fake_value.__instancecheck__(__instance)
 
     @classmethod
     def __torch_function__(cls, orig_method, types, args=None, kwargs=None) -> Self:

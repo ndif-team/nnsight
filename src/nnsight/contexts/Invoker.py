@@ -13,7 +13,7 @@ from ..patching import Patch, Patcher
 from ..tracing.Node import Node
 from ..tracing.Proxy import Proxy
 from . import check_for_dependencies
-from .GraphBasedContext import GlobalTracingContext
+from .Context import GlobalTracingContext
 
 if TYPE_CHECKING:
 
@@ -89,7 +89,7 @@ class Invoker(AbstractContextManager):
 
                 if has_proxies_in_inputs:
 
-                    input = util.apply(input, lambda x: x.proxy_value, Node)
+                    input = util.apply(input, lambda x: x.fake_value, Node)
 
                     input, batch_size = self.tracer.model._prepare_input(
                         *input[0], **input[1]

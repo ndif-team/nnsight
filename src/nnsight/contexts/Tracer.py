@@ -3,14 +3,14 @@ from __future__ import annotations
 import weakref
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
+from nnsight.intervention import InterventionProxy
 from typing_extensions import Self
 
 from ..tracing import protocols
-from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from . import resolve_dependencies
 from .backends import Backend, BridgeMixin, EditBackend, EditMixin, RemoteMixin
-from .GraphBasedContext import GraphBasedContext
+from .Context import Context
 from .Invoker import Invoker
 from ..intervention import InterventionHandler
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from ..tracing.Node import Node
 
 
-class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
+class Tracer(Context, RemoteMixin, EditMixin):
     """The Tracer class creates a :class:`nnsight.tracing.Graph.Graph` around the ._model of a :class:`nnsight.models.NNsightModel.NNsight` which tracks and manages the operations performed on the inputs and outputs of said model.
 
     Attributes:
@@ -36,26 +36,21 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         backend: Backend,
         model: "NNsight",
         graph: Optional[Graph] = None,
-        bridge: Optional[Bridge] = None,
         method: Optional[str] = None,
         validate: bool = False,
-        return_context: bool = False,
         **kwargs,
     ) -> None:
 
         self.model = model
         self.method = method
 
-        self.return_context = return_context
 
-        GraphBasedContext.__init__(
+        Context.__init__(
             self,
             backend,
             graph=graph,
-            bridge=bridge,
             proxy_class=model.proxy_class,
-            validate=validate,
-            sequential=False,
+            validate=validate
         )
 
         protocols.ApplyModuleProtocol.set_module(self.graph, self.model)
@@ -86,8 +81,6 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
             self.invoker.__enter__()
 
         if isinstance(self.backend, EditBackend):
-            if self.return_context:
-                return self.model, self
 
             return self.model
 
@@ -146,6 +139,12 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
     def _invoker_group(self):
         
         return len(self._invoker_inputs) - 1
+    
+    #### Protocol ################################
+    
+    @classmethod
+    def execute(cls, node: protocols.Node):
+        return super().execute(node)
 
     ##### BACKENDS ###############################
 
@@ -157,10 +156,9 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         invoker_inputs = self._invoker_inputs
 
-        # If ths graph has a Bridge, we need to check for Nodes in the input itself.
-        if protocols.BridgeProtocol.has_bridge(self.graph):
 
-            invoker_inputs = resolve_dependencies(invoker_inputs)
+
+        invoker_inputs = Node.prepare_inputs
             
         (args, kwargs), batch_groups = self.batch(invoker_inputs)
 
@@ -210,3 +208,26 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"
+
+
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {
+            "node": {
+                "color": "purple",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": "ExecuteProtocol",
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: "solid"),
+        }  # Argument edge display

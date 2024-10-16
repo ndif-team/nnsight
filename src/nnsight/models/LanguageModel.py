@@ -405,7 +405,7 @@ class LanguageModel(RemoteableMixin):
 
         def convert_idx(self, idx: int):
             if idx >= 0:
-                n_tokens = self.proxy.node.proxy_value.shape[1]
+                n_tokens = self.proxy.node.fake_value.shape[1]
                 idx = -(n_tokens - idx)
 
             return idx

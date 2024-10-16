@@ -42,7 +42,7 @@ def check_for_dependencies(data: Any) -> Tuple[Any, bool]:
 
     def check_for_nodes(proxy: Proxy):
 
-        if not proxy.node.done():
+        if not proxy.node.done:
 
             nonlocal has_proxies
 

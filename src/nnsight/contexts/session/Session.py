@@ -7,7 +7,7 @@ from ...tracing.Bridge import Bridge
 from ...tracing.Graph import Graph
 from ...tracing.protocols import EarlyStopProtocol
 from ..backends import Backend, BridgeBackend, RemoteMixin
-from ..GraphBasedContext import GraphBasedContext
+from ..Context import Context
 from .Iterator import Iterator
 
 if TYPE_CHECKING:
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from ...tracing.Node import Node
 
 
-class Session(GraphBasedContext, RemoteMixin):
+class Session(Context, RemoteMixin):
     """A Session is a root Collection that handles adding new Graphs and new Collections while in the session.
 
     Attributes:
@@ -39,7 +39,7 @@ class Session(GraphBasedContext, RemoteMixin):
 
         self.model = model
 
-        GraphBasedContext.__init__(
+        Context.__init__(
             self,
             backend,
             bridge=self.bridge,

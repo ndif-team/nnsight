@@ -73,10 +73,7 @@ def test_external_proxy_intervention_executed_locally(
         with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer_2:
             l1_out[:, 2] = 5
 
-        assert list(tracer_2.graph.nodes.keys()) == [
-            "BridgeProtocol_0",
-            "setitem_0",
-        ]
+        assert len(tracer_2.graph) == 2
 
     assert l1_out[:, 2] == 5
 

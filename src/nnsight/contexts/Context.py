@@ -4,7 +4,7 @@ import inspect
 import weakref
 from contextlib import AbstractContextManager
 from functools import wraps
-from typing import Any, Callable, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.overrides import TorchFunctionMode
@@ -13,29 +13,25 @@ from typing_extensions import Self
 from ..intervention import InterventionProxy
 from ..patching import Patch, Patcher
 from ..tracing import protocols
-from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
-from .backends import Backend, BridgeMixin
+from .backends.LocalBackend import LocalMixin, Backend
 from .Conditional import Conditional
 
 
-class GraphBasedContext(AbstractContextManager, BridgeMixin):
+class Context(protocols.Protocol, LocalMixin, AbstractContextManager):
 
     def __init__(
         self,
         backend: Backend,
-        graph: Graph = None,
-        bridge: Bridge = None,
+        graph: Optional[Graph] = None,
+        parent: Optional[Graph] = None,
         **kwargs,
     ) -> None:
 
         self.backend = backend
 
-        self.graph: Graph = Graph(**kwargs) if graph is None else graph
-
-        if bridge is not None:
-
-            bridge.add(self.graph)
+        self.graph: Graph = graph or Graph(**kwargs)
+        self.parent = parent
 
     def apply(
         self,
@@ -122,12 +118,8 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             InterventionProxy: Proxy of the EarlyStopProtocol node.
         """
 
-        if self.graph.sequential:
-            return protocols.EarlyStopProtocol.add(self.graph)
-        else:
-            raise Exception(
-                "Early exit is only supported for sequential graph-based contexts."
-            )
+        return protocols.EarlyStopProtocol.add(self.graph)
+     
 
     def log(self, *data: Any) -> None:
         """Adds a node via .apply to print the value of a Node.
@@ -237,15 +229,9 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
 
         try:
             self.graph.reset()
-            self.graph.execute()
+            self.graph.execute(subgraph=set(range(len(self.graph))))
         except protocols.EarlyStopProtocol.EarlyStopException as e:
             raise e
-
-    def bridge_backend_handle(self, bridge: Bridge) -> None:
-
-        bridge.pop_graph()
-
-        protocols.LocalBackendExecuteProtocol.add(self, bridge.peek_graph())
 
 from inspect import getmembers, isclass
 
@@ -288,7 +274,7 @@ def global_patch_class(cls: type) -> Patch:
     return Patch(cls, inner, "__new__")
 
 
-class GlobalTracingContext(GraphBasedContext):
+class GlobalTracingContext(Context):
     """The Global Tracing Context handles adding tracing operations globally without reference to a given `GraphBasedContext`.
     There should only be one of these and that is `GlobalTracingContext.GLOBAL_TRACING_CONTEXT`.
     `GlobalTracingContext.TORCH_HANDLER` handles adding torch functions without reference to a given `GraphBasedContext`.
@@ -366,7 +352,7 @@ class GlobalTracingContext(GraphBasedContext):
         return GlobalTracingContext.GlobalTracingExit()
 
     @staticmethod
-    def try_register(graph_based_context: GraphBasedContext) -> bool:
+    def try_register(graph_based_context: Context) -> bool:
         """Attempts to register a `Graph` globally.]
         Will not if one is already registered.
 
@@ -386,7 +372,7 @@ class GlobalTracingContext(GraphBasedContext):
         return True
 
     @staticmethod
-    def try_deregister(graph_based_context: GraphBasedContext) -> bool:
+    def try_deregister(graph_based_context: Context) -> bool:
         """Attempts to deregister a `Graph` globally.
         Will not if `graph_based_context` does not have the same `Graph` as the currently registered one.
 
@@ -408,7 +394,7 @@ class GlobalTracingContext(GraphBasedContext):
         return True
 
     @staticmethod
-    def register(graph_based_context: GraphBasedContext) -> None:
+    def register(graph_based_context: Context) -> None:
         """Register `GraphBasedContext` globally.
 
         Args:
@@ -450,7 +436,7 @@ class GlobalTracingContext(GraphBasedContext):
         static_methods = [
             name
             for name, value in inspect.getmembers(
-                GraphBasedContext, predicate=inspect.ismethod
+                Context, predicate=inspect.ismethod
             )
         ]
 

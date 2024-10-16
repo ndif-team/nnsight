@@ -540,7 +540,7 @@ except:
 
 DEFAULT_PATCHER.__enter__()
 
-from .contexts.GraphBasedContext import GlobalTracingContext
+from .contexts.Context import GlobalTracingContext
 
 bool = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bool
 bytes = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytes

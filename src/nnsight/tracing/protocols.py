@@ -20,9 +20,8 @@ if TYPE_CHECKING:
     from ..contexts.backends.LocalBackend import LocalMixin
     from ..contexts.Conditional import Conditional
     from ..intervention import InterventionProxy
-    from .Bridge import Bridge
-    from .Graph import Graph
-    from .Node import Node
+    from . import Graph
+    from . import Node
 
 
 class Protocol:
@@ -34,10 +33,16 @@ class Protocol:
     condition: bool = True
 
     @classmethod
-    def add(cls, *args, **kwargs) -> "InterventionProxy":
+    def add(cls, graph:"Graph",*args, **kwargs) -> "InterventionProxy":
         """Class method to be implemented in order to add a Node of this Protocol to a Graph."""
-
-        raise NotImplementedError()
+        
+        graph.create(
+            target = cls,
+            fake_value=None,
+            *args,
+            **kwargs
+            
+        )
 
     @classmethod
     def execute(cls, node: "Node"):
@@ -248,18 +253,14 @@ class GradProtocol(Protocol):
     Uses an attachment to store number of times .backward() has been called during tracing so a given .grad hook is only value injected at the appropriate backwards pass.
     """
 
-    attachment_name = "nnsight_backward_idx"
 
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
 
-        # Get number of times .backward() was called during tracing from an attachment. Use as Node argument.
-        backward_idx = node.graph.attachments.get(cls.attachment_name, 0)
-
         return node.create(
-            proxy_value=node.proxy_value,
+            proxy_value=node.fake_value,
             target=cls,
-            args=[node, backward_idx],
+            args=[node],
         )
 
     @classmethod
@@ -269,55 +270,42 @@ class GradProtocol(Protocol):
 
         # First arg is the Tensor to add hook to.
         tensor: torch.Tensor = args[0]
-        # Second is which backward pass this Node refers to.
-        backward_idx: int = args[1]
+        backwards_iteration = kwargs.pop('backwards_iteration')
+        subgraph = kwargs.pop('subgraph')
 
         # Hook to remove when hook is executed at the appropriate backward pass.
         hook = None
 
+
         def grad(value):
-
-            nonlocal backward_idx
-
-            # If backward_idx == 0, this is the correct backward pass and we should actually execute.
-            if backward_idx == 0:
-
+            
+            nonlocal backwards_iteration
+            
+            # print(backwards_iteration, node)
+            
+            if backwards_iteration == 0:
+                                   
                 # Set the value of the Node.
                 node.set_value(value)
-                
+
+                node.graph.execute(subgraph=subgraph)
+
                 # There may be a swap Protocol executed during the resolution of this part of the graph.
                 # If so get it and replace value with it.
                 value = SwapProtocol.get_swap(node.graph, value)
-
-                # Don't execute this hook again.
-                backward_idx = -1
 
                 # Remove hook (if this is not done memory issues occur)
                 hook.remove()
 
                 return value
-
-            # Otherwise decrement backward_idx
             else:
-
-                backward_idx -= 1
-
-                return None
-
+                backwards_iteration -= 1
+                
+                return value
+            
         # Register hook.
         hook = tensor.register_hook(grad)
-
-    @classmethod
-    def increment(cls, graph: "Graph"):
-        """Increments the backward_idx attachment to track the number of times .backward() is called in tracing for this Graph.
-
-        Args:
-            graph (Graph): Graph.
-        """
-
-        backward_idx = graph.attachments.get(cls.attachment_name, 0)
-
-        graph.attachments[cls.attachment_name] = backward_idx + 1
+         
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
@@ -426,151 +414,6 @@ class SwapProtocol(Protocol):
             "edge": defaultdict(lambda: "solid"),
         }  # Argument edge key word
 
-
-class BridgeProtocol(Protocol):
-    """Protocol to connect two Graphs by grabbing a value from one and injecting it into another.
-    Uses an attachment to store a Bridge object which references all relevant Graphs and their ordering.
-    """
-
-    attachment_name = "nnsight_bridge"
-    condition: bool = False
-
-    class BridgeException(Exception):
-        def __init__(self):
-            super.__init__("Must define a Session context to make use of the Bridge")
-
-    @classmethod
-    def add(cls, node: "Node") -> "InterventionProxy":
-
-        bridge = cls.get_bridge(node.graph)
-        curr_graph = bridge.peek_graph()
-        bridge_proxy = bridge.get_bridge_proxy(
-            node, curr_graph.id
-        )  # a bridged node has a unique bridge node proxy per graph reference
-
-        # if the bridge node does not exist, create one
-        if bridge_proxy is None:
-            # Adds a Lock Node. One, so the value from_node isn't destroyed until the to_nodes are done with it,
-            # and two acts as an easy reference to the from_node to get its value from the lock Node args.
-            lock_node = LockProtocol.add(node).node
-
-            # Args for a Bridge Node are the id of the Graph and node name of the Lock Node.
-            bridge_proxy = node.create(
-                target=cls,
-                proxy_value=node.proxy_value,
-                args=[node.graph.id, lock_node.name],
-            )
-            bridge.add_bridge_proxy(node, bridge_proxy)
-
-        return bridge_proxy
-
-    @classmethod
-    def execute(cls, node: "Node") -> None:
-
-        # Gets Bridge object from the Node's Graph.
-        bridge = cls.get_bridge(node.graph)
-
-        # Args are Graph's id and name of the Lock Node on it.
-        from_graph_id, lock_node_name = node.args
-
-        # Gets the from_node's Graph via its id with the Bridge and get the Lock Node.
-        lock_node = bridge.get_graph(from_graph_id).nodes[lock_node_name]
-
-        # Value node is Lock Node's only arg
-        value_node: "Node" = lock_node.args[0]
-
-        if value_node.done():
-
-            # Set value to that of the value Node.
-            node.set_value(value_node.value)
-
-        # Bridge.release tells this Protocol when to release all Lock Nodes as we no longer need the data (useful when running a Graph in a loop, only release on last iteration)
-        if bridge.release:
-
-            lock_node.set_value(None)
-
-    @classmethod
-    def set_bridge(cls, graph: "Graph", bridge: "Bridge") -> None:
-        """Sets Bridge object as an attachment on a Graph.
-
-        Args:
-            graph (Graph): Graph.
-            bridge (Bridge): Bridge.
-        """
-
-        graph.attachments[cls.attachment_name] = weakref.proxy(bridge)
-
-    @classmethod
-    def get_bridge(cls, graph: "Graph") -> "Bridge":
-        """Gets Bridge object from a Graph. Assumes Bridge has been set as an attachment on this Graph via BridgeProtocol.set_bridge().
-
-        Args:
-            graph (Graph): Graph.
-
-        Returns:
-            Bridge: Bridge.
-        """
-
-        if not cls.has_bridge(graph):
-            raise cls.BridgeException()
-
-        return graph.attachments[cls.attachment_name]
-
-    @classmethod
-    def has_bridge(cls, graph: "Graph") -> bool:
-        """Checks to see if a Bridge was added as an attachment on this Graph via BridgeProtocol.set_bridge().
-
-        Args:
-            graph (Graph): Graph
-
-        Returns:
-            bool: If Graph has Bridge attachment.
-        """
-
-        return cls.attachment_name in graph.attachments
-
-    @classmethod
-    def peek_graph(cls, graph: "Graph") -> "Graph":
-        """Returns current Intervention Graph.
-
-        Args:
-            - graph (Graph): Graph.
-
-        Returns:
-            Graph: Graph.
-        """
-
-        if not BridgeProtocol.has_bridge(graph):
-            return graph
-        else:
-            bridge = BridgeProtocol.get_bridge(graph)
-            return bridge.peek_graph()
-
-    @classmethod
-    def style(cls) -> Dict[str, Any]:
-        """Visualization style for this protocol node.
-
-        Returns:
-            - Dict: dictionary style.
-        """
-
-        return {
-            "node": {"color": "brown", "shape": "box"},  # Node display
-            "label": cls.__name__,
-            "arg": defaultdict(
-                lambda: {
-                    "color": "gray",
-                    "shape": "box",
-                },  # Non-node argument display
-                {0: {"color": "gray", "shape": "box", "style": "dashed"}},
-            ),
-            "arg_kname": defaultdict(
-                lambda: None, {0: "graph_id"}
-            ),  # Arugment label key word
-            "edge": defaultdict(lambda: "solid", {0: "dashed"}),
-        }  # Argument edge display
-
-
 class EarlyStopProtocol(Protocol):
     """Protocol to stop the execution of a model early."""
 
@@ -633,28 +476,7 @@ class LocalBackendExecuteProtocol(Protocol):
 
         node.set_value(None)
 
-    @classmethod
-    def style(cls) -> Dict[str, Any]:
-        """Visualization style for this protocol node.
-
-        Returns:
-            - Dict: dictionary style.
-        """
-
-        return {
-            "node": {
-                "color": "purple",
-                "shape": "polygon",
-                "sides": 6,
-            },  # Node display
-            "label": "ExecuteProtocol",
-            "arg": defaultdict(
-                lambda: {"color": "gray", "shape": "box"}
-            ),  # Non-node argument display
-            "arg_kname": defaultdict(lambda: None),  # Argument label key word
-            "edge": defaultdict(lambda: "solid"),
-        }  # Argument edge display
-
+   
 
 class ValueProtocol(Protocol):
 
@@ -713,7 +535,7 @@ class ConditionalProtocol(Protocol):
                     ('layer2', torch.nn.Linear(hidden_dims, output_size)),
                 ]))
 
-                input = torch.rand((1, input_size))    å
+                input = torch.rand((1, input_size))    
 
         Ex 1: The .save() on the model output will only be executed if the condition (x > 0) is evaluated to True.
 
@@ -760,9 +582,9 @@ class ConditionalProtocol(Protocol):
                 - conditioned_node (Node): Conditioned Node
             """
             for listener in conditioned_node.listeners:
-                for listener_arg in listener.arg_dependencies:
+                for listener_arg in listener.dependencies:
                     listener_arg.remaining_listeners -= 1
-                    if listener_arg.done() and listener_arg.redundant():
+                    if listener_arg.done and listener_arg.redundant:
                         listener_arg.destroy()
                 update_conditioned_nodes(listener)
 
@@ -900,7 +722,7 @@ class UpdateProtocol(Protocol):
 
         return node.create(
             target=cls,
-            proxy_value=node.proxy_value,
+            proxy_value=node.fake_value,
             args=[
                 node,
                 new_value,

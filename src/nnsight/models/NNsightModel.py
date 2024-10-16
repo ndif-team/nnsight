@@ -319,6 +319,7 @@ class NNsight:
             print(edited_output)
         """
         model_to_edit = self
+        
         if not inplace:
             model_to_edit = self._shallow_copy()
 
@@ -419,8 +420,8 @@ class NNsight:
                 return fn(*args, **kwargs)
             except protocols.EarlyStopProtocol.EarlyStopException:
                 # TODO: Log.
-                for node in intervention_graph.nodes.values():
-                    if not node.executed():
+                for node in intervention_graph:
+                    if not node.executed:
                         node.clean()
             finally:
                 intervention_handler.cleanup()
@@ -582,5 +583,5 @@ if TYPE_CHECKING:
     class NNsight(NNsight, Envoy):
         def __getattribute__(
             self, name: str
-        ) -> Union[Tracer, Session, Envoy, InterventionProxy, Any]:
+        ) -> Union[Envoy]:
             pass
