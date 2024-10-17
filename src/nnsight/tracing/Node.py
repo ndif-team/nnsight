@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import sys
 import traceback
 import weakref
 from collections import defaultdict
@@ -384,25 +385,26 @@ class Node:
 
                 # Set value.
                 self.set_value(output)
-
+        except protocols.EarlyStopProtocol.EarlyStopException as e:
+            raise e
         except Exception as e:
             if self.graph and self.graph.debug:
-                if type(e) != protocols.EarlyStopProtocol.EarlyStopException:
-                    if self.attached():
-                        print(f"\n{self.meta_data['traceback']}\n" + \
-                            f"NNsightError: {str(e)}.\n")
-                        
-                        # Kill all the graphs in the Session to signal that an error occured
-                        # This way only the traceback of the Node responsible for the error gets printed out
-                        self.graph.alive = False
-                        if protocols.BridgeProtocol.has_bridge(self.graph):
-                            bridge = protocols.BridgeProtocol.get_bridge(self.graph)
+                sys.tracebacklimit = 0
+                if self.attached():
+                    print(f"\n{self.meta_data['traceback']}")
+                    
+                    # Kill all the graphs in the Session to signal that an error occured
+                    # This way only the traceback of the Node responsible for the error gets printed out
+                    self.graph.alive = False
+                    if protocols.BridgeProtocol.has_bridge(self.graph):
+                        bridge = protocols.BridgeProtocol.get_bridge(self.graph)
 
-                            def kill_graph(graph: "Graph") -> None:
-                                """Sets the graph.alive attribute to False"""
-                                graph.alive = False
+                        def kill_graph(graph: "Graph") -> None:
+                            """Sets the graph.alive attribute to False"""
+                            graph.alive = False
 
-                            [kill_graph(g) for g in bridge.graph_stack]
+                        [kill_graph(g) for g in bridge.graph_stack]
+                raise util.NNsightError(str(e)) from None
             else: 
                 raise type(e)(
                     f"Above exception occured when executing Node: '{self.name}' in Graph: '{self.graph.id}'"
