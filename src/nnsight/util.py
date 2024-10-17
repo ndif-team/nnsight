@@ -146,3 +146,8 @@ class WrapperModule(torch.nn.Module):
             args = args[0]
 
         return args
+
+class NNsightError(Exception):
+    """NNsight Execption class for raising error during execution."""
+
+    pass

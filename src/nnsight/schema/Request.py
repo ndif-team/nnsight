@@ -21,7 +21,7 @@ class RequestModel(BaseModel):
         arbitrary_types_allowed=True, protected_namespaces=()
     )
 
-    object: str | OBJECT_TYPES
+    object: Union[str, OBJECT_TYPES]
     model_key: str
 
     id: str = None

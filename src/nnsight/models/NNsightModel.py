@@ -33,6 +33,7 @@ from ..intervention import (
 from ..logger import logger
 from ..tracing import protocols
 from ..tracing.Graph import Graph
+from .. import CONFIG
 
 
 class MetaDispatcher(TorchDispatchMode):
@@ -245,14 +246,19 @@ class NNsight:
 
             backend = RemoteBackend(host=backend, blocking=blocking)
 
+        if "debug" not in kwargs.keys():
+            kwargs["debug"] = CONFIG.APP.DEBUG
+
         # Create Tracer object.
         if self._default_graph is not None:
 
             graph = self._default_graph.copy()
 
-            tracer = Tracer(backend, self, bridge=bridge, graph=graph, **kwargs)
+            graph.debug = kwargs["debug"]
+
+            tracer = Tracer(backend, self, bridge=bridge, graph=graph, scan=scan, **kwargs)
         else:
-            tracer = Tracer(backend, self, bridge=bridge, **kwargs)
+            tracer = Tracer(backend, self, bridge=bridge, scan=scan, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -404,6 +410,9 @@ class NNsight:
         elif isinstance(backend, str):
 
             backend = RemoteBackend(host=backend, blocking=blocking)
+
+        if "debug" not in kwargs.keys():
+            kwargs["debug"] = CONFIG.APP.DEBUG
 
         session = Session(backend, self, **kwargs)
 

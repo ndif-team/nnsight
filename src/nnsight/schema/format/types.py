@@ -77,8 +77,8 @@ class NodeModel(BaseNNsightModel):
     target: Union[FunctionModel, FunctionType]
     args: List[ValueTypes] = []
     kwargs: Dict[str, ValueTypes] = {}
-    condition: None | Union[
-        NodeReferenceType, NodeModel.Reference
+    condition: Union[
+        NodeReferenceType, NodeModel.Reference, None
     ] = None
     
     @model_serializer(mode='wrap')
