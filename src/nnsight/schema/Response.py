@@ -36,6 +36,7 @@ class ResponseModel(BaseModel):
         COMPLETED = "COMPLETED"
         LOG = "LOG"
         ERROR = "ERROR"
+        NNSIGHT_ERROR = "NNSIGHT_ERROR"
 
     id: str
     status: JobStatus

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import requests
 import socketio
@@ -11,6 +11,8 @@ from tqdm import tqdm
 from ... import CONFIG
 from ...logger import logger, remote_logger
 from .LocalBackend import LocalBackend, LocalMixin
+from ...util import NNsightError
+from ...tracing.protocols import BridgeProtocol
 
 if TYPE_CHECKING:
 
@@ -52,6 +54,39 @@ class RemoteMixin(LocalMixin):
         """
 
         raise NotImplementedError()
+    
+    def remote_backend_handle_nnsight_exception(self, exception_message: str) -> None:
+        """ Handles nnsight error received from the remote server and caused by the execution of the intervention graph constructed locally.
+
+        Args:
+            exception_message (str): error message relayed and formatted by the remote server.
+        """
+        if self.graph.debug:
+            msg_split = exception_message.split("-")
+            err_msg = msg_split[0].strip()
+            graph_id = int(msg_split[1].strip())
+            node_name = msg_split[2].strip()
+
+            def nnsight_error(*args, **kwargs):
+                """Throws an NNsightError constructed from the information received by the server."""
+                nonlocal err_msg, graph_id, node_name
+                nns_err = NNsightError(err_msg, graph_id, node_name)
+
+                raise nns_err
+            
+            if BridgeProtocol.has_bridge(self.graph):
+                bridge = BridgeProtocol.get_bridge(self.graph)
+                err_node_graph = bridge.get_graph(graph_id)
+                err_node = err_node_graph.nodes[node_name]
+            else:
+                err_node = self.graph.nodes[node_name]
+
+            err_node.args = []
+            err_node.kwargs = dict()
+            err_node.target = (lambda: nnsight_error())
+            err_node.execute()
+        else:
+            raise Exception(exception_message)
 
     def remote_backend_cleanup(self):
         raise NotImplementedError()
@@ -98,6 +133,7 @@ class RemoteBackend(LocalBackend):
     def __call__(self, obj: RemoteMixin):
 
         self.handle_result = obj.remote_backend_handle_result_value
+        self.handle_nnsight_exception = obj.remote_backend_handle_nnsight_exception
 
         if self.blocking:
 
@@ -190,6 +226,11 @@ class RemoteBackend(LocalBackend):
         # Or if there was some error.
         elif response.status == ResponseModel.JobStatus.ERROR:
             raise Exception(str(response))
+        elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
+            try:
+                self.handle_nnsight_exception(response.description)
+            except Exception as e:
+                raise e from None
 
         return response
 

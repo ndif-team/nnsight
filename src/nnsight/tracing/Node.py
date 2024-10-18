@@ -404,7 +404,9 @@ class Node:
                             graph.alive = False
 
                         [kill_graph(g) for g in bridge.graph_stack]
-                raise util.NNsightError(str(e)) from None
+                    raise util.NNsightError(str(e), self.graph.id, self.name)
+                else:
+                    raise e from None
             else: 
                 raise type(e)(
                     f"Above exception occured when executing Node: '{self.name}' in Graph: '{self.graph.id}'"

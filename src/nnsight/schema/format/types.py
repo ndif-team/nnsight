@@ -229,11 +229,12 @@ class GraphModel(BaseNNsightModel):
 
     id: int
     sequential: bool
+    debug: bool
     nodes: Dict[str, Union["NodeModel", "NodeType"]]
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
 
-        graph = Graph(validate=False, sequential=self.sequential, graph_id=self.id)
+        graph = Graph(validate=False, sequential=self.sequential, graph_id=self.id, debug=self.debug)
 
         handler.graph = graph
         handler.nodes = self.nodes
@@ -342,7 +343,7 @@ GraphType = Annotated[
     Graph,
     AfterValidator(
         lambda value: GraphModel(
-            id=value.id, sequential=value.sequential, nodes=value.nodes
+            id=value.id, sequential=value.sequential, nodes=value.nodes, debug=value.debug
         )
     ),
 ]
