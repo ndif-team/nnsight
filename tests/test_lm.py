@@ -2,10 +2,7 @@ import pytest
 import torch
 
 import nnsight
-from nnsight.contexts.GraphBasedContext import GlobalTracingContext
-from nnsight.contexts.Tracer import Tracer
-from nnsight.schema.Request import RequestModel
-from nnsight.tracing.Graph import Graph
+from nnsight.intervention.contexts import InterventionTracer
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +17,7 @@ def MSG_prompt():
     return "Madison Square Garden is located in the city of"
 
 
-def _test_serialize(tracer: Tracer):
+def _test_serialize(tracer: InterventionTracer):
     pass
     # with GlobalTracingContext.exit_global_tracing_context():
     #     request = RequestModel(
@@ -59,7 +56,7 @@ def test_save(gpt2: nnsight.LanguageModel):
         hs_input = gpt2.transformer.h[-1].input.save()
 
         _test_serialize(tracer)
-
+        
     assert hs.value is not None
     assert isinstance(hs.value, torch.Tensor)
     assert hs.value.ndim == 3
@@ -150,6 +147,7 @@ def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         output1
         == "Madison Square Garden is located in the city of New York City"
     )
+
     assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
 

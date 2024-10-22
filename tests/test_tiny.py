@@ -73,16 +73,15 @@ def test_external_proxy_intervention_executed_locally(
         with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer_2:
             l1_out[:, 2] = 5
 
-        assert len(tracer_2.graph) == 2
-
     assert l1_out[:, 2] == 5
 
 
 def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input, validate=True, scan=True):
+    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
         l1_out = tiny_model.layer1.output.save()
+        tracer.stop()
         l2_out = tiny_model.layer2.output.save()
-        tiny_model.layer1.output.stop()
+        
 
     assert isinstance(l1_out.value, torch.Tensor)
 
@@ -192,11 +191,8 @@ def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.session(validate=True) as session:
         result = session.apply(list).save()
-        with session.iter([0, 1, 2], return_context=True, validate=True) as (
-            item,
-            iterator,
-        ):
-            with iterator.cond(item % 2 == 0):
+        with session.iter([0, 1, 2]) as item:
+            with session.cond(item % 2 == 0):
                 with tiny_model.trace(tiny_input, validate=True, scan=True):
                     result.append(item)
 
@@ -215,44 +211,26 @@ def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
     assert torch.all(l1_out.value == 0).item()
 
 
-def test_update_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session(validate=True) as session:
-        sum = session.apply(int, 0).save()
-        with session.iter([0, 1, 2], validate=True) as item:
-            sum.update(sum + item)
-
-        sum.update(sum + 4)
-
-        with tiny_model.trace(tiny_input, validate=True, scan=True):
-            sum.update(sum + 3)
-            double_sum = (sum * 2).save()
-
-    assert double_sum.value == 20
-
-
 def test_sequential_graph_based_context_exit(tiny_model: NNsight):
     with tiny_model.session(validate=True) as session:
         l = session.apply(list).save()
         l.append(0)
 
-        with session.iter([1, 2, 3, 4], return_context=True, validate=True) as (
-            item,
-            iterator,
-        ):
-            with iterator.cond(item == 3):
-                iterator.exit()
+        with session.iter([1, 2, 3, 4]) as item:
+            with session.cond(item == 3):
+                session.stop()
             l.append(item)
         l.append(5)
-        session.exit()
+        session.stop()
         l.append(6)
 
     assert l.value == [0, 1, 2, 5]
 
 
 def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input, validate=True, scan=True):
+    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
         l1_out = tiny_model.layer1.output
-        tiny_model.layer1.output.stop()
+        tracer.stop()
         l1_out_double = l1_out * 2
 
     with pytest.raises(ValueError):
@@ -262,9 +240,9 @@ def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_bridged_node_cleanup(tiny_model: NNsight):
     with tiny_model.session(validate=True) as session:
         l = session.apply(list)
-        with session.iter([0, 1, 2], return_context=True, validate=True) as (item, iterator):
-            with iterator.cond(item == 2):
-                iterator.exit()
+        with session.iter([0, 1, 2]) as item:
+            with session.cond(item == 2):
+                session.stop()
             l.append(item)
 
     with pytest.raises(ValueError):
@@ -279,22 +257,22 @@ def test_nested_iterator(tiny_model: NNsight):
         l.append([1])
         l.append([2])
         l2 = session.apply(list).save()
-        with session.iter(l, validate=True) as item:
-            with session.iter(item, validate=True) as item_2:
+        with session.iter(l) as item:
+            with session.iter(item) as item_2:
                 l2.append(item_2)
 
     assert l2.value == [0, 1, 2]
 
 def test_nnsight_builtins(tiny_model: NNsight):
     with tiny_model.session() as session:
-        nn_list = nnsight.list().save()
-        sesh_list = session.list().save()
+        nn_list = session.apply(list).save()
+        sesh_list = session.apply(list).save()
         apply_list = session.apply(list).save()
 
-        with session.iter([nn_list, sesh_list, apply_list], return_context=True) as (l, iterator):
-            l.append(nnsight.int(0))
-            l.append(iterator.str("Hello World"))
-            l.append(nnsight.dict({"a": "1"}))
+        with session.iter([nn_list, sesh_list, apply_list]) as l:
+            l.append(session.apply(int))
+            l.append(session.apply(str, "Hello World"))
+            l.append(session.apply(dict, {"a": "1"}))
 
     assert nn_list == sesh_list
     assert sesh_list == apply_list
