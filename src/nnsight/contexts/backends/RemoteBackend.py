@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Tuple
+from typing import TYPE_CHECKING, Any, Tuple, Dict
 
 import requests
 import socketio
@@ -13,6 +13,8 @@ from ... import CONFIG
 from ...logger import logger, remote_logger
 from ...tracing import protocols
 from .LocalBackend import LocalBackend, LocalMixin
+from ...util import NNsightError
+from ...tracing.protocols import BridgeProtocol
 
 if TYPE_CHECKING:
 
@@ -55,6 +57,36 @@ class RemoteMixin(LocalMixin):
         """
 
         raise NotImplementedError()
+    
+    def remote_backend_handle_nnsight_exception(self, exception_data: Dict) -> None:
+        """ Handles nnsight error received from the remote server and caused by the execution of the intervention graph constructed locally.
+
+        Args:
+            exception_message (str): error message relayed and formatted by the remote server.
+        """
+        if self.graph.debug:
+            err_msg = exception_data["messae"]
+            graph_id = exception_data["graph_id"]
+            node_name = exception_data["node_name"]
+
+            def trigger_exception(*args, **kwargs):
+                """Throws an Exception constructed from the information received by the server."""
+                nonlocal err_msg
+                nns_err = Exception(err_msg)
+
+                raise nns_err
+            
+            if BridgeProtocol.has_bridge(self.graph):
+                bridge = BridgeProtocol.get_bridge(self.graph)
+                err_node_graph = bridge.get_graph(graph_id)
+                err_node = err_node_graph.nodes[node_name]
+            else:
+                err_node = self.graph.nodes[node_name]
+
+            err_node.args = []
+            err_node.kwargs = dict()
+            err_node.target = (lambda: trigger_exception())
+            err_node.execute()
 
     # Following two methods are really only necessary because how you get a node in Tracer is different than Session
     # due to one have many graphs and the other on one.
@@ -238,6 +270,12 @@ class RemoteBackend(LocalBackend):
 
             # Get the local stream node in our intervention graph
             node = self.object.remote_backend_get_stream_node(*args)
+            
+        elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
+            try:
+                self.object.remote_backend_handle_nnsight_exception(self.data)
+            except Exception as e:
+                raise e from None
 
             # If its already been executed, it must mean this intervention subgraph should be executed every time.
             if node.executed():

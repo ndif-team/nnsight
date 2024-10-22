@@ -17,6 +17,7 @@ from ..intervention import (HookHandler, InterventionHandler,
                             InterventionProtocol, InterventionProxy)
 from ..tracing import protocols
 from ..tracing.Graph import Graph
+from .. import CONFIG
 
 
 class NNsight:
@@ -177,10 +178,14 @@ class NNsight:
 
             backend = RemoteBackend(host=backend, blocking=blocking)
 
+        if "debug" not in kwargs.keys():
+            kwargs["debug"] = CONFIG.APP.DEBUG
+
         # Create Tracer object.
         if self._default_graph is not None:
 
             graph = self._default_graph.copy()
+            graph.debug = kwargs["debug"]
 
             tracer = Tracer(
                 backend,
@@ -188,10 +193,11 @@ class NNsight:
                 bridge=bridge,
                 method=method,
                 graph=graph,
+                scan=scan,
                 **kwargs,
             )
         else:
-            tracer = Tracer(backend, self, bridge=bridge, method=method, **kwargs)
+            tracer = Tracer(backend, self, bridge=bridge, method=method, scan=scan, **kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -343,6 +349,9 @@ class NNsight:
         elif isinstance(backend, str):
 
             backend = RemoteBackend(host=backend, blocking=blocking)
+
+        if "debug" not in kwargs.keys():
+            kwargs["debug"] = CONFIG.APP.DEBUG
 
         session = Session(backend, self, **kwargs)
 

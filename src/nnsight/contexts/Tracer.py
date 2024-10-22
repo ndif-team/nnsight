@@ -35,11 +35,13 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         self,
         backend: Backend,
         model: "NNsight",
+        scan: bool = False,
         graph: Optional[Graph] = None,
         bridge: Optional[Bridge] = None,
         method: Optional[str] = None,
         validate: bool = False,
         return_context: bool = False,
+        debug: bool = False,
         **kwargs,
     ) -> None:
 
@@ -48,6 +50,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.return_context = return_context
 
+        self.scan = scan
+
         GraphBasedContext.__init__(
             self,
             backend,
@@ -55,6 +59,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
             bridge=bridge,
             proxy_class=model.proxy_class,
             validate=validate,
+            debug=debug,
             sequential=False,
         )
 
@@ -116,6 +121,9 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         if self.invoker is not None:
 
             raise Exception("Can't create an invoker context with one already open!")
+        
+        if "scan" not in kwargs.keys():
+            kwargs["scan"] = self.scan
 
         return Invoker(self, *inputs, **kwargs)
 

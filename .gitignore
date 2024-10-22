@@ -5,7 +5,8 @@ public/
 .installed.cfg
 .vscode
 __pycache__/
-.DS_STORE
+.DS_Store
+**/.DS_Store
 config.yaml
 .nfs*
 nnsight.log

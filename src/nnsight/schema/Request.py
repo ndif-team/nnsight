@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Union
+from typing import TYPE_CHECKING, Union
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, field_serializer
 
@@ -21,7 +21,7 @@ class RequestModel(BaseModel):
         arbitrary_types_allowed=True, protected_namespaces=()
     )
 
-    object: str | OBJECT_TYPES
+    object: Union[str, OBJECT_TYPES]
     model_key: str
 
     id: str = None
