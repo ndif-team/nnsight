@@ -7,8 +7,15 @@ from types import MethodDescriptorType
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import (BaseModel, ConfigDict, Field, Strict, field_validator,
-                      model_serializer)
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    Strict,
+    field_validator,
+    model_serializer,
+)
 from pydantic.functional_validators import AfterValidator
 from typing_extensions import Annotated
 
@@ -51,12 +58,13 @@ class BaseNNsightModel(BaseModel):
     def deserialize(self, handler: DeserializeHandler):
         raise NotImplementedError()
 
+
 def try_deserialize(value: BaseNNsightModel | Any, handler: DeserializeHandler):
-    
+
     if isinstance(value, BaseNNsightModel):
-        
+
         return value.deserialize(handler)
-    
+
     return value
 
 
@@ -77,27 +85,25 @@ class NodeModel(BaseNNsightModel):
     target: Union[FunctionModel, FunctionType]
     args: List[ValueTypes] = []
     kwargs: Dict[str, ValueTypes] = {}
-    condition: Union[
-        NodeReferenceType, NodeModel.Reference, None
-    ] = None
-    
-    @model_serializer(mode='wrap')
+    condition: None | Union[NodeReferenceType, NodeModel.Reference] = None
+
+    @model_serializer(mode="wrap")
     def serialize_model(self, handler):
-            
+
         dump = handler(self)
-        
+
         if self.condition is None:
-            
-            dump.pop('condition')
-            
+
+            dump.pop("condition")
+
         if not self.kwargs:
-            
-            dump.pop('kwargs')
-            
+
+            dump.pop("kwargs")
+
         if not self.args:
-            
-            dump.pop('args')
-            
+
+            dump.pop("args")
+
         return dump
 
     def deserialize(self, handler: DeserializeHandler) -> Node:
@@ -110,23 +116,19 @@ class NodeModel(BaseNNsightModel):
             target=self.target.deserialize(handler),
             args=[try_deserialize(value, handler) for value in self.args],
             kwargs={
-                key: try_deserialize(value, handler) for key, value in self.kwargs.items()
+                key: try_deserialize(value, handler)
+                for key, value in self.kwargs.items()
             },
             name=self.name,
         ).node
 
         node.cond_dependency = try_deserialize(self.condition, handler)
-        
+
         if isinstance(node.cond_dependency, Node):
             node.cond_dependency.listeners.append(weakref.proxy(node))
 
-        if isinstance(node.target, type) and issubclass(
-            node.target, protocols.Protocol
-        ):
-
-            node.target.compile(node)
-
         return node
+
 
 class TensorModel(BaseNNsightModel):
 
@@ -153,7 +155,7 @@ class SliceModel(BaseNNsightModel):
         return slice(
             try_deserialize(self.start, handler),
             try_deserialize(self.stop, handler),
-            try_deserialize(self.step, handler)
+            try_deserialize(self.step, handler),
         )
 
 
@@ -196,7 +198,10 @@ class DictModel(BaseNNsightModel):
     values: Dict[str, ValueTypes]
 
     def deserialize(self, handler: DeserializeHandler) -> dict:
-        return {key: try_deserialize(value, handler) for key, value in self.values.items()}
+        return {
+            key: try_deserialize(value, handler)
+            for key, value in self.values.items()
+        }
 
 
 class FunctionWhitelistError(Exception):
@@ -209,7 +214,6 @@ class FunctionModel(BaseNNsightModel):
 
     function_name: str
 
-    @field_validator("function_name")
     @classmethod
     def check_function_whitelist(cls, qualname: str) -> str:
         if qualname not in FUNCTIONS_WHITELIST:
@@ -220,12 +224,18 @@ class FunctionModel(BaseNNsightModel):
         return qualname
 
     def deserialize(self, handler: DeserializeHandler) -> FUNCTION:
+
+        FunctionModel.check_function_whitelist(self.function_name)
+
         return FUNCTIONS_WHITELIST[self.function_name]
 
 
 class GraphModel(BaseNNsightModel):
 
     type_name: Literal["GRAPH"] = "GRAPH"
+
+    # We have a reference to the real Graph in the pydantic to be used by optimization logic
+    graph: Graph = Field(exclude=True, default=None, validate_default=False)
 
     id: int
     sequential: bool
@@ -272,10 +282,14 @@ class TracerModel(BaseNNsightModel):
 
         handler.graph = graph
 
-        kwargs = {key: try_deserialize(value, handler) for key, value in self.kwargs.items()}
+        kwargs = {
+            key: try_deserialize(value, handler)
+            for key, value in self.kwargs.items()
+        }
 
         invoker_inputs = [
-            try_deserialize(invoker_input, handler) for invoker_input in self.invoker_inputs
+            try_deserialize(invoker_input, handler)
+            for invoker_input in self.invoker_inputs
         ]
 
         tracer = Tracer(
@@ -343,7 +357,11 @@ GraphType = Annotated[
     Graph,
     AfterValidator(
         lambda value: GraphModel(
-            id=value.id, sequential=value.sequential, nodes=value.nodes, debug=value.debug
+            id=value.id,
+            sequential=value.sequential,
+            nodes=value.nodes,
+            graph=value,
+            debug=value.debug
         )
     ),
 ]
@@ -360,27 +378,39 @@ TensorType = Annotated[
 SliceType = Annotated[
     slice,
     AfterValidator(
-        lambda value: SliceModel(start=value.start, stop=value.stop, step=value.step)
+        lambda value: SliceModel(
+            start=value.start, stop=value.stop, step=value.step
+        )
     ),
 ]
 
 EllipsisType = Annotated[
-    type(...),  # It will be better to use EllipsisType, but it requires python>=3.10
+    type(
+        ...
+    ),  # It will be better to use EllipsisType, but it requires python>=3.10
     AfterValidator(lambda value: EllipsisModel()),
 ]
 
 
-ListType = Annotated[list, AfterValidator(lambda value: ListModel(values=value))]
-
-TupleType = Annotated[
-    tuple, Strict(), AfterValidator(lambda value: TupleModel(values=list(value)))
+ListType = Annotated[
+    list, AfterValidator(lambda value: ListModel(values=value))
 ]
 
-DictType = Annotated[dict, AfterValidator(lambda value: DictModel(values=value))]
+TupleType = Annotated[
+    tuple,
+    Strict(),
+    AfterValidator(lambda value: TupleModel(values=list(value))),
+]
+
+DictType = Annotated[
+    dict, AfterValidator(lambda value: DictModel(values=value))
+]
 
 FunctionType = Annotated[
     FUNCTION,
-    AfterValidator(lambda value: FunctionModel(function_name=get_function_name(value))),
+    AfterValidator(
+        lambda value: FunctionModel(function_name=get_function_name(value))
+    ),
 ]
 
 NodeReferenceType = Annotated[
@@ -413,7 +443,9 @@ TracerType = Annotated[
 
 IteratorType = Annotated[
     Iterator,
-    AfterValidator(lambda value: IteratorModel(graph=value.graph, data=value.data)),
+    AfterValidator(
+        lambda value: IteratorModel(graph=value.graph, data=value.data)
+    ),
 ]
 
 SessionType = Annotated[

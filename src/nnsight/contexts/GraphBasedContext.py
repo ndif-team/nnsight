@@ -136,6 +136,18 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             data (Any): Data to print.
         """
         self.apply(print, *data)
+        
+    def remote(self, data:Any) -> InterventionProxy:
+        """Streams data remotely when it becomes available locally.
+        The remote service will block until the local value is uploaded and received.
+
+        Is a no-op when not executing remotely.
+
+        Returns:
+            InterventionProxy: Proxy.
+        """
+        
+        return protocols.StreamingUploadProtocol.add(self.graph, data)
 
     def bool(self, *args, **kwargs) -> InterventionProxy:
         """NNsight helper method to create a traceable bool."""
@@ -208,13 +220,16 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
         GlobalTracingContext.try_deregister(self)
-
+        
         if isinstance(exc_val, BaseException):
-            self.graph.alive = False
             self.graph = None
             raise exc_val
 
         self.backend(self)
+         
+        if not isinstance(self.graph, weakref.ProxyType):
+            self.graph = weakref.proxy(self.graph)
+
 
     ### BACKENDS ########
 
@@ -225,21 +240,12 @@ class GraphBasedContext(AbstractContextManager, BridgeMixin):
             self.graph.execute()
         except protocols.EarlyStopProtocol.EarlyStopException as e:
             raise e
-        finally:
-            graph = self.graph
-            graph.alive = False
-
-            if not isinstance(graph, weakref.ProxyType):
-                self.graph = weakref.proxy(graph)
 
     def bridge_backend_handle(self, bridge: Bridge) -> None:
 
         bridge.pop_graph()
 
         protocols.LocalBackendExecuteProtocol.add(self, bridge.peek_graph())
-
-        self.graph = weakref.proxy(self.graph)
-
 
 from inspect import getmembers, isclass
 

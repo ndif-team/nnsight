@@ -1,7 +1,10 @@
+import asyncio
 import inspect
 import weakref
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, Optional, Union
+from io import BytesIO
+from threading import Thread
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -43,10 +46,6 @@ class Protocol:
         Args:
             node (Node): Node to execute using this Protocols execution logic.
         """
-        pass
-
-    @classmethod
-    def compile(cls, node: "Node") -> None:
         pass
 
     @classmethod
@@ -138,9 +137,7 @@ class ApplyModuleProtocol(Protocol):
         except:
             device = None
 
-        args, kwargs = node.prepare_inputs(
-            (node.args, node.kwargs), device=device
-        )
+        args, kwargs = node.prepare_inputs((node.args, node.kwargs), device=device)
 
         module_path, *args = args
 
@@ -287,12 +284,10 @@ class GradProtocol(Protocol):
 
                 # Set the value of the Node.
                 node.set_value(value)
-
-                if node.attached():
-
-                    # There may be a swap Protocol executed during the resolution of this part of the graph.
-                    # If so get it and replace value with it.
-                    value = SwapProtocol.get_swap(node.graph, value)
+                
+                # There may be a swap Protocol executed during the resolution of this part of the graph.
+                # If so get it and replace value with it.
+                value = SwapProtocol.get_swap(node.graph, value)
 
                 # Don't execute this hook again.
                 backward_idx = -1
@@ -442,9 +437,7 @@ class BridgeProtocol(Protocol):
 
     class BridgeException(Exception):
         def __init__(self):
-            super.__init__(
-                "Must define a Session context to make use of the Bridge"
-            )
+            super.__init__("Must define a Session context to make use of the Bridge")
 
     @classmethod
     def add(cls, node: "Node") -> "InterventionProxy":
@@ -485,7 +478,7 @@ class BridgeProtocol(Protocol):
 
         # Value node is Lock Node's only arg
         value_node: "Node" = lock_node.args[0]
-        
+
         if value_node.done():
 
             # Set value to that of the value Node.
@@ -672,7 +665,7 @@ class ValueProtocol(Protocol):
 
     @classmethod
     def execute(cls, node: Node) -> None:
-        
+
         node.set_value(node.args[0])
 
     @classmethod
@@ -742,9 +735,7 @@ class ConditionalProtocol(Protocol):
     attachment_name = "nnsight_conditional_manager"
 
     @classmethod
-    def add(
-        cls, graph: "Graph", condition: Union["Node", Any]
-    ) -> "InterventionProxy":
+    def add(cls, graph: "Graph", condition: Union["Node", Any]) -> "InterventionProxy":
 
         return graph.create(target=cls, proxy_value=True, args=[condition])
 
@@ -791,9 +782,7 @@ class ConditionalProtocol(Protocol):
         return cls.attachment_name in graph.attachments.keys()
 
     @classmethod
-    def get_conditional(
-        cls, graph: "Graph", cond_node_name: str
-    ) -> "Conditional":
+    def get_conditional(cls, graph: "Graph", cond_node_name: str) -> "Conditional":
         """Gets the ConditionalProtocol node by its name.
 
         Args:
@@ -863,9 +852,7 @@ class ConditionalProtocol(Protocol):
             bool: Whether the Node is conditioned.
         """
 
-        return node.graph.attachments[cls.attachment_name].is_node_conditioned(
-            node
-        )
+        return node.graph.attachments[cls.attachment_name].is_node_conditioned(node)
 
     @classmethod
     def style(cls) -> Dict[str, Any]:
@@ -900,9 +887,7 @@ class UpdateProtocol(Protocol):
     """
 
     @classmethod
-    def add(
-        cls, node: "Node", new_value: Union[Node, Any]
-    ) -> "InterventionProxy":
+    def add(cls, node: "Node", new_value: Union[Node, Any]) -> "InterventionProxy":
         """Creates an UpdateProtocol node.
 
         Args:
@@ -937,9 +922,7 @@ class UpdateProtocol(Protocol):
         if value_node.target == BridgeProtocol:
             value_node._value = new_value
             bridge = BridgeProtocol.get_bridge(value_node.graph)
-            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[
-                value_node.args[1]
-            ]
+            lock_node = bridge.id_to_graph[value_node.args[0]].nodes[value_node.args[1]]
             value_node = lock_node.args[0]
 
         value_node._value = new_value
@@ -963,3 +946,72 @@ class UpdateProtocol(Protocol):
             "arg_kname": defaultdict(lambda: None),  # Argument label key word
             "edge": defaultdict(lambda: "solid"),
         }  # Argument edge display
+
+
+class StreamingDownloadProtocol(Protocol):
+
+    @classmethod
+    def add(cls, node: Node) -> "InterventionProxy":
+        """Add streaming download Node to the intervention graph.
+
+        Args:
+            node (Node): Node to download value of locally when available remotely.
+        """
+
+        return node.create(target=cls, proxy_value=None, args=[node])
+
+    @classmethod
+    def execute(cls, node: "Node"):
+        """When executing remotely, the local version of this Node type has its value set directly by `RemoteBackend`, not via `.execute(...)`
+        The remote version streams the value in a ResponseModel object.
+
+        Is a no-op when not executing remotely.
+        """
+
+        value_node = node.args[0]
+
+        node.set_value(value_node.value)
+
+
+class StreamingUploadProtocol(Protocol):
+
+    send: Callable = None
+
+    @classmethod
+    def set(cls, fn: Callable):
+
+        cls.send = fn
+
+    @classmethod
+    def add(cls, graph: "Graph", value: Any) -> "InterventionProxy":
+        """Add streaming upload Node to the intervention graph.
+
+        Args:
+            graph (Graph): Graph to add Node to.
+            value (Any): Value to upload remotely when available locally.
+        """
+
+        return graph.create(target=cls, proxy_value=None, args=[value])
+
+    @classmethod
+    def execute(cls, node: "Node"):
+        """When executing remotely, the local version of this Node calls `cls.send` to upload the its value to a waiting remote service.
+        The remote version blocks and waits until it receives the value from its local counterpart.
+
+        Is a no-op when not executing remotely.
+
+        Args:
+            node (Node): Node to upload remotely.
+        """
+
+        value = node.prepare_inputs(node.args[0])
+
+        if cls.send is not None:
+
+            cls.send(value)
+
+            node.update_dependencies()
+
+        else:
+
+            node.set_value(value)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Union
+from typing import TYPE_CHECKING, Union
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, field_serializer
 
@@ -43,8 +43,24 @@ class RequestModel(BaseModel):
 
         handler = DeserializeHandler(model=model)
 
-        object = TypeAdapter(
+        object: OBJECT_TYPES = TypeAdapter(
             OBJECT_TYPES, config=RequestModel.model_config
         ).validate_python(json.loads(self.object))
 
         return object.deserialize(handler)
+
+class StreamValueModel(BaseModel):
+    
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True, protected_namespaces=()
+    )
+    
+    value: ValueTypes
+    
+    def deserialize(self, model:NNsight):
+        
+        handler = DeserializeHandler(model=model)
+        
+        return try_deserialize(self.value, handler)
+                
+        

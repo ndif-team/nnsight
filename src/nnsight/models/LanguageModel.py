@@ -2,15 +2,28 @@ from __future__ import annotations
 
 import json
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    Type,
+    Union,
+)
 
+from nnsight.contexts.Tracer import Tracer
 import torch
+from torch.nn.modules import Module
 from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
     AutoTokenizer,
     BatchEncoding,
+    PretrainedConfig,
     PreTrainedModel,
     PreTrainedTokenizer,
 )
@@ -22,38 +35,7 @@ from nnsight.envoy import Envoy
 
 from ..intervention import InterventionProxy
 from ..util import WrapperModule
-from . import NNsight
-from .mixins import GenerationMixin, RemoteableMixin
-
-
-class TokenIndexer:
-    """Helper class to directly access token indices of hidden states.
-    Directly indexes the second dimension of tensors.
-    Makes positive indices negative as tokens are padded on the left.
-
-    Args:
-        proxy (InterventionProxy): Proxy to aid in token indexing.
-    """
-
-    def __init__(self, proxy: InterventionProxy) -> None:
-        self.proxy = proxy
-
-    def convert_idx(self, idx: int):
-        if idx >= 0:
-            n_tokens = self.proxy.node.proxy_value.shape[1]
-            idx = -(n_tokens - idx)
-
-        return idx
-
-    def __getitem__(self, key: int) -> LanguageModelProxy:
-        key = self.convert_idx(key)
-
-        return self.proxy[:, key]
-
-    def __setitem__(self, key: int, value: Union[LanguageModelProxy, Any]) -> None:
-        key = self.convert_idx(key)
-
-        self.proxy[:, key] = value
+from .mixins import RemoteableMixin
 
 
 class LanguageModelProxy(InterventionProxy):
@@ -79,7 +61,7 @@ class LanguageModelProxy(InterventionProxy):
     """
 
     @property
-    def token(self) -> TokenIndexer:
+    def token(self) -> LanguageModel.TokenIndexer:
         """Property used to do token based indexing on a proxy.
         Directly indexes the second dimension of tensors.
         Makes positive indices negative as tokens are padded on the left.
@@ -101,15 +83,19 @@ class LanguageModelProxy(InterventionProxy):
         Returns:
             TokenIndexer: Object to do token based indexing.
         """
-        return TokenIndexer(self)
+        return LanguageModel.TokenIndexer(self)
 
     @property
-    def t(self) -> TokenIndexer:
+    def t(self) -> LanguageModel.TokenIndexer:
         """Property as alias for InterventionProxy.token"""
         return self.token
 
 
-class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
+from ..util import TypeHint, hint
+
+
+@hint
+class LanguageModel(RemoteableMixin, TypeHint[Union[PreTrainedModel]]):
     """LanguageModels are NNsight wrappers around transformers language models.
 
     Inputs can be in the form of:
@@ -132,86 +118,119 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
 
     """
 
-    proxy_class = LanguageModelProxy
+    __methods__ = {"generate": "_generate"}
 
-    def __new__(cls, *args, **kwargs) -> Self | Envoy:
-        return object.__new__(cls)
+    proxy_class = LanguageModelProxy
+    tokenizer: PreTrainedTokenizer
+
+    class Generator(WrapperModule):
+
+        class Streamer(WrapperModule):
+
+            def put(self, *args):
+                return self(*args)
+
+            def end(self):
+                pass
+
+        def __init__(self) -> None:
+
+            super().__init__()
+
+            self.streamer = LanguageModel.Generator.Streamer()
 
     def __init__(
         self,
-        model_key: Union[str, torch.nn.Module],
         *args,
+        config: Optional[PretrainedConfig] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
         automodel: Type[AutoModel] = AutoModelForCausalLM,
         **kwargs,
     ) -> None:
-        self.tokenizer: PreTrainedTokenizer = tokenizer
-        self._model: PreTrainedModel = None
+
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
             else getattr(modeling_auto, automodel)
         )
 
-        if isinstance(model_key, torch.nn.Module):
+        self.config = config
+        self.tokenizer = tokenizer
+        self.repo_id: str = None
 
-            setattr(model_key, "generator", WrapperModule())
+        super().__init__(*args, **kwargs)
 
-        super().__init__(model_key, *args, **kwargs)
+        self.generator = LanguageModel.Generator()
 
-    def _load(
-        self,
-        repo_id: str,
-        tokenizer_kwargs: Optional[Dict[str, Any]] = None,
-        patch_llama_scan: bool = True,
-        **kwargs,
-    ) -> PreTrainedModel:
+    def _load_config(self, repo_id: str, **kwargs):
 
-        config = kwargs.pop("config", None) or AutoConfig.from_pretrained(
-            repo_id, **kwargs
-        )
+        if self.config is None:
+
+            self.config = AutoConfig.from_pretrained(repo_id, **kwargs)
+
+    def _load_tokenizer(self, repo_id: str, **kwargs):
 
         if self.tokenizer is None:
-            if tokenizer_kwargs is None:
-                tokenizer_kwargs = {}
 
-            if "padding_side" not in tokenizer_kwargs:
-                tokenizer_kwargs["padding_side"] = "left"
+            if "padding_side" not in kwargs:
+                kwargs["padding_side"] = "left"
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, config=config, **tokenizer_kwargs
+                repo_id, config=self.config, **kwargs
             )
 
             if not hasattr(self.tokenizer.pad_token, "pad_token"):
                 self.tokenizer.pad_token = self.tokenizer.eos_token
-                
-        if self._model is None:
 
-            if (
-                patch_llama_scan
-                and isinstance(config, LlamaConfig)
-                and isinstance(config.rope_scaling, dict)
-                and "rope_type" in config.rope_scaling
-            ):
-                config.rope_scaling["rope_type"] = "default"
+    def _load_meta(
+        self,
+        repo_id: str,
+        tokenizer_kwargs: Optional[Dict[str, Any]] = {},
+        patch_llama_scan: bool = True,
+        **kwargs,
+    ) -> Module:
 
-            model = self.automodel.from_config(config, trust_remote_code=True)
+        self.repo_id = repo_id
 
-            setattr(model, "generator", WrapperModule())
+        self._load_config(repo_id, **kwargs)
 
-            return model
+        self._load_tokenizer(repo_id, **tokenizer_kwargs)
 
         if (
             patch_llama_scan
-            and isinstance(config, LlamaConfig)
-            and isinstance(config.rope_scaling, dict)
-            and "rope_type" in config.rope_scaling
+            and isinstance(self.config, LlamaConfig)
+            and isinstance(self.config.rope_scaling, dict)
+            and "rope_type" in self.config.rope_scaling
         ):
-            config.rope_scaling["rope_type"] = "llama3"
+            self.config.rope_scaling["rope_type"] = "default"
 
-        model = self.automodel.from_pretrained(repo_id, config=config, **kwargs)
+        model = self.automodel.from_config(self.config, trust_remote_code=True)
 
-        setattr(model, "generator", WrapperModule())
+        return model
+
+    def _load(
+        self,
+        repo_id: str,
+        tokenizer_kwargs: Optional[Dict[str, Any]] = {},
+        patch_llama_scan: bool = True,
+        **kwargs,
+    ) -> PreTrainedModel:
+
+        self._load_config(repo_id, **kwargs)
+
+        self._load_tokenizer(repo_id, **tokenizer_kwargs)
+
+        if (
+            patch_llama_scan
+            and isinstance(self.config, LlamaConfig)
+            and isinstance(self.config.rope_scaling, dict)
+            and "rope_type" in self.config.rope_scaling
+        ):
+            self.config.rope_scaling["rope_type"] = "llama3"
+
+        model = self.automodel.from_pretrained(
+            repo_id, config=self.config, **kwargs
+        )
 
         return model
 
@@ -228,8 +247,6 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         ],
         **kwargs,
     ):
-        if isinstance(inputs, BatchEncoding):
-            return inputs
 
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
@@ -243,113 +260,126 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
             inputs = [{"input_ids": ids} for ids in inputs]
             return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
-        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
+        return self.tokenizer(
+            inputs, return_tensors="pt", padding=True, **kwargs
+        )
 
-    def _prepare_inputs(
+    def _prepare_input(
         self,
-        inputs: Union[
-            str,
-            List[str],
-            List[List[str]],
-            List[int],
-            List[List[int]],
-            torch.Tensor,
-            Dict[str, Any],
-            BatchEncoding,
+        *inputs: Tuple[
+            Union[
+                str,
+                List[str],
+                List[List[str]],
+                List[int],
+                List[List[int]],
+                torch.Tensor,
+                List[torch.Tensor],
+                Dict[str, Any],
+                BatchEncoding,
+            ]
         ],
+        input_ids: Union[
+            List[int], List[List[int]], torch.Tensor, List[torch.Tensor]
+        ] = None,
         labels: Any = None,
         **kwargs,
     ) -> Tuple[BatchEncoding, int]:
+
+        if input_ids is not None:
+
+            assert len(inputs) == 0
+
+            inputs = (input_ids,)
+
+        assert len(inputs) == 1
+
+        inputs = inputs[0]
+
         if isinstance(inputs, dict):
+            inputs = self._prepare_input(**inputs, labels=labels)
+        elif isinstance(inputs, BatchEncoding):
+            pass
+        else:
 
-            new_inputs = dict()
+            inputs = self._tokenize(inputs, **kwargs)
 
-            tokenized_inputs = self._tokenize(inputs["input_ids"], **kwargs)
+            if labels is not None:
+                labels = self._tokenize(labels, **kwargs)["input_ids"]
 
-            new_inputs["input_ids"] = tokenized_inputs["input_ids"]
+        return ((inputs,), {"labels": None}), len(inputs["input_ids"])
 
-            if "attention_mask" in inputs:
-                for ai, attn_mask in enumerate(inputs["attention_mask"]):
-                    tokenized_inputs["attention_mask"][
-                        ai, -len(attn_mask) :
-                    ] = attn_mask
-
-                new_inputs["attention_mask"] = tokenized_inputs["attention_mask"]
-
-            if "labels" in inputs:
-                labels = self._tokenize(inputs["labels"], **kwargs)
-
-                new_inputs["labels"] = labels["input_ids"]
-
-            return (BatchEncoding(new_inputs),), len(new_inputs["input_ids"])
-
-        inputs = self._tokenize(inputs, **kwargs)
-
-        if labels is not None:
-            labels = self._tokenize(labels, **kwargs)
-
-            inputs["labels"] = labels["input_ids"]
-
-        return (inputs,), len(inputs["input_ids"])
-
-    def _batch_inputs(
+    def _batch(
         self,
-        batched_inputs: Optional[Dict[str, Any]],
-        prepared_inputs: BatchEncoding,
+        batched_inputs: Optional[Tuple[Tuple[BatchEncoding], Dict[str, Any]]],
+        input: BatchEncoding,
+        labels: Optional[torch.Tensor] = None,
     ) -> Tuple[Dict[str, Any]]:
 
         if batched_inputs is None:
-            batched_inputs = {"input_ids": []}
+            return ((input,), {"labels": labels})
 
-            if "labels" in prepared_inputs:
-                batched_inputs["labels"] = []
+        batched_labels = batched_inputs[1]["labels"]
+        batched_inputs = batched_inputs[0][0]
 
-            if "attention_mask" in prepared_inputs:
-                batched_inputs["attention_mask"] = []
+        attention_mask = batched_inputs["attention_mask"]
+        batched_inputs = [
+            {"input_ids": ids}
+            for ids in [
+                *batched_inputs["input_ids"].tolist(),
+                *input["input_ids"].tolist(),
+            ]
+        ]
+        batched_inputs = self.tokenizer.pad(batched_inputs, return_tensors="pt")
 
-        else:
+        if labels is not None:
 
-            batched_inputs = batched_inputs[0]
+            batched_labels = torch.cat((batched_labels, labels))
 
-        batched_inputs["input_ids"].extend(prepared_inputs["input_ids"])
+        batched_inputs["attention_mask"][
+            :1, : attention_mask.shape[1]
+        ] = attention_mask
 
-        if "labels" in prepared_inputs:
-            batched_inputs["labels"].extend(prepared_inputs["labels"])
-        if "attention_mask" in prepared_inputs:
-            batched_inputs["attention_mask"].extend(prepared_inputs["attention_mask"])
+        return ((batched_inputs,), {"labels": batched_inputs})
 
-        return (batched_inputs,)
+    def _execute(self, inputs: BatchEncoding, **kwargs) -> Any:
 
-    def _execute_forward(self, prepared_inputs: Any, *args, **kwargs):
-
-        device = next(self._model.parameters()).device
+        inputs = inputs.to(self.device)
 
         return self._model(
-            *args,
-            **prepared_inputs.to(device),
+            **inputs,
             **kwargs,
         )
 
-    def _execute_generate(
-        self, prepared_inputs: Any, *args, max_new_tokens=1, **kwargs
+    def _generate(
+        self,
+        inputs: BatchEncoding,
+        max_new_tokens=1,
+        streamer: Any = None,
+        **kwargs,
     ):
 
-        device = next(self._model.parameters()).device
+        if streamer is None:
+            streamer = self.generator.streamer
+
+        inputs = inputs.to(self.device)
 
         output = self._model.generate(
-            *args,
-            **prepared_inputs.to(device),
-            max_new_tokens=max_new_tokens,
+            **inputs,
             **kwargs,
+            streamer=streamer,
+            max_new_tokens=max_new_tokens,
         )
 
-        self._model.generator(output)
+        self.generator(output)
 
         return output
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {"repo_id": self._model_key}  # , "torch_dtype": str(self._model.dtype)}
+            {
+                "repo_id": self.repo_id
+            }  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
@@ -360,3 +390,34 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
         repo_id = kwargs.pop("repo_id")
 
         return LanguageModel(repo_id, **kwargs)
+
+    class TokenIndexer:
+        """Helper class to directly access token indices of hidden states.
+        Directly indexes the second dimension of tensors.
+        Makes positive indices negative as tokens are padded on the left.
+
+        Args:
+            proxy (InterventionProxy): Proxy to aid in token indexing.
+        """
+
+        def __init__(self, proxy: InterventionProxy) -> None:
+            self.proxy = proxy
+
+        def convert_idx(self, idx: int):
+            if idx >= 0:
+                n_tokens = self.proxy.node.proxy_value.shape[1]
+                idx = -(n_tokens - idx)
+
+            return idx
+
+        def __getitem__(self, key: int) -> LanguageModelProxy:
+            key = self.convert_idx(key)
+
+            return self.proxy[:, key]
+
+        def __setitem__(
+            self, key: int, value: Union[LanguageModelProxy, Any]
+        ) -> None:
+            key = self.convert_idx(key)
+
+            self.proxy[:, key] = value

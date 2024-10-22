@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 from typing_extensions import Self
 
@@ -9,13 +9,14 @@ from ..tracing import protocols
 from ..tracing.Bridge import Bridge
 from ..tracing.Graph import Graph
 from . import resolve_dependencies
-from .backends import Backend, EditBackend, BridgeMixin, EditMixin, RemoteMixin
+from .backends import Backend, BridgeMixin, EditBackend, EditMixin, RemoteMixin
 from .GraphBasedContext import GraphBasedContext
 from .Invoker import Invoker
-
+from ..intervention import InterventionHandler
 if TYPE_CHECKING:
     from ..models.mixins import RemoteableMixin
     from ..models.NNsightModel import NNsight
+    from ..tracing.Node import Node
 
 
 class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
@@ -35,15 +36,17 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         backend: Backend,
         model: "NNsight",
         scan: bool = False,
+        graph: Optional[Graph] = None,
+        bridge: Optional[Bridge] = None,
+        method: Optional[str] = None,
         validate: bool = False,
-        graph: Graph = None,
-        bridge: Bridge = None,
         return_context: bool = False,
         debug: bool = False,
         **kwargs,
     ) -> None:
 
         self.model = model
+        self.method = method
 
         self.return_context = return_context
 
@@ -90,7 +93,7 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         if isinstance(self.backend, EditBackend):
             if self.return_context:
                 return self.model, self
-            
+
             return self.model
 
         return tracer
@@ -103,11 +106,10 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         self.model._envoy._reset()
 
-
         super().__exit__(exc_type, exc_val, exc_tb)
 
     def invoke(self, *inputs: Any, **kwargs) -> Invoker:
-        """Create an Invoker context dor a given input.
+        """Create an Invoker context for a given input.
 
         Raises:
             Exception: If an Invoker context is already open
@@ -125,14 +127,28 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
 
         return Invoker(self, *inputs, **kwargs)
 
-    def next(self, increment: int = 1) -> None:
-        """Increments call_iter of all module Envoys. Useful when doing iterative/generative runs.
+    def batch(
+        self, invoker_inputs: Tuple[Tuple[Tuple[Any], Dict[str, Any]]]
+    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], List[Tuple[int, int]]]:
 
-        Args:
-            increment (int): How many call_iter to increment at once. Defaults to 1.
-        """
+        batch_groups = []
+        batch_start = 0
+        batched_input = None
 
-        self.model._envoy.next(increment=increment, propagate=True)
+        for args, kwargs in invoker_inputs:
+            (args, kwargs), batch_size = self.model._prepare_input(*args, **kwargs)
+
+            batch_groups.append((batch_start, batch_size))
+
+            batched_input = self.model._batch(batched_input, *args, **kwargs)
+
+            batch_start += batch_size
+
+        if batched_input is None:
+            
+            batched_input = tuple(tuple(), dict())
+
+        return batched_input, batch_groups
 
     ##### BACKENDS ###############################
 
@@ -148,23 +164,27 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         if protocols.BridgeProtocol.has_bridge(self.graph):
 
             invoker_inputs = resolve_dependencies(invoker_inputs)
+            
+        (args, kwargs), batch_groups = self.batch(invoker_inputs)
 
         self.graph.execute()
 
+        fn = (
+            self.model._execute
+            if self.method is None
+            else getattr(self.model, self.method)
+        )
+        
+        intervention_handler = InterventionHandler(batch_groups=batch_groups)
+
         self.model.interleave(
-            self.model._execute,
+            fn,
             self.graph,
-            *invoker_inputs,
+            *args,
+            intervention_handler=intervention_handler,
+            **kwargs,
             **self._kwargs,
         )
-
-        graph = self.graph
-        graph.alive = False
-
-        if not isinstance(graph, weakref.ProxyType):
-            self.graph = weakref.proxy(graph)
-
-        return graph
 
     def edit_backend_execute(self) -> Graph:
 
@@ -188,13 +208,8 @@ class Tracer(GraphBasedContext, RemoteMixin, BridgeMixin, EditMixin):
         for node_name, node_value in value.items():
             self.graph.nodes[node_name]._value = node_value
 
-    def remote_backend_cleanup(self):
-        
-        graph = self.graph
-        graph.alive = False
-
-        if not isinstance(graph, weakref.ProxyType):
-            self.graph = weakref.proxy(graph)
+    def remote_backend_get_stream_node(self, name: str, graph_id: str) -> "Node":
+        return self.graph.nodes[name]
 
     def __repr__(self) -> str:
         return f"&lt;{self.__class__.__name__} at {hex(id(self))}&gt;"

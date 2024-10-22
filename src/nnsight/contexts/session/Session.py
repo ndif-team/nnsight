@@ -13,6 +13,7 @@ from .Iterator import Iterator
 if TYPE_CHECKING:
     from ...models.mixins import RemoteableMixin
     from ...models.NNsightModel import NNsight
+    from ...tracing.Node import Node
 
 
 class Session(GraphBasedContext, RemoteMixin):
@@ -49,9 +50,9 @@ class Session(GraphBasedContext, RemoteMixin):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
 
-        self.model._session = None
-
         super().__exit__(exc_type, exc_val, exc_tb)
+        
+        self.model._session = None
 
     def iter(self, iterable: Iterable, **kwargs) -> Iterator:
         """Creates an Iterator context to iteratively execute an intervention graph, with an update item at each iteration.
@@ -139,6 +140,12 @@ class Session(GraphBasedContext, RemoteMixin):
                 graph.nodes[node_name]._value = node_value
 
             graph.alive = False
+
+    def remote_backend_get_stream_node(self, name: str, graph_id: str) -> "Node":
+
+        graph = self.bridge.id_to_graph[graph_id]
+
+        return graph.nodes[name]
 
     def remote_backend_cleanup(self):
 

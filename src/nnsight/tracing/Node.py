@@ -48,6 +48,25 @@ class Node:
         value (Any): Actual value to be populated during execution.
     """
 
+    def __getstate__(self) -> Dict:
+
+        state = self.__dict__.copy()
+
+        state.pop("proxy")
+        state["graph"] = util.weakref_to_obj(self.graph)
+        state["listeners"] = [
+            util.weakref_to_obj(listener) for listener in self.listeners
+        ] 
+
+        return state
+
+    def __setstate__(self, state: Dict) -> None:
+
+        state["graph"] = weakref.proxy(state["graph"])
+        state["listeners"] = [weakref.proxy(listener) for listener in state["listeners"]]
+        
+        self.__dict__.update(state)
+
     def __init__(
         self,
         target: Union[Callable, str],
@@ -218,25 +237,11 @@ class Node:
 
         if not self.attached():
 
-            graph: "Graph" = None
+            from ..contexts.GraphBasedContext import GlobalTracingContext
 
-            def find_attached_graph(node: Union[Proxy, Node]):
+            if GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
 
-                if isinstance(node, Proxy):
-
-                    node = node.node
-
-                nonlocal graph
-
-                if node.attached():
-
-                    graph = node.graph
-
-            util.apply((args, kwargs), find_attached_graph, (Proxy, Node))
-
-            if graph is not None:
-
-                return graph.create(
+                return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph.create(
                     target=target,
                     name=name,
                     proxy_value=proxy_value,
@@ -279,13 +284,18 @@ class Node:
             kwargs=kwargs,
         )
 
-    def reset(self) -> None:
+    def reset(self, propagate: bool = False) -> None:
         """Resets this Nodes remaining_listeners and remaining_dependencies."""
 
         self.remaining_listeners = len(self.listeners)
-        self.remaining_dependencies = len(self.arg_dependencies) + int(
-            not (self.cond_dependency is None)
-        )
+        self.remaining_dependencies = sum(
+            [not node.executed() for node in self.arg_dependencies]
+        ) + int(not (self.cond_dependency is None))
+
+        if propagate:
+            for node in self.listeners:
+                if node.executed():
+                    node.reset(propagate=True)
 
     def done(self) -> bool:
         """Returns true if the value of this node has been set.
@@ -390,23 +400,11 @@ class Node:
         except Exception as e:
             if self.graph and self.graph.debug:
                 sys.tracebacklimit = 0
-                if self.attached():
-                    print(f"\n{self.meta_data['traceback']}")
-                    
-                    # Kill all the graphs in the Session to signal that an error occured
-                    # This way only the traceback of the Node responsible for the error gets printed out
-                    self.graph.alive = False
-                    if protocols.BridgeProtocol.has_bridge(self.graph):
-                        bridge = protocols.BridgeProtocol.get_bridge(self.graph)
-
-                        def kill_graph(graph: "Graph") -> None:
-                            """Sets the graph.alive attribute to False"""
-                            graph.alive = False
-
-                        [kill_graph(g) for g in bridge.graph_stack]
-                    raise util.NNsightError(str(e), self.graph.id, self.name)
-                else:
+                if isinstance(e, util.NNsightError):
                     raise e from None
+                else:
+                    print(f"\n{self.meta_data['traceback']}")
+                    raise util.NNsightError(str(e), self.graph.id, self.name)
             else: 
                 raise type(e)(
                     f"Above exception occured when executing Node: '{self.name}' in Graph: '{self.graph.id}'"
@@ -426,20 +424,30 @@ class Node:
 
         logger.info(f"=> SET({self.name})")
 
+        self.update_listeners()
+
+        self.update_dependencies()
+
+        if self.done() and self.redundant():
+            self.destroy()
+
+    def update_listeners(self):
+        """Updates remaining_dependencies of listeners. If they are now fulfilled, execute them."""
+
         for listener in self.listeners:
             listener.remaining_dependencies -= 1
 
             if listener.fulfilled() and not self.graph.sequential:
                 listener.execute()
 
+    def update_dependencies(self):
+        """Updates remaining_listeners of dependencies. If they are now redundant, destroy them."""
+
         for dependency in self.arg_dependencies:
             dependency.remaining_listeners -= 1
 
             if dependency.redundant():
                 dependency.destroy()
-
-        if self.done() and self.redundant():
-            self.destroy()
 
     def destroy(self) -> None:
         """Removes the reference to the node's value and logs it's destruction."""
@@ -484,7 +492,11 @@ class Node:
 
         styles = {
             "node": {"color": "black", "shape": "ellipse"},
-            "label": (self.target if isinstance(self.target, str) else self.target.__name__),
+            "label": (
+                self.target
+                if isinstance(self.target, str)
+                else self.target.__name__
+            ),
             "arg": defaultdict(lambda: {"color": "gray", "shape": "box"}),
             "arg_kname": defaultdict(lambda: None),
             "edge": defaultdict(lambda: "solid"),
@@ -496,11 +508,15 @@ class Node:
             self.target, protocols.Protocol
         ):
             styles = self.target.style()
-            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
+
+            viz_graph.add_node(
+                node_name, label=styles["label"], **styles["node"]
+            )
             if (
                 recursive
                 and self.target == protocols.LocalBackendExecuteProtocol
             ):
+
                 # recursively draw all sub-graphs
                 for sub_node in self.args[0].graph.nodes.values():
                     # draw root nodes and attach them to their LocalBackendExecuteProtocol node
@@ -523,7 +539,9 @@ class Node:
                             viz_graph, recursive, node_name + "_"
                         )
         else:
-            viz_graph.add_node(node_name, label=styles["label"], **styles["node"])
+            viz_graph.add_node(
+                node_name, label=styles["label"], **styles["node"]
+            )
 
         def visualize_args(arg_collection):
             """Recursively visualizes the arguments of this node.
@@ -541,9 +559,11 @@ class Node:
                     if isinstance(arg, Iterable):
                         for element in arg:
                             if isinstance(element, Node):
-                                dep_name = element.visualize(viz_graph, recursive, backend_name)
+                                dep_name = element.visualize(
+                                    viz_graph, recursive, backend_name
+                                )
                                 iter_val_dependencies.append(dep_name)
-                    
+
                     name = node_name
                     if isinstance(arg, torch.Tensor):
                         name += f"_Tensor_{key}"
@@ -564,7 +584,9 @@ class Node:
                     viz_graph.add_node(name, label=label, **styles["arg"][key])
 
                     for dep_name in iter_val_dependencies:
-                        viz_graph.add_edge(dep_name, name, style="dashed", color="gray")
+                        viz_graph.add_edge(
+                            dep_name, name, style="dashed", color="gray"
+                        )
 
                 viz_graph.add_edge(name, node_name, style=styles["edge"][key])
 
