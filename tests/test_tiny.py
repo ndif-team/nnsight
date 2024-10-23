@@ -4,13 +4,36 @@ from enum import auto
 import pytest
 import torch
 
-import nnsight
+from nnsight.intervention.contexts import InterventionTracer
+from nnsight.tracing.backends import Backend
+from nnsight.tracing.graph import Graph
+from nnsight.tracing.protocols import StopProtocol
 from nnsight import NNsight
-
+class AssertSavedLenBackend(Backend):
+    
+    def __init__(self, len:int) -> None:
+        self.len = len
+    
+    def __call__(self, graph: Graph) -> None:
+        
+        try:
+         
+            graph.nodes[-1].execute()
+            
+        except StopProtocol.StopException:
+            
+            pass
+        
+        finally:
+            
+            assert self.len == len([node for node in graph.nodes if node.done])
+                            
+            graph.nodes.clear()
+            graph.stack.clear()
+            
 input_size = 5
 hidden_dims = 10
 output_size = 2
-
 
 @pytest.fixture(scope="module")
 def tiny_model(device: str):
@@ -40,7 +63,7 @@ def tiny_input():
 @torch.no_grad()
 def test_tiny(tiny_model: NNsight, tiny_input: torch.Tensor):
 
-    with tiny_model.trace(tiny_input):
+    with tiny_model.trace(tiny_input, backend=AssertSavedLenBackend(1)):
 
         hs = tiny_model.layer2.output.save()
 
@@ -48,7 +71,7 @@ def test_tiny(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_grad_setting(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input, validate=True, scan=True):
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(2)):
         l1_grad = tiny_model.layer1.output.grad.clone().save()
 
         tiny_model.layer1.output.grad = (
@@ -66,7 +89,7 @@ def test_grad_setting(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_external_proxy_intervention_executed_locally(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
-    with tiny_model.session(validate=True) as sesh:
+    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as sesh:
         with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer_1:
             l1_out = tiny_model.layer1.output.save()
 
@@ -77,7 +100,7 @@ def test_external_proxy_intervention_executed_locally(
 
 
 def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(1)) as tracer:
         l1_out = tiny_model.layer1.output.save()
         tracer.stop()
         l2_out = tiny_model.layer2.output.save()
@@ -92,7 +115,7 @@ def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 def test_true_conditional_protocol(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
-    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(1)) as tracer:
         num = 5
         with tracer.cond(num > 0):
             tiny_model.layer1.output[:] = 1
@@ -105,7 +128,7 @@ def test_true_conditional_protocol(
 def test_false_conditional_protocol(
     tiny_model: NNsight, tiny_input: torch.Tensor
 ):
-    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(1)) as tracer:
         num = 5
         with tracer.cond(num < 0):
             tiny_model.layer1.output[:] = 1
@@ -122,7 +145,7 @@ def test_false_conditional_protocol(
 def test_node_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
     """Test a Tensor a boolean value as a result of a boolean operation on an InterventionProxy"""
 
-    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(0)) as tracer:
         out = tiny_model.layer1.output
         out[:, 0] = 1
         with tracer.cond(out[:, 0] != 1):
@@ -138,7 +161,7 @@ def test_multiple_dependent_conditionals(
 ):
     """Test that interventions defined within different Intervention contexts can be referenced if their conditions evaluated to True."""
 
-    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(1)) as tracer:
         num = 5
         l1_out = tiny_model.layer1.output
         l2_out = tiny_model.layer2.output.save()
@@ -155,7 +178,7 @@ def test_multiple_dependent_conditionals(
 
 
 def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(1)) as tracer:
         num = 5
         with tracer.cond(num > 0):  # True
             l1_out = tiny_model.layer1.output.save()
@@ -179,7 +202,7 @@ def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session(validate=True) as session:
+    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as session:
         num = 5
         with session.cond(num > 0):
             with tiny_model.trace(tiny_input, validate=True, scan=True):
@@ -189,7 +212,7 @@ def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session(validate=True) as session:
+    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as session:
         result = session.apply(list).save()
         with session.iter([0, 1, 2]) as item:
             with session.cond(item % 2 == 0):
@@ -200,7 +223,7 @@ def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session(validate=True) as session:
+    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as session:
         val = session.apply(int, 0)
         with tiny_model.trace(tiny_input, validate=True, scan=True):
             tiny_model.layer1.output[:] = (
@@ -212,7 +235,7 @@ def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_sequential_graph_based_context_exit(tiny_model: NNsight):
-    with tiny_model.session(validate=True) as session:
+    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as session:
         l = session.apply(list).save()
         l.append(0)
 
@@ -228,7 +251,7 @@ def test_sequential_graph_based_context_exit(tiny_model: NNsight):
 
 
 def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input, validate=True, scan=True) as tracer:
+    with tiny_model.trace(tiny_input, validate=True, scan=True, backend=AssertSavedLenBackend(0)) as tracer:
         l1_out = tiny_model.layer1.output
         tracer.stop()
         l1_out_double = l1_out * 2
@@ -238,7 +261,7 @@ def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_bridged_node_cleanup(tiny_model: NNsight):
-    with tiny_model.session(validate=True) as session:
+    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(0)) as session:
         l = session.apply(list)
         with session.iter([0, 1, 2]) as item:
             with session.cond(item == 2):
@@ -251,7 +274,7 @@ def test_bridged_node_cleanup(tiny_model: NNsight):
 
 def test_nested_iterator(tiny_model: NNsight):
 
-    with tiny_model.session(validate=True) as session:
+    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as session:
         l = session.apply(list)
         l.append([0])
         l.append([1])
@@ -264,7 +287,7 @@ def test_nested_iterator(tiny_model: NNsight):
     assert l2.value == [0, 1, 2]
 
 def test_nnsight_builtins(tiny_model: NNsight):
-    with tiny_model.session() as session:
+    with tiny_model.session(backend=AssertSavedLenBackend(3)) as session:
         nn_list = session.apply(list).save()
         sesh_list = session.apply(list).save()
         apply_list = session.apply(list).save()
@@ -278,7 +301,7 @@ def test_nnsight_builtins(tiny_model: NNsight):
     assert sesh_list == apply_list
 
 def test_torch_creation_operations_patch(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input, scan=False, validate=False):
+    with tiny_model.trace(tiny_input, scan=False, validate=False, backend=AssertSavedLenBackend(0)):
         l1_output = tiny_model.layer1.output
         torch.arange(l1_output.shape[0], l1_output.shape[1])
         torch.empty(l1_output.shape)
