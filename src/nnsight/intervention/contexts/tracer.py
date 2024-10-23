@@ -124,17 +124,17 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
         
         graph: InterventionGraph
         model = graph.model
-
-        graph.compile()
-
-        graph.reset()
-
+        
         invoker_inputs, kwargs = node.prepare_inputs((invoker_inputs, node.kwargs))
 
         (invoker_args, invoker_kwargs), batch_groups = cls._batch(model, invoker_inputs)
-
+        
+        graph.compile()
+        
+        graph.reset()
+        
         graph.execute()
-
+        
         model.interleave(
             *invoker_args,
             fn=method,
@@ -144,11 +144,3 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             **invoker_kwargs,
         )
         
-        
-    ### Backends ################
-    
-    
-    def edit_backend_execute(self) -> Any:
-        
-    
-        self._model._default_graph = self.graph

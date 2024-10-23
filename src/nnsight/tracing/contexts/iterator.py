@@ -33,7 +33,7 @@ class Iterator(Context[SubGraph]):
         
         variable_node = next(iter(graph))
         
-        graph.defer_stack.append(node.index)
+        graph.defer_stack.append(variable_node.index)
 
         for idx, value in enumerate(copy.copy(collection)):
 

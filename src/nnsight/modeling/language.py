@@ -31,10 +31,11 @@ from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
 
-
+from ..intervention import Envoy
 from ..util import WrapperModule
 from .mixins import RemoteableMixin
-
+from ..intervention.contexts import InterventionTracer
+from ..intervention.graph import InterventionProxyType, InterventionNodeType
 
 class LanguageModel(RemoteableMixin):
     """LanguageModels are NNsight wrappers around transformers language models.
@@ -100,7 +101,7 @@ class LanguageModel(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-        self.generator = LanguageModel.Generator()
+        self.generator: Envoy[InterventionProxyType, InterventionNodeType] = LanguageModel.Generator()
 
     def _load_config(self, repo_id: str, **kwargs):
 
@@ -247,7 +248,7 @@ class LanguageModel(RemoteableMixin):
             if labels is not None:
                 labels = self._tokenize(labels, **kwargs)["input_ids"]
 
-        return ((inputs,), {"labels": None}), len(inputs["input_ids"])
+        return ((inputs,), {"labels": labels}), len(inputs["input_ids"])
 
     def _batch(
         self,
@@ -334,7 +335,7 @@ class LanguageModel(RemoteableMixin):
 if TYPE_CHECKING:
     
     class LanguageModel(LanguageModel, PreTrainedModel):
-        pass
-        # def generate(self, *args, **kwargs) -> Tracer:
-        #     pass
+  
+        def generate(self, *args, **kwargs) -> InterventionTracer:
+            pass
     

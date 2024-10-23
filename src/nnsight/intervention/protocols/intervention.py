@@ -2,12 +2,11 @@ from typing import TYPE_CHECKING, Any, List
 
 
 import torch
-from ...tracing.protocols import Protocol, VariableProtocol
-from .. import protocols
+from ...tracing.protocols import Protocol
 from ... import util
 
 if TYPE_CHECKING:
-    from ..interleaver import Interleaver9000
+    from ..interleaver import Interleaver
     from ..graph import InterventionNodeType, InterventionProxyType, InterventionGraph, InterventionProxy, InterventionNode
 
 class InterventionProtocol(Protocol):
@@ -85,7 +84,7 @@ class InterventionProtocol(Protocol):
         activations: Any,
         module_path: str,
         key: str,
-        interleaver: "Interleaver9000",
+        interleaver: "Interleaver",
     ):
         """Entry to intervention graph. This should be hooked to all modules involved in the intervention graph.
 
@@ -139,7 +138,7 @@ class InterventionProtocol(Protocol):
                 # If this execution is possibly not the last time it will be executed,
                 # we need to defer destruction of dependencies outside the sub-graph.
                 if defer:
-                    node.graph.defer_stack.append(node)
+                    node.graph.defer_stack.append(node.kwargs['start'])
 
                 subgraph.reset()
 

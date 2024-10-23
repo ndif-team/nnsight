@@ -35,10 +35,8 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         self.model = model
         self.validate = validate
 
-        self.interventions: Dict[str, List[SubGraph]] = defaultdict(
-            list
-        )
-        self.grad_subgraph:Set[int] = set()
+        self.interventions: Dict[str, List[SubGraph]] = defaultdict(list)
+        self.grad_subgraph: Set[int] = set()
 
         self.compiled = False
         self.call_counter: Dict[int, int] = defaultdict(int)
@@ -107,7 +105,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         for index in range(start, end):
 
             node: InterventionNodeType = self.nodes[index]
-            
+
             if context_node is None and node.graph is not self:
 
                 context_node = self.nodes[node.graph[-1].index + 1]
@@ -117,9 +115,6 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                 self.context_dependency(context_node, intervention_subgraphs)
 
             if node.target is InterventionProtocol:
-                
-
-                node.graph = self
 
                 subgraph = SubGraph(self, subset=sorted(list(node.subgraph())))
 
@@ -128,12 +123,16 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                 self.interventions[module_path].append(subgraph)
 
                 intervention_subgraphs.append(subgraph)
-                                
+
                 if context_node is not None:
 
                     context_node._dependencies.add(node.index)
                     node._listeners.add(context_node.index)
                     subgraph.subset.append(context_node.index)
+
+                    graph: SubGraph = node.graph
+
+                    graph.subset.remove(node.index)
 
                     node.kwargs["start"] = context_start
 
@@ -141,14 +140,14 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
                     node.kwargs["start"] = self.subset.index(subgraph.subset[0])
 
-            elif node.target is GradProtocol:
-
                 node.graph = self
+
+            elif node.target is GradProtocol:
 
                 subgraph = SubGraph(self, subset=sorted(list(node.subgraph())))
 
                 intervention_subgraphs.append(subgraph)
-                
+
                 self.grad_subgraph.update(subgraph.subset[1:])
 
                 if context_node is not None:
@@ -156,29 +155,36 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                     context_node._dependencies.add(node.index)
                     node._listeners.add(context_node.index)
                     subgraph.subset.append(context_node.index)
-                    
-                    node.kwargs["start"] = context_start 
-                    
+
+                    graph: SubGraph = node.graph
+
+                    graph.subset.remove(node.index)
+
+                    node.kwargs["start"] = context_start
+
                 else:
 
                     node.kwargs["start"] = self.subset.index(subgraph.subset[1])
+
+                node.graph = self
 
             elif node.target is ApplyModuleProtocol:
 
                 node.graph = self
 
-
             elif context_node is not None and context_node is node:
                 context_node = None
 
-    def execute(self, start:int=0, grad:bool=False) -> None:
+        self.compiled = True
+
+    def execute(self, start: int = 0, grad: bool = False) -> None:
 
         self.alive = False
-        
+
         exception = None
 
         for node in self[start:]:
-            
+
             if node.executed:
                 continue
             elif node.fulfilled:
@@ -286,4 +292,3 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
     #         global_offset += max_group + 1
 
     #     return mgraph
-

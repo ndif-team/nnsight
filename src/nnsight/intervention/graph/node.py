@@ -11,6 +11,8 @@ from ... import util
 from ...tracing.contexts import GlobalTracingContext
 from ...tracing.graph import Node, Proxy
 from ...tracing.protocols import Protocol
+from ..protocols import InterventionProtocol
+
 if TYPE_CHECKING:
     from . import InterventionGraph
 
@@ -61,6 +63,19 @@ class InterventionNode(Node):
 
         return inputs
 
+    def update_dependencies(self):
+        for dependency in self.dependencies:
+            if len(self.graph.defer_stack) > 0 and (
+                dependency.index < self.graph.defer_stack[-1]
+                or dependency.target is InterventionProtocol
+            ):
+                continue
+
+            dependency.remaining_listeners -= 1
+
+            if dependency.redundant:
+                dependency.destroy()
+
 
 InterventionNodeType = TypeVar("InterventionNodeType", bound=InterventionNode)
 
@@ -70,7 +85,9 @@ class ValidatingInterventionNode(InterventionNode):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        if self.fake_value is inspect._empty and (isinstance(self.target, type) and not issubclass(self.target, Protocol)):
+        if self.fake_value is inspect._empty and (
+            isinstance(self.target, type) and not issubclass(self.target, Protocol)
+        ):
             self.fake_value = validate(self.target, *self.args, **self.kwargs)
 
 

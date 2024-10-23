@@ -12,7 +12,7 @@ from .graph import InterventionGraph, InterventionNode
 from .protocols import InterventionProtocol
 
 
-class Interleaver9000(AbstractContextManager):
+class Interleaver(AbstractContextManager):
 
     def __init__(
         self,
@@ -51,12 +51,14 @@ class Interleaver9000(AbstractContextManager):
         
         self.batch_size = sum(self.batch_groups[-1]) if batch_size is None else batch_size
 
-    def __enter__(self) -> Interleaver9000:
+    def __enter__(self) -> Interleaver:
         """Registers input and output hooks to modules if they are defined.
 
         Returns:
             HookModel: HookModel object.
         """
+        
+
 
         for module_key in self.graph.interventions.keys():
 

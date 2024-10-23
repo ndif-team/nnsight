@@ -40,8 +40,7 @@ class Graph(Generic[NodeType, ProxyType]):
     def reset(self) -> None:
 
         for node in self:
-            if (self.alive or node.executed) and node.redundant:
-                node.reset()
+            node.reset()
 
     def execute(self) -> None:
 
@@ -73,6 +72,8 @@ class Graph(Generic[NodeType, ProxyType]):
         for index in range(start, end):
 
             node = self.nodes[index]
+            
+            # print(node)
 
             node.update_dependencies()
 
@@ -141,14 +142,6 @@ class Graph(Generic[NodeType, ProxyType]):
 
     def __len__(self) -> int:
         return len(self.nodes)
-
-    def __getstate__(self) -> Dict:
-        return {"id": self.id, "nodes": self.nodes, "name_idx": self.name_idx}
-
-    def __setstate__(self, state: Dict) -> None:
-
-        self.__dict__.update(state)
-
 
 class SubGraph(Graph[NodeType, ProxyType]):
 

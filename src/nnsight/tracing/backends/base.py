@@ -22,7 +22,7 @@ class ExecutionBackend(Backend):
             pass
         
         finally:
-                
-            graph.nodes = []
-            graph.stack = []
+                            
+            graph.nodes.clear()
+            graph.stack.clear()
             

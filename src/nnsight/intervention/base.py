@@ -12,7 +12,7 @@ from ..tracing.backends import Backend
 from .contexts import InterventionTracer, Session, EditingTracer
 from .envoy import Envoy
 from .graph import InterventionGraph, InterventionProxy, InterventionProxyType, InterventionNode
-from .interleaver import Interleaver9000
+from .interleaver import Interleaver
 
 
 class NNsight:
@@ -307,7 +307,7 @@ class NNsight:
         *args,
         fn: Optional[Union[Callable, str]] = None,
         intervention_graph: Optional[InterventionGraph] = None,
-        interleaver: Optional[Interleaver9000] = None,
+        interleaver: Optional[Interleaver] = None,
         batch_groups: Optional[List[Tuple[int, int]]] = None,
         **kwargs,
     ) -> Any:
@@ -332,7 +332,7 @@ class NNsight:
         
         if interleaver is None:
             # TODO: Error if no intervention graph
-            interleaver = Interleaver9000(intervention_graph, batch_groups=batch_groups)
+            interleaver = Interleaver(intervention_graph, batch_groups=batch_groups)
             
         if fn is None:
             fn = self._execute
