@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import AbstractContextManager
-from typing import Callable, Dict, List, Tuple, Union, Optional
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
@@ -20,7 +20,7 @@ class Interleaver(AbstractContextManager):
         batch_groups: Optional[List[Tuple[int, int]]] = None,
         input_hook: Optional[Callable] = None,
         output_hook: Optional[Callable] = None,
-        batch_size: Optional[int] = None
+        batch_size: Optional[int] = None,
     ) -> None:
 
         self.model: torch.nn.Module = None
@@ -47,9 +47,10 @@ class Interleaver(AbstractContextManager):
         self.output_hook = output_hook
 
         self.handles: List[RemovableHandle] = []
-        self.deferred = set()
-        
-        self.batch_size = sum(self.batch_groups[-1]) if batch_size is None else batch_size
+
+        self.batch_size = (
+            sum(self.batch_groups[-1]) if batch_size is None else batch_size
+        )
 
     def __enter__(self) -> Interleaver:
         """Registers input and output hooks to modules if they are defined.
@@ -57,8 +58,6 @@ class Interleaver(AbstractContextManager):
         Returns:
             HookModel: HookModel object.
         """
-        
-
 
         for module_key in self.graph.interventions.keys():
 
@@ -105,14 +104,18 @@ class Interleaver(AbstractContextManager):
 
         if isinstance(exc_val, Exception):
             raise exc_val
+
     def cleanup(self) -> None:
 
-        def inner(node: InterventionNode):
+        for start in self.graph.deferred:
 
-            for listener in node.listeners:
-                listener.update_dependencies()
-                inner(listener)
+            for index in range(start, self.graph.deferred[start][-1] + 1):
 
-        for index in self.deferred:
+                node = self.graph.nodes[index]
 
-            inner(self.graph.nodes[index])
+                for dependency in node.dependencies:
+                    if dependency.index < start:
+                        dependency.remaining_listeners -= 1
+
+                        if dependency.redundant:
+                            dependency.destroy()

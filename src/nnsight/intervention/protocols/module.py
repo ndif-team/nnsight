@@ -15,7 +15,6 @@ class ApplyModuleProtocol(Protocol):
     Uses an attachment to the Graph to store the model.
     """
 
-    attachment_name = "nnsight_root_module"
 
     @classmethod
     def add(

@@ -73,8 +73,6 @@ class Graph(Generic[NodeType, ProxyType]):
 
             node = self.nodes[index]
             
-            # print(node)
-
             node.update_dependencies()
 
     def create(
@@ -102,16 +100,22 @@ class Graph(Generic[NodeType, ProxyType]):
 
         memo = {}
 
-        def from_memo(node: Node):
+        def from_memo(arg: Union[Node, SubGraph]):
+            
+            if isinstance(arg, SubGraph):
+                return arg.copy(SubGraph(new_graph))
+            
+            if arg.done:
+                return arg.value
 
-            return new_graph.nodes[memo[node.index]]
+            return new_graph.nodes[memo[arg.index]]
 
         for node in self:
 
             new_node = new_graph.create(
                 node.target,
-                *util.apply(node.args, from_memo, Node),
-                **util.apply(node.kwargs, from_memo, Node),
+                *util.apply(node.args, from_memo, (Node, SubGraph)),
+                **util.apply(node.kwargs, from_memo, (Node, SubGraph)),
             ).node
 
             memo[node.index] = new_node.index

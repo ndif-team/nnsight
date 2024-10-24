@@ -304,7 +304,6 @@ class Node:
         
         for dependency in self.dependencies:
             if len(self.graph.defer_stack) > 0 and dependency.index  < self.graph.defer_stack[-1]:
-                print(dependency.target, dependency.args)
                 continue
             
             dependency.remaining_listeners -= 1

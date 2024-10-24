@@ -116,13 +116,11 @@ class InterventionProtocol(Protocol):
         interventions = interleaver.graph.interventions
 
         if module_path in interventions:
-            intervention_subgraphs = interventions[module_path]
+            intervention_nodes = interventions[module_path]
 
             # Multiple intervention nodes can have same module_path if there are multiple invocations.
             # Is a set of node indexes making up the intervention subgraph
-            for subgraph in intervention_subgraphs:
-
-                node:"InterventionNode" = subgraph[0]
+            for node in intervention_nodes:
 
                 # Args for intervention nodes are (module_path, batch_group, iteration).
                 _, batch_group, iteration = node.args
@@ -134,13 +132,6 @@ class InterventionProtocol(Protocol):
                 # Dont execute if the node isnt ready (call count / iteration) or its not fulfilled (conditional)
                 if not ready:
                     continue
-
-                # If this execution is possibly not the last time it will be executed,
-                # we need to defer destruction of dependencies outside the sub-graph.
-                if defer:
-                    node.graph.defer_stack.append(node.kwargs['start'])
-
-                subgraph.reset()
 
                 value = activations
 
@@ -175,13 +166,8 @@ class InterventionProtocol(Protocol):
                 
                 node.executed = True
                 
-                node.graph.execute(start=node.kwargs['start'])
-                
-                
-
-
-                if defer:
-                    node.graph.defer_stack.pop()
+                # Execute starting from start
+                node.graph.execute(start=node.kwargs['start'], defer=defer)
 
                 # Check if through the previous value injection, there was a 'swap' intervention.
                 # This would mean we want to replace activations for this batch with some other ones.

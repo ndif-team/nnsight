@@ -132,7 +132,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
         graph.compile()
         
         graph.reset()
-        
+                
         graph.execute()
         
         model.interleave(

@@ -36,6 +36,7 @@ class Condition(Context[SubGraph]):
             condition = True
 
         if not branch and condition:
+            
             graph.reset()
             graph.execute()
 
