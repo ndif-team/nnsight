@@ -182,7 +182,7 @@ class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
                 repo_id, config=config, **tokenizer_kwargs
             )
 
-            if not hasattr(self.tokenizer.pad_token, "pad_token"):
+            if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 
         if self._model is None:
