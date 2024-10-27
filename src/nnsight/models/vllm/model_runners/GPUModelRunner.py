@@ -1,13 +1,20 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
+from functools import wraps
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union, Callable
 
 import torch
 import torch.distributed
 
 from nnsight.models.NNsightModel import NNsight
-from vllm.distributed import get_pp_group
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear)
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
@@ -16,7 +23,8 @@ from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict, dump_input_when_exception)
 
-from ....intervention import InterventionHandler
+from ....intervention import InterventionHandler, InterventionProtocol
+from ....patching import Patch, Patcher
 from .. import VLLM
 from ..sampling import NNsightSamplingMetadata
 
@@ -209,7 +217,7 @@ class NNsightGPUModelRunner(ModelRunner):
                 "finished_requests_ids": model_input.finished_requests_ids,
                 "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
             }
-            if self.has_seqlen_agnostic
+            if self.has_inner_state
             else {}
         )
         if (
@@ -331,11 +339,73 @@ class NNsightGPUModelRunner(ModelRunner):
                 output.hidden_states = hidden_states
 
             return output
+        
+        def parallel_intervene(intervene_func: Callable) -> Callable:
+            """ Create an intervene wrapper that handles tensor parallelism execution of vLLM models.
 
-        output = NNsight.interleave(
-            self.model,
-            inner,
-            intervention_graph,
-            intervention_handler=intervention_handler,
-        )
+            Args:
+                intervene_func (Callable): intervention function.
+            
+            Returns 
+            """
+
+            @wraps(intervene_func)
+            def parallel_intervene_wrapper(
+                activations: Any, 
+                module_path: str, 
+                module: torch.nn.Module, 
+                key: str, 
+                intervention_handler: "InterventionHandler"
+            ) -> Any:
+                """ InterventionProtocol.intervene wrapper handling the parallelized modules of vLLM.
+                If some activations were parallelized, then they need to be gathered as a full tensor to intervene on them,
+                and then split again before returning them.
+
+                Args:
+                    activations (Any): Either the inputs or outputs of a torch module.
+                    module_path (str): Module path of the current relevant module relative to the root model.
+                    module (torch.nn.Module): Module to be intervened on.
+                    key (str): Key denoting either "input" or "output" of module.
+                    intervention_handler (InterventionHandler): Handler object that stores the intervention graph and keeps track of module call count.
+
+                Returns:
+                    Any: The activations, potentially modified by the intervention graph.
+                """
+                # If the activations are parallelized, they must be gathered before intervening on them
+                if isinstance(module, ColumnParallelLinear) and key == "output" and not module.gather_output:
+                    full_tensor = tensor_model_parallel_all_gather(activations[0])
+                    activations = (full_tensor, ) + activations[1:]
+                if isinstance(module, RowParallelLinear) and key == "input" and module.input_is_parallel:
+                    full_tensor = tensor_model_parallel_all_gather(activations[0][0])
+                    activations = ((full_tensor,) + activations[0][1:], ) + activations[1:]
+
+                activations = intervene_func(activations, module_path, module, key, intervention_handler)
+
+                # If the activations were parallelized originally, they must be split again before returning them
+                if isinstance(module, ColumnParallelLinear) and key == "output" and not module.gather_output:
+                    tp_rank = get_tensor_model_parallel_rank()
+                    splitted_input = split_tensor_along_last_dim(activations[0], num_partitions=get_tensor_model_parallel_world_size())
+                    activations = (splitted_input[tp_rank].contiguous(),) + activations[1:]
+                if isinstance(module, RowParallelLinear) and key == "input" and module.input_is_parallel:
+                    tp_rank = get_tensor_model_parallel_rank()
+                    splitted_input = split_tensor_along_last_dim(activations[0][0], num_partitions=get_tensor_model_parallel_world_size())
+                    activations = ((splitted_input[tp_rank].contiguous(),) + activations[0][1:],) + activations[1:]
+
+                return activations
+            
+            return parallel_intervene_wrapper
+
+        if get_tensor_model_parallel_world_size() > 1:
+            intervene_patch = Patch(InterventionProtocol, parallel_intervene(InterventionProtocol.intervene), "intervene")
+        else:
+            intervene_patch = Patch(InterventionProtocol, InterventionProtocol.intervene, "intervene")
+
+        with Patcher([intervene_patch]):
+            output = NNsight.interleave(
+                self.model,
+                inner,
+                intervention_graph,
+                intervention_handler=intervention_handler,
+            )
+
         return [output]

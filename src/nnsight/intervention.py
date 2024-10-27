@@ -12,7 +12,7 @@ from __future__ import annotations
 import inspect
 from collections import defaultdict
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Collection, Dict, List, Tuple, Union
 
 import torch
 from torch.utils.hooks import RemovableHandle
