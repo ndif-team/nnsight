@@ -36,7 +36,7 @@ def handle_conditional(frame: FrameType, condition: "Proxy"):
 
     graph = condition.node.graph
 
-    branch = Condition(condition, backend=ChildBackend(), parent=graph)
+    branch = Condition(condition, parent=graph)
 
     def get_else(node: ast.If):
 
