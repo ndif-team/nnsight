@@ -106,6 +106,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         end = self[-1].index + 1
 
         context_start: int = None
+        defer_start: int = None
         context_node: InterventionNode = None
 
         # looping over all the nodes created within this graph's context
@@ -119,6 +120,8 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                 context_node = self.nodes[node.graph[-1].index + 1]
 
                 context_start = self.subset.index(context_node.index)
+                
+                defer_start = node.index
 
                 self.context_dependency(context_node, intervention_subgraphs)
 
@@ -147,12 +150,14 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                     graph.subset.remove(node.index)
 
                     node.kwargs["start"] = context_start
+                    node.kwargs["defer_start"] = defer_start
 
                     node.graph = self
 
                 else:
 
                     node.kwargs["start"] = self.subset.index(subgraph.subset[0])
+                    node.kwargs["defer_start"] = node.kwargs["start"]
 
             elif node.target is GradProtocol:
 
@@ -189,23 +194,23 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         self.compiled = True
 
-    def execute(self, start: int = 0, grad: bool = False, defer:bool=False) -> None:
+    def execute(self, start: int = 0, grad: bool = False, defer:bool=False, defer_start:int=0) -> None:
 
         self.alive = False
 
         exception = None
-        
-        if start in self.deferred:
-                        
-            for index in self.deferred[start]:
+                
+        if defer_start in self.deferred:
+                    
+            for index in self.deferred[defer_start]:
                 
                 self.nodes[index].reset()
                 
-            del self.deferred[start]
+            del self.deferred[defer_start]
             
         if defer:
 
-            self.defer_stack.append(self[start].index)
+            self.defer_stack.append(defer_start)
 
         for node in self[start:]:
 
@@ -217,7 +222,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                 try:
                     node.execute()
                     if defer and node.target is not InterventionProtocol:
-                        self.deferred[start].append(node.index)
+                        self.deferred[defer_start].append(node.index)
                 except Exception as e:
                     exception = (node.index, e)
                     break

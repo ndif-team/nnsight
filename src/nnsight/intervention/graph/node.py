@@ -11,7 +11,7 @@ from ... import util
 from ...tracing.contexts import GlobalTracingContext
 from ...tracing.graph import Node, Proxy
 from ...tracing.protocols import Protocol
-from ..protocols import InterventionProtocol
+from ..protocols import GradProtocol, InterventionProtocol
 
 if TYPE_CHECKING:
     from . import InterventionGraph
@@ -67,7 +67,10 @@ class InterventionNode(Node):
         for dependency in self.dependencies:
             if len(self.graph.defer_stack) > 0 and (
                 dependency.index < self.graph.defer_stack[-1]
-                or dependency.target is InterventionProtocol
+                or (
+                    dependency.target in (InterventionProtocol, GradProtocol)
+                    and dependency.graph is not self.graph
+                )
             ):
                 continue
 

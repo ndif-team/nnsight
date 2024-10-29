@@ -161,13 +161,14 @@ class InterventionProtocol(Protocol):
                         torch.Tensor,
                     )
 
+                node.reset()
+
                 # Value injection.
                 node.set_value(value)
                 
                 node.executed = True
-                
                 # Execute starting from start
-                node.graph.execute(start=node.kwargs['start'], defer=defer)
+                node.graph.execute(start=node.kwargs['start'], defer=defer, defer_start=node.kwargs['defer_start'])
 
                 # Check if through the previous value injection, there was a 'swap' intervention.
                 # This would mean we want to replace activations for this batch with some other ones.
