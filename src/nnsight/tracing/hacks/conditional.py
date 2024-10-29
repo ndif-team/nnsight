@@ -4,7 +4,6 @@ import sys
 from types import FrameType
 from typing import TYPE_CHECKING
 
-from ..backends import ChildBackend
 from ..contexts import Condition, Context
 from .util import execute, execute_body, execute_until
 
@@ -36,7 +35,7 @@ def handle_conditional(frame: FrameType, condition: "Proxy"):
 
     graph = condition.node.graph
 
-    branch = Condition(condition, backend=ChildBackend(), parent=graph)
+    branch = Condition(condition, parent=graph)
 
     def get_else(node: ast.If):
 

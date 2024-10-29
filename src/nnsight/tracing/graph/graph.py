@@ -138,7 +138,7 @@ class Graph(Generic[NodeType, ProxyType]):
     @overload
     def __getitem__(self, key: Union[slice, List[int]]) -> List[Node]: ...
 
-    def __getitem__(self, key: Any) -> Union[Node, List[Node]]:
+    def __getitem__(self, key: Union[int, Union[slice, List[int]]]) -> Union[Node, List[Node]]:
         return self.nodes[key]
 
     def __iter__(self) -> Iterator[Node]:
@@ -171,7 +171,7 @@ class SubGraph(Graph[NodeType, ProxyType]):
     @overload
     def __getitem__(self, key: Union[slice, List[int]]) -> List[Node]: ...
 
-    def __getitem__(self, key: Any) -> Union[Node, List[Node]]:
+    def __getitem__(self, key: Union[int, Union[slice, List[int]]]) -> Union[Node, List[Node]]:
         
         index = self.subset[key]
         
