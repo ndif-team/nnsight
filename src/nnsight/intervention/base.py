@@ -9,6 +9,7 @@ from typing_extensions import Self
 
 from .. import util
 from ..tracing.backends import Backend
+from .backends import RemoteBackend
 from .contexts import InterventionTracer, Session, EditingTracer
 from .envoy import Envoy
 from .graph import InterventionGraph, InterventionProxy, InterventionProxyType, InterventionNode
@@ -52,8 +53,6 @@ class NNsight:
         *inputs: Any,
         method: Optional[str] = None,
         backend: Optional[Union[Backend, str]] = None,
-        remote: bool = False,
-        blocking: bool = True,
         trace: bool = True,
         scan:bool = False,
         **kwargs: Dict[str, Any],
@@ -147,19 +146,9 @@ class NNsight:
         if backend is not None:
             pass
 
-        elif self._session is not None:
+        if self._session is not None:
 
             parent = self._session.graph
-
-        # If remote, use RemoteBackend with default url.
-        elif remote:
-
-            backend = RemoteBackend(blocking=blocking)
-
-        # If backend is a string, assume RemoteBackend url.
-        elif isinstance(backend, str):
-
-            backend = RemoteBackend(host=backend, blocking=blocking)
 
         tracer = InterventionTracer(self, *inputs, method=method, backend=backend, parent = parent, scan=scan,**kwargs)
 
@@ -268,8 +257,6 @@ class NNsight:
     def session(
         self,
         backend: Union[Backend, str] = None,
-        remote: bool = False,
-        blocking: bool = True,
         **kwargs,
     ) -> Session:
         """Create a session context using a Session.
@@ -289,16 +276,6 @@ class NNsight:
         elif self._session is not None:
 
             parent = self._session.graph
-
-        # If remote, use RemoteBackend with default url.
-        elif remote:
-
-            backend = RemoteBackend(blocking=blocking)
-
-        # If backend is a string, assume RemoteBackend url.
-        elif isinstance(backend, str):
-
-            backend = RemoteBackend(host=backend, blocking=blocking)
 
         return Session[InterventionNode, self.proxy_class](self, backend=backend, **kwargs)
 

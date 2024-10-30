@@ -1,66 +1,56 @@
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Dict, List, Union
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, field_serializer
+from pydantic import BaseModel, ConfigDict
 
-from .. import NNsight
-from .format.types import *
+from .format.types import (
+    MEMO,
+    DeserializeHandler,
+    Graph,
+    GraphModel,
+    GraphType,
+    ValueTypes,
+)
 
 if TYPE_CHECKING:
-    from ..contexts.backends.RemoteBackend import RemoteMixin
-
-OBJECT_TYPES = Union[SessionType, TracerType, SessionModel, TracerModel]
+    from .. import NNsight
 
 
 class RequestModel(BaseModel):
 
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True, protected_namespaces=()
-    )
+    model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
 
-    object: str | OBJECT_TYPES
-    model_key: str
+    graph: Union[GraphModel, GraphType]
+    memo: Dict[int, ValueTypes]
 
-    id: str = None
-    received: datetime = None
+    def __init__(self, *args, memo: Dict = None, **kwargs):
 
-    session_id: Optional[str] = None
+        super().__init__(*args, memo=memo or dict(), **kwargs)
 
-    @field_serializer("object")
-    def serialize_object(
-        self, object: Union[SessionType, TracerType, SessionModel, TracerModel]
-    ) -> str:
+        if memo is None:
 
-        if isinstance(object, str):
-            return object
+            self.memo = {**MEMO}
 
-        return object.model_dump_json()
+            MEMO.clear()
 
-    def deserialize(self, model: NNsight) -> "RemoteMixin":
+    def deserialize(self):
 
-        handler = DeserializeHandler(model=model)
+        handler = DeserializeHandler(self.memo)
 
-        object: OBJECT_TYPES = TypeAdapter(
-            OBJECT_TYPES, config=RequestModel.model_config
-        ).validate_python(json.loads(self.object))
-
-        return object.deserialize(handler)
+        return self.graph.deserialize(handler)
 
 class StreamValueModel(BaseModel):
-    
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True, protected_namespaces=()
-    )
-    
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
+
     value: ValueTypes
-    
-    def deserialize(self, model:NNsight):
-        
+
+    def deserialize(self, model: "NNsight"):
+
         handler = DeserializeHandler(model=model)
-        
+
         return try_deserialize(self.value, handler)
-                
-        

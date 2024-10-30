@@ -118,7 +118,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
                     module_path,
                     self._tracer._invoker_group,
                     iteration,
-                    fake_values=fake_output,  
+                    fake_value=fake_output,  
                 )
 
         self._output_stack.append(output)
@@ -176,7 +176,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
                     module_path,
                     self._tracer._invoker_group,
                     iteration,
-                    fake_values=fake_input,  
+                    fake_value=fake_input,  
                 )
 
         self._input_stack.append(input)
