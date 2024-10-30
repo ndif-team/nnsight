@@ -3,6 +3,8 @@ API:
   HOST: ndif.dev
   JOB_ID: null
   SSL: true
+  ZLIB: true
+  FORMAT: json
 APP:
   LOGGING: false
   REMOTE_LOGGING: true

@@ -24,19 +24,19 @@ import torch
 import yaml
 
 from .util import Patch, Patcher
-from .schema.Config import ConfigModel
+from .schema.config import ConfigModel
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
-# from .logger import logger, remote_logger
+from .logger import logger, remote_logger
 from .intervention import NNsight
 from .modeling.language import LanguageModel
 # from .tracing.Proxy import proxy_wrapper
 
-# logger.disabled = not CONFIG.APP.LOGGING
-# remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
+logger.disabled = not CONFIG.APP.LOGGING
+remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
 
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()

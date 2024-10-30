@@ -8,7 +8,7 @@ from nnsight.tracing.backends import Backend
 from nnsight.tracing.graph import Graph
 from nnsight.tracing.protocols import StopProtocol
 from nnsight.tracing.contexts import GlobalTracingContext
-from nnsight.schema.Request import RequestModel
+from nnsight.schema.request import RequestModel
 class AssertSavedLenBackend(Backend):
     
     def __init__(self, len:int) -> None:

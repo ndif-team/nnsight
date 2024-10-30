@@ -7,31 +7,15 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-# from .. import util
-# from ..tracing.Graph import Graph
-
-
-# class ResultModel(BaseModel):
-#     id: str
-#     value: Any = None
-
-#     @classmethod
-#     def from_graph(cls, graph: Graph) -> Dict[str, Any]:
-
-#         saves = {
-#             name: util.apply(
-#                 node.value, lambda x: x.detach().cpu(), torch.Tensor
-#             )
-#             for name, node in graph.nodes.items()
-#             if node.done()
-#         }
-
-#         return saves
+from .result import RESULT
 
 
 class ResponseModel(BaseModel):
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
+
     class JobStatus(Enum):
         RECEIVED = "RECEIVED"
         APPROVED = "APPROVED"
@@ -45,7 +29,7 @@ class ResponseModel(BaseModel):
     status: JobStatus
 
     description: Optional[str] = ""
-    data: Optional[Any] = None
+    data: Optional[Union[RESULT, Any]] = None
     received: Optional[datetime] = None
     session_id: Optional[str] = None
 
@@ -56,7 +40,7 @@ class ResponseModel(BaseModel):
         if self.status == ResponseModel.JobStatus.ERROR:
             logger.error(str(self))
             raise SystemExit("Remote exception.")
-        elif self.status ==  ResponseModel.JobStatus.STREAM:
+        elif self.status == ResponseModel.JobStatus.STREAM:
             pass
         else:
             logger.info(str(self))

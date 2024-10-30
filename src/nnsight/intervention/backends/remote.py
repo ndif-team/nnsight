@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import pickle
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import requests
 import socketio
@@ -14,11 +14,12 @@ import zlib
 from ... import CONFIG
 from ...tracing import protocols
 from ...tracing.backends import Backend
-from ...tracing.graph import GraphType
+from ...tracing.graph import Graph
 
-from ...schema.Request import RequestModel
-from ...schema.Response import ResponseModel
-
+from ...schema.request import RequestModel
+from ...schema.response import ResponseModel
+from ...schema.result import ResultModel, RESULT
+from ... import remote_logger
 class RemoteBackend(Backend):
     """Backend to execute a context object via a remote service.
 
@@ -53,11 +54,11 @@ class RemoteBackend(Backend):
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
 
 
-    def serialize(self, graph: GraphType) -> bytes:
+    def serialize(self, graph: Graph) -> bytes:
         
         if self.format == "json":
             
-            data = RequestModel(graph)
+            data = RequestModel(graph=graph)
             
             json = data.model_dump(
                 mode="json"
@@ -80,9 +81,8 @@ class RemoteBackend(Backend):
             data = zlib.compress(data)
             
         return data
-            
-
-    def __call__(self, graph: GraphType):
+               
+    def __call__(self, graph: Graph):
 
 
         if self.blocking:
@@ -90,7 +90,9 @@ class RemoteBackend(Backend):
             data = self.serialize(graph)
 
             # Do blocking request.
-            self.blocking_request(data)
+            result = self.blocking_request(data)
+            
+            ResultModel.inject(graph, result)
 
         else:
 
@@ -107,7 +109,7 @@ class RemoteBackend(Backend):
         # Cleanup
         self.object.remote_backend_cleanup()
 
-    def handle_response(self, response: "ResponseModel") -> None:
+    def handle_response(self, response: ResponseModel) -> Optional[RESULT]:
         """Handles incoming response data.
 
         Logs the response object.
@@ -125,7 +127,6 @@ class RemoteBackend(Backend):
             ResponseModel: ResponseModel.
         """
 
-        from ...schema.Response import ResponseModel, ResultModel
 
         # Log response for user
         response.log(remote_logger)
@@ -135,50 +136,13 @@ class RemoteBackend(Backend):
 
             # If the response has no result data, it was too big and we need to stream it from the server.
             if response.data is None:
-                # Create BytesIO object to store bytes received from server in.
-                result_bytes = io.BytesIO()
-                result_bytes.seek(0)
-
-                # Get result from result url using job id.
-                with requests.get(
-                    url=f"{self.address}/result/{response.id}",
-                    stream=True,
-                ) as stream:
-                    # Total size of incoming data.
-                    total_size = float(stream.headers["Content-length"])
-
-                    with tqdm(
-                        total=total_size,
-                        unit="B",
-                        unit_scale=True,
-                        desc="Downloading result",
-                    ) as progress_bar:
-                        # chunk_size=None so server determines chunk size.
-                        for data in stream.iter_content(chunk_size=None):
-                            progress_bar.update(len(data))
-                            result_bytes.write(data)
-
-                # Move cursor to beginning of bytes.
-                result_bytes.seek(0)
-
-                # Decode bytes with pickle and then into pydantic object.
-                result = torch.load(
-                    result_bytes, map_location="cpu", weights_only=False
-                )
-
-                # Close bytes
-                result_bytes.close()
-
+                
+                result = self.get_result(response.id)
             else:
 
                 result = response.data
 
-            # Load into pydantic object from dict.
-            result = ResultModel(**result)
-
-            # Handle result
-            # This injects the .saved() values
-            self.object.remote_backend_handle_result_value(result.value)
+            return result
 
         # If were receiving a streamed value:
         elif response.status == ResponseModel.JobStatus.STREAM:
@@ -199,7 +163,7 @@ class RemoteBackend(Backend):
                         
             node.remaining_dependencies = -1
 
-    def submit_request(self, data: bytes, headers: Dict[str, Any]) -> "ResponseModel":
+    def submit_request(self, data: bytes, headers: Dict[str, Any]) -> None:
         """Sends request to the remote endpoint and handles the response object.
 
         Raises:
@@ -209,7 +173,9 @@ class RemoteBackend(Backend):
             (ResponseModel): Response.
         """
 
-        from ...schema.Response import ResponseModel
+        from ...schema.response import ResponseModel
+        
+        headers['Content-Type'] = "application/octet-stream"
 
         response = requests.post(
             f"{self.address}/request",
@@ -221,14 +187,13 @@ class RemoteBackend(Backend):
 
             response = ResponseModel(**response.json())
 
-            return self.handle_response(response)
+            self.handle_response(response)
 
         else:
-
             msg = response.json()['detail']
             raise ConnectionError(msg)
 
-    def get_response(self) -> "ResponseModel":
+    def get_response(self) -> ResponseModel:
         """Retrieves and handles the response object from the remote endpoint.
 
         Raises:
@@ -238,7 +203,7 @@ class RemoteBackend(Backend):
             (ResponseModel): Response.
         """
 
-        from ...schema.Response import ResponseModel
+        from ...schema.response import ResponseModel
 
         response = requests.get(
             f"{self.address}/response/{self.job_id}",
@@ -255,14 +220,51 @@ class RemoteBackend(Backend):
 
             raise Exception(response.reason)
 
-    def blocking_request(self, request: "RequestModel"):
+    def get_result(self, id:str) -> RESULT:
+        
+        result_bytes = io.BytesIO()
+        result_bytes.seek(0)
+
+        # Get result from result url using job id.
+        with requests.get(
+            url=f"{self.address}/result/{id}",
+            stream=True,
+        ) as stream:
+            # Total size of incoming data.
+            total_size = float(stream.headers["Content-length"])
+
+            with tqdm(
+                total=total_size,
+                unit="B",
+                unit_scale=True,
+                desc="Downloading result",
+            ) as progress_bar:
+                # chunk_size=None so server determines chunk size.
+                for data in stream.iter_content(chunk_size=None):
+                    progress_bar.update(len(data))
+                    result_bytes.write(data)
+
+        # Move cursor to beginning of bytes.
+        result_bytes.seek(0)
+
+        # Decode bytes with pickle and then into pydantic object.
+        result = torch.load(
+            result_bytes, map_location="cpu", weights_only=False
+        )
+        
+        result = ResultModel(**result).result
+
+        # Close bytes
+        result_bytes.close()
+        
+        return result
+    
+    def blocking_request(self, data: bytes) -> RESULT:
         """Send intervention request to the remote service while waiting for updates via websocket.
 
         Args:
             request (RequestModel):Request.
         """
-
-        from ...schema.Response import ResponseModel
 
         # We need to do some processing / optimizations on both the graph were sending remotely
         # and our local intervention graph. In order handle the more complex Protocols for streaming.
@@ -280,17 +282,16 @@ class RemoteBackend(Backend):
                 wait_timeout=10,
             )
             
-            
             headers = {
                 # Give request session ID so server knows to respond via websockets to us.
                 'model_key' : self.model_key,
                 'session_id' : sio.sid,
                 'format' : self.format,
-                'zlib' : self.zlib
+                'zlib' : str(self.zlib)
             }
 
             # Submit request via
-            response = self.submit_request(request, headers)
+            self.submit_request(data, headers)
 
             # We need to tell the StreamingUploadProtocol how to use our websocket connection
             # so it can upload values during execution to our job.
@@ -308,22 +309,21 @@ class RemoteBackend(Backend):
                     response = sio.receive()[1]
                     # Convert to pydantic object.
                     response = ResponseModel.unpickle(response)
-
                     # Handle the response.
-                    self.handle_response(response)
-
+                    result = self.handle_response(response)
                     # Break when completed.
-                    if response.status == ResponseModel.JobStatus.COMPLETED:
-                        break
+                    if result is not None:
+                        return result
 
             except Exception as e:
 
                 raise e
 
             finally:
+                pass
 
                 # Clear StreamingUploadProtocol state
-                protocols.StreamingUploadProtocol.set(None)
+                # protocols.StreamingUploadProtocol.set(None)
 
     def stream_send(self, value: Any, job_id: str, sio: socketio.SimpleClient):
         """Upload some value to the remote service for some job id.
@@ -334,7 +334,7 @@ class RemoteBackend(Backend):
             sio (socketio.SimpleClient): Connected websocket client.
         """
 
-        from ...schema.Request import StreamValueModel
+        from ...schema.request import StreamValueModel
 
         request = StreamValueModel(value=value)
 
@@ -351,7 +351,7 @@ class RemoteBackend(Backend):
             request (RequestModel): Request if submitting a new request. Defaults to None
         """
 
-        from ...schema.Response import ResponseModel
+        from ...schema.response import ResponseModel
 
         if request is not None:
 
