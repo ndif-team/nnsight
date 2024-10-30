@@ -37,9 +37,9 @@ class RequestModel(BaseModel):
 
             MEMO.clear()
 
-    def deserialize(self):
+    def deserialize(self, model: "NNsight"):
 
-        handler = DeserializeHandler(self.memo)
+        handler = DeserializeHandler(self.memo, model)
 
         return self.graph.deserialize(handler)
 

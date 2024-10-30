@@ -36,9 +36,11 @@ class DeserializeHandler:
     def __init__(
         self,
         memo,
+        model: "NNsight"
     ) -> None:
 
         self.memo = memo
+        self.model = model
         self.graph = Graph(node_class=InterventionNode)
 
 
@@ -299,7 +301,7 @@ class InterventionGraphModel(SubGraphModel):
         return InterventionGraphModel(subset=value.subset)
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
-        return InterventionGraph(handler.graph, subset=self.subset)
+        return InterventionGraph(handler.graph, model=handler.model, subset=self.subset)
 
 
 class MemoReferenceModel(BaseNNsightModel):
