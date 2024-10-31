@@ -1,4 +1,4 @@
-from typing import Callable, Any, Generic
+from typing import Callable, Any, Generic, TypeVar, Union
 from typing_extensions import Self
 
 from ..graph import ProxyType, GraphType, SubGraph, NodeType, Proxy
@@ -37,12 +37,9 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
 
         return Condition(condition, parent=self.graph)
 
-    def apply(
-        self,
-        target: Callable,
-        *args,
-        **kwargs,
-    ) -> Proxy:
+    R = TypeVar('R')
+    
+    def apply(self, target: Callable[..., R], *args, **kwargs) -> Union[Proxy, R]:
 
         return self.graph.create(
             target,
@@ -53,3 +50,8 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
     def stop(self):
 
         StopProtocol.add(self.graph)
+        
+        
+    def log(self, *args):
+        
+        self.apply(print, *args)

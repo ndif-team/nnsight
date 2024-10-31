@@ -83,15 +83,11 @@ class RemoteBackend(Backend):
         return data
                
     def __call__(self, graph: Graph):
-
-
+        
         if self.blocking:
-
-            
 
             # Do blocking request.
             self.blocking_request(graph)
-     
 
         else:
 
@@ -129,7 +125,7 @@ class RemoteBackend(Backend):
 
         # If job is completed:
         if response.status == ResponseModel.JobStatus.COMPLETED:
-
+            
             # If the response has no result data, it was too big and we need to stream it from the server.
             if response.data is None:
                 

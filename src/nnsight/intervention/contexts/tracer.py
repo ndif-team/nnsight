@@ -1,10 +1,12 @@
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+
+from nnsight.tracing.graph import Proxy
 
 from ...tracing.backends import Backend
 from ...tracing.contexts import Tracer
 from ...tracing.graph import GraphType
-from ..graph import InterventionGraph, InterventionNode, ValidatingInterventionNode,  InterventionNodeType, InterventionProxyType
+from ..graph import InterventionGraph, InterventionNode, ValidatingInterventionNode,  InterventionNodeType, InterventionProxyType, InterventionProxy
 from . import Invoker
 
 if TYPE_CHECKING:
@@ -116,6 +118,11 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
     def _invoker_group(self):
 
         return len(self.args) - 2
+    
+    R = TypeVar('R')
+    
+    def apply(self, target: Callable[..., R], *args, **kwargs) -> Union[InterventionProxy, R]:
+        return super().apply(target, *args, **kwargs)
 
     @classmethod
     def execute(cls, node: InterventionNodeType):
