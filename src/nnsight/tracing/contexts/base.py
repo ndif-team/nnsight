@@ -58,8 +58,12 @@ class Context(Protocol, AbstractContextManager, Generic[GraphType]):
         self.add(graph.stack[-1], graph, *self.args, **self.kwargs)
 
         if self.backend is not None:
+            
+            graph = graph.stack.pop()
+            
+            graph.alive = False
 
-            self.backend(graph.stack.pop())
+            self.backend(graph)
 
     @classmethod
     def execute(cls, node: NodeType):
