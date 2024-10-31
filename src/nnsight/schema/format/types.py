@@ -288,7 +288,12 @@ class SubGraphModel(BaseNNsightModel):
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
 
-        return SubGraph(handler.graph, subset=self.subset)
+        value = SubGraph(handler.graph, subset=self.subset)
+        
+        for node in value:
+            node.graph = value
+            
+        return value
 
 
 class InterventionGraphModel(SubGraphModel):
@@ -301,7 +306,12 @@ class InterventionGraphModel(SubGraphModel):
         return InterventionGraphModel(subset=value.subset)
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
-        return InterventionGraph(handler.graph, model=handler.model, subset=self.subset)
+        value = InterventionGraph(handler.graph, model=handler.model, subset=self.subset)
+    
+        for node in value:
+            node.graph = value
+            
+        return value
 
 
 class MemoReferenceModel(BaseNNsightModel):
