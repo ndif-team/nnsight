@@ -3,23 +3,24 @@ from __future__ import annotations
 import io
 import pickle
 import weakref
+import zlib
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
+import msgspec
 import requests
 import socketio
 import torch
 from tqdm import tqdm
-import msgspec
-import zlib
-from ... import CONFIG
+
+from ... import CONFIG, remote_logger
+from ...schema.request import RequestModel
+from ...schema.response import ResponseModel
+from ...schema.result import RESULT, ResultModel
 from ...tracing import protocols
 from ...tracing.backends import Backend
 from ...tracing.graph import Graph
 
-from ...schema.request import RequestModel
-from ...schema.response import ResponseModel
-from ...schema.result import ResultModel, RESULT
-from ... import remote_logger
+
 class RemoteBackend(Backend):
     """Backend to execute a context object via a remote service.
 
@@ -32,14 +33,14 @@ class RemoteBackend(Backend):
 
     def __init__(
         self,
-        model_key:str,
+        model_key: str,
         host: str = None,
         blocking: bool = True,
         job_id: str = None,
         ssl: bool = None,
         api_key: str = "",
     ) -> None:
-        
+
         self.model_key = model_key
 
         self.job_id = job_id or CONFIG.API.JOB_ID
@@ -53,53 +54,52 @@ class RemoteBackend(Backend):
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
 
+    def serialize(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
 
-    def serialize(self, graph: Graph) -> bytes:
-        
         if self.format == "json":
-            
+
             data = RequestModel(graph=graph)
-            
-            json = data.model_dump(
-                mode="json"
-            )
-            
+
+            json = data.model_dump(mode="json")
+
             data = msgspec.json.encode(json)
-            
-        elif self.format == 'pt':
-            
+
+        elif self.format == "pt":
+
             data = io.BytesIO()
 
             torch.save(graph, data)
-            
+
             data.seek(0)
-            
+
             data = data.read()
-            
+
         if self.zlib:
-                
+
             data = zlib.compress(data)
-            
-        return data
-               
+
+        headers = {
+            "model_key": self.model_key,
+            "format": self.format,
+            "zlib": str(self.zlib),
+        }
+
+        return data, headers
+
     def __call__(self, graph: Graph):
-        
+
         if self.blocking:
 
             # Do blocking request.
-            self.blocking_request(graph)
+            result = self.blocking_request(graph)
 
         else:
 
-            request = None
-
-            # If self.job_id is empty, it means were sending a new job.
-            if not self.job_id:
-
-                request = self.request()
-
             # Otherwise we are getting the status / result of the existing job.
-            self.non_blocking_request(request)
+            result = self.non_blocking_request(graph)
+            
+        if result is not None:  
+            ResultModel.inject(graph, result)
 
     def handle_response(self, response: ResponseModel) -> Optional[RESULT]:
         """Handles incoming response data.
@@ -119,16 +119,15 @@ class RemoteBackend(Backend):
             ResponseModel: ResponseModel.
         """
 
-
         # Log response for user
         response.log(remote_logger)
 
         # If job is completed:
         if response.status == ResponseModel.JobStatus.COMPLETED:
-            
+
             # If the response has no result data, it was too big and we need to stream it from the server.
             if response.data is None:
-                
+
                 result = self.get_result(response.id)
             else:
 
@@ -138,7 +137,7 @@ class RemoteBackend(Backend):
 
         # If were receiving a streamed value:
         elif response.status == ResponseModel.JobStatus.STREAM:
-            
+
             # First item is arguments on how the RemoteMixin can get the correct StreamingDownload node.
             # Second item is the steamed value from the remote service.
             args, value = response.data
@@ -152,10 +151,10 @@ class RemoteBackend(Backend):
 
             # Inject it into the local intervention graph to kick off local execution.
             node.set_value(value)
-                        
+
             node.remaining_dependencies = -1
 
-    def submit_request(self, data: bytes, headers: Dict[str, Any]) -> None:
+    def submit_request(self, data: bytes, headers: Dict[str, Any]) -> Optional[ResponseModel]:
         """Sends request to the remote endpoint and handles the response object.
 
         Raises:
@@ -166,8 +165,8 @@ class RemoteBackend(Backend):
         """
 
         from ...schema.response import ResponseModel
-        
-        headers['Content-Type'] = "application/octet-stream"
+
+        headers["Content-Type"] = "application/octet-stream"
 
         response = requests.post(
             f"{self.address}/request",
@@ -180,12 +179,14 @@ class RemoteBackend(Backend):
             response = ResponseModel(**response.json())
 
             self.handle_response(response)
+            
+            return response
 
         else:
-            msg = response.json()['detail']
+            msg = response.json()["detail"]
             raise ConnectionError(msg)
 
-    def get_response(self) -> ResponseModel:
+    def get_response(self) -> Optional[RESULT]:
         """Retrieves and handles the response object from the remote endpoint.
 
         Raises:
@@ -212,8 +213,8 @@ class RemoteBackend(Backend):
 
             raise Exception(response.reason)
 
-    def get_result(self, id:str) -> RESULT:
-        
+    def get_result(self, id: str) -> RESULT:
+
         result_bytes = io.BytesIO()
         result_bytes.seek(0)
 
@@ -240,18 +241,16 @@ class RemoteBackend(Backend):
         result_bytes.seek(0)
 
         # Decode bytes with pickle and then into pydantic object.
-        result = torch.load(
-            result_bytes, map_location="cpu", weights_only=False
-        )
-        
+        result = torch.load(result_bytes, map_location="cpu", weights_only=False)
+
         result = ResultModel(**result).result
 
         # Close bytes
         result_bytes.close()
-        
+
         return result
-    
-    def blocking_request(self, graph: Graph) -> None:
+
+    def blocking_request(self, graph: Graph) -> Optional[RESULT]:
         """Send intervention request to the remote service while waiting for updates via websocket.
 
         Args:
@@ -260,12 +259,10 @@ class RemoteBackend(Backend):
 
         # We need to do some processing / optimizations on both the graph were sending remotely
         # and our local intervention graph. In order handle the more complex Protocols for streaming.
-        #preprocess(request, streaming=True)
+        # preprocess(request, streaming=True)
 
         # Create a socketio connection to the server.
-        with socketio.SimpleClient(
-             reconnection_attempts=10
-        ) as sio:
+        with socketio.SimpleClient(reconnection_attempts=10) as sio:
             # Connect
             sio.connect(
                 self.ws_address,
@@ -273,18 +270,12 @@ class RemoteBackend(Backend):
                 transports=["websocket"],
                 wait_timeout=10,
             )
-            
-            headers = {
-                # Give request session ID so server knows to respond via websockets to us.
-                'model_key' : self.model_key,
-                'session_id' : sio.sid,
-                'format' : self.format,
-                'zlib' : str(self.zlib)
-            }
-            
-            data = self.serialize(graph)
-            
 
+
+            data, headers = self.serialize(graph)
+            
+            headers['session_id'] = sio.sid
+            
             # Submit request via
             self.submit_request(data, headers)
 
@@ -308,8 +299,7 @@ class RemoteBackend(Backend):
                     result = self.handle_response(response)
                     # Break when completed.
                     if result is not None:
-                        ResultModel.inject(graph, result)
-                        break
+                        return result
 
             except Exception as e:
 
@@ -336,7 +326,7 @@ class RemoteBackend(Backend):
 
         sio.emit("stream_upload", data=(request.model_dump_json(), job_id))
 
-    def non_blocking_request(self, request: "RequestModel" = None):
+    def non_blocking_request(self, graph: Graph):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
 
         Sets CONFIG.API.JOB_ID on initial request as to later get the status of said job.
@@ -349,10 +339,12 @@ class RemoteBackend(Backend):
 
         from ...schema.response import ResponseModel
 
-        if request is not None:
+        if self.job_id is None:
+            
+            data, headers = self.serialize(graph)
 
             # Submit request via
-            response = self.submit_request(request)
+            response = self.submit_request(data, headers)
 
             CONFIG.API.JOB_ID = response.id
 
@@ -362,13 +354,15 @@ class RemoteBackend(Backend):
 
             try:
 
-                response = self.get_response()
+                result = self.get_response()
 
-                if response.status == ResponseModel.JobStatus.COMPLETED:
+                if result is not None:
 
                     CONFIG.API.JOB_ID = None
 
                     CONFIG.save()
+                    
+                    return result
 
             except Exception as e:
 
@@ -440,9 +434,7 @@ def preprocess(request: "RequestModel", streaming: bool = False):
                             # Remove from remote GraphModel
                             graph_model.nodes.pop(node.name, None)
                             # Also remove the exception for it.
-                            exceptions.pop(
-                                f"{graph_model.id}_{node.name}", None
-                            )
+                            exceptions.pop(f"{graph_model.id}_{node.name}", None)
 
                             pop_stream_listeners(node)
 

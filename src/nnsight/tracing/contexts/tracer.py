@@ -25,10 +25,6 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
         
         return super().__exit__(exc_type, exc_val, exc_tb)
 
-    def trace(self):
-
-        return Tracer(parent=self.graph)
-
     def iter(self, collection):
 
         return Iterator(collection, parent=self.graph)
@@ -36,6 +32,14 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
     def cond(self, condition):
 
         return Condition(condition, parent=self.graph)
+    
+    def stop(self):
+
+        StopProtocol.add(self.graph)
+        
+    def log(self, *args):
+        
+        self.apply(print, *args)
 
     R = TypeVar('R')
     
@@ -47,11 +51,4 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
             **kwargs,
         )
 
-    def stop(self):
 
-        StopProtocol.add(self.graph)
-        
-        
-    def log(self, *args):
-        
-        self.apply(print, *args)
