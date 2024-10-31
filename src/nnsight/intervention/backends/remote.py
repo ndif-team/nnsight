@@ -87,12 +87,11 @@ class RemoteBackend(Backend):
 
         if self.blocking:
 
-            data = self.serialize(graph)
+            
 
             # Do blocking request.
-            result = self.blocking_request(data)
-            
-            ResultModel.inject(graph, result)
+            self.blocking_request(graph)
+     
 
         else:
 
@@ -105,9 +104,6 @@ class RemoteBackend(Backend):
 
             # Otherwise we are getting the status / result of the existing job.
             self.non_blocking_request(request)
-
-        # Cleanup
-        self.object.remote_backend_cleanup()
 
     def handle_response(self, response: ResponseModel) -> Optional[RESULT]:
         """Handles incoming response data.
@@ -259,7 +255,7 @@ class RemoteBackend(Backend):
         
         return result
     
-    def blocking_request(self, data: bytes) -> RESULT:
+    def blocking_request(self, graph: Graph) -> None:
         """Send intervention request to the remote service while waiting for updates via websocket.
 
         Args:
@@ -289,6 +285,9 @@ class RemoteBackend(Backend):
                 'format' : self.format,
                 'zlib' : str(self.zlib)
             }
+            
+            data = self.serialize(graph)
+            
 
             # Submit request via
             self.submit_request(data, headers)
@@ -313,7 +312,8 @@ class RemoteBackend(Backend):
                     result = self.handle_response(response)
                     # Break when completed.
                     if result is not None:
-                        return result
+                        ResultModel.inject(graph, result)
+                        break
 
             except Exception as e:
 
