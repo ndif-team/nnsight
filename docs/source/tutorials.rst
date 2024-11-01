@@ -130,6 +130,23 @@ Tutorials
             </div>
          </div>
 
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/LoRA_tutorial.ipynb
+      :class-card: surface
+      :class-body: surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-arrow-down-a-z fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">LoRA</h5>
+               <p class="card-text">Fine tuning for sentiment analysis</p>
+            </div>
+         </div>         
+
 .. toctree::
    :glob:
    :maxdepth: 1
