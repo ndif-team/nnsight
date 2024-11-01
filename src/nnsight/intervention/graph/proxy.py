@@ -32,7 +32,7 @@ class InterventionProxy(Proxy):
             Proxy: Grad proxy.
         """
 
-        self.__dict__["_grad"] = protocols.GradProtocol.add(self.node.graph, self.node, backward_iter=0)
+        self.__dict__["_grad"] = protocols.GradProtocol.add(self.node.graph, self.node, fake_value=self.node.fake_value)
 
         return self._grad
 

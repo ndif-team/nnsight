@@ -26,14 +26,12 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         self,
         *args,
         model: Optional["NNsight"] = None,
-        validate: bool = False,
         **kwargs,
     ) -> None:
 
         super().__init__(*args, **kwargs)
         
         self.model = model
-        self.validate = validate
 
         self.interventions: Dict[str, List[InterventionNode]] = defaultdict(list)
         self.grad_subgraph: Set[int] = set()
