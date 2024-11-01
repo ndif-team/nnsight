@@ -1,4 +1,5 @@
 
+import inspect
 from typing import TYPE_CHECKING
 import torch
 from ...tracing.protocols import Protocol
@@ -7,7 +8,7 @@ from ...tracing.graph import SubGraph
 from ... import util
 if TYPE_CHECKING:
     
-    from ..graph import InterventionProxyType, InterventionNode
+    from ..graph import InterventionProxyType, InterventionNode, InterventionGraph
 
 class ApplyModuleProtocol(Protocol):
     """Protocol that references some root model, and calls its .forward() method given some input.
@@ -18,7 +19,7 @@ class ApplyModuleProtocol(Protocol):
 
     @classmethod
     def add(
-        cls, graph: SubGraph, module_path: str, *args, hook=False, **kwargs
+        cls, graph: "InterventionGraph", module_path: str, *args, hook=False, **kwargs
     ) -> Self:
         """Creates and adds an ApplyModuleProtocol to the Graph.
         Assumes the attachment has already been added via ApplyModuleProtocol.set_module().
@@ -30,26 +31,24 @@ class ApplyModuleProtocol(Protocol):
         Returns:
             InterventionProxy: ApplyModule Proxy.
         """
+        
+        from ..graph.node import ValidatingInterventionNode, validate
 
-        # value = inspect._empty
+        # If the Graph is validating, we need to compute the proxy_value for this node.
+        if graph.node_class is ValidatingInterventionNode:
 
-        # # If the Graph is validating, we need to compute the proxy_value for this node.
-        # if graph.validate:
+            # If the module has parameters, get its device to move input tensors to.
+            module: torch.nn.Module = util.fetch_attr(
+                graph.model._model, module_path
+            )
 
-        #     from .Node import Node
+            try:
+                device = next(module.parameters()).device
+            except:
+                device = None
 
-        #     # If the module has parameters, get its device to move input tensors to.
-        #     module: torch.nn.Module = util.fetch_attr(
-        #         cls.get_module(graph), module_path
-        #     )
-
-        #     try:
-        #         device = next(module.parameters()).device
-        #     except:
-        #         device = None
-
-        #     # Enter FakeMode for proxy_value computing.
-        #     value = validate(module.forward, *args, **kwargs)
+            # Enter FakeMode for proxy_value computing.
+            kwargs['fake_value'] = validate(module.forward, *args, **kwargs)
 
         kwargs["hook"] = hook
 
@@ -69,7 +68,7 @@ class ApplyModuleProtocol(Protocol):
             node (Node): ApplyModule Node.
         """
         
-        graph = node.graph
+        graph: InterventionGraph = node.graph
     
         module: torch.nn.Module = util.fetch_attr(
             graph.model._model, node.args[0]

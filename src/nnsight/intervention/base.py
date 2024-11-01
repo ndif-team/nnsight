@@ -9,7 +9,7 @@ from typing_extensions import Self
 
 from .. import util
 from ..tracing.backends import Backend
-from .backends import RemoteBackend
+from .backends import NoopBackend
 from .contexts import InterventionTracer, Session, EditingTracer
 from .envoy import Envoy
 from .graph import InterventionGraph, InterventionProxy, InterventionProxyType, InterventionNode
@@ -41,7 +41,7 @@ class NNsight:
     ) -> None:
 
         self._model: torch.nn.Module = model
-        self._envoy = Envoy(self._model)
+        self._envoy:Envoy[InterventionProxy, InterventionNode] = Envoy(self._model)
 
         self._session: Optional[Session] = None
         self._default_graph: Optional[InterventionGraph] = None
@@ -51,10 +51,10 @@ class NNsight:
     def trace(
         self,
         *inputs: Any,
-        method: Optional[str] = None,
         backend: Optional[Union[Backend, str]] = None,
         trace: bool = True,
         scan:bool = False,
+        method: Optional[str] = None,
         **kwargs: Dict[str, Any],
     ) -> Union[InterventionTracer, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
@@ -141,14 +141,12 @@ class NNsight:
 
         # TODO raise error/warning if trying to use one backend with another condition satisfied?
 
-        parent = None
-
-        if backend is not None:
-            pass
-
         if self._session is not None:
 
             parent = self._session.graph
+            
+        else:
+            parent = None
 
         tracer = InterventionTracer(self, *inputs, method=method, backend=backend, parent = parent, scan=scan,**kwargs)
 
@@ -160,7 +158,7 @@ class NNsight:
             if not trace:
 
                 with tracer:
-                    with tracer.invoke(*inputs, **invoker_args):
+                    with tracer.invoke(*inputs, **tracer.invoker_kwargs):
 
                         output = self._envoy.output.save()
 
@@ -263,19 +261,17 @@ class NNsight:
 
         Args:
             backend (Backend): Backend for this Session object.
-            remote (bool): Use RemoteBackend with default url.
 
         Returns:
             Session: Session.
         """
 
-        # If remote, use RemoteBackend with default url.
-        if backend is not None:
+
+
+        if self._session is not None:
+
+            #TODO Error
             pass
-
-        elif self._session is not None:
-
-            parent = self._session.graph
 
         return Session[InterventionNode, self.proxy_class](self, backend=backend, **kwargs)
 

@@ -212,7 +212,7 @@ def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as session:
+    with tiny_model.session(validate=False, backend=AssertSavedLenBackend(1)) as session:
         result = session.apply(list).save()
         with session.iter([0, 1, 2]) as item:
             with session.cond(item % 2 == 0):

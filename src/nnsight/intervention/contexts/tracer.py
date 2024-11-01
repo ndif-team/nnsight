@@ -35,8 +35,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             proxy_class=model.proxy_class,
             backend=backend,
             parent=parent,
-            graph=model._default_graph,
-            validate=validate,
+            graph=model._default_graph
         )
 
         self._model = model
