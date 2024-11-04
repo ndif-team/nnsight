@@ -184,6 +184,16 @@ class GlobalTracingContext(Tracer):
                 )
 
         return object.__getattribute__(self, name)
+    
+    def int(self, *args, **kwargs):
+        """NNsight helper method to create a traceable int."""
+
+        return self.apply(int, *args, **kwargs)
+    
+    def list(self, *args, **kwargs):
+        """NNsight helper method to create a traceable list."""
+
+        return self.apply(list, *args, **kwargs)
 
 
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()

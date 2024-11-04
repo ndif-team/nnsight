@@ -96,7 +96,6 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         if isinstance(self[0].target, type) and issubclass(
             self[0].target, Context
         ):
-            breakpoint()
             graph = self[0].args[0]
 
             # handle emtpy if statments or for loops

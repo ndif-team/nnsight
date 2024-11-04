@@ -1,7 +1,7 @@
 import copy
 from typing import Collection
 
-from ...tracing.graph import SubGraph, GraphType, NodeType, ProxyType
+from ...tracing.graph import SubGraph
 from ...tracing.graph import Node
 from ...tracing.graph import Proxy
 from . import Context
@@ -60,5 +60,3 @@ class Iterator(Context[SubGraph]):
                     break
             
         node.set_value(None)
-
-        

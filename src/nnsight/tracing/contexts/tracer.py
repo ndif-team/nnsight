@@ -53,3 +53,6 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
     def stop(self):
 
         StopProtocol.add(self.graph)
+
+    def vis(self, *args, **kwargs):
+        self.graph.visualize(*args, **kwargs)

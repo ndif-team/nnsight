@@ -1,13 +1,16 @@
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict
 
-from typing import TYPE_CHECKING
 import torch
-from ...tracing.protocols import Protocol
 from typing_extensions import Self
-from ...tracing.graph import SubGraph
+
 from ... import util
+from ...tracing.graph import SubGraph
+from ...tracing.protocols import Protocol
+
 if TYPE_CHECKING:
     
-    from ..graph import InterventionProxyType, InterventionNode
+    from ..graph import InterventionNode
 
 class ApplyModuleProtocol(Protocol):
     """Protocol that references some root model, and calls its .forward() method given some input.
@@ -93,3 +96,24 @@ class ApplyModuleProtocol(Protocol):
 
         node.set_value(output)
 
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {
+            "node": {
+                "color": "blue",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label word
+            "edge": defaultdict(lambda: {"style": "solid"}), # Argument edge display
+        }

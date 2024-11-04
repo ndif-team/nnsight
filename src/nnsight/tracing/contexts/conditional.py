@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from collections import defaultdict
+from typing import Any, Dict, Optional
 
-from ...tracing.graph import NodeType, ProxyType, SubGraph
+from ...tracing.graph import NodeType, SubGraph
 from ..contexts import Context
 
 
 class Condition(Context[SubGraph]):
 
     def __init__(
-        self, condition: Any, branch: NodeType = False, *args, **kwargs
+        self, condition: Optional[NodeType], branch: Optional[NodeType] = None, *args, **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
 
@@ -32,6 +33,7 @@ class Condition(Context[SubGraph]):
         condition: Any
         condition, branch = node.prepare_inputs((condition, branch))
 
+        # else case has a True condition
         if condition is None and not branch:
             condition = True
 
@@ -45,5 +47,25 @@ class Condition(Context[SubGraph]):
             graph.clean()
             node.set_value(branch)
             
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
 
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {
+            "node": {
+                "color": "#FF8C00",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: {"style": "solid"}, {2: {"style": "solid", "label": "branch", "color": "#FF8C00", "fontsize": 10}}), # Argument edge display
+        }
 

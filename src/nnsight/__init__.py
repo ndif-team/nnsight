@@ -84,6 +84,10 @@ DEFAULT_PATCHER.add(
 
 DEFAULT_PATCHER.__enter__()
 
+from .tracing.contexts.globals import GlobalTracingContext
+int = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.int
+list = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.list
+
 # from .contexts.Context import GlobalTracingContext
 
 # bool = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bool

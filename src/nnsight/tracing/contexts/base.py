@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Generic, Optional, Type, Union
+from typing import Generic, Optional, Type
 
 from typing_extensions import Self
 

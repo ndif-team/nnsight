@@ -1,10 +1,13 @@
-from typing import TYPE_CHECKING, Any
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict
 
 import torch
-from ...tracing.protocols import Protocol
+
 from ... import util
+from ...tracing.protocols import Protocol
+
 if TYPE_CHECKING:
-    from ..graph import InterventionNodeType, InterventionGraph, InterventionProxyType
+    from ..graph import InterventionGraph, InterventionNodeType
 
 
 class SwapProtocol(Protocol):
@@ -68,3 +71,21 @@ class SwapProtocol(Protocol):
             graph.swap = None
 
         return value
+    
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {
+            "node": {"color": "green4", "shape": "ellipse"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(lambda: None),  # Argument label key word
+            "edge": defaultdict(lambda: {"style": "solid"}), # Argument edge key word
+        }

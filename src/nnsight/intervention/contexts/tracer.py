@@ -1,10 +1,12 @@
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ...tracing.backends import Backend
 from ...tracing.contexts import Tracer
 from ...tracing.graph import GraphType
-from ..graph import InterventionGraph, InterventionNode, ValidatingInterventionNode,  InterventionNodeType, InterventionProxyType
+from ..graph import (InterventionGraph, InterventionNode, InterventionNodeType,
+                     InterventionProxyType, ValidatingInterventionNode)
 from . import Invoker
 
 if TYPE_CHECKING:
@@ -143,4 +145,26 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             **kwargs,
             **invoker_kwargs,
         )
+
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {
+            "node": {
+                "color": "purple",
+                "shape": "polygon",
+                "sides": 6,
+            },  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument
+            "arg_kname": defaultdict(lambda: None, {1: "method"}),  # Argument label key word
+            "edge": defaultdict(lambda: {"style": "solid"}), # Argument edge display
+        }
         

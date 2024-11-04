@@ -1,13 +1,14 @@
-from typing import TYPE_CHECKING, Any, List
-
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict
 
 import torch
-from ...tracing.protocols import Protocol
+
 from ... import util
+from ...tracing.protocols import Protocol
 
 if TYPE_CHECKING:
+    from ..graph import InterventionNodeType
     from ..interleaver import Interleaver
-    from ..graph import InterventionNodeType, InterventionProxyType, InterventionGraph, InterventionProxy, InterventionNode
 
 class InterventionProtocol(Protocol):
 
@@ -196,3 +197,23 @@ class InterventionProtocol(Protocol):
     def execute(cls, node: "InterventionNodeType"):
         # To prevent the node from looking like its executed when calling Graph.execute
         node.executed = False
+
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        return {
+            "node": {"color": "green4", "shape": "box"},  # Node display
+            "label": cls.__name__,
+            "arg": defaultdict(
+                lambda: {"color": "gray", "shape": "box"}
+            ),  # Non-node argument display
+            "arg_kname": defaultdict(
+                lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}
+            ),  # Argument label key word
+            "edge": defaultdict(lambda: {"style": "solid"}), # Argument Edge display
+        }
