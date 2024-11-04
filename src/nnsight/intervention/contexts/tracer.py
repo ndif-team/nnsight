@@ -23,6 +23,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
         scan:bool=False,
         invoker_kwargs: Dict[str, Any] = {},
         validate: bool = False,
+        debug: bool = False,
         **kwargs,
     ) -> None:
         
@@ -35,6 +36,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             parent=parent,
             graph=model._default_graph,
             validate=validate,
+            debug=debug,
         )
 
         self._model = model

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import copy
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, List, Optional, Tuple,
-                    Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union)
 
 import torch
 from typing_extensions import Self
@@ -13,6 +11,7 @@ from .contexts import InterventionTracer, Session, EditingTracer
 from .envoy import Envoy
 from .graph import InterventionGraph, InterventionProxy, InterventionProxyType, InterventionNode
 from .interleaver import Interleaver
+from .. import CONFIG
 
 
 class NNsight:
@@ -161,6 +160,9 @@ class NNsight:
 
             backend = RemoteBackend(host=backend, blocking=blocking)
 
+        if "debug" not in kwargs.keys():
+            kwargs["debug"] = CONFIG.APP.DEBUG
+
         tracer = InterventionTracer(self, *inputs, method=method, backend=backend, parent = parent, scan=scan,**kwargs)
 
         # If user provided input directly to .trace(...).
@@ -299,6 +301,9 @@ class NNsight:
         elif isinstance(backend, str):
 
             backend = RemoteBackend(host=backend, blocking=blocking)
+
+        if "debug" not in kwargs.keys():
+            kwargs["debug"] = CONFIG.APP.DEBUG
 
         return Session[InterventionNode, self.proxy_class](self, backend=backend, **kwargs)
 

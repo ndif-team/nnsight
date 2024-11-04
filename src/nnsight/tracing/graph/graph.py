@@ -26,10 +26,12 @@ class Graph(Generic[NodeType, ProxyType]):
         self,
         node_class: Type[NodeType] = Node,
         proxy_class: Type[ProxyType] = Proxy,
+        debug: bool = False,
     ) -> None:
 
         self.node_class = node_class
         self.proxy_class = proxy_class
+        self.debug = debug
 
         self.alive = True
 

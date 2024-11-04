@@ -22,6 +22,7 @@ class Context(Protocol, AbstractContextManager, Generic[GraphType]):
         graph_class: Type[SubGraph] = SubGraph,
         node_class: Type[NodeType] = Node,
         proxy_class: Type[ProxyType] = Proxy,
+        debug: bool = False,
         **kwargs,
     ) -> None:
 
@@ -31,7 +32,7 @@ class Context(Protocol, AbstractContextManager, Generic[GraphType]):
         self.backend = backend
 
         if parent is None:
-            parent = Graph(node_class=node_class, proxy_class=proxy_class)
+            parent = Graph(node_class=node_class, proxy_class=proxy_class, debug=debug)
             parent.stack.append(parent)
 
         self.graph = graph_class(*args, parent, **kwargs)

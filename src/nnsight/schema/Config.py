@@ -14,6 +14,7 @@ class ApiConfigModel(BaseModel):
 class AppConfigModel(BaseModel):
     LOGGING: bool = False
     REMOTE_LOGGING: bool = True
+    DEBUG: bool = False
 
 
 class ConfigModel(BaseModel):
@@ -24,6 +25,12 @@ class ConfigModel(BaseModel):
 
         self.API.APIKEY = apikey
 
+        self.save()
+
+    def set_default_app_debug(self, debug: bool):
+
+        self.APP.DEBUG = debug
+        
         self.save()
 
     def save(self):

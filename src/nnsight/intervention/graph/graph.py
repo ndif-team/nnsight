@@ -1,15 +1,6 @@
+import sys
 from collections import defaultdict
-from typing import (
-    TYPE_CHECKING,
-    Dict,
-    Generic,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    Type,
-    Union,
-)
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
 
 from ...tracing.contexts import Context
 from ...tracing.graph import SubGraph
@@ -228,7 +219,12 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
             self.defer_stack = []
             self.clean(exception[0])
             self.defer_stack = defer_stack
-            raise exception[1]
+            if self.debug:
+                print(f"\n{self.nodes[exception[0]].meta_data['traceback']}")
+                sys.tracebacklimit = 0
+                raise type(exception[1])(str(exception[1]))
+            else:
+                raise exception[1]
 
     def count(
         self, index: int, iteration: Union[int, List[int], slice]
