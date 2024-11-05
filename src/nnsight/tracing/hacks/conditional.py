@@ -4,7 +4,6 @@ import sys
 from types import FrameType
 from typing import TYPE_CHECKING
 
-from ..backends import ChildBackend
 from ..contexts import Condition, Context
 from .util import execute, execute_body, execute_until
 

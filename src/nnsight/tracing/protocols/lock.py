@@ -1,15 +1,15 @@
 from typing import TYPE_CHECKING
 
-from ...tracing.protocols import Protocol
+from . import Protocol
 
 if TYPE_CHECKING:
-    from ..graph import InterventionNodeType, InterventionProxyType
+    from ..graph import ProxyType, NodeType
 
 
 class LockProtocol(Protocol):
 
     @classmethod
-    def add(cls, node: "InterventionNodeType") -> "InterventionProxyType":
+    def add(cls, node: "NodeType") -> "ProxyType":
         return node.create(
             cls,
             node,

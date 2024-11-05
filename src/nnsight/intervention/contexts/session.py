@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
 
 from ...tracing.contexts import Tracer
 from ..graph import InterventionNode, ValidatingInterventionNode, InterventionProxyType, InterventionProxy
@@ -30,4 +30,9 @@ class Session(Tracer[InterventionNode, InterventionProxy]):
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.model._session = None
         return super().__exit__(exc_type, exc_val, exc_tb)
+    
+    R = TypeVar('R')
+    
+    def apply(self, target: Callable[..., R], *args, **kwargs) -> Union[InterventionProxy, R]:
+        return super().apply(target, *args, **kwargs)
     

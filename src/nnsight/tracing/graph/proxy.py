@@ -1,9 +1,10 @@
 from __future__ import annotations
 import inspect
 import operator
-from typing import TYPE_CHECKING, Any, Callable, Generic, Protocol, Iterator, Union, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Union, TypeVar
 from typing_extensions import Self
 from ... import util
+from .. import protocols
 
 if TYPE_CHECKING:
     from .node import Node
@@ -25,6 +26,22 @@ class Proxy:
         self.node: "Node"
         
     ### API ##############################
+    
+    def save(self) -> Self:
+        """Adds a lock Node to prevent its value from being cleared where normally it would be cleared when its no longer needed to save memory.
+        Used to access values outside of the tracing context, after execution.
+
+        Returns:
+            InterventionProxy: Proxy.
+        """
+
+        # Add a 'lock' node with the save proxy as an argument to ensure the values are never deleted.
+        # This is because 'lock' nodes never actually get set and therefore there will always be a
+        # dependency for the save proxy.
+
+        protocols.LockProtocol.add(self.node)
+
+        return self
 
     @property
     def value(self) -> Any:

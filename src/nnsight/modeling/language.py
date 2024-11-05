@@ -32,10 +32,11 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
 
 from ..intervention import Envoy
+from ..intervention.contexts import InterventionTracer
+from ..intervention.graph import InterventionNodeType, InterventionProxyType
 from ..util import WrapperModule
 from .mixins import RemoteableMixin
-from ..intervention.contexts import InterventionTracer
-from ..intervention.graph import InterventionProxyType, InterventionNodeType
+
 
 class LanguageModel(RemoteableMixin):
     """LanguageModels are NNsight wrappers around transformers language models.
@@ -101,7 +102,9 @@ class LanguageModel(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-        self.generator: Envoy[InterventionProxyType, InterventionNodeType] = LanguageModel.Generator()
+        self.generator: Envoy[InterventionProxyType, InterventionNodeType] = (
+            LanguageModel.Generator()
+        )
 
     def _load_config(self, repo_id: str, **kwargs):
 
@@ -169,9 +172,7 @@ class LanguageModel(RemoteableMixin):
         ):
             self.config.rope_scaling["rope_type"] = "llama3"
 
-        model = self.automodel.from_pretrained(
-            repo_id, config=self.config, **kwargs
-        )
+        model = self.automodel.from_pretrained(repo_id, config=self.config, **kwargs)
 
         return model
 
@@ -201,9 +202,7 @@ class LanguageModel(RemoteableMixin):
             inputs = [{"input_ids": ids} for ids in inputs]
             return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
-        return self.tokenizer(
-            inputs, return_tensors="pt", padding=True, **kwargs
-        )
+        return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
 
     def _prepare_input(
         self,
@@ -238,7 +237,7 @@ class LanguageModel(RemoteableMixin):
         inputs = inputs[0]
 
         if isinstance(inputs, dict):
-            inputs = self._prepare_input(**inputs, labels=labels)
+            inputs = BatchEncoding(inputs)
         elif isinstance(inputs, BatchEncoding):
             pass
         else:
@@ -277,9 +276,7 @@ class LanguageModel(RemoteableMixin):
 
             batched_labels = torch.cat((batched_labels, labels))
 
-        batched_inputs["attention_mask"][
-            :1, : attention_mask.shape[1]
-        ] = attention_mask
+        batched_inputs["attention_mask"][:1, : attention_mask.shape[1]] = attention_mask
 
         return ((batched_inputs,), {"labels": batched_inputs})
 
@@ -318,9 +315,7 @@ class LanguageModel(RemoteableMixin):
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {
-                "repo_id": self.repo_id
-            }  # , "torch_dtype": str(self._model.dtype)}
+            {"repo_id": self.repo_id}  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
@@ -331,11 +326,11 @@ class LanguageModel(RemoteableMixin):
         repo_id = kwargs.pop("repo_id")
 
         return LanguageModel(repo_id, **kwargs)
-    
+
+
 if TYPE_CHECKING:
-    
+
     class LanguageModel(LanguageModel, PreTrainedModel):
-  
+
         def generate(self, *args, **kwargs) -> InterventionTracer:
             pass
-    
