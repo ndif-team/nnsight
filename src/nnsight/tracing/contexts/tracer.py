@@ -1,9 +1,11 @@
-from typing import Callable, Any, Generic
+from typing import Callable
 from typing_extensions import Self
 
-from ..graph import ProxyType, GraphType, SubGraph, NodeType
+from ..graph import ProxyType, SubGraph, NodeType
 from ..protocols import StopProtocol
 from . import Condition, Context, Iterator
+
+from ...util import viz_graph
 
 
 class Tracer(Context[SubGraph[NodeType, ProxyType]]):
@@ -55,4 +57,4 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
         StopProtocol.add(self.graph)
 
     def vis(self, *args, **kwargs):
-        self.graph.visualize(*args, **kwargs)
+        viz_graph(self.graph, *args, **kwargs)

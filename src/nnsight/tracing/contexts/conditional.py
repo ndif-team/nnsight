@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Any, Dict, Optional
 
 from ...tracing.graph import NodeType, SubGraph
@@ -54,18 +53,11 @@ class Condition(Context[SubGraph]):
         Returns:
             - Dict: dictionary style.
         """
+    
+        default_style = super().style()
 
-        return {
-            "node": {
-                "color": "#FF8C00",
-                "shape": "polygon",
-                "sides": 6,
-            },  # Node display
-            "label": cls.__name__,
-            "arg": defaultdict(
-                lambda: {"color": "gray", "shape": "box"}
-            ),  # Non-node argument
-            "arg_kname": defaultdict(lambda: None),  # Argument label key word
-            "edge": defaultdict(lambda: {"style": "solid"}, {2: {"style": "solid", "label": "branch", "color": "#FF8C00", "fontsize": 10}}), # Argument edge display
-        }
+        default_style["node"] = {"color": "#FF8C00", "shape": "polygon", "sides": 6}
+        default_style["edge"][2] = {"style": "solid", "label": "branch", "color": "#FF8C00", "fontsize": 10}
+
+        return default_style
 

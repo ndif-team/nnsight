@@ -1,4 +1,3 @@
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict
 
 import torch
@@ -206,14 +205,11 @@ class InterventionProtocol(Protocol):
             - Dict: dictionary style.
         """
 
-        return {
-            "node": {"color": "green4", "shape": "box"},  # Node display
-            "label": cls.__name__,
-            "arg": defaultdict(
-                lambda: {"color": "gray", "shape": "box"}
-            ),  # Non-node argument display
-            "arg_kname": defaultdict(
-                lambda: None, {0: "key", 1: "batch_size", 2: "batch_start"}
-            ),  # Argument label key word
-            "edge": defaultdict(lambda: {"style": "solid"}), # Argument Edge display
-        }
+        default_style = super().style()
+
+        default_style["node"] = {"color": "green4", "shape": "box"}
+        default_style["arg_kname"][0] = "key"
+        default_style["arg_kname"][1] = "batch_size"
+        default_style["arg_kname"][2] = "batch_start"
+
+        return default_style

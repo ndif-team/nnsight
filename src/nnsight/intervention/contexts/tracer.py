@@ -1,5 +1,4 @@
 import weakref
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ...tracing.backends import Backend
@@ -154,17 +153,10 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             - Dict: dictionary style.
         """
 
-        return {
-            "node": {
-                "color": "purple",
-                "shape": "polygon",
-                "sides": 6,
-            },  # Node display
-            "label": cls.__name__,
-            "arg": defaultdict(
-                lambda: {"color": "gray", "shape": "box"}
-            ),  # Non-node argument
-            "arg_kname": defaultdict(lambda: None, {1: "method"}),  # Argument label key word
-            "edge": defaultdict(lambda: {"style": "solid"}), # Argument edge display
-        }
+        default_style = super().style()
+
+        default_style["node"] = {"color": "purple", "shape": "polygon", "sides": 6}
+        default_style["arg_kname"][1] = "method"
+
+        return default_style
         

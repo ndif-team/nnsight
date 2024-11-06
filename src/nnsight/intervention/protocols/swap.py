@@ -1,4 +1,3 @@
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict
 
 import torch
@@ -80,12 +79,8 @@ class SwapProtocol(Protocol):
             - Dict: dictionary style.
         """
 
-        return {
-            "node": {"color": "green4", "shape": "ellipse"},  # Node display
-            "label": cls.__name__,
-            "arg": defaultdict(
-                lambda: {"color": "gray", "shape": "box"}
-            ),  # Non-node argument display
-            "arg_kname": defaultdict(lambda: None),  # Argument label key word
-            "edge": defaultdict(lambda: {"style": "solid"}), # Argument edge key word
-        }
+        default_style = super().style()
+
+        default_style["node"] = {"color": "green4", "shape": "ellipse"}
+
+        return default_style

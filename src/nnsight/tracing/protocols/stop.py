@@ -1,4 +1,3 @@
-from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict
 
 from . import Protocol
@@ -25,16 +24,8 @@ class StopProtocol(Protocol):
             - Dict: dictionary style.
         """
 
-        return {
-            "node": {
-                "color": "red",
-                "shape": "polygon",
-                "sides": 6,
-            },  # Node display
-            "label": cls.__name__,
-            "arg": defaultdict(
-                lambda: {"color": "gray", "shape": "box"}
-            ),  # Non-node argument display
-            "arg_kname": defaultdict(lambda: None),  # Argument label key word
-            "edge": defaultdict(lambda: {"style": "solid"}),
-        }  # Argument edge display
+        default_style = super().style()
+
+        default_style["node"] = {"color": "red", "shape": "polygon", "sides": 6}
+
+        return default_style
