@@ -1,12 +1,30 @@
 import weakref
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 from nnsight.tracing.graph import Proxy
 
 from ...tracing.backends import Backend
 from ...tracing.contexts import Tracer
 from ...tracing.graph import GraphType
-from ..graph import InterventionGraph, InterventionNode, ValidatingInterventionNode,  InterventionNodeType, InterventionProxyType, InterventionProxy
+from ..contexts import LocalContext
+from ..graph import (
+    InterventionGraph,
+    InterventionNode,
+    InterventionNodeType,
+    InterventionProxy,
+    InterventionProxyType,
+    ValidatingInterventionNode,
+)
 from . import Invoker
 
 if TYPE_CHECKING:
@@ -22,12 +40,12 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
         method: Optional[str] = None,
         backend: Optional[Backend] = None,
         parent: Optional[GraphType] = None,
-        scan:bool=False,
+        scan: bool = False,
         invoker_kwargs: Dict[str, Any] = {},
         validate: bool = False,
         **kwargs,
     ) -> None:
-        
+
         super().__init__(
             graph_class=InterventionGraph,
             model=model,
@@ -35,7 +53,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             proxy_class=model.proxy_class,
             backend=backend,
             parent=parent,
-            graph=model._default_graph
+            graph=model._default_graph,
         )
 
         self._model = model
@@ -45,8 +63,8 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
         self.invoker: Optional[Invoker] = None
         self.invoker_args = invoker_args
         self.invoker_kwargs = invoker_kwargs
-        self.invoker_kwargs['scan'] = scan
-        
+        self.invoker_kwargs["scan"] = scan
+
         self.args = [method]
         self.kwargs = kwargs
 
@@ -69,17 +87,15 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
     def __enter__(self):
 
         tracer = super().__enter__()
-        
 
         if self.invoker_args:
-            
+
             invoker = self.invoke(*self.invoker_args, **self.invoker_kwargs)
             invoker.__enter__()
 
         return tracer
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        
 
         if self.invoker is not None:
 
@@ -117,30 +133,32 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
     def _invoker_group(self):
 
         return len(self.args) - 2
-    
-    R = TypeVar('R')
-    
-    def apply(self, target: Callable[..., R], *args, **kwargs) -> Union[InterventionProxy, R]:
+
+    R = TypeVar("R")
+
+    def apply(
+        self, target: Callable[..., R], *args, **kwargs
+    ) -> Union[InterventionProxy, R]:
         return super().apply(target, *args, **kwargs)
 
     @classmethod
     def execute(cls, node: InterventionNodeType):
 
         graph, method, *invoker_inputs = node.args
-        
+
         graph: InterventionGraph
         model = graph.model
-        
+
         invoker_inputs, kwargs = node.prepare_inputs((invoker_inputs, node.kwargs))
 
         (invoker_args, invoker_kwargs), batch_groups = cls._batch(model, invoker_inputs)
-        
+
         graph.compile()
-        
+
         graph.reset()
-                
+
         graph.execute()
-        
+
         model.interleave(
             *invoker_args,
             fn=method,
@@ -149,4 +167,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             **kwargs,
             **invoker_kwargs,
         )
-        
+
+    def local(self):
+
+        return LocalContext(parent=self.graph)

@@ -45,7 +45,7 @@ class InterventionProxy(Proxy):
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
         protocols.SwapProtocol.add(self.node.graph, self._grad, value)
-
+        
     def __setattr__(
         self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
     ) -> None:

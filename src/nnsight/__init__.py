@@ -85,9 +85,12 @@ DEFAULT_PATCHER.add(
 DEFAULT_PATCHER.__enter__()
 
 from .tracing.contexts import GlobalTracingContext
+from .intervention.contexts import InterventionTracer
 
-apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
-log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
+gtc:InterventionTracer = GlobalTracingContext.GLOBAL_TRACING_CONTEXT
+
+apply = gtc.apply
+log = gtc.log
 
 
 def trace(fn):
