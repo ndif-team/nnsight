@@ -1,11 +1,14 @@
 import pytest
 import torch
-
+import msgspec
+import zlib
 import nnsight
-from nnsight.intervention.contexts import InterventionTracer
+from nnsight.intervention.contexts import InterventionTracer, Session
 from nnsight.tracing.backends import Backend
 from nnsight.tracing.graph import Graph
 from nnsight.tracing.protocols import StopProtocol
+from nnsight.tracing.contexts import GlobalTracingContext
+from nnsight.schema.request import RequestModel
 class AssertSavedLenBackend(Backend):
     
     def __init__(self, len:int) -> None:
@@ -30,8 +33,6 @@ class AssertSavedLenBackend(Backend):
             
 
     
-    
-
 @pytest.fixture(scope="module")
 def gpt2(device: str):
     return nnsight.LanguageModel(
@@ -45,18 +46,30 @@ def MSG_prompt():
 
 
 def _test_serialize(tracer: InterventionTracer):
-    pass
-    # with GlobalTracingContext.exit_global_tracing_context():
-    #     request = RequestModel(
-    #         object=tracer, model_key=tracer.remote_backend_get_model_key()
-    #     )
-    #     request_json = request.model_dump(
-    #         mode="json", exclude=["session_id", "received", "id"]
-    #     )
 
-    #     request2 = RequestModel(**request_json)
-    #     tracer = request2.deserialize(tracer.model)
-    # assert isinstance(tracer.graph, Graph)
+    with GlobalTracingContext.exit_global_tracing_context():
+        request = RequestModel(
+            graph=tracer.graph.stack[0]
+        )
+
+        request_json = request.model_dump(
+            mode="json"
+        )
+        
+        data = msgspec.json.encode(request_json)
+        
+        data = zlib.compress(data)
+        data = zlib.decompress(data)
+        
+        request_json = msgspec.json.decode(data)
+        
+        
+        request2 = RequestModel(**request_json)
+        
+        model = tracer.model if isinstance(tracer, Session) else tracer._model
+        
+        graph = request2.deserialize(model)
+    assert isinstance(graph, Graph)
 
 
 @torch.no_grad()

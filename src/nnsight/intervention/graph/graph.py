@@ -26,14 +26,12 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         self,
         *args,
         model: Optional["NNsight"] = None,
-        validate: bool = False,
         **kwargs,
     ) -> None:
 
         super().__init__(*args, **kwargs)
-
+        
         self.model = model
-        self.validate = validate
 
         self.interventions: Dict[str, List[InterventionNode]] = defaultdict(list)
         self.grad_subgraph: Set[int] = set()
@@ -115,7 +113,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
             # is this node part of an inner context's subgraph?
             if context_node is None and node.graph is not self:
-
+                
                 context_node = self.nodes[node.graph[-1].index + 1]
 
                 context_start = self.subset.index(context_node.index)
@@ -194,9 +192,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         self.compiled = True
 
     def execute(self, start: int = 0, grad: bool = False, defer:bool=False, defer_start:int=0) -> None:
-
-        self.alive = False
-
+                        
         exception = None
                 
         if defer_start in self.deferred:

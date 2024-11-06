@@ -1,12 +1,11 @@
-from typing import Callable
+from typing import Callable, TypeVar, Union
 from typing_extensions import Self
 
-from ..graph import ProxyType, SubGraph, NodeType
+from ..graph import ProxyType, SubGraph, NodeType, Proxy
 from ..protocols import StopProtocol
 from . import Condition, Context, Iterator
 
 from ...util import viz_graph
-
 
 class Tracer(Context[SubGraph[NodeType, ProxyType]]):
     
@@ -27,10 +26,6 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
         
         return super().__exit__(exc_type, exc_val, exc_tb)
 
-    def trace(self):
-
-        return Tracer(parent=self.graph)
-
     def iter(self, collection):
 
         return Iterator(collection, parent=self.graph)
@@ -38,23 +33,24 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
     def cond(self, condition):
 
         return Condition(condition, parent=self.graph)
+    
+    def stop(self):
 
-    def apply(
-        self,
-        target: Callable,
-        *args,
-        **kwargs,
-    ) -> ProxyType:
+        StopProtocol.add(self.graph)
+        
+    def log(self, *args):
+        
+        self.apply(print, *args)
+
+    R = TypeVar('R')
+    
+    def apply(self, target: Callable[..., R], *args, **kwargs) -> Union[Proxy, R]:
 
         return self.graph.create(
             target,
             *args,
             **kwargs,
         )
-
-    def stop(self):
-
-        StopProtocol.add(self.graph)
-
+    
     def vis(self, *args, **kwargs):
         viz_graph(self.graph, *args, **kwargs)

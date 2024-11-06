@@ -7,14 +7,14 @@ from pydantic import BaseModel
 class ApiConfigModel(BaseModel):
     HOST: str = "ndif.dev"
     SSL: bool = True
+    FORMAT:str ='json'
+    ZLIB:bool = True
     APIKEY: Optional[str] = None
     JOB_ID:Optional[str] = None
-
 
 class AppConfigModel(BaseModel):
     LOGGING: bool = False
     REMOTE_LOGGING: bool = True
-
 
 class ConfigModel(BaseModel):
     API: ApiConfigModel = ApiConfigModel()

@@ -21,22 +21,6 @@ class InterventionProxy(Proxy):
 
         self._grad: Self
         self.node: "InterventionNode"
-
-    def save(self) -> Self:
-        """Adds a lock Node to prevent its value from being cleared where normally it would be cleared when its no longer needed to save memory.
-        Used to access values outside of the tracing context, after execution.
-
-        Returns:
-            InterventionProxy: Proxy.
-        """
-
-        # Add a 'lock' node with the save proxy as an argument to ensure the values are never deleted.
-        # This is because 'lock' nodes never actually get set and therefore there will always be a
-        # dependency for the save proxy.
-
-        protocols.LockProtocol.add(self.node)
-
-        return self
     
     @property
     def grad(self) -> Self:
@@ -48,7 +32,7 @@ class InterventionProxy(Proxy):
             Proxy: Grad proxy.
         """
 
-        self.__dict__["_grad"] = protocols.GradProtocol.add(self.node.graph, self.node, backward_iter=0)
+        self.__dict__["_grad"] = protocols.GradProtocol.add(self.node.graph, self.node, fake_value=self.node.fake_value)
 
         return self._grad
 
@@ -153,9 +137,3 @@ class InterventionProxy(Proxy):
     
     
 InterventionProxyType = TypeVar("InterventionProxyType", bound=InterventionProxy)
-
-
-if TYPE_CHECKING:
-
-    class InterventionProxy(InterventionProxy, torch.Tensor):
-        pass

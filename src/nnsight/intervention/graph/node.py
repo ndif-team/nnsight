@@ -30,7 +30,10 @@ class InterventionNode(Node):
 
     @classmethod
     def prepare_inputs(
-        cls, inputs: Any, device: Optional[torch.device] = None, fake: bool = False
+        cls,
+        inputs: Any,
+        device: Optional[torch.device] = None,
+        fake: bool = False,
     ) -> Any:
 
         inputs = util.apply(inputs, lambda x: x, inspect._empty)
@@ -38,6 +41,9 @@ class InterventionNode(Node):
         def inner(value: Union[InterventionNode, torch.Tensor]):
 
             nonlocal device
+            
+            if isinstance(value, Proxy):
+                value = value.node
 
             if isinstance(value, InterventionNode):
                 if fake:
@@ -51,7 +57,7 @@ class InterventionNode(Node):
             return value
 
         inputs = util.apply(
-            inputs, inner, (InterventionNode, torch.Tensor), inplace=not fake
+            inputs, inner, (InterventionNode, Proxy, torch.Tensor), inplace=not fake
         )
 
         if device is not None:
@@ -88,8 +94,8 @@ class ValidatingInterventionNode(InterventionNode):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        if self.fake_value is inspect._empty and (
-            isinstance(self.target, type) and not issubclass(self.target, Protocol)
+        if self.attached and self.fake_value is inspect._empty and not (
+            isinstance(self.target, type) and issubclass(self.target, Protocol)
         ):
             self.fake_value = validate(self.target, *self.args, **self.kwargs)
 
@@ -128,8 +134,10 @@ def validate(target: Callable, *args, **kwargs):
                 args, kwargs = InterventionNode.prepare_inputs(
                     (args, kwargs), fake=True
                 )
-
+                                            
                 return target(
                     *args,
                     **kwargs,
                 )
+
+    

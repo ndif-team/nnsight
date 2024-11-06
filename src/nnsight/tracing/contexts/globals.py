@@ -53,8 +53,7 @@ def global_patch(obj: Union[FunctionType, Type]):
         patch = global_patch_fn(obj)
 
     GlobalTracingContext.PATCHER.add(patch)
-
-
+    
 class GlobalTracingContext(Tracer):
     """The Global Tracing Context handles adding tracing operations globally without reference to a given `GraphBasedContext`.
     There should only be one of these and that is `GlobalTracingContext.GLOBAL_TRACING_CONTEXT`.

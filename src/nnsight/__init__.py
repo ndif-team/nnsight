@@ -24,19 +24,19 @@ import torch
 import yaml
 
 from .util import Patch, Patcher
-from .schema.Config import ConfigModel
+from .schema.config import ConfigModel
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
-# from .logger import logger, remote_logger
+from .logger import logger, remote_logger
 from .intervention import NNsight
 from .modeling.language import LanguageModel
 # from .tracing.Proxy import proxy_wrapper
 
-# logger.disabled = not CONFIG.APP.LOGGING
-# remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
+logger.disabled = not CONFIG.APP.LOGGING
+remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
 
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
@@ -84,50 +84,47 @@ DEFAULT_PATCHER.add(
 
 DEFAULT_PATCHER.__enter__()
 
-from .tracing.contexts.globals import GlobalTracingContext
-int = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.int
-list = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.list
+from .tracing.contexts import GlobalTracingContext
 
-# from .contexts.Context import GlobalTracingContext
-
-# bool = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bool
-# bytes = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytes
-# int = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.int
-# float = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.float
-# str = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.str
-# complex = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.complex
-# bytearray = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.bytearray
-# tuple = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.tuple
-# list = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.list
-# set = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.set
-# dict = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.dict
-# apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
-# log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
-# cond = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.cond
-
-# import inspect
-
-# from . import util
-# from .intervention.graph import InterventionProxy
+apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
+log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
 
 
-# def trace(fn: Callable):
-#     """Helper decorator to add a function to the intervention graph via `.apply(...)`.
-#     This is opposed to entering the function during tracing and tracing all inner operations.
+def trace(fn):
+    """Helper decorator to add a function to the intervention graph via `.apply(...)`.
+    This is opposed to entering the function during tracing and tracing all inner operations.
 
-#     Args:
-#         fn (Callable): Function to apply.
+    Args:
+        fn (Callable): Function to apply.
 
-#     Returns:
-#         Callable: Traceable function.
-#     """
+    Returns:
+        Callable: Traceable function.
+    """
 
-#     @wraps(fn)
-#     def inner(*args, **kwargs):
+    @wraps(fn)
+    def inner(*args, **kwargs):
 
-#         return apply(fn, *args, **kwargs)
+        return apply(fn, *args, **kwargs)
 
-#     return inner
+    return inner
+
+
+bool = trace(bool)
+bytes = trace(bytes)
+int = trace(int)
+float = trace(float)
+str = trace(str)
+complex = trace(complex)
+bytearray = trace(bytearray)
+tuple = trace(tuple)
+list = trace(list)
+set = trace(set)
+dict = trace(dict)
+
+import inspect
+
+from . import util
+from .intervention.graph import InterventionProxy
 
 
 # def local(object: Callable | InterventionProxy):

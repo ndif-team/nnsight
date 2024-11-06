@@ -19,11 +19,20 @@ class Graph(Generic[NodeType, ProxyType]):
         self.node_class = node_class
         self.proxy_class = proxy_class
 
-        self.alive = True
+        self._alive = [True]
 
         self.nodes: List[Node] = []
         self.stack: List[Graph] = []
         self.defer_stack: List[int] = []
+        
+    @property
+    def alive(self) -> bool:
+        return self._alive[0]
+    
+    @alive.setter
+    def alive(self, value:bool):
+        
+        self._alive[0] = value
 
     def reset(self) -> None:
 
@@ -31,8 +40,6 @@ class Graph(Generic[NodeType, ProxyType]):
             node.reset()
 
     def execute(self) -> None:
-
-        self.alive = False
 
         exception = None
 

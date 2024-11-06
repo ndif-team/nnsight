@@ -212,7 +212,7 @@ def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 
 def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.session(validate=True, backend=AssertSavedLenBackend(1)) as session:
+    with tiny_model.session(validate=False, backend=AssertSavedLenBackend(1)) as session:
         result = session.apply(list).save()
         with session.iter([0, 1, 2]) as item:
             with session.cond(item % 2 == 0):
@@ -297,8 +297,8 @@ def test_nnsight_builtins(tiny_model: NNsight):
             l.append(session.apply(str, "Hello World"))
             l.append(session.apply(dict, {"a": "1"}))
 
-    assert nn_list == sesh_list
-    assert sesh_list == apply_list
+    assert nn_list.value == sesh_list.value
+    assert sesh_list.value == apply_list.value
 
 def test_torch_creation_operations_patch(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.trace(tiny_input, scan=False, validate=False, backend=AssertSavedLenBackend(0)):

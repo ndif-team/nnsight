@@ -1,5 +1,6 @@
 import weakref
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    TypeVar, Union)
 
 from ...tracing.backends import Backend
 from ...tracing.contexts import Tracer
@@ -34,8 +35,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
             proxy_class=model.proxy_class,
             backend=backend,
             parent=parent,
-            graph=model._default_graph,
-            validate=validate,
+            graph=model._default_graph
         )
 
         self._model = model
@@ -117,6 +117,11 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
     def _invoker_group(self):
 
         return len(self.args) - 2
+    
+    R = TypeVar('R')
+    
+    def apply(self, target: Callable[..., R], *args, **kwargs) -> Union[InterventionProxyType, R]:
+        return super().apply(target, *args, **kwargs)
 
     @classmethod
     def execute(cls, node: InterventionNodeType):

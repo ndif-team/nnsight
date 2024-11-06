@@ -327,7 +327,6 @@ class Patch:
 
         setattr(self.parent, self.key, self.orig)
 
-
 class Patcher(AbstractContextManager):
     """Context manager that patches from a list of Patches on __enter__ and restores the patch on __exit__.
 
