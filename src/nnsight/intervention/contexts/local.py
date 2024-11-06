@@ -2,7 +2,6 @@ from ...tracing.contexts import Tracer
 from ...tracing.graph import GraphType, NodeType
 from ..protocols import EntryPoint, NoopProtocol
 
-
 class LocalContext(Tracer):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
