@@ -10,7 +10,7 @@ from typing_extensions import Self
 from .. import util
 from ..tracing.backends import Backend
 from .backends import NoopBackend
-from .contexts import InterventionTracer, Session, EditingTracer
+from .contexts import InterleavingTracer, Session, EditingTracer
 from .envoy import Envoy
 from .graph import InterventionGraph, InterventionProxy, InterventionProxyType, InterventionNode
 from .interleaver import Interleaver
@@ -56,7 +56,7 @@ class NNsight:
         scan:bool = False,
         method: Optional[str] = None,
         **kwargs: Dict[str, Any],
-    ) -> Union[InterventionTracer, Any]:
+    ) -> Union[InterleavingTracer, Any]:
         """Entrypoint into the tracing and interleaving functionality nnsight provides.
 
         In short, allows access to the future inputs and outputs of modules in order to trace what operations you would like to perform on them.
@@ -148,7 +148,7 @@ class NNsight:
         else:
             parent = None
 
-        tracer = InterventionTracer(self, *inputs, method=method, backend=backend, parent = parent, scan=scan,**kwargs)
+        tracer = InterleavingTracer(self, *inputs, method=method, backend=backend, parent = parent, scan=scan,**kwargs)
 
         # If user provided input directly to .trace(...).
         if len(inputs) > 0:
@@ -171,7 +171,7 @@ class NNsight:
 
         return tracer
 
-    def scan(self, *inputs, **kwargs) -> InterventionTracer:
+    def scan(self, *inputs, **kwargs) -> InterleavingTracer:
         """Context just to populate fake tenor proxy values using scan and validate.
         Useful when looking for just the shapes of future tensors
 
@@ -198,7 +198,7 @@ class NNsight:
         *inputs: Any,
         inplace: bool = False,
         **kwargs: Dict[str, Any],
-    ) -> Union[InterventionTracer, Any]:
+    ) -> Union[InterleavingTracer, Any]:
         """Create a trace context with an edit backend and apply a list of edits.
 
         The edit backend sets a default graph on an NNsight model copy which is

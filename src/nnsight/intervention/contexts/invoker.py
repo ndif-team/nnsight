@@ -14,7 +14,7 @@ from ..graph import InterventionNode, InterventionProxy, InterventionProxyType
 
 if TYPE_CHECKING:
 
-    from . import InterventionTracer
+    from . import InterleavingTracer
 
 
 class Invoker(AbstractContextManager):
@@ -33,7 +33,7 @@ class Invoker(AbstractContextManager):
 
     def __init__(
         self,
-        tracer: "InterventionTracer",
+        tracer: "InterleavingTracer",
         *args,
         scan: bool = False,
         **kwargs,

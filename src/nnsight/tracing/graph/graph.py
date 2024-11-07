@@ -1,19 +1,7 @@
 from __future__ import annotations
 
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Generic,
-    Iterator,
-    List,
-    Optional,
-    Set,
-    Type,
-    TypeVar,
-    Union,
-    overload,
-)
+from typing import (Any, Callable, Dict, Generic, Iterator, List, Optional,
+                    Set, Type, TypeVar, Union, overload)
 
 from ... import util
 from .. import protocols
@@ -86,10 +74,11 @@ class Graph(Generic[NodeType, ProxyType]):
         self,
         target: Union[Callable, protocols.Protocol],
         *args,
+        redirect:bool=True,
         **kwargs,
     ) -> ProxyType:
 
-        graph = self.stack[-1] if self.stack else self
+        graph = self.stack[-1] if redirect and self.stack else self
 
         return self.proxy_class(
             self.node_class(target, *args, graph=graph, **kwargs)
@@ -102,33 +91,31 @@ class Graph(Generic[NodeType, ProxyType]):
 
         # Add Node.
         self.nodes.append(node)
-
-    def copy(self, new_graph: Graph[NodeType, ProxyType]):
-
-        memo = {}
-
-        def from_memo(arg: Union[Node, SubGraph]):
+        
+        
+    def copy(self, new_graph:Optional[Graph[NodeType, ProxyType]] = None):
+        
+        if new_graph is None:
+            new_graph = Graph(node_class=self.node_class, proxy_class=self.proxy_class)
             
+        node = self[-1]
+            
+        def process(arg: Union[Node, SubGraph]):
+                
             if isinstance(arg, SubGraph):
-                return arg.copy(SubGraph(new_graph))
+                return arg.copy(parent=new_graph)
             
             if arg.done:
                 return arg.value
 
-            return new_graph.nodes[memo[arg.index]]
-
-        for node in self:
-
-            new_node = new_graph.create(
-                node.target,
-                *util.apply(node.args, from_memo, (Node, SubGraph)),
-                **util.apply(node.kwargs, from_memo, (Node, SubGraph)),
-            ).node
-
-            memo[node.index] = new_node.index
-
+        new_graph.create(
+            node.target,
+            *util.apply(node.args, process, (Node, SubGraph)),
+            **util.apply(node.kwargs, process, (Node, SubGraph)),
+        )
+        
         return new_graph
-
+    
     ### Magic Methods ######################################
 
     def __str__(self) -> str:
@@ -210,6 +197,40 @@ class SubGraph(Graph[NodeType, ProxyType]):
             raise StopIteration
 
 
+    def copy(self, new_graph:Optional[SubGraph[NodeType, ProxyType]] = None, parent: Optional[Graph[NodeType, ProxyType]] = None, memo:Optional[Dict[int, NodeType]] = None):
+        
+        if parent is None:
+            parent = Graph(node_class=self.node_class, proxy_class=self.proxy_class)
+        
+        if new_graph is None:
+            new_graph = type(self)(parent)
+        
+        if memo is None:
+            memo = {}
+
+        def process(arg: Union[Node, SubGraph]):
+            
+            if isinstance(arg, SubGraph):
+                return arg.copy(parent=new_graph, memo=memo)
+            
+            if arg.done:
+                return arg.value
+
+            return new_graph.nodes[memo[arg.index]]
+
+        for node in self:
+
+            new_node = new_graph.create(
+                node.target,
+                *util.apply(node.args, process, (Node, SubGraph)),
+                **util.apply(node.kwargs, process, (Node, SubGraph)),
+            ).node
+
+            memo[node.index] = new_node.index
+
+        return new_graph
+
+    
 # class MultiGraph(Graph):
 
 

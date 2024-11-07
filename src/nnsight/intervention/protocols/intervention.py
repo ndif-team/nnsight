@@ -2,14 +2,14 @@ from typing import TYPE_CHECKING, Any, List
 
 
 import torch
-from ...tracing.protocols import Protocol
 from ... import util
+from .entrypoint import EntryPoint
 
 if TYPE_CHECKING:
     from ..interleaver import Interleaver
     from ..graph import InterventionNodeType, InterventionProxyType, InterventionGraph, InterventionProxy, InterventionNode
 
-class InterventionProtocol(Protocol):
+class InterventionProtocol(EntryPoint):
 
     @classmethod
     def concat(

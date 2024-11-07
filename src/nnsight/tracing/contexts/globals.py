@@ -166,23 +166,4 @@ class GlobalTracingContext(Tracer):
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph is not None
 
-    def __getattribute__(self, name: str) -> Any:
-        """Prevent attribute access if no `GraphBasedContext` registered."""
-
-        static_methods = [
-            name
-            for name, value in inspect.getmembers(Tracer, predicate=inspect.ismethod)
-        ]
-
-        if name in static_methods:
-
-            if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
-
-                raise Exception(
-                    "Global ops cannot be used outside of a tracing context."
-                )
-
-        return object.__getattribute__(self, name)
-
-
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()
