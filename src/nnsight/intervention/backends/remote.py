@@ -5,7 +5,7 @@ import pickle
 import weakref
 import zlib
 import sys
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 import requests
@@ -14,15 +14,14 @@ import torch
 from tqdm import tqdm
 
 from ... import CONFIG, remote_logger
-from ...schema.request import RequestModel
+from ...schema.request import RequestModel, StreamValueModel
 from ...schema.response import ResponseModel
 from ...schema.result import RESULT, ResultModel
 from ...tracing import protocols
 from ...tracing.backends import Backend
 from ...tracing.graph import Graph, SubGraph
-from .. import protocols as intervention_protocols
-from ..contexts.local import LocalContext
 from ...util import NNsightError
+from ..contexts.local import LocalContext, RemoteContext
 
 
 class RemoteBackend(Backend):
@@ -58,29 +57,9 @@ class RemoteBackend(Backend):
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
 
-    def serialize(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
+    def request(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
 
-        if self.format == "json":
-
-            data = RequestModel(graph=graph)
-
-            json = data.model_dump(mode="json")
-
-            data = msgspec.json.encode(json)
-
-        elif self.format == "pt":
-
-            data = io.BytesIO()
-
-            torch.save(graph, data)
-
-            data.seek(0)
-
-            data = data.read()
-
-        if self.zlib:
-
-            data = zlib.compress(data)
+        data = RequestModel.serialize(graph, self.format, self.zlib)
 
         headers = {
             "model_key": self.model_key,
@@ -278,20 +257,18 @@ class RemoteBackend(Backend):
             
             remote_graph = preprocess(graph)
 
-            data, headers = self.serialize(remote_graph)
+            data, headers = self.request(remote_graph)
             
             headers['session_id'] = sio.sid
             
             # Submit request via
-            self.submit_request(data, headers)
+            response = self.submit_request(data, headers)
 
-            # We need to tell the StreamingUploadProtocol how to use our websocket connection
-            # so it can upload values during execution to our job.
-            # protocols.StreamingUploadProtocol.set(
-            #     lambda *args: self.stream_send(
-            #         *args, job_id=response.id, sio=sio
-            #     )
-            # )
+            LocalContext.set(
+                lambda *args: self.stream_send(
+                    *args, job_id=response.id, sio=sio
+            ))
+      
 
             try:
                 # Loop until
@@ -312,12 +289,9 @@ class RemoteBackend(Backend):
                 raise e
 
             finally:
-                pass
+                LocalContext.set(None)
 
-                # Clear StreamingUploadProtocol state
-                # protocols.StreamingUploadProtocol.set(None)
-
-    def stream_send(self, value: Any, job_id: str, sio: socketio.SimpleClient):
+    def stream_send(self, values: Dict[int, Any], job_id: str, sio: socketio.SimpleClient):
         """Upload some value to the remote service for some job id.
 
         Args:
@@ -326,11 +300,7 @@ class RemoteBackend(Backend):
             sio (socketio.SimpleClient): Connected websocket client.
         """
 
-        from ...schema.request import StreamValueModel
-
-        request = StreamValueModel(value=value)
-
-        sio.emit("stream_upload", data=(request.model_dump_json(), job_id))
+        sio.emit("stream_upload", data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id))
 
     def non_blocking_request(self, graph: Graph):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
@@ -343,11 +313,10 @@ class RemoteBackend(Backend):
             request (RequestModel): Request if submitting a new request. Defaults to None
         """
 
-        from ...schema.response import ResponseModel
 
         if self.job_id is None:
             
-            data, headers = self.serialize(graph)
+            data, headers = self.request(graph)
 
             # Submit request via
             response = self.submit_request(data, headers)
@@ -386,7 +355,7 @@ def preprocess(graph: Graph):
         
         if node.target is LocalContext:
             
-            LocalContext.prune(node)
+            graph.nodes[node.index].kwargs['uploads'] = RemoteContext.from_local(node)
      
     return new_graph
             
