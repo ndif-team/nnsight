@@ -191,3 +191,16 @@ class WrapperModule(torch.nn.Module):
 
         return args
 
+class NNsightError(Exception):
+    """NNsight Execption class for raising error during execution.
+    
+    Attributes:
+        - message (str): error message.
+        - node_id (int): node id.
+    """
+
+    def __init__(self, message: str, node_id: int):
+        self.message = message
+        self.node_id = node_id
+        super().__init__(self.message)
+

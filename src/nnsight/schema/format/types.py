@@ -261,12 +261,16 @@ class GraphModel(BaseNNsightModel):
 
     nodes: List[Union[MemoReferenceModel, NodeType]]
 
+    debug: bool
+
     @staticmethod
     def to_model(value: Graph) -> Self:
 
-        return GraphModel(graph=value, nodes=value.nodes)
+        return GraphModel(graph=value, nodes=value.nodes, debug=value.debug)
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
+
+        handler.graph.debug = self.debug
 
         for node in self.nodes:
 

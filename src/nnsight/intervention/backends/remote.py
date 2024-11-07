@@ -153,6 +153,9 @@ class RemoteBackend(Backend):
             node.set_value(value)
 
             node.remaining_dependencies = -1
+        
+        elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
+            pass
 
     def submit_request(self, data: bytes, headers: Dict[str, Any]) -> Optional[ResponseModel]:
         """Sends request to the remote endpoint and handles the response object.

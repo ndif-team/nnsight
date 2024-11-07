@@ -6,6 +6,7 @@ from ...tracing.contexts import Context
 from ...tracing.graph import SubGraph
 from ..protocols import ApplyModuleProtocol, GradProtocol, InterventionProtocol
 from . import InterventionNode, InterventionNodeType, InterventionProxyType
+from ...util import NNsightError
 
 if TYPE_CHECKING:
     from .. import NNsight
@@ -200,7 +201,10 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                     if defer and node.target is not InterventionProtocol:
                         self.deferred[defer_start].append(node.index)
                 except Exception as e:
-                    exception = (node.index, e)
+                    if self.debug:
+                        exception = (node.index, NNsightError(str(e), node.index))
+                    else:
+                        exception = (node.index, e)
                     break
             elif not grad and node.index in self.grad_subgraph:
                 continue
@@ -218,9 +222,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
             if self.debug:
                 print(f"\n{self.nodes[exception[0]].meta_data['traceback']}")
                 sys.tracebacklimit = 0
-                raise type(exception[1])(str(exception[1]))
-            else:
-                raise exception[1]
+            raise exception[1]
 
     def count(
         self, index: int, iteration: Union[int, List[int], slice]

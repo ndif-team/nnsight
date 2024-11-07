@@ -24,6 +24,7 @@ class ResponseModel(BaseModel):
         LOG = "LOG"
         STREAM = "STREAM"
         ERROR = "ERROR"
+        NNSIGHT_ERROR = "NNSIGHT_ERROR"
 
     id: str
     status: JobStatus
