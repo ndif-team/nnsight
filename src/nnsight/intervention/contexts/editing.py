@@ -1,10 +1,10 @@
 from typing import TYPE_CHECKING
 from ..backends import EditingBackend
-from . import InterventionTracer
+from . import InterleavingTracer
 if TYPE_CHECKING:
     from .. import NNsight
 
-class EditingTracer(InterventionTracer):
+class EditingTracer(InterleavingTracer):
 
     def __init__(self, model:"NNsight", *args, inplace: bool = False, **kwargs) -> None:
         

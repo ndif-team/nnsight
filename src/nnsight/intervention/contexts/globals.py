@@ -5,7 +5,8 @@ from inspect import getmembers, isclass
 import torch
 from torch.utils import data
 
-from ...tracing.contexts.globals import global_patch
+from ...tracing.contexts.globals import global_patch, GlobalTracingContext, global_patch_fn
+from . import InterventionTracer
 
 global_patch(torch.nn.Parameter),
 global_patch(data.DataLoader),
@@ -28,3 +29,9 @@ for key, value in getmembers(torch.optim, isclass):
     if issubclass(value, torch.optim.Optimizer):
 
         global_patch(value)
+
+
+class GlobalInterventionTracingContext(GlobalTracingContext, InterventionTracer):
+    GLOBAL_TRACING_CONTEXT: GlobalInterventionTracingContext
+
+GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalInterventionTracingContext()

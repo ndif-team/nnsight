@@ -84,11 +84,14 @@ DEFAULT_PATCHER.add(
 
 DEFAULT_PATCHER.__enter__()
 
-from .tracing.contexts import GlobalTracingContext
+from .intervention.contexts import GlobalInterventionTracingContext
 
-apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
-log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
-
+apply = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.apply
+log = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.log
+local = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.local
+cond = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.cond
+iter = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.iter
+stop = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.stop
 
 def trace(fn):
     """Helper decorator to add a function to the intervention graph via `.apply(...)`.
@@ -103,7 +106,7 @@ def trace(fn):
 
     @wraps(fn)
     def inner(*args, **kwargs):
-
+        
         return apply(fn, *args, **kwargs)
 
     return inner
@@ -125,37 +128,6 @@ import inspect
 
 from . import util
 from .intervention.graph import InterventionProxy
-
-
-# def local(object: Callable | InterventionProxy):
-#     """Helper decorator to add a function to the intervention graph via `.apply(...)`
-#     AND convert all input Proxies to local ones via `.local()`.
-    
-#     If a non-function is passed in, its assumed to be an `InterventionProxy` and `.local()` is called and returned.
-
-#     Args:
-#         object ( Callable | InterventionProxy): Function to apply or Proxy to make local.
-
-#     Returns:
-#         Callable | InterventionProxy: Traceable local function or local Proxy.
-#     """
-    
-#     if inspect.isroutine(object):
-
-#         fn = trace(object)
-
-#         @wraps(fn)
-#         def inner(*args, **kwargs):
-
-#             args, kwargs = util.apply(
-#                 (args, kwargs), lambda x: x.local(), InterventionProxy
-#             )
-
-#             return fn(*args, **kwargs)
-
-#         return inner
-    
-#     return object.local()
 
 
 # def remote(object: Callable | Any):

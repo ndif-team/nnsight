@@ -12,6 +12,19 @@ from ..protocols import Protocol
 
 
 class Context(Protocol, AbstractContextManager, Generic[GraphType]):
+    """A `Context` represents a scope (or slice) of a computation graph with specific logic for adding and executing nodes defined within it.
+    It has a `SubGraph` which contains the nodes that make up the operations of the context.
+    As an `AbstractContextManager`, entering adds its sub-graph to the stack, making new nodes created while within this context added to it's sub-graph.
+        Exiting pops its sub-graph off the stack, allowing nodes to be added to its parent, and adds itself as a node to its parent `Context`/`SubGraph`. ( To say, "execute me")
+        If the `Context` has a backend, it pops its parent off the stack and passes it to the `Backend` object to execute.
+        (This only happens if the context is the root-most context, and its parent is therefore the root `Graph`)
+    As a `Context` is itself a `Protocol`, it defines how to execute it's sub-graph in the `execute` method.
+    
+
+    Attributes:
+    
+        backend (Backend): Backend to execute the deferred root computation graph
+    """
 
     def __init__(
         self,

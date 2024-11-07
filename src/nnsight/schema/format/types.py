@@ -235,6 +235,15 @@ class FunctionModel(BaseNNsightModel):
     type_name: Literal["FUNCTION"] = "FUNCTION"
 
     function_name: str
+    
+    @staticmethod
+    def to_model(value:FUNCTION):
+        
+        model = FunctionModel(function_name=get_function_name(value))
+        
+        FunctionModel.check_function_whitelist(model.function_name)
+        
+        return model
 
     @classmethod
     def check_function_whitelist(cls, qualname: str) -> str:
@@ -375,7 +384,7 @@ DictType = Annotated[dict, AfterValidator(DictModel.to_model)]
 
 FunctionType = Annotated[
     FUNCTION,
-    AfterValidator(lambda value: FunctionModel(function_name=get_function_name(value))),
+    AfterValidator(FunctionModel.to_model),
 ]
 
 NodeType = Annotated[
