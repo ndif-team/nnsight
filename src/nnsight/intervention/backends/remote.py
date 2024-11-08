@@ -133,11 +133,14 @@ class RemoteBackend(Backend):
             node.execute()
 
         elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
-            error_node = graph.nodes[response.data['node_id']]
-            print(f"\n{error_node.meta_data['traceback']}")
             sys.tracebacklimit = 0
-            raise NNsightError(response.data['message'], error_node.index)
-            
+            if graph.debug:
+                error_node = graph.nodes[response.data['node_id']]
+                print(f"\n{error_node.meta_data['traceback']}")
+                raise NNsightError(response.data['err_message'], error_node.index)
+            else:
+                print(f"\n{response.data['traceback']}")
+                raise SystemExit("Remote exception.")
             
     def submit_request(self, data: bytes, headers: Dict[str, Any]) -> Optional[ResponseModel]:
         """Sends request to the remote endpoint and handles the response object.

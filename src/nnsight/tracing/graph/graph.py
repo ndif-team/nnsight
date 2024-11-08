@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sys
 from typing import (Any, Callable, Dict, Generic, Iterator, List, Optional,
                     Set, Type, TypeVar, Union, overload)
 
 from ... import util
+from ...util import NNsightError
 from .. import protocols
 from . import Node, NodeType, Proxy, ProxyType
 
@@ -43,21 +45,27 @@ class Graph(Generic[NodeType, ProxyType]):
 
     def execute(self) -> None:
 
-        exception = None
+        nns_err: NNsightError = None
 
         for node in self:
             try:
                 node.execute()
-            except Exception as e:
-                exception = (node.index, e)
+            except NNsightError as e:
+                nns_err = e
                 break
 
-        if exception is not None:
+        if nns_err is not None:
             defer_stack = self.defer_stack
             self.defer_stack = []
-            self.clean(exception[0])
+            self.clean(nns_err.node_id)
             self.defer_stack = defer_stack
-            raise exception[1]
+            if self.debug:
+                if nns_err.count == 0:
+                    print(f"\n{self.nodes[nns_err.node_id].meta_data['traceback']}")
+                sys.tracebacklimit = 0
+                raise nns_err from None
+            else:
+                raise nns_err
 
     def clean(self, start: Optional[int] = None):
 

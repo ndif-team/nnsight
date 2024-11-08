@@ -11,6 +11,8 @@ from ... import util
 from ..protocols import Protocol
 from .proxy import Proxy, ProxyType
 
+from ...util import NNsightError
+
 if TYPE_CHECKING:
     from .graph import Graph
 
@@ -264,9 +266,17 @@ class Node:
                 # Set value.
                 self.set_value(output)
 
+        except NNsightError as e:
+            e.count += 1
+            if self.graph.debug:
+                raise e from None
+            else:
+                raise e
         except Exception as e:
-            
-            raise e
+            if self.graph.debug:
+                raise NNsightError(str(e), self.index) from None
+            else:
+                raise NNsightError(str(e), self.index) from e
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.

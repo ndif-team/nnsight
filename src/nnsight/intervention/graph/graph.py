@@ -175,7 +175,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
     def execute(self, start: int = 0, grad: bool = False, defer:bool=False, defer_start:int=0) -> None:
                         
-        exception = None
+        nns_err: NNsightError = None
                 
         if defer_start in self.deferred:
                     
@@ -200,11 +200,8 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                     node.execute()
                     if defer and node.target is not InterventionProtocol:
                         self.deferred[defer_start].append(node.index)
-                except Exception as e:
-                    if self.debug:
-                        exception = (node.index, NNsightError(str(e), node.index))
-                    else:
-                        exception = (node.index, e)
+                except NNsightError as e:
+                    nns_err = e
                     break
             elif not grad and node.index in self.grad_subgraph:
                 continue
@@ -214,15 +211,18 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         if defer:
             self.defer_stack.pop()
 
-        if exception is not None:
+        if nns_err is not None:
             defer_stack = self.defer_stack
             self.defer_stack = []
-            self.clean(exception[0])
+            self.clean(nns_err.node_id)
             self.defer_stack = defer_stack
             if self.debug:
-                print(f"\n{self.nodes[exception[0]].meta_data['traceback']}")
+                if nns_err.count == 0:
+                    print(f"\n{self.nodes[nns_err.node_id].meta_data['traceback']}")
                 sys.tracebacklimit = 0
-            raise exception[1]
+                raise nns_err from None
+            else:
+                raise nns_err
 
     def count(
         self, index: int, iteration: Union[int, List[int], slice]
