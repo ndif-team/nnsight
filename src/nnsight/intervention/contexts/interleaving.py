@@ -17,7 +17,6 @@ from ..graph import (
     InterventionNodeType,
     ValidatingInterventionNode,
 )
-from ..protocols.noop import NoopProtocol
 
 from . import Invoker
 from . import InterventionTracer
@@ -90,10 +89,7 @@ class InterleavingTracer(InterventionTracer):
         return tracer
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        
-        if len(self.graph.nodes) == 0:
-            self.graph.create(NoopProtocol)
-
+    
         if self.invoker is not None:
 
             self.invoker.__exit__(None, None, None)
