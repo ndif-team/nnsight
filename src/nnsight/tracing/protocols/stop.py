@@ -15,3 +15,4 @@ class StopProtocol(Protocol):
     def execute(cls, node: "Node") -> None:
 
         raise cls.StopException()
+

@@ -42,6 +42,12 @@ class Proxy:
         protocols.LockProtocol.add(self.node)
 
         return self
+    
+    def stop(self) -> None:
+        protocols.StopProtocol.add(
+            self.node.graph, 
+            self.node, 
+        )
 
     @property
     def value(self) -> Any:

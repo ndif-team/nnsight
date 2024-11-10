@@ -225,6 +225,9 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
     def iter(self, iteration: Union[int, List[int], slice]) -> None:
         self._iteration_stack.append(iteration)
 
+    def stop(self) -> None:
+        self.output.stop()
+
     def next(self, increment: int = 1) -> Envoy:
         """By default, this modules inputs and outputs only refer to the first time its called. Use `.next()`to select which iteration .input an .output refer to.
 
