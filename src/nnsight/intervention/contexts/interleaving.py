@@ -2,13 +2,10 @@ import weakref
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Dict,
     List,
     Optional,
     Tuple,
-    TypeVar,
-    Union,
 )
 
 
@@ -20,6 +17,8 @@ from ..graph import (
     InterventionNodeType,
     ValidatingInterventionNode,
 )
+from ..protocols.noop import NoopProtocol
+
 from . import Invoker
 from . import InterventionTracer
 if TYPE_CHECKING:
@@ -91,6 +90,9 @@ class InterleavingTracer(InterventionTracer):
         return tracer
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        
+        if len(self.graph.nodes) == 0:
+            self.graph.create(NoopProtocol)
 
         if self.invoker is not None:
 
@@ -133,7 +135,7 @@ class InterleavingTracer(InterventionTracer):
     def execute(cls, node: InterventionNodeType):
 
         graph, method, *invoker_inputs = node.args
-
+        
         graph: InterventionGraph
         model = graph.model
 
