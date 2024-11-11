@@ -23,7 +23,7 @@ classifiers = [
 
 dependencies = [
     "transformers",
-    "protobuf",
+    "protobuf", 
     "python-socketio[client]",
     "tokenizers>=0.13.0",
     "pydantic>=2.9.0",
@@ -51,9 +51,7 @@ test = [
 
 [tool.setuptools]
 include-package-data = true
+license-files = ["LICENSE"]
 
 [tool.setuptools.package-data]
 nnsight = ["config.yaml", "nnsight.log"]
-
-[tool.setuptools.options]
-license_file = "LICENSE"
