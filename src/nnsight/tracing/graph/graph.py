@@ -98,11 +98,10 @@ class Graph(Generic[NodeType, ProxyType]):
 
         # Loop over ALL nodes within the span of this graph.
         for index in range(start, end):
-
+            
             node = self.nodes[index]
-
-            # Update its dependencies (memory management)
-            node.update_dependencies()
+            if not node.executed:
+                node.update_dependencies()
 
     def create(
         self,
