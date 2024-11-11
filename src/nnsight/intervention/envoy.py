@@ -307,17 +307,6 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
         return self.modules(*args, **kwargs, names=True)
 
-    def to(self, *args, **kwargs) -> Self:
-        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
-
-        Returns:
-            Envoy: Envoy.
-        """
-
-        self._module = self._module.to(*args, **kwargs)
-
-        return self
-
     # Private API ###############################
 
     def _update(self, module: torch.nn.Module) -> None:
