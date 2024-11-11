@@ -36,6 +36,12 @@ dependencies = [
     "msgspec"
     ]
 
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "toml"
+]
+
 [project.urls]
 "Homepage" = "https://github.com/ndif-team/nnsight"
 "Website" = "https://nnsight.net/"
