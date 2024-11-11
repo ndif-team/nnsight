@@ -172,7 +172,7 @@ class NNsight:
         return tracer
 
     def scan(self, *inputs, **kwargs) -> InterleavingTracer:
-        """Context just to populate fake tenor proxy values using scan and validate.
+        """Context just to populate fake tensor proxy values using scan and validate.
         Useful when looking for just the shapes of future tensors
 
         Examples:
