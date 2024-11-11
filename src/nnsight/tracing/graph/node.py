@@ -24,6 +24,18 @@ if TYPE_CHECKING:
 
 
 class Node:
+    """A computation `Graph` is made up of individual `Node`s which represent a single operation.
+    It has a `target` which the operation this `Node` will execute.
+    It has `args` and `kwargs` to execute its `target` with. These may contain other `Node`s and are therefore `dependencies` of this `Node`.
+    Conversely this `Node` is a `listener` of its `dependencies`.
+    
+    During execution of the computation graph and therefore the `Node`s, each 
+    
+    Attributes:
+        index (Optional[int]): Integer index of this `Node` within its greater computation graph.
+        graph (Graph): 
+        target (Union[Callable, Protocol]): Callable to execute as this `Node`'s operation. Might be a `Protocol` which is handled differently in node execution.
+    """
 
     def __init__(
         self,
@@ -63,11 +75,21 @@ class Node:
             
     @property
     def listeners(self) -> List[Self]:
+        """Iterator from index to `Node`.
+
+        Returns:
+            List[Self]: List of listener `Node`s.
+        """
         
         return [self.graph.nodes[index] for index in self._listeners]
     
     @property
     def dependencies(self) -> List[Self]:
+        """Iterator from index to `Node`.
+
+        Returns:
+            List[Self]: List of dependency `Node`s.
+        """
         
         return [self.graph.nodes[index] for index in self._dependencies]
 
@@ -117,7 +139,7 @@ class Node:
 
     @property
     def attached(self) -> bool:
-        """Checks to see if the weakref to the Graph is alive or dead.
+        """Checks to see if the `Graph` this `Node` is a part of is alive..
         Alive meaning the Graph is still open to tracing new Nodes.
 
         Returns:
@@ -317,6 +339,14 @@ class Node:
         self._value = inspect._empty
 
     def subgraph(self, subgraph: Optional[Set[int]] = None) -> Set[int]:
+        """Returns a Set of indexes starting from this node, and recursively iterating over all the Node's listeners.
+
+        Args:
+            subgraph (Optional[Set[int]], optional): Current subgraph. Defaults to None.
+
+        Returns:
+            Set[int]: Set of Node indexes.
+        """
 
         if subgraph is None:
             subgraph = set()
