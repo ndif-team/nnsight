@@ -225,6 +225,9 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
     def iter(self, iteration: Union[int, List[int], slice]) -> None:
         self._iteration_stack.append(iteration)
 
+    def stop(self) -> None:
+        self.output.stop()
+
     def next(self, increment: int = 1) -> Envoy:
         """By default, this modules inputs and outputs only refer to the first time its called. Use `.next()`to select which iteration .input an .output refer to.
 
@@ -303,17 +306,6 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         """
 
         return self.modules(*args, **kwargs, names=True)
-
-    def to(self, *args, **kwargs) -> Self:
-        """Override torch.nn.Module.to so this returns the Envoy, not the underlying module when doing: model = model.to(...)
-
-        Returns:
-            Envoy: Envoy.
-        """
-
-        self._module = self._module.to(*args, **kwargs)
-
-        return self
 
     # Private API ###############################
 

@@ -76,6 +76,9 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         if self.compiled:
             return self.interventions
 
+        if len(self.nodes) == 1:
+            return 
+
         intervention_subgraphs: List[SubGraph] = []
 
         start = self[0].index
