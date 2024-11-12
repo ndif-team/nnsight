@@ -280,10 +280,11 @@ class Node:
             else:
 
                 # Prepare arguments.
-                args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
+                args, kwargs = self.prepare_inputs((self.args, self.kwargs))
 
                 # Call the target to get value.
                 output = self.target(*args, **kwargs)
+    
 
                 # Set value.
                 self.set_value(output)

@@ -110,8 +110,8 @@ class Graph(Generic[NodeType, ProxyType]):
         for index in range(start, end):
             
             node = self.nodes[index]
-            if not node.executed:
-                node.update_dependencies()
+
+            node.update_dependencies()
 
     def create(
         self,
