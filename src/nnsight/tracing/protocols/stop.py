@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 from . import Protocol
+from ...util import NNsightError
 
 if TYPE_CHECKING:
     from ..graph import Node
@@ -8,11 +9,11 @@ if TYPE_CHECKING:
 
 class StopProtocol(Protocol):
 
-    class StopException(Exception):
+    class StopException(NNsightError):
         pass
 
     @classmethod
     def execute(cls, node: "Node") -> None:
 
-        raise cls.StopException()
+        raise cls.StopException("Early Stop Exception!", node.index)
 

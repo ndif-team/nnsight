@@ -1,5 +1,7 @@
 from ..graph import Graph
 from ..protocols import StopProtocol
+import sys
+from ...util import NNsightError
 
 
 class Backend:
@@ -20,6 +22,14 @@ class ExecutionBackend(Backend):
         except StopProtocol.StopException:
 
             pass
+
+        except NNsightError as e:
+            if graph.debug:
+                print(f"\n{graph.nodes[e.node_id].meta_data['traceback']}")
+                sys.tracebacklimit = 0
+                raise e
+            else:
+                raise e
 
         finally:
 

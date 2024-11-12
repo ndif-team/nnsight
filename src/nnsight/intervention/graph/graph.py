@@ -219,13 +219,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
             self.defer_stack = []
             self.clean(nns_err.node_id)
             self.defer_stack = defer_stack
-            if self.debug:
-                if nns_err.count == 0:
-                    print(f"\n{self.nodes[nns_err.node_id].meta_data['traceback']}")
-                sys.tracebacklimit = 0
-                raise nns_err from None
-            else:
-                raise nns_err
+            raise nns_err
 
     def count(
         self, index: int, iteration: Union[int, List[int], slice]

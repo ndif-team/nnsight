@@ -8,7 +8,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List,
 from typing_extensions import Self
 
 from ... import util
-from ..protocols import Protocol
+from ..protocols import Protocol, StopProtocol
 from .proxy import Proxy, ProxyType
 
 from ...util import NNsightError
@@ -288,9 +288,9 @@ class Node:
 
                 # Set value.
                 self.set_value(output)
-
+        except StopProtocol.StopException as e:
+            raise e
         except NNsightError as e:
-            e.count += 1
             if self.graph.debug:
                 raise e from None
             else:

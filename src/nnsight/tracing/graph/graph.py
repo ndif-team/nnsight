@@ -85,13 +85,7 @@ class Graph(Generic[NodeType, ProxyType]):
             self.defer_stack.clear()
             self.clean(nns_err.node_id)
             self.defer_stack.extend(defer_stack)
-            if self.debug:
-                if nns_err.count == 0:
-                    print(f"\n{self.nodes[nns_err.node_id].meta_data['traceback']}")
-                sys.tracebacklimit = 0
-                raise nns_err from None
-            else:
-                raise nns_err
+            raise nns_err
 
     def clean(self, start: Optional[int] = None):
         """Cleans up dependencies of `Node`s so their values are appropriately memory managed.

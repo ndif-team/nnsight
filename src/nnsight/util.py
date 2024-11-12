@@ -197,12 +197,10 @@ class NNsightError(Exception):
     Attributes:
         - message (str): error message.
         - node_id (int): node id.
-        - count (int): number of times this exception has been raised.
     """
 
     def __init__(self, message: str, node_id: int):
         self.message = message
         self.node_id = node_id
-        self.count = 0
         super().__init__(self.message)
 
