@@ -48,27 +48,11 @@ def MSG_prompt():
 def _test_serialize(tracer: InterventionTracer):
 
     with GlobalTracingContext.exit_global_tracing_context():
-        request = RequestModel(
-            graph=tracer.graph.stack[0]
-        )
+        request = RequestModel.serialize(tracer.graph.stack[0], 'json', True)
 
-        request_json = request.model_dump(
-            mode="json"
-        )
-        
-        data = msgspec.json.encode(request_json)
-        
-        data = zlib.compress(data)
-        data = zlib.decompress(data)
-        
-        request_json = msgspec.json.decode(data)
-        
-        
-        request2 = RequestModel(**request_json)
-        
         model = tracer.model if isinstance(tracer, Session) else tracer._model
         
-        graph = request2.deserialize(model)
+        graph = RequestModel.deserialize(model, request, 'json', True)
     assert isinstance(graph, Graph)
 
 
