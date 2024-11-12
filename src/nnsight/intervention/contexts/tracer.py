@@ -9,11 +9,18 @@ from ...tracing.graph import Proxy
 from ..graph import (InterventionNodeType, InterventionProxy,
                      InterventionProxyType)
 from . import LocalContext
+from ... import CONFIG
 
 
 class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
 
     R = TypeVar("R")
+
+    def __init__(self, *args, **kwargs) -> None:
+        if kwargs['debug'] == None:
+            kwargs['debug'] = CONFIG.APP.DEBUG
+
+        super().__init__(*args, **kwargs)
 
     def apply(
         self, target: Callable[..., R], *args, **kwargs

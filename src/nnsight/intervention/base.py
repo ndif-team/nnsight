@@ -147,9 +147,6 @@ class NNsight:
         else:
             parent = None
 
-        if "debug" not in kwargs.keys():
-            kwargs["debug"] = CONFIG.APP.DEBUG
-
         tracer = InterleavingTracer(self, *inputs, method=method, backend=backend, parent = parent, scan=scan,**kwargs)
 
         # If user provided input directly to .trace(...).
@@ -274,9 +271,6 @@ class NNsight:
 
             #TODO Error
             pass
-
-        if "debug" not in kwargs.keys():
-            kwargs["debug"] = CONFIG.APP.DEBUG
 
         return Session[InterventionNode, self.proxy_class](self, backend=backend, **kwargs)
 

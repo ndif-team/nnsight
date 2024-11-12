@@ -36,7 +36,7 @@ class InterleavingTracer(InterventionTracer):
         scan: bool = False,
         invoker_kwargs: Dict[str, Any] = {},
         validate: bool = False,
-        debug: bool = False,
+        debug: Optional[bool] = None,
         **kwargs,
     ) -> None:
 
