@@ -274,9 +274,22 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         return ready, defer
     
-    # def clean(self):
-        
-    #     for deferred in self.def
+    def clean(self, start: Optional[int] = None):
+
+        if start is None:
+            start = self[0].index
+
+        end = self[-1].index + 1
+
+        # Loop over ALL nodes within the span of this graph.
+        for index in range(start, end):
+            
+            node = self.nodes[index]
+            
+            if node.executed:
+                break
+
+            node.update_dependencies()
 
     # @classmethod
     # def shift(cls, mgraph: MultiGraph) -> MultiGraph:
