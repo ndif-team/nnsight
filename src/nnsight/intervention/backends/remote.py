@@ -63,6 +63,7 @@ class RemoteBackend(Backend):
             "model_key": self.model_key,
             "format": self.format,
             "zlib": str(self.zlib),
+            "ndif-api-key": self.api_key,
         }
 
         return data, headers
