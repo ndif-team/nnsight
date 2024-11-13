@@ -288,18 +288,10 @@ class Node:
 
                 # Set value.
                 self.set_value(output)
-        except StopProtocol.StopException as e:
-            raise e
         except NNsightError as e:
-            if self.graph.debug:
-                raise e from None
-            else:
-                raise e
+            raise e
         except Exception as e:
-            if self.graph.debug:
-                raise NNsightError(str(e), self.index) from None
-            else:
-                raise NNsightError(str(e), self.index) from e
+            raise NNsightError(str(e), self.index)
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.

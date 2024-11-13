@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from typing import (Any, Callable, Dict, Generic, Iterator, List, Optional,
-                    Set, Type, TypeVar, Union, overload)
+                    Tuple, Type, TypeVar, Union, overload)
 
 from typing_extensions import Self
 
@@ -71,21 +71,21 @@ class Graph(Generic[NodeType, ProxyType]):
             exception: If there is an exception during executing a `Node`. If so, we need to clean up the dependencies of `Node`s yet to be executed.
         """
 
-        nns_err: NNsightError = None
+        err: Tuple[int, NNsightError] = None
 
         for node in self:
             try:
                 node.execute()
             except NNsightError as e:
-                nns_err = e
+                err = (node.index, e)
                 break
 
-        if nns_err is not None:
+        if err is not None:
             defer_stack = self.defer_stack.copy()
             self.defer_stack.clear()
-            self.clean(nns_err.node_id)
+            self.clean(err[0])
             self.defer_stack.extend(defer_stack)
-            raise nns_err
+            raise err[1]
 
     def clean(self, start: Optional[int] = None):
         """Cleans up dependencies of `Node`s so their values are appropriately memory managed.

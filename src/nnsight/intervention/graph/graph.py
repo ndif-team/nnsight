@@ -1,6 +1,6 @@
 import sys
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Tuple
 
 from ...tracing.contexts import Context
 from ...tracing.graph import SubGraph
@@ -178,7 +178,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
     def execute(self, start: int = 0, grad: bool = False, defer:bool=False, defer_start:int=0) -> None:
                         
-        nns_err: NNsightError = None
+        err: Tuple[int, NNsightError] = None
                 
         if defer_start in self.deferred:
                     
@@ -204,7 +204,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                     if defer and node.target is not InterventionProtocol:
                         self.deferred[defer_start].append(node.index)
                 except NNsightError as e:
-                    nns_err = e
+                    err = (node.index, e)
                     break
             elif not grad and node.index in self.grad_subgraph:
                 continue
@@ -214,12 +214,12 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         if defer:
             self.defer_stack.pop()
 
-        if nns_err is not None:
+        if err is not None:
             defer_stack = self.defer_stack
             self.defer_stack = []
-            self.clean(nns_err.node_id)
+            self.clean(err[0])
             self.defer_stack = defer_stack
-            raise nns_err
+            raise err[1]
 
     def count(
         self, index: int, iteration: Union[int, List[int], slice]

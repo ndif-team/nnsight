@@ -27,7 +27,7 @@ class ExecutionBackend(Backend):
             if graph.debug:
                 print(f"\n{graph.nodes[e.node_id].meta_data['traceback']}")
                 sys.tracebacklimit = 0
-                raise e
+                raise e from None
             else:
                 raise e
 
