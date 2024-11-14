@@ -133,10 +133,12 @@ class RemoteBackend(Backend):
             node.execute()
 
         elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
-            sys.tracebacklimit = 0
             if graph.debug:
                 error_node = graph.nodes[response.data['node_id']]
-                print(f"\n{error_node.meta_data['traceback']}")
+                print(f"\n{response.data['traceback']}")
+                print("During handling of the above exception, another exception occurred:\n")
+                print(f"{error_node.meta_data['traceback']}")
+                sys.tracebacklimit = 0
                 raise NNsightError(response.data['err_message'], error_node.index)
             else:
                 print(f"\n{response.data['traceback']}")

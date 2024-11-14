@@ -291,7 +291,8 @@ class Node:
         except NNsightError as e:
             raise e
         except Exception as e:
-            raise NNsightError(str(e), self.index)
+            traceback_content = traceback.format_exc()
+            raise NNsightError(str(e), self.index, traceback_content)
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.

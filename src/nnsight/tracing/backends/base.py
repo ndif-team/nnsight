@@ -25,7 +25,9 @@ class ExecutionBackend(Backend):
 
         except NNsightError as e:
             if graph.debug:
-                print(f"\n{graph.nodes[e.node_id].meta_data['traceback']}")
+                print(f"\n{e.traceback_content}")
+                print("During handling of the above exception, another exception occurred:\n")
+                print(f"{graph.nodes[e.node_id].meta_data['traceback']}")
                 sys.tracebacklimit = 0
                 raise e from None
             else:
