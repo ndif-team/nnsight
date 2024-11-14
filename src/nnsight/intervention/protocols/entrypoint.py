@@ -1,3 +1,4 @@
+from typing import Any
 from ...tracing.protocols import Protocol
 
 class EntryPoint(Protocol):
@@ -6,6 +7,11 @@ class EntryPoint(Protocol):
     Subclasses EntryPoint informs those cases to handle it differently.
     Examples are InterventionProtocol and GradProtocol.
     """
+    
+    @staticmethod
+    def is_entrypoint(thing:Any):
+        
+        return isinstance(thing, type) and issubclass(thing, EntryPoint)
     
     @classmethod
     def add(cls,*args, **kwargs):

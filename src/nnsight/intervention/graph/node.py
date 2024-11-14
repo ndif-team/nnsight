@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 class InterventionNode(Node):
     """This is the intervention extension of the base Node type.
-    
+
     It has a fake_value to see information about this Node's future value before execution.
     It adds additional functionality to Node.prepare_inputs to handle Tensors.
     """
@@ -38,7 +38,7 @@ class InterventionNode(Node):
         device: Optional[torch.device] = None,
         fake: bool = False,
     ) -> Any:
-        """Override prepare_inputs to make sure 
+        """Override prepare_inputs to make sure
 
         Args:
             inputs (Any): _description_
@@ -54,7 +54,7 @@ class InterventionNode(Node):
         def inner(value: Union[InterventionNode, torch.Tensor]):
 
             nonlocal device
-            
+
             if isinstance(value, Proxy):
                 value = value.node
 
@@ -87,7 +87,7 @@ class InterventionNode(Node):
             if len(self.graph.defer_stack) > 0 and (
                 dependency.index < self.graph.defer_stack[-1]
                 or (
-                    issubclass(dependency.target, EntryPoint)
+                    EntryPoint.is_entrypoint(dependency.target)
                     and dependency.graph is not self.graph
                 )
             ):
@@ -110,7 +110,11 @@ class ValidatingInterventionNode(InterventionNode):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        if self.attached and self.fake_value is inspect._empty and not Protocol.is_protocol(self.target):
+        if (
+            self.attached
+            and self.fake_value is inspect._empty
+            and not Protocol.is_protocol(self.target)
+        ):
             self.fake_value = validate(self.target, *self.args, **self.kwargs)
 
 
@@ -148,10 +152,8 @@ def validate(target: Callable, *args, **kwargs):
                 args, kwargs = InterventionNode.prepare_inputs(
                     (args, kwargs), fake=True
                 )
-                                            
+
                 return target(
                     *args,
                     **kwargs,
                 )
-
-    
