@@ -1,13 +1,18 @@
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
+from typing import TYPE_CHECKING
 
-from ..graph import InterventionNode, ValidatingInterventionNode, InterventionProxy
-from . import InterventionTracer
 from typing_extensions import Self
+
+from ..graph import (InterventionNode, InterventionProxy,
+                     ValidatingInterventionNode)
+from . import InterventionTracer
+
 if TYPE_CHECKING:
     from .. import NNsight
 
 
 class Session(InterventionTracer[InterventionNode, InterventionProxy]):
+    """A Session simply allows grouping multiple Tracers in one computation graph.
+    """
 
     def __init__(self, model: "NNsight", validate: bool = False, **kwargs) -> None:
 
