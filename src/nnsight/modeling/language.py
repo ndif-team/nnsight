@@ -258,7 +258,7 @@ class LanguageModel(RemoteableMixin):
 
         if batched_inputs is None:
             return ((input,), {"labels": labels})
-
+        
         batched_labels = batched_inputs[1]["labels"]
         batched_inputs = batched_inputs[0][0]
 
@@ -278,7 +278,7 @@ class LanguageModel(RemoteableMixin):
 
         batched_inputs["attention_mask"][:1, : attention_mask.shape[1]] = attention_mask
 
-        return ((batched_inputs,), {"labels": batched_inputs})
+        return ((batched_inputs,), {"labels": batched_labels})
 
     def _execute(self, inputs: BatchEncoding, **kwargs) -> Any:
 
