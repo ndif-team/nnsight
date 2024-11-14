@@ -6,6 +6,8 @@ if TYPE_CHECKING:
     from .. import NNsight
 
 class EditingBackend(Backend):
+    """Backend to set the default graph to the current InterventionGraph. Assumes the final Node is an InterleavingTracer.
+    """
     
     def __init__(self, model: "NNsight") -> None:
         

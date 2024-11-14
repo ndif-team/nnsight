@@ -11,13 +11,18 @@ from ... import util
 from ...tracing.contexts import GlobalTracingContext
 from ...tracing.graph import Node, Proxy
 from ...tracing.protocols import Protocol
-from ..protocols import GradProtocol, InterventionProtocol
+from ..protocols import EntryPoint
 
 if TYPE_CHECKING:
     from . import InterventionGraph
 
 
 class InterventionNode(Node):
+    """This is the intervention extension of the base Node type.
+
+    It has a fake_value to see information about this Node's future value before execution.
+    It adds additional functionality to Node.prepare_inputs to handle Tensors.
+    """
 
     def __init__(
         self, *args, fake_value: Optional[Any] = inspect._empty, **kwargs
@@ -26,8 +31,6 @@ class InterventionNode(Node):
 
         self.fake_value = fake_value
 
-        self.graph: "InterventionGraph"
-
     @classmethod
     def prepare_inputs(
         cls,
@@ -35,13 +38,23 @@ class InterventionNode(Node):
         device: Optional[torch.device] = None,
         fake: bool = False,
     ) -> Any:
+        """Override prepare_inputs to make sure
+
+        Args:
+            inputs (Any): _description_
+            device (Optional[torch.device], optional): _description_. Defaults to None.
+            fake (bool, optional): _description_. Defaults to False.
+
+        Returns:
+            Any: _description_
+        """
 
         inputs = util.apply(inputs, lambda x: x, inspect._empty)
 
         def inner(value: Union[InterventionNode, torch.Tensor]):
 
             nonlocal device
-            
+
             if isinstance(value, Proxy):
                 value = value.node
 
@@ -74,7 +87,7 @@ class InterventionNode(Node):
             if len(self.graph.defer_stack) > 0 and (
                 dependency.index < self.graph.defer_stack[-1]
                 or (
-                    dependency.target in (InterventionProtocol, GradProtocol)
+                    EntryPoint.is_entrypoint(dependency.target)
                     and dependency.graph is not self.graph
                 )
             ):
@@ -90,12 +103,17 @@ InterventionNodeType = TypeVar("InterventionNodeType", bound=InterventionNode)
 
 
 class ValidatingInterventionNode(InterventionNode):
+    """The ValidatingInterventionNode executes its target using the fake_values of all of its dependencies to calculate a new fake_value for this node.
+    Does not do this if the Node is detached from any graph, already has a fake_value (specified by whoever created the Node) or is a Protocol.
+    """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        if self.attached and self.fake_value is inspect._empty and not (
-            isinstance(self.target, type) and issubclass(self.target, Protocol)
+        if (
+            self.attached
+            and self.fake_value is inspect._empty
+            and not Protocol.is_protocol(self.target)
         ):
             self.fake_value = validate(self.target, *self.args, **self.kwargs)
 
@@ -134,10 +152,8 @@ def validate(target: Callable, *args, **kwargs):
                 args, kwargs = InterventionNode.prepare_inputs(
                     (args, kwargs), fake=True
                 )
-                                            
+
                 return target(
                     *args,
                     **kwargs,
                 )
-
-    

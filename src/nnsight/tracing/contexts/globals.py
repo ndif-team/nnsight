@@ -26,6 +26,9 @@ def global_patch_class(cls: type) -> util.Patch:
 
     @wraps(fn)
     def inner(cls, *args, **kwargs):
+        
+        if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
+            return cls(*args, **kwargs)
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(cls, *args, **kwargs)
 
@@ -36,6 +39,9 @@ def global_patch_fn(fn: FunctionType) -> util.Patch:
 
     @wraps(fn)
     def inner(*args, **kwargs):
+        
+        if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
+            return fn(*args, **kwargs)
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(fn, *args, **kwargs)
 

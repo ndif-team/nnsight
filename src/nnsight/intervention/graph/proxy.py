@@ -1,14 +1,17 @@
 from __future__ import annotations
+
 import inspect
 from typing import TYPE_CHECKING, Any, Collection, TypeVar, Union
-from ...tracing.protocols import StopProtocol
+
 import torch
+from typing_extensions import Self
+
+from ... import util
 from ...tracing.graph import Proxy
 from .. import protocols
-from typing_extensions import Self
-from ... import util
+
 if TYPE_CHECKING:
-    from . import InterventionNodeType, InterventionNode , InterventionProxyType
+    from . import InterventionNode
 
 
 class InterventionProxy(Proxy):

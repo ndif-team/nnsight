@@ -13,6 +13,17 @@ if TYPE_CHECKING:
 
 
 class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
+    """The `InterventionGraph` is the special `SubGraph` type that handles the complex intervention operations a user wants to make during interleaving.
+    We need to `.compile()` it before execution to determine how to execute interventions appropriately.
+
+    Attributes:
+        model (NNsight): NNsight model.
+        interventions
+        grad_subgraph
+        compiled
+        call_counter
+        deferred
+    """
 
     def __init__(
         self,

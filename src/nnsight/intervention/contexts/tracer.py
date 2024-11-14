@@ -13,6 +13,8 @@ from ... import CONFIG
 
 
 class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
+    """Extension of base Tracer to add additional intervention functionality and type hinting for intervention proxies.
+    """
 
     R = TypeVar("R")
 
@@ -27,7 +29,7 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
     ) -> Union[InterventionProxy, R]:
         return super().apply(target, *args, **kwargs)
 
-    def local(self, fn: Optional[Callable] = None):
+    def local(self, fn: Optional[Callable] = None) -> Union[LocalContext, Callable]:
 
         if fn is None:
 
