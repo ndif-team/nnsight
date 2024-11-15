@@ -121,34 +121,8 @@ class Interleaver(AbstractContextManager):
         for handle in self.handles:
             handle.remove()
 
-        self.cleanup()
-
         if isinstance(exc_val, Exception):
             raise exc_val
 
 
 
-    def cleanup(self) -> None:
-        """Because some modules may be executed more than once, and to accommodate memory management just like a loop,
-        intervention graph sections defer updating the remaining listeners of Nodes if this is not the last time this section will be executed.
-        If we never knew it was the last time, there may still be deferred sections after execution.
-        These will be leftover in graph.deferred, and therefore we need to update their dependencies.
-        """
-
-        # For every intervention graph section (indicated by where it started)
-        for start in self.graph.deferred:
-
-            # Loop through all nodes that got their dependencies deferred.
-            for index in range(start, self.graph.deferred[start][-1] + 1):
-
-                node = self.graph.nodes[index]
-
-                # Update each of its dependencies
-                for dependency in node.dependencies:
-                    # Only if it was before start
-                    # (not within this section, but before)
-                    if dependency.index < start:
-                        dependency.remaining_listeners -= 1
-
-                        if dependency.redundant:
-                            dependency.destroy()

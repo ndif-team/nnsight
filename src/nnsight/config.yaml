@@ -6,5 +6,6 @@ API:
   SSL: true
   ZLIB: true
 APP:
+  DEBUG: true
   LOGGING: false
   REMOTE_LOGGING: true

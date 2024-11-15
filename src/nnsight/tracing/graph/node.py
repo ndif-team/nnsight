@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import sys
 import traceback
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List,
                     Optional, Set, TypeVar, Union)
@@ -291,7 +292,8 @@ class Node:
         except NNsightError as e:
             raise e
         except Exception as e:
-            raise NNsightError(str(e), self.index)
+            breakpoint()
+            raise e
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
