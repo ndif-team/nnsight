@@ -1,20 +1,12 @@
+import sys
 from collections import defaultdict
-from typing import (
-    TYPE_CHECKING,
-    Dict,
-    Generic,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    Type,
-    Union,
-)
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Tuple
 
 from ...tracing.contexts import Context
 from ...tracing.graph import SubGraph
 from ..protocols import ApplyModuleProtocol, GradProtocol, InterventionProtocol
 from . import InterventionNode, InterventionNodeType, InterventionProxyType
+from ...util import NNsightError
 
 if TYPE_CHECKING:
     from .. import NNsight
@@ -197,7 +189,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
     def execute(self, start: int = 0, grad: bool = False, defer:bool=False, defer_start:int=0) -> None:
                         
-        exception = None
+        err: Tuple[int, NNsightError] = None
                 
         if defer_start in self.deferred:
                     
@@ -222,8 +214,8 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                     node.execute()
                     if defer and node.target is not InterventionProtocol:
                         self.deferred[defer_start].append(node.index)
-                except Exception as e:
-                    exception = (node.index, e)
+                except NNsightError as e:
+                    err = (node.index, e)
                     break
             elif not grad and node.index in self.grad_subgraph:
                 continue
@@ -233,12 +225,12 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         if defer:
             self.defer_stack.pop()
 
-        if exception is not None:
+        if err is not None:
             defer_stack = self.defer_stack
             self.defer_stack = []
-            self.clean(exception[0])
+            self.clean(err[0])
             self.defer_stack = defer_stack
-            raise exception[1]
+            raise err[1]
 
     def count(
         self, index: int, iteration: Union[int, List[int], slice]
@@ -301,6 +293,33 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                 break
 
             node.update_dependencies()
+            
+            
+    def cleanup(self) -> None:
+        """Because some modules may be executed more than once, and to accommodate memory management just like a loop,
+        intervention graph sections defer updating the remaining listeners of Nodes if this is not the last time this section will be executed.
+        If we never knew it was the last time, there may still be deferred sections after execution.
+        These will be leftover in graph.deferred, and therefore we need to update their dependencies.
+        """
+
+        # For every intervention graph section (indicated by where it started)
+        for start in self.deferred:
+
+            # Loop through all nodes that got their dependencies deferred.
+            for index in range(start, self.deferred[start][-1] + 1):
+
+                node = self.nodes[index]
+
+                # Update each of its dependencies
+                for dependency in node.dependencies:
+                    # Only if it was before start
+                    # (not within this section, but before)
+                    if dependency.index < start:
+                        dependency.remaining_listeners -= 1
+
+                        if dependency.redundant:
+                            dependency.destroy()
+
 
     # @classmethod
     # def shift(cls, mgraph: MultiGraph) -> MultiGraph:

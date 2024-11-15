@@ -43,6 +43,7 @@ class InterleavingTracer(InterventionTracer):
         backend: Optional[Backend] = None,
         parent: Optional[GraphType] = None,
         validate: bool = False,
+        debug: Optional[bool] = None,
         **kwargs,
     ) -> None:
 
@@ -54,6 +55,7 @@ class InterleavingTracer(InterventionTracer):
             backend=backend,
             parent=parent,
             graph=model._default_graph,
+            debug=debug,
         )
 
         self._model = model
@@ -157,3 +159,5 @@ class InterleavingTracer(InterventionTracer):
         interleaver = Interleaver(graph, batch_groups=batch_groups)
         
         graph.model.interleave(interleaver, *invoker_args, fn=method,**kwargs, **invoker_kwargs)
+        
+        graph.cleanup()

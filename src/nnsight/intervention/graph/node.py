@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any, Callable, Optional, Set, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode

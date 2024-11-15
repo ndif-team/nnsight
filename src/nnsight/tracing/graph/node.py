@@ -1,23 +1,18 @@
 from __future__ import annotations
 
 import inspect
-import weakref
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    Generic,
-    List,
-    Optional,
-    Set,
-    TypeVar,
-    Union,
-)
+import sys
+import traceback
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List,
+                    Optional, Set, TypeVar, Union)
+
 from typing_extensions import Self
+
 from ... import util
-from ..protocols import Protocol
+from ..protocols import Protocol, StopProtocol
 from .proxy import Proxy, ProxyType
+
+from ...util import NNsightError
 
 if TYPE_CHECKING:
     from .graph import Graph
@@ -64,6 +59,8 @@ class Node:
         self.remaining_listeners = 0
         self.remaining_dependencies = 0
         self.executed = False
+
+        self.meta_data = self._meta_data()
 
         # If theres an alive Graph, add it.
         if self.attached:
@@ -292,10 +289,11 @@ class Node:
 
                 # Set value.
                 self.set_value(output)
-
-        except Exception as e:
-            
+        except NNsightError as e:
             raise e
+        except Exception as e:
+            traceback_content = traceback.format_exc()
+            raise NNsightError(str(e), self.index, traceback_content)
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
@@ -361,6 +359,42 @@ class Node:
             listener.subgraph(subgraph)
 
         return subgraph
+    
+    def _meta_data(self) -> Dict[str, Any]:
+        """ Creates a dictionary of meta-data for this node.
+        Contains the following key-value pairs:
+            - traceback: Optional[str]: If the Graph is in debug mode, 
+                a traceback string is compiled to be used if the execution of this Node raises an error.
+        
+        Returns:
+            Dict[str, Any]: Meta-Data dictionary.
+        """
+
+        meta_data = dict()
+
+        def traceback_str() -> str:
+            """ Compiles a string of all the lines in the Traceback up until nnsight code is called.
+            Returns:
+                Str: Call Stack
+            """
+
+            traceback_str = "Traceback (most recent call last):\n"
+            stack = traceback.extract_stack()
+            for frame in stack:
+                # exclude frames created by nnsight
+                if "nnsight/src/nnsight/" not in str(frame.filename):
+                    traceback_str += f"  File \"{frame.filename}\", line {frame.lineno}, in {frame.name}\n"
+                    traceback_str += f"    {frame.line}\n"
+                else:
+                    break
+
+            return traceback_str
+
+        if self.attached and self.graph.debug:
+            meta_data["traceback"] = traceback_str()
+
+        return meta_data
+
     ### Magic Methods #####################################
     def __str__(self) -> str:
         return f"{self.target.__name__} {self.index}"

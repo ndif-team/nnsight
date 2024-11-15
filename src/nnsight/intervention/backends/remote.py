@@ -4,6 +4,7 @@ import io
 import pickle
 import weakref
 import zlib
+import sys
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import msgspec
@@ -19,6 +20,7 @@ from ...schema.result import RESULT, ResultModel
 from ...tracing import protocols
 from ...tracing.backends import Backend
 from ...tracing.graph import Graph, SubGraph
+from ...util import NNsightError
 from ..contexts.local import LocalContext, RemoteContext
 
 
@@ -129,6 +131,18 @@ class RemoteBackend(Backend):
             node = graph.nodes[index]
             
             node.execute()
+
+        elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
+            if graph.debug:
+                error_node = graph.nodes[response.data['node_id']]
+                print(f"\n{response.data['traceback']}")
+                print("During handling of the above exception, another exception occurred:\n")
+                print(f"{error_node.meta_data['traceback']}")
+                sys.tracebacklimit = 0
+                raise NNsightError(response.data['err_message'], error_node.index)
+            else:
+                print(f"\n{response.data['traceback']}")
+                raise SystemExit("Remote exception.")
             
     def submit_request(self, data: bytes, headers: Dict[str, Any]) -> Optional[ResponseModel]:
         """Sends request to the remote endpoint and handles the response object.

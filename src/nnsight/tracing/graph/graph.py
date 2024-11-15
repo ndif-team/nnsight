@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sys
 from typing import (Any, Callable, Dict, Generic, Iterator, List, Optional,
-                    Set, Type, TypeVar, Union, overload)
+                    Tuple, Type, TypeVar, Union, overload)
 
 from typing_extensions import Self
 
 from ... import util
+from ...util import NNsightError
 from .. import protocols
 from . import Node, NodeType, Proxy, ProxyType
 
@@ -32,10 +34,12 @@ class Graph(Generic[NodeType, ProxyType]):
         self,
         node_class: Type[NodeType] = Node,
         proxy_class: Type[ProxyType] = Proxy,
+        debug: bool = False,
     ) -> None:
 
         self.node_class = node_class
         self.proxy_class = proxy_class
+        self.debug = debug
 
         self._alive = [True]
 
@@ -67,21 +71,21 @@ class Graph(Generic[NodeType, ProxyType]):
             exception: If there is an exception during executing a `Node`. If so, we need to clean up the dependencies of `Node`s yet to be executed.
         """
 
-        exception = None
+        err: Tuple[int, NNsightError] = None
 
         for node in self:
             try:
                 node.execute()
-            except Exception as e:
-                exception = (node.index, e)
+            except NNsightError as e:
+                err = (node.index, e)
                 break
 
-        if exception is not None:
+        if err is not None:
             defer_stack = self.defer_stack.copy()
             self.defer_stack.clear()
-            self.clean(exception[0])
+            self.clean(err[0])
             self.defer_stack.extend(defer_stack)
-            raise exception[1]
+            raise err[1]
 
     def clean(self, start: Optional[int] = None):
         """Cleans up dependencies of `Node`s so their values are appropriately memory managed.
@@ -150,8 +154,8 @@ class Graph(Generic[NodeType, ProxyType]):
         """
 
         if new_graph is None:
-            new_graph = Graph(node_class=self.node_class, proxy_class=self.proxy_class)
-
+            new_graph = Graph(node_class=self.node_class, proxy_class=self.proxy_class, debug=self.debug)
+        
         node = self[-1]
 
         def process(arg: Union[Node, SubGraph]):

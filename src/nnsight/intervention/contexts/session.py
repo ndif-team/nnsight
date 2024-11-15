@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from typing_extensions import Self
 
@@ -14,11 +14,12 @@ class Session(InterventionTracer[InterventionNode, InterventionProxy]):
     """A Session simply allows grouping multiple Tracers in one computation graph.
     """
 
-    def __init__(self, model: "NNsight", validate: bool = False, **kwargs) -> None:
+    def __init__(self, model: "NNsight", validate: bool = False, debug:Optional[bool] = None, **kwargs) -> None:
 
         super().__init__(
             node_class=ValidatingInterventionNode if validate else InterventionNode,
             proxy_class=model.proxy_class,
+            debug=debug,
             **kwargs,
         )
 

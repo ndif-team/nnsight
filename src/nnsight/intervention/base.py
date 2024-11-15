@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import copy
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, List,
-                    Optional, Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union)
 
 import torch
 from typing_extensions import Self
@@ -15,6 +13,7 @@ from .envoy import Envoy
 from .graph import (InterventionGraph, InterventionNode, InterventionProxy,
                     InterventionProxyType)
 from .interleaver import Interleaver
+from .. import CONFIG
 
 
 class NNsight:
