@@ -430,7 +430,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
     def _set_iteration(
         self, iteration: Optional[int] = None, propagate: bool = True
     ) -> None:
-
+    
         if iteration is not None:
             self._iteration_stack.append(iteration)
             self._output_stack.append(None)
@@ -451,8 +451,8 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             propagate (bool, optional): If to propagate to all sub-modules. Defaults to True.
         """
 
-        self._output_stack = []
-        self._input_stack = []
+        self._output_stack = [None]
+        self._input_stack = [None]
 
         if propagate:
             for envoy in self._children:
@@ -467,7 +467,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
         self._reset_proxies(propagate=False)
 
-        self._set_iteration(0, propagate=False)
+        self._iteration_stack = [0]
 
         if propagate:
             for envoy in self._children:
