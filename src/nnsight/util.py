@@ -1,6 +1,9 @@
 """Module for utility functions and classes used throughout the package."""
 
+from contextlib import AbstractContextManager
 import importlib
+import torch
+from typing_extensions import Self
 import types
 from functools import wraps
 from typing import (
@@ -10,6 +13,7 @@ from typing import (
     Collection,
     Dict,
     Generic,
+    List,
     Optional,
     Tuple,
     Type,
@@ -17,19 +21,15 @@ from typing import (
     Union,
 )
 
-import torch
-
-if TYPE_CHECKING:
-    from .tracing.Node import Node
-
 # TODO Have an Exception you can raise to stop apply early
 
 T = TypeVar("T")
+C = TypeVar("T", bound=Collection[T])
 
 
 def apply(
-    data: Any, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
-) -> Collection:
+    data: C, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
+) -> C:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
@@ -76,7 +76,6 @@ def apply(
 
     return data
 
-
 def fetch_attr(object: object, target: str) -> Any:
     """Retrieves an attribute from an object hierarchy given an attribute path. Levels are separated by '.' e.x (transformer.h.1)
 
@@ -101,33 +100,6 @@ def fetch_attr(object: object, target: str) -> Any:
 
     return object
 
-
-def wrap(object: object, wrapper: Type, *args, **kwargs) -> object:
-    """Wraps some object given some wrapper type.
-    Updates the __class__ attribute of the object and calls the wrapper type's __init__ method.
-
-    Args:
-        object (object): Object to wrap.
-        wrapper (Type): Type to wrap the object in.
-
-    Returns:
-        object: Wrapped object.
-    """
-    if isinstance(object, wrapper):
-        return object
-
-    new_class = types.new_class(
-        object.__class__.__name__,
-        (object.__class__, wrapper),
-    )
-
-    object.__class__ = new_class
-
-    wrapper.__init__(object, *args, **kwargs)
-
-    return object
-
-
 def to_import_path(type: type) -> str:
 
     return f"{type.__module__}.{type.__name__}"
@@ -141,11 +113,73 @@ def from_import_path(import_path: str) -> type:
     return getattr(importlib.import_module(import_path), classname)
 
 
-def weakref_to_obj(weakref: Any):
 
-    return weakref.__repr__.__self__
+class Patch:
+    """Class representing a replacement of an attribute on a module.
 
+    Attributes:
+        obj (Any): Object to replace.
+        replacement (Any): Object that replaces.
+        parent (Any): Module or class to replace attribute.
+    """
 
+    def __init__(self, parent: Any, replacement: Any, key: str) -> None:
+        self.parent = parent
+        self.replacement = replacement
+        self.key = key
+        self.orig = getattr(self.parent, key)
+
+    def patch(self) -> None:
+        """Carries out the replacement of an object in a module/class."""
+        setattr(self.parent, self.key, self.replacement)
+
+    def restore(self) -> None:
+        """Carries out the restoration of the original object on the objects module/class."""
+
+        setattr(self.parent, self.key, self.orig)
+
+class Patcher(AbstractContextManager):
+    """Context manager that patches from a list of Patches on __enter__ and restores the patch on __exit__.
+
+    Attributes:
+        patches (List[Patch]):
+    """
+
+    def __init__(self, patches: Optional[List[Patch]] = None) -> None:
+        self.patches = patches or []
+        
+        self.entered = False
+
+    def add(self, patch: Patch) -> None:
+        """Adds a Patch to the patches. Also calls `.patch()` on the Patch.
+
+        Args:
+            patch (Patch): Patch to add.
+        """
+        self.patches.append(patch)
+
+        if self.entered:
+            patch.patch()
+
+    def __enter__(self) -> Self:
+        """Enters the patching context. Calls `.patch()` on all patches.
+
+        Returns:
+            Patcher: Patcher
+        """
+        
+        self.entered = True
+        
+        for patch in self.patches:
+            patch.patch()
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Calls `.restore()` on all patches."""
+        self.entered = False
+        for patch in self.patches:
+            patch.restore()
 class WrapperModule(torch.nn.Module):
     """Simple torch module which passes it's input through. Useful for hooking.
     If there is only one argument, returns the first element.
@@ -157,14 +191,3 @@ class WrapperModule(torch.nn.Module):
 
         return args
 
-
-H = TypeVar("H")
-P = TypeVar("P")
-
-
-class TypeHint(Generic[H]):
-    pass
-
-
-def hint(cls: Type[P | TypeHint[H]]) -> Union[Type[H], Type[P]]:
-    return cls

@@ -1,8 +1,10 @@
 API:
-  APIKEY: null
+  APIKEY: rhJV6e3LGhtXlkB47z9W
+  FORMAT: json
   HOST: ndif.dev
   JOB_ID: null
   SSL: true
+  ZLIB: true
 APP:
   LOGGING: false
   REMOTE_LOGGING: true
