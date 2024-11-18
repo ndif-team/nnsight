@@ -32,7 +32,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
 
 from ..intervention import Envoy
-from ..intervention.contexts import InterventionTracer
+from ..intervention.contexts import InterleavingTracer
 from ..intervention.graph import InterventionNodeType, InterventionProxyType
 from ..util import WrapperModule
 from .mixins import RemoteableMixin
@@ -332,5 +332,5 @@ if TYPE_CHECKING:
 
     class LanguageModel(LanguageModel, PreTrainedModel):
 
-        def generate(self, *args, **kwargs) -> InterventionTracer:
+        def generate(self, *args, **kwargs) -> InterleavingTracer:
             pass

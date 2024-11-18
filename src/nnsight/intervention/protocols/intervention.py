@@ -128,7 +128,7 @@ class InterventionProtocol(EntryPoint):
                 # Updates the count of intervention node calls.
                 # If count matches the Node's iteration, its ready to be executed.
                 ready, defer = node.graph.count(node.index, iteration)
-
+                
                 # Dont execute if the node isnt ready (call count / iteration) or its not fulfilled (conditional)
                 if not ready:
                     continue
