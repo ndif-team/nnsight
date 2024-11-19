@@ -233,6 +233,8 @@ class NNsightGPUModelRunner(ModelRunner):
         ## NNSIGHT #########################################
 
         intervention_graph = model_input.sampling_metadata.intervention_graph
+        
+        intervention_graph.set(self.model)
 
         batch_groups = model_input.sampling_metadata.batch_groups
 
