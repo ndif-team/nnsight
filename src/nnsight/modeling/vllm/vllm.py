@@ -8,9 +8,9 @@ from .executors.GPUExecutor import NNsightGPUExecutor
 from .executors.RayGPUExecutor import NNsightRayGPUExecutor
 from .sampling import NNsightSamplingParams
 from dataclasses import fields
+from ...intervention.interleaver import Interleaver
 
 if TYPE_CHECKING:
-    from ...intervention.interleaver import Interleaver
     from ...intervention.graph import InterventionGraph
     from torch.nn import Module
     from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -165,7 +165,7 @@ class VLLM(RemoteableMixin):
             enable_lora=bool(llm.llm_engine.lora_config),
         )
 
-        if kwargs["tensor_parallel_size"] > 1:
+        if kwargs.get("tensor_parallel_size", 1) > 1:
             return llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
         else:
             return llm.llm_engine.model_executor.driver_worker.model_runner.model
@@ -226,11 +226,9 @@ class VLLM(RemoteableMixin):
 
     def interleave(
         self,
+        interleaver: Interleaver,
         *args,
         fn: Optional[Union[Callable, str]] = None,
-        intervention_graph: Optional["InterventionGraph"] = None,
-        interleaver: Optional["Interleaver"] = None,
-        batch_groups: Optional[List[Tuple[int, int]]] = None,
         **kwargs,
     ) -> Any:
 
@@ -244,13 +242,14 @@ class VLLM(RemoteableMixin):
         fn(prompts, params, **kwargs)
 
         intervention_graph.alive = False """
-
+        
+        
         if not self.dispatched:
             self.dispatch()
 
         for param in args[1]:
 
-            param.intervention_graph = intervention_graph
+            param.intervention_graph = interleaver.graph
 
         if fn is None:
             fn = self._execute

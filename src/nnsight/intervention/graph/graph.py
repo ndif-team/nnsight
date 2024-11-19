@@ -1,14 +1,15 @@
+import copy
 import sys
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 from typing_extensions import Self
 
 from ...tracing.contexts import Context
 from ...tracing.graph import SubGraph
+from ...util import NNsightError
 from ..protocols import ApplyModuleProtocol, GradProtocol, InterventionProtocol
 from . import InterventionNode, InterventionNodeType, InterventionProxyType
-from ...util import NNsightError
 
 if TYPE_CHECKING:
     from .. import NNsight
@@ -36,7 +37,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
     ) -> None:
 
         super().__init__(*args, **kwargs)
-        
+
         self.model = model
 
         self.interventions: Dict[str, List[InterventionNode]] = defaultdict(list)
@@ -44,7 +45,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         self.compiled = False
         self.call_counter: Dict[int, int] = defaultdict(int)
-        self.deferred:Dict[int, List[int]] = defaultdict(list)
+        self.deferred: Dict[int, List[int]] = defaultdict(list)
 
     def __getstate__(self) -> Dict:
 
@@ -108,15 +109,13 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
             return self.interventions
 
         if len(self.nodes) == 1:
-            return 
+            return
 
         intervention_subgraphs: List[SubGraph] = []
 
         start = self[0].index
 
-        if isinstance(self[0].target, type) and issubclass(
-            self[0].target, Context
-        ):
+        if isinstance(self[0].target, type) and issubclass(self[0].target, Context):
             graph = self[0].args[0]
 
             if len(graph) > 0:
@@ -133,17 +132,17 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
             node: InterventionNodeType = self.nodes[index]
 
             if context_node is None and node.graph is not self:
-                
+
                 context_node = self.nodes[node.graph[-1].index + 1]
 
                 context_start = self.subset.index(context_node.index)
-                
+
                 defer_start = node.index
 
                 self.context_dependency(context_node, intervention_subgraphs)
 
             if node.target is InterventionProtocol:
-                
+
                 subgraph = SubGraph(self, subset=sorted(list(node.subgraph())))
 
                 module_path, *_ = node.args
@@ -207,18 +206,24 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         self.compiled = True
 
-    def execute(self, start: int = 0, grad: bool = False, defer:bool=False, defer_start:int=0) -> None:
-                        
+    def execute(
+        self,
+        start: int = 0,
+        grad: bool = False,
+        defer: bool = False,
+        defer_start: int = 0,
+    ) -> None:
+
         err: Tuple[int, NNsightError] = None
-                
+
         if defer_start in self.deferred:
-                    
+
             for index in self.deferred[defer_start]:
-                
+
                 self.nodes[index].reset()
-                
+
             del self.deferred[defer_start]
-            
+
         if defer:
 
             self.defer_stack.append(defer_start)
@@ -227,7 +232,9 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
             if node.executed:
                 continue
-            elif node.index != self[start].index and node.target is InterventionProtocol:
+            elif (
+                node.index != self[start].index and node.target is InterventionProtocol
+            ):
                 break
             elif node.fulfilled:
                 try:
@@ -241,7 +248,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                 continue
             else:
                 break
-            
+
         if defer:
             self.defer_stack.pop()
 
@@ -252,9 +259,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
             self.defer_stack = defer_stack
             raise err[1]
 
-    def count(
-        self, index: int, iteration: Union[int, List[int], slice]
-    ) -> bool:
+    def count(self, index: int, iteration: Union[int, List[int], slice]) -> bool:
         """Increments the count of times a given Intervention Node has tried to be executed and returns if the Node is ready and if it needs to be deferred.
 
         Args:
@@ -296,7 +301,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         self.call_counter[index] += 1
 
         return ready, defer
-    
+
     def clean(self, start: Optional[int] = None):
 
         if start is None:
@@ -306,15 +311,14 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         # Loop over ALL nodes within the span of this graph.
         for index in range(start, end):
-            
+
             node = self.nodes[index]
-            
+
             if node.executed:
                 break
 
             node.update_dependencies()
-            
-            
+
     def cleanup(self) -> None:
         """Because some modules may be executed more than once, and to accommodate memory management just like a loop,
         intervention graph sections defer updating the remaining listeners of Nodes if this is not the last time this section will be executed.
@@ -340,8 +344,8 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                         if dependency.redundant:
                             dependency.destroy()
 
-
-    def copy(self,
+    def copy(
+        self,
         new_graph: Self = None,
         parent: Optional["GraphType"] = None,
         memo: Optional[Dict[int, "NodeType"]] = None,
@@ -349,29 +353,28 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         if memo is None:
             memo = {}
-        
+
         new_graph = super().copy(new_graph, parent, memo)
 
         new_graph.compiled = self.compiled
 
-        interventions = {}
-
         for module_path, list_of_nodes in self.interventions.items():
 
-            interventions[module_path] = [new_graph.nodes[memo[node.index]] for node in list_of_nodes]
+            new_graph.interventions[module_path] = [
+                new_graph.nodes[memo[node.index]] for node in list_of_nodes
+            ]
 
-        new_graph.interventions = interventions
+        new_graph.call_counter = {
+            memo[index]: value for index, value in self.call_counter.items()
+        }
 
-        new_graph.call_counter = self.call_counter.copy()
+        new_graph.deferred = copy.deepcopy(self.deferred)
 
-        new_graph.deferred = self.deferred.copy()
+        new_graph.grad_subgraph = [memo[index] for index in self.grad_subgraph]
 
-        new_graph.grad_subgraph = self.grad_subgraph.copy()
-
-        new_graph.defer_stack = self.defer_stack.copy()
+        new_graph.defer_stack = [memo[index] for index in self.defer_stack]
 
         return new_graph
-
 
     # @classmethod
     # def shift(cls, mgraph: MultiGraph) -> MultiGraph:
