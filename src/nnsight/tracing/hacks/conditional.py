@@ -14,7 +14,9 @@ if TYPE_CHECKING:
 def handle_conditional(frame: FrameType, condition: "Proxy"):
 
     line_no = frame.f_lineno
-    source_lines, _ = inspect.getsourcelines(frame)
+    source_file = inspect.getsourcefile(frame)
+    with open(source_file, "r") as file:
+        source_lines = file.readlines()
     source = "".join(source_lines)
     tree = ast.parse(source)
 

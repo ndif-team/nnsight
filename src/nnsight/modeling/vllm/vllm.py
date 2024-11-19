@@ -191,6 +191,9 @@ class VLLM(RemoteableMixin):
                     **kwargs,
                 )
 
+                if kwargs != {}:
+                    param.is_default_param = False
+
                 prompts.append(prompt)
                 params.append(param)
 
@@ -264,6 +267,14 @@ class VLLM(RemoteableMixin):
         params: List[NNsightSamplingParams],
         **kwargs,
     ) -> Any:
+
+        kwargs.pop('invoker_group')
+
+        for param in params:
+            if param.is_default_param:
+                for attr, value in kwargs.items():
+                    if hasattr(NNsightSamplingParams, attr):
+                        setattr(param, attr, value)
 
         self.vllm_entrypoint.generate(prompts, sampling_params=params)
 
