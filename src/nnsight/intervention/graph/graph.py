@@ -354,25 +354,26 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         if memo is None:
             memo = {}
 
-        new_graph = super().copy(new_graph, parent, memo)
+        new_graph = super().copy(new_graph, parent=parent, memo=memo)
 
         new_graph.compiled = self.compiled
 
-        for module_path, list_of_nodes in self.interventions.items():
+        for key, value in self.call_counter.items():
+            self.call_counter[memo[key]] = value
 
-            new_graph.interventions[module_path] = [
-                new_graph.nodes[memo[node.index]] for node in list_of_nodes
-            ]
+        if new_graph.compiled:
 
-        new_graph.call_counter = {
-            memo[index]: value for index, value in self.call_counter.items()
-        }
+            for module_path, list_of_nodes in self.interventions.items():
 
-        new_graph.deferred = copy.deepcopy(self.deferred)
+                new_graph.interventions[module_path] = [
+                    new_graph.nodes[memo[node.index]] for node in list_of_nodes
+                ]
 
-        new_graph.grad_subgraph = [memo[index] for index in self.grad_subgraph]
+            for key, values in self.deferred.items():
 
-        new_graph.defer_stack = [memo[index] for index in self.defer_stack]
+                new_graph[memo[key]] = [memo[index] for index in values]
+
+            new_graph.grad_subgraph = [memo[index] for index in self.grad_subgraph]
 
         return new_graph
 
