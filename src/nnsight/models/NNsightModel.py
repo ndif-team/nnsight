@@ -119,6 +119,10 @@ class NNsight:
             self.dispatch_model()
 
         logger.info(f"Initialized `{self._model_key}`")
+        
+    def __call__(self, *args, **kwargs):
+        
+        return self._envoy(*args, **kwargs)
 
     def trace(
         self,
