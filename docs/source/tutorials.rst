@@ -139,7 +139,7 @@ Tutorials
 
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-arrow-down-a-z fa-2x"></i>
+               <i class="fa-solid fa-sliders fa-2x"></i>
             </div> 
             <div>
                <h5 class="card-title">LoRA</h5>
