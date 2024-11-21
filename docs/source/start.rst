@@ -19,13 +19,18 @@ Please give the project a :ndif:`star on Github` to support the project. NNsight
 First Steps
 -----------
 
-.. grid:: 2 2 3 3
+.. grid:: 2 2 2 2
    :gutter: 2
 
    .. grid-item-card:: Walkthrough
       :link: notebooks/tutorials/walkthrough.ipynb
 
       Walk through the basic functionality of the package.
+
+   .. grid-item-card:: Remote Access
+      :link: notebooks/features/remote_execution.ipynb
+
+      Configure API access for remote model execution.
 
    .. grid-item-card:: Features
       :link: features
@@ -37,7 +42,7 @@ First Steps
       :link: tutorials
       :link-type: doc
 
-      See implementations of :bdg-primary:`nnsight` through common interpretability techniques.
+      See :bdg-primary:`nnsight` implementations of common interpretability techniques.
 
 
 
