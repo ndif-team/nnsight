@@ -4,14 +4,43 @@ import sys
 from types import FrameType
 from typing import TYPE_CHECKING
 
-from ..contexts import Condition, Context
+from ..contexts import Condition
 from .util import execute, execute_body, execute_until
-
+from ..graph import Graph
 if TYPE_CHECKING:
     from ..graph import Proxy
 
+def get_else(node: ast.If):
 
-def handle_conditional(frame: FrameType, condition: "Proxy"):
+    return (
+        node.orelse[0]
+        if isinstance(node.orelse[0], ast.If)
+        else ast.If(
+            test=ast.Constant(value=None),
+            body=node.orelse,
+            orelse=[],
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+        )
+    )
+    
+def handle(node: ast.If, frame:FrameType, graph:Graph, branch:Condition = None):
+
+    condition_expr = ast.Expression(
+        body=node.test, lineno=node.lineno, col_offset=node.col_offset
+    )
+
+    condition = execute(condition_expr, frame)
+    
+    context = Condition(condition, parent = graph) if branch is None else branch.else_(condition)
+
+    with context as branch:
+        execute_body(node.body, frame, branch.graph)
+
+    if node.orelse:
+        return handle(get_else(node), frame, graph, branch)
+    
+def handle_proxy(frame: FrameType, condition: "Proxy"):
 
     line_no = frame.f_lineno
     source_lines, _ = inspect.getsourcelines(frame)
@@ -37,44 +66,13 @@ def handle_conditional(frame: FrameType, condition: "Proxy"):
 
     branch = Condition(condition, parent=graph)
 
-    def get_else(node: ast.If):
-
-        return (
-            node.orelse[0]
-            if isinstance(node.orelse[0], ast.If)
-            else ast.If(
-                test=ast.Constant(value=None),
-                body=node.orelse,
-                orelse=[],
-                lineno=node.lineno,
-                col_offset=node.col_offset,
-            )
-        )
-
-    def evaluate_and_execute(node: ast.stmt):
-
-        nonlocal branch
-
-        if isinstance(node, ast.If):
-
-            condition_expr = ast.Expression(
-                body=node.test, lineno=node.lineno, col_offset=node.col_offset
-            )
-
-            condition = execute(condition_expr, frame)
-
-            with branch.else_(condition) as branch:
-                execute_body(node.body, frame)
-
-            if node.orelse:
-                return evaluate_and_execute(get_else(node))
-
-    def callback(node: ast.If, context: Context, frame: FrameType):
+    def callback(node: ast.If, frame: FrameType, graph:Graph, branch:Condition):
 
         if node.orelse:
-            evaluate_and_execute(get_else(if_node))
+            handle(get_else(if_node), frame, graph, branch)
 
     branch.__enter__()
-    execute_until(branch, if_node, frame, callback=callback)
+    
+    execute_until(branch, if_node, frame, callback=lambda : callback(if_node, frame, graph, branch))
 
     return True

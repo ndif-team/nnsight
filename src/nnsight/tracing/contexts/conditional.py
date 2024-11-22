@@ -16,10 +16,10 @@ class Condition(Context[SubGraph]):
         self.args = [condition, branch]
 
     def else_(self, condition: Optional[Any] = None):
-
+        
         return Condition(
             condition,
-            branch=self.graph.nodes[self.graph[-1].index + 1],
+            branch=self.graph.nodes[-1],
             parent=self.graph.stack[-1],
         )
 

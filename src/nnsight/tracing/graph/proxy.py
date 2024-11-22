@@ -286,13 +286,13 @@ class Proxy:
         
         from ..hacks import iterator
         
-        return iterator.handle_iterator(inspect.currentframe().f_back, self)
+        return iterator.handle_proxy(inspect.currentframe().f_back, self)
 
     def __bool__(self) -> Self:
         
         from ..hacks import conditional
         
-        return conditional.handle_conditional(inspect.currentframe().f_back, self)
+        return conditional.handle_proxy(inspect.currentframe().f_back, self)
 
     def __instancecheck__(self, __instance: Any) -> bool:
         return self.node.fake_value.__instancecheck__(__instance)

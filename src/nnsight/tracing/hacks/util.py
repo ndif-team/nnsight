@@ -4,7 +4,7 @@ from types import FrameType
 from typing import Any, Callable, List, Optional
 
 from ..contexts import Context
-
+from ..graph import Graph
 
 def execute(expr: ast.expr, frame: FrameType) -> Any:
     ast.fix_missing_locations(expr)
@@ -15,16 +15,20 @@ def execute(expr: ast.expr, frame: FrameType) -> Any:
     )
 
 
-def execute_body(body: List[ast.stmt], frame: FrameType) -> None:
+def execute_body(body: List[ast.stmt], frame: FrameType, graph:Graph) -> None:
+    
+    from . import handle_inner
 
     for stmt in body:
-        module = ast.Module(body=[stmt], type_ignores=[])
-        ast.fix_missing_locations(module)
-        exec(
-            compile(module, "<string>", "exec"),
-            frame.f_globals,
-            frame.f_locals,
-        )
+        
+        if not handle_inner(stmt, frame, graph):
+            module = ast.Module(body=[stmt], type_ignores=[])
+            ast.fix_missing_locations(module)
+            exec(
+                compile(module, "<string>", "exec"),
+                frame.f_globals,
+                frame.f_locals,
+            )
 
 
 def execute_until(
@@ -52,7 +56,7 @@ def execute_until(
 
             if callback is not None:
 
-                callback(node, context, frame)
+                callback()
 
     frame.f_trace = trace
     sys.settrace(trace)
