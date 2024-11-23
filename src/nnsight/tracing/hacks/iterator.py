@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from ..contexts import Iterator
 from ..graph import Graph
-from .util import execute, execute_body, execute_until
+from .util import execute, execute_body, execute_until, visit
 
 if TYPE_CHECKING:
     from ..graph import Proxy
@@ -40,27 +40,17 @@ def handle(node: ast.For, frame: FrameType, graph: Graph):
 
 def handle_proxy(frame: FrameType, collection: "Proxy"):
 
-    line_no = frame.f_lineno
-    source_lines, inner_line_no = inspect.getsourcelines(frame)
-    if inner_line_no > 0:
-        line_no = line_no - inner_line_no + 1
-    source = "".join(source_lines).lstrip()
-    tree = ast.parse(source)
-
     class Visitor(ast.NodeVisitor):
         def __init__(self, line_no):
             self.target = None
             self.line_no = line_no
 
-        def visit_For(self, node):
+        def visit_If(self, node):
             if node.lineno == self.line_no:
                 self.target = node
             self.generic_visit(node)
 
-    visitor = Visitor(line_no)
-    visitor.visit(tree)
-
-    for_node = visitor.target
+    for_node:ast.For = visit(frame, Visitor)
 
     graph = collection.node.graph
 

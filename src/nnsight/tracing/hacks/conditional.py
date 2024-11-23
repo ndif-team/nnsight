@@ -5,7 +5,7 @@ from types import FrameType
 from typing import TYPE_CHECKING
 
 from ..contexts import Condition
-from .util import execute, execute_body, execute_until
+from .util import execute, execute_body, execute_until, visit
 from ..graph import Graph
 if TYPE_CHECKING:
     from ..graph import Proxy
@@ -31,7 +31,7 @@ def handle(node: ast.If, frame:FrameType, graph:Graph, branch:Condition = None):
     )
 
     condition = execute(condition_expr, frame)
-    
+        
     context = Condition(condition, parent = graph) if branch is None else branch.else_(condition)
 
     with context as branch:
@@ -42,14 +42,6 @@ def handle(node: ast.If, frame:FrameType, graph:Graph, branch:Condition = None):
     
 def handle_proxy(frame: FrameType, condition: "Proxy"):
 
-    line_no = frame.f_lineno
-    source_lines, inner_line_no = inspect.getsourcelines(frame)
-    if inner_line_no > 0:
-        line_no = line_no - inner_line_no + 1
-        
-    source = "".join(source_lines).lstrip()
-    tree = ast.parse(source)
-    
     class Visitor(ast.NodeVisitor):
         def __init__(self, line_no):
             self.target = None
@@ -60,10 +52,7 @@ def handle_proxy(frame: FrameType, condition: "Proxy"):
                 self.target = node
             self.generic_visit(node)
 
-    visitor = Visitor(line_no)
-    visitor.visit(tree)
-
-    if_node = visitor.target
+    if_node:ast.If = visit(frame, Visitor)
     
     graph = condition.node.graph
 
