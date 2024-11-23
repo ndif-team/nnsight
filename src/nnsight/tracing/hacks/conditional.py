@@ -43,10 +43,13 @@ def handle(node: ast.If, frame:FrameType, graph:Graph, branch:Condition = None):
 def handle_proxy(frame: FrameType, condition: "Proxy"):
 
     line_no = frame.f_lineno
-    source_lines, _ = inspect.getsourcelines(frame)
-    source = "".join(source_lines)
+    source_lines, inner_line_no = inspect.getsourcelines(frame)
+    if inner_line_no > 0:
+        line_no = line_no - inner_line_no + 1
+        
+    source = "".join(source_lines).lstrip()
     tree = ast.parse(source)
-
+    
     class Visitor(ast.NodeVisitor):
         def __init__(self, line_no):
             self.target = None
@@ -61,7 +64,7 @@ def handle_proxy(frame: FrameType, condition: "Proxy"):
     visitor.visit(tree)
 
     if_node = visitor.target
-
+    
     graph = condition.node.graph
 
     branch = Condition(condition, parent=graph)
@@ -73,6 +76,6 @@ def handle_proxy(frame: FrameType, condition: "Proxy"):
 
     branch.__enter__()
     
-    execute_until(branch, if_node, frame, callback=lambda : callback(if_node, frame, graph, branch))
+    execute_until(branch, frame.f_lineno, frame.f_lineno + len(if_node.body), frame, callback=lambda : callback(if_node, frame, graph, branch))
 
     return True

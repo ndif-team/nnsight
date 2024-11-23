@@ -33,14 +33,12 @@ def execute_body(body: List[ast.stmt], frame: FrameType, graph:Graph) -> None:
 
 def execute_until(
     context: Context,
-    node: ast.If,
+    first_line:int,
+    last_line:int,
     frame: FrameType,
     callback: Optional[Callable] = None,
 ):
 
-    last_line = node.body[-1].lineno
-    first_line =  node.body[0].lineno
-    
     prev_trace = frame.f_trace
 
     def trace(new_frame: FrameType, *args):

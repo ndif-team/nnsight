@@ -1,4 +1,5 @@
 import ast
+import ctypes
 import inspect
 import sys
 from types import FrameType
@@ -27,6 +28,9 @@ def handle(node: ast.For, frame: FrameType, graph: Graph):
     with context as item:
         if isinstance(target, ast.Name):
             frame.f_locals[target.id] = item
+            ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
+            
+  
         # elif isinstance(target, ast.Tuple):
         #     for t, v in zip(target.elts, item):
         #         if isinstance(t, ast.Name):
@@ -37,8 +41,10 @@ def handle(node: ast.For, frame: FrameType, graph: Graph):
 def handle_proxy(frame: FrameType, collection: "Proxy"):
 
     line_no = frame.f_lineno
-    source_lines, _ = inspect.getsourcelines(frame)
-    source = "".join(source_lines)
+    source_lines, inner_line_no = inspect.getsourcelines(frame)
+    if inner_line_no > 0:
+        line_no = line_no - inner_line_no + 1
+    source = "".join(source_lines).lstrip()
     tree = ast.parse(source)
 
     class Visitor(ast.NodeVisitor):
@@ -62,6 +68,6 @@ def handle_proxy(frame: FrameType, collection: "Proxy"):
 
     item = iterator.__enter__()
 
-    execute_until(iterator, for_node, frame)
+    execute_until(iterator, frame.f_lineno, frame.f_lineno + len(for_node.body), frame)
 
     return iter([item])
