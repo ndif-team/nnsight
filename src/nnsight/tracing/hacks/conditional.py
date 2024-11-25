@@ -52,19 +52,23 @@ def handle_proxy(frame: FrameType, condition: "Proxy"):
                 self.target = node
             self.generic_visit(node)
 
-    if_node:ast.If = visit(frame, Visitor)
+    visitor = visit(frame, Visitor)
+
+    if_node:ast.If = visitor.target
     
     graph = condition.node.graph
 
     branch = Condition(condition, parent=graph)
 
     def callback(node: ast.If, frame: FrameType, graph:Graph, branch:Condition):
+        
+        branch.__exit__(None, None, None)
 
         if node.orelse:
             handle(get_else(if_node), frame, graph, branch)
 
     branch.__enter__()
     
-    execute_until(branch, frame.f_lineno, frame.f_lineno + len(if_node.body), frame, callback=lambda : callback(if_node, frame, graph, branch))
+    execute_until(frame.f_lineno, frame.f_lineno + len(if_node.body), frame, callback=lambda _: callback(if_node, frame, graph, branch))
 
     return True

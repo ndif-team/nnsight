@@ -1,4 +1,5 @@
 import ast
+import ctypes
 import inspect
 import sys
 from types import FrameType
@@ -34,7 +35,6 @@ def execute_body(body: List[ast.stmt], frame: FrameType, graph: Graph) -> None:
 
 
 def execute_until(
-    context: Context,
     first_line: int,
     last_line: int,
     frame: FrameType,
@@ -44,18 +44,21 @@ def execute_until(
     prev_trace = frame.f_trace
 
     def trace(new_frame: FrameType, *args):
-
+        
         if new_frame.f_code.co_filename == frame.f_code.co_filename and (
             new_frame.f_lineno > last_line or new_frame.f_lineno < first_line
         ):
+            
             frame.f_trace = prev_trace
             sys.settrace(prev_trace)
-
-            context.__exit__(None, None, None)
+            
+            if prev_trace is not None:
+            
+                prev_trace(new_frame, *args)
 
             if callback is not None:
 
-                callback()
+                callback(new_frame)
 
     frame.f_trace = trace
     sys.settrace(trace)
@@ -74,4 +77,4 @@ def visit(frame: FrameType, visitor_cls: Type[ast.NodeVisitor]) -> ast.stmt:
     visitor = visitor_cls(line_no)
     visitor.visit(tree)
 
-    return visitor.target
+    return visitor
