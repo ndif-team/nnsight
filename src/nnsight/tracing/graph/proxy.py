@@ -1,9 +1,12 @@
 from __future__ import annotations
+
 import inspect
 import operator
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Union, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Iterator, TypeVar, Union
+
 from typing_extensions import Self
-from ... import util
+
+from ... import CONFIG, util
 from .. import protocols
 
 if TYPE_CHECKING:
@@ -24,9 +27,9 @@ class Proxy:
         self.__dict__["node"] = node
 
         self.node: "Node"
-        
+
     ### API ##############################
-    
+
     def save(self) -> Self:
         """Adds a lock Node to prevent its value from being cleared where normally it would be cleared when its no longer needed to save memory.
         Used to access values outside of the tracing context, after execution.
@@ -42,11 +45,11 @@ class Proxy:
         protocols.LockProtocol.add(self.node)
 
         return self
-    
+
     def stop(self) -> None:
         protocols.StopProtocol.add(
-            self.node.graph, 
-            self.node, 
+            self.node.graph,
+            self.node,
         )
 
     @property
@@ -74,9 +77,9 @@ class Proxy:
             return repr(self.value)
 
         return str(self)
-    
+
     ### Special ################
-    
+
     @staticmethod
     def call(callable: Callable, *args, **kwargs) -> Self:
         return callable(*args, **kwargs)
@@ -94,8 +97,7 @@ class Proxy:
             *([self.node] + list(args)),
             **kwargs,
         )
-        
-        
+
     def __getattr__(self, key: Union[Self, Any]) -> Self:
         return self.node.create(util.fetch_attr, self.node, key)
 
@@ -113,9 +115,8 @@ class Proxy:
             key,
             value,
         )
-        
-    ### Regular Operators #########################
 
+    ### Regular Operators #########################
 
     def __getitem__(self, key: Union[Self, Any]) -> Self:
         return self.node.create(operator.getitem, self.node, key)
@@ -127,8 +128,6 @@ class Proxy:
             key,
             value,
         )
-
-
 
     def __abs__(self) -> Self:
         return self.node.create(
@@ -147,7 +146,6 @@ class Proxy:
             operator.neg,
             self.node,
         )
-
 
     def __add__(self, other: Union[Self, Any]) -> Self:
         return self.node.create(operator.add, self.node, other)
@@ -273,25 +271,31 @@ class Proxy:
 
     def __index__(self) -> Self:
         return self.node.create(operator.index, self.node)
-    
+
     def __len__(self) -> Self:
         return self.node.create(
             len,
             self.node,
         )
-    
+
     ### Hacks ##############################
-    
+
     def __iter__(self) -> Iterator[Self]:
         
+        if not CONFIG.APP.CONTROL_FLOW_HACKS:
+            raise Exception('Iteration control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False')
+
         from ..hacks import iterator
-        
+
         return iterator.handle_iterator(inspect.currentframe().f_back, self)
 
     def __bool__(self) -> Self:
         
+        if not CONFIG.APP.CONTROL_FLOW_HACKS:
+            raise Exception('Conditional control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False')
+
         from ..hacks import conditional
-        
+
         return conditional.handle_conditional(inspect.currentframe().f_back, self)
 
     def __instancecheck__(self, __instance: Any) -> bool:

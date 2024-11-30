@@ -15,7 +15,9 @@ class ApiConfigModel(BaseModel):
 class AppConfigModel(BaseModel):
     LOGGING: bool = False
     REMOTE_LOGGING: bool = True
-    DEBUG: bool = False
+    DEBUG: bool = True
+    CONTROL_FLOW_HACKS:bool = True
+    FRAME_INJECTION:bool = True
 
 class ConfigModel(BaseModel):
     API: ApiConfigModel = ApiConfigModel()

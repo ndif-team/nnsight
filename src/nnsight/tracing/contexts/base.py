@@ -9,7 +9,7 @@ from ...tracing.graph import Node, NodeType, Proxy, ProxyType
 from ..backends import Backend, ExecutionBackend
 from ..graph import Graph, GraphType, SubGraph
 from ..protocols import Protocol
-
+from ... import CONFIG
 
 class Context(Protocol, AbstractContextManager, Generic[GraphType]):
     """A `Context` represents a scope (or slice) of a computation graph with specific logic for adding and executing nodes defined within it.
@@ -42,7 +42,7 @@ class Context(Protocol, AbstractContextManager, Generic[GraphType]):
         # If this is the root graph, we want to execute it upon exit.
         # Otherwise its a child context/graph and all we want to
         if backend is None and parent is None:
-            backend = ExecutionBackend()
+            backend = ExecutionBackend(injection=CONFIG.APP.FRAME_INJECTION)
 
         self.backend = backend
 
