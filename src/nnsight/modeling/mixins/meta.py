@@ -1,3 +1,5 @@
+from typing import Dict, Optional
+
 import torch
 from accelerate import init_empty_weights
 
@@ -8,7 +10,7 @@ from .loadable import LoadableMixin
 class MetaMixin(LoadableMixin):
 
     def __init__(
-        self, *args, dispatch: bool = False, meta_buffers: bool = True, **kwargs
+        self, *args, dispatch: bool = False, meta_buffers: bool = True, rename: Optional[Dict[str,str]] = None, **kwargs
     ) -> None:
 
         self.dispatched = dispatch
@@ -23,7 +25,7 @@ class MetaMixin(LoadableMixin):
 
                 model = self._load_meta(*args, **kwargs)
 
-            NNsight.__init__(self, model)
+            NNsight.__init__(self, model, rename=rename)
 
         self.args = args
         self.kwargs = kwargs
