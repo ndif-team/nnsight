@@ -40,7 +40,7 @@ class Invoker(AbstractContextManager):
     ) -> None:
 
         self.tracer = tracer
-        self.input = (args, kwargs)
+        self.inputs = (args, kwargs)
 
         self.scan = scan
 
@@ -73,7 +73,7 @@ class Invoker(AbstractContextManager):
             return proxy
 
         # We need to check if there were any Proxies in the actual Invoker input. This might be True in a Session where values from one trace are used as an input to another.
-        util.apply(self.input, check_for_proxies, InterventionProxy)
+        util.apply(self.inputs, check_for_proxies, InterventionProxy)
 
         # We dont want to create new proxies during scanning/prepare_inputs so we exit the global tracing context.
         with GlobalTracingContext.exit_global_tracing_context():
@@ -81,13 +81,13 @@ class Invoker(AbstractContextManager):
             # If we dont have proxies we can immediately prepare the input so the user can see it and the batch_size.
             if not has_proxies_in_inputs:
 
-                self.input, self.batch_size = self.tracer._model._prepare_input(
-                    *self.input[0], **self.input[1]
+                self.inputs, self.batch_size = self.tracer._model._prepare_input(
+                    *self.inputs[0], **self.inputs[1]
                 )
 
             if self.scan:
 
-                input = self.input
+                input = self.inputs
 
                 if has_proxies_in_inputs:
 
@@ -129,7 +129,7 @@ class Invoker(AbstractContextManager):
             else:
                 self.tracer._model._envoy._reset()
 
-            self.tracer.args.append(self.input)
+            self.tracer.args.append(self.inputs)
 
         return self
 

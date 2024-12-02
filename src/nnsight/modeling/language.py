@@ -123,7 +123,7 @@ class LanguageModel(RemoteableMixin):
                 repo_id, config=self.config, **kwargs
             )
 
-            if not hasattr(self.tokenizer.pad_token, "pad_token"):
+            if getattr(self.tokenizer, "pad_token", None) is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def _load_meta(

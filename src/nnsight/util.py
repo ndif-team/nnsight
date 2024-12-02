@@ -24,7 +24,7 @@ from typing import (
 # TODO Have an Exception you can raise to stop apply early
 
 T = TypeVar("T")
-C = TypeVar("T", bound=Collection[T])
+C = TypeVar("C", bound=Collection[T])
 
 
 def apply(
