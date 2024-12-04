@@ -16,6 +16,8 @@ from . import InterventionTracer
 
 # Torch classes
 global_patch(torch.nn.Parameter)
+global_patch(torch.nn.Linear)
+
 global_patch(data.DataLoader)
 # Tensor creation operations
 global_patch(torch.arange)

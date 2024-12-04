@@ -86,7 +86,7 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.device]]: Proxy value device or collection of devices.
         """
 
-        if not self.node.attached():
+        if not self.node.attached:
 
             return util.apply(self.value, lambda x: x.device, torch.Tensor)
 
@@ -130,8 +130,8 @@ class InterventionProxy(Proxy):
 
             proxy = arg
 
-        util.apply(args, get_proxy, Proxy)
-
+        util.apply((args, kwargs), get_proxy, Proxy)
+    
         return proxy.node.create(
             orig_method,
             *args,
