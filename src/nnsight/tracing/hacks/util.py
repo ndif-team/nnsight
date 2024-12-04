@@ -67,7 +67,19 @@ def execute_until(
 def visit(frame: FrameType, visitor_cls: Type[ast.NodeVisitor]) -> ast.stmt:
 
     line_no = frame.f_lineno
-    source_lines, inner_line_no = inspect.getsourcelines(frame)
+    try:
+        source_lines, inner_line_no = inspect.getsourcelines(frame)
+    except:
+        
+        try:
+            import IPython
+            ipython = IPython.get_ipython()
+            source_lines = ipython.user_global_ns['_ih'][-1]
+            inner_line_no = 0
+            
+        except:
+            raise
+            
     if inner_line_no > 0:
         line_no = line_no - inner_line_no + 1
 

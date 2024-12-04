@@ -100,7 +100,7 @@ def handle_proxy(frame: FrameType, collection: "Proxy"):
     def callback(iterator: Iterator):
                 
         iterator.__exit__(None, None, None)
-
-    execute_until(frame.f_lineno, for_node.end_lineno, frame, callback=lambda _: callback(iterator))
+    #frame.f_lineno + (for_node.end_lineno - for_node.lineno)
+    execute_until(frame.f_lineno, frame.f_lineno + for_node.end_lineno, frame, callback=lambda _: callback(iterator))
 
     return iter([item])
