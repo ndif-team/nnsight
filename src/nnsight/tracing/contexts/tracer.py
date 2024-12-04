@@ -1,10 +1,9 @@
-from typing import Callable, Any, Generic, TypeVar, Union
+from typing import Callable, TypeVar, Union
 from typing_extensions import Self
 
-from ..graph import ProxyType, GraphType, SubGraph, NodeType, Proxy
+from ..graph import ProxyType, SubGraph, NodeType, Proxy
 from ..protocols import StopProtocol
 from . import Condition, Context, Iterator
-
 
 class Tracer(Context[SubGraph[NodeType, ProxyType]]):
     
@@ -50,5 +49,3 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
             *args,
             **kwargs,
         )
-
-

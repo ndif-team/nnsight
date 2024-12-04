@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Any, Callable, Generic, Optional, Type, Union
+from typing import Generic, Optional, Type
 
 from typing_extensions import Self
 
+from ... import CONFIG
 from ...tracing.graph import Node, NodeType, Proxy, ProxyType
 from ..backends import Backend, ExecutionBackend
-from ..graph import Graph, GraphType, SubGraph
+from ..graph import Graph, GraphType, SubGraph, viz_graph
 from ..protocols import Protocol
-from ... import CONFIG
 
 class Context(Protocol, AbstractContextManager, Generic[GraphType]):
     """A `Context` represents a scope (or slice) of a computation graph with specific logic for adding and executing nodes defined within it.
@@ -80,6 +80,9 @@ class Context(Protocol, AbstractContextManager, Generic[GraphType]):
             graph.alive = False
 
             self.backend(graph)
+
+    def vis(self, *args, **kwargs):
+        viz_graph(self.graph, *args, **kwargs)
 
     @classmethod
     def execute(cls, node: NodeType):

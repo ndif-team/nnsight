@@ -4,7 +4,6 @@ from enum import auto
 import pytest
 import torch
 
-from nnsight.intervention.contexts import InterventionTracer
 from nnsight.tracing.backends import Backend
 from nnsight.tracing.graph import Graph
 from nnsight.tracing.protocols import StopProtocol
