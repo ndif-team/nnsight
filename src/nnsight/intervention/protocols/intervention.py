@@ -207,8 +207,8 @@ class InterventionProtocol(EntryPoint):
         default_style = super().style()
 
         default_style["node"] = {"color": "green4", "shape": "box"}
-        default_style["arg_kname"][0] = "key"
-        default_style["arg_kname"][1] = "batch_size"
-        default_style["arg_kname"][2] = "batch_start"
+        default_style["arg_kname"][0] = "module_path"
+        default_style["arg_kname"][1] = "batch_group"
+        default_style["arg_kname"][2] = "call_counter"
 
         return default_style
