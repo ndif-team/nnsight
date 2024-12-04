@@ -1,20 +1,25 @@
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Optional
 
-from ...tracing.contexts import Tracer
-from ..graph import InterventionNode, ValidatingInterventionNode, InterventionProxyType, InterventionProxy
-from . import InterventionTracer, Invoker
 from typing_extensions import Self
+
+from ..graph import (InterventionNode, InterventionProxy,
+                     ValidatingInterventionNode)
+from . import InterventionTracer
+
 if TYPE_CHECKING:
     from .. import NNsight
 
 
-class Session(Tracer[InterventionNode, InterventionProxy]):
+class Session(InterventionTracer[InterventionNode, InterventionProxy]):
+    """A Session simply allows grouping multiple Tracers in one computation graph.
+    """
 
-    def __init__(self, model: "NNsight", validate: bool = False, **kwargs) -> None:
+    def __init__(self, model: "NNsight", validate: bool = False, debug:Optional[bool] = None, **kwargs) -> None:
 
         super().__init__(
             node_class=ValidatingInterventionNode if validate else InterventionNode,
             proxy_class=model.proxy_class,
+            debug=debug,
             **kwargs,
         )
 
@@ -30,9 +35,3 @@ class Session(Tracer[InterventionNode, InterventionProxy]):
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.model._session = None
         return super().__exit__(exc_type, exc_val, exc_tb)
-    
-    R = TypeVar('R')
-    
-    def apply(self, target: Callable[..., R], *args, **kwargs) -> Union[InterventionProxy, R]:
-        return super().apply(target, *args, **kwargs)
-    

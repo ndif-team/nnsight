@@ -1,15 +1,14 @@
 from typing import TYPE_CHECKING, Any, Dict
 
 import torch
-
 from ... import util
-from ...tracing.protocols import Protocol
+from .entrypoint import EntryPoint
 
 if TYPE_CHECKING:
     from ..graph import InterventionNodeType
     from ..interleaver import Interleaver
 
-class InterventionProtocol(Protocol):
+class InterventionProtocol(EntryPoint):
 
     @classmethod
     def concat(
@@ -128,7 +127,7 @@ class InterventionProtocol(Protocol):
                 # Updates the count of intervention node calls.
                 # If count matches the Node's iteration, its ready to be executed.
                 ready, defer = node.graph.count(node.index, iteration)
-
+                
                 # Dont execute if the node isnt ready (call count / iteration) or its not fulfilled (conditional)
                 if not ready:
                     continue

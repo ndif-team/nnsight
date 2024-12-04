@@ -1,14 +1,17 @@
 from __future__ import annotations
+
 import inspect
 from typing import TYPE_CHECKING, Any, Collection, TypeVar, Union
-from ...tracing.protocols import StopProtocol
+
 import torch
+from typing_extensions import Self
+
+from ... import util
 from ...tracing.graph import Proxy
 from .. import protocols
-from typing_extensions import Self
-from ... import util
+
 if TYPE_CHECKING:
-    from . import InterventionNodeType, InterventionNode , InterventionProxyType
+    from . import InterventionNode
 
 
 class InterventionProxy(Proxy):
@@ -45,7 +48,7 @@ class InterventionProxy(Proxy):
             value (Union[InterventionProxy, Any]): Value to set output to.
         """
         protocols.SwapProtocol.add(self.node.graph, self._grad, value)
-
+        
     def __setattr__(
         self, key: Union[InterventionProxy, Any], value: Union[Self, Any]
     ) -> None:
@@ -83,7 +86,7 @@ class InterventionProxy(Proxy):
             Union[torch.Size,Collection[torch.device]]: Proxy value device or collection of devices.
         """
 
-        if not self.node.attached():
+        if not self.node.attached:
 
             return util.apply(self.value, lambda x: x.device, torch.Tensor)
 
@@ -127,8 +130,8 @@ class InterventionProxy(Proxy):
 
             proxy = arg
 
-        util.apply(args, get_proxy, Proxy)
-
+        util.apply((args, kwargs), get_proxy, Proxy)
+    
         return proxy.node.create(
             orig_method,
             *args,

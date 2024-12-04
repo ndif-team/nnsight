@@ -11,9 +11,9 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 import os
 from functools import wraps
-from typing import Any, Callable, Dict, Union
 
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any, Callable, Dict, Union
 
 try:
     __version__ = version("nnsight")
@@ -23,17 +23,17 @@ except PackageNotFoundError:
 import torch
 import yaml
 
-from .util import Patch, Patcher
 from .schema.config import ConfigModel
+from .util import Patch, Patcher
 
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
+
 from .logger import logger, remote_logger
-from .intervention import NNsight
+from .intervention import Envoy, NNsight
 from .modeling.language import LanguageModel
-# from .tracing.Proxy import proxy_wrapper
 
 logger.disabled = not CONFIG.APP.LOGGING
 remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
@@ -41,15 +41,6 @@ remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
 
-import math
-from inspect import getmembers, isbuiltin, isfunction
-
-# import einops
-
-# for key, value in getmembers(einops.einops, isfunction):
-#     DEFAULT_PATCHER.add(Patch(einops.einops, proxy_wrapper(value), key))
-# for key, value in getmembers(math, isbuiltin):
-#     DEFAULT_PATCHER.add(Patch(math, proxy_wrapper(value), key))
 
 # Tensor creation operations
 from torch._subclasses.fake_tensor import FakeTensor
@@ -84,11 +75,14 @@ DEFAULT_PATCHER.add(
 
 DEFAULT_PATCHER.__enter__()
 
-from .tracing.contexts import GlobalTracingContext
+from .intervention.contexts import GlobalInterventionTracingContext
 
-apply = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply
-log = GlobalTracingContext.GLOBAL_TRACING_CONTEXT.log
-
+apply = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.apply
+log = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.log
+local = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.local
+cond = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.cond
+iter = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.iter
+stop = GlobalInterventionTracingContext.GLOBAL_TRACING_CONTEXT.stop
 
 def trace(fn):
     """Helper decorator to add a function to the intervention graph via `.apply(...)`.
@@ -103,7 +97,7 @@ def trace(fn):
 
     @wraps(fn)
     def inner(*args, **kwargs):
-
+        
         return apply(fn, *args, **kwargs)
 
     return inner
@@ -120,69 +114,3 @@ tuple = trace(tuple)
 list = trace(list)
 set = trace(set)
 dict = trace(dict)
-
-import inspect
-
-from . import util
-from .intervention.graph import InterventionProxy
-
-
-# def local(object: Callable | InterventionProxy):
-#     """Helper decorator to add a function to the intervention graph via `.apply(...)`
-#     AND convert all input Proxies to local ones via `.local()`.
-    
-#     If a non-function is passed in, its assumed to be an `InterventionProxy` and `.local()` is called and returned.
-
-#     Args:
-#         object ( Callable | InterventionProxy): Function to apply or Proxy to make local.
-
-#     Returns:
-#         Callable | InterventionProxy: Traceable local function or local Proxy.
-#     """
-    
-#     if inspect.isroutine(object):
-
-#         fn = trace(object)
-
-#         @wraps(fn)
-#         def inner(*args, **kwargs):
-
-#             args, kwargs = util.apply(
-#                 (args, kwargs), lambda x: x.local(), InterventionProxy
-#             )
-
-#             return fn(*args, **kwargs)
-
-#         return inner
-    
-#     return object.local()
-
-
-# def remote(object: Callable | Any):
-#     """Helper decorator to add a function to the intervention graph via `.apply(...)`
-#     AND convert all input Proxies to downloaded local ones via `.local()`
-#     AND convert the output to an uploaded remote one via `remote()`.
-    
-#     If a non-function is passed in, `remote(object)` is called and returned.
-
-#     Args:
-#         object ( Callable | Any): Function to apply or object to make remote.
-
-#     Returns:
-#         Callable | InterventionProxy: Traceable local -> remote function or remote Proxy.
-#     """
-
-#     if inspect.isroutine(object):
-
-#         fn = local(object)
-
-#         @wraps(fn)
-#         def inner(*args, **kwargs):
-
-#             return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.remote(
-#                 fn(*args, **kwargs)
-#             )
-
-#         return inner
-
-#     return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.remote(object)

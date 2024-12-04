@@ -5,8 +5,6 @@ from ..graph import ProxyType, SubGraph, NodeType, Proxy
 from ..protocols import StopProtocol
 from . import Condition, Context, Iterator
 
-from ...util import viz_graph
-
 class Tracer(Context[SubGraph[NodeType, ProxyType]]):
     
     
@@ -51,6 +49,3 @@ class Tracer(Context[SubGraph[NodeType, ProxyType]]):
             *args,
             **kwargs,
         )
-    
-    def vis(self, *args, **kwargs):
-        viz_graph(self.graph, *args, **kwargs)

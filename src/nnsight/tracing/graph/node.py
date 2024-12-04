@@ -1,29 +1,36 @@
 from __future__ import annotations
 
 import inspect
-import weakref
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    Generic,
-    List,
-    Optional,
-    Set,
-    TypeVar,
-    Union,
-)
+import sys
+import traceback
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List,
+                    Optional, Set, TypeVar, Union)
+
 from typing_extensions import Self
+
 from ... import util
-from ..protocols import Protocol
+from ..protocols import Protocol, StopProtocol
 from .proxy import Proxy, ProxyType
+
+from ...util import NNsightError
 
 if TYPE_CHECKING:
     from .graph import Graph
 
 
 class Node:
+    """A computation `Graph` is made up of individual `Node`s which represent a single operation.
+    It has a `target` which the operation this `Node` will execute.
+    It has `args` and `kwargs` to execute its `target` with. These may contain other `Node`s and are therefore `dependencies` of this `Node`.
+    Conversely this `Node` is a `listener` of its `dependencies`.
+    
+    During execution of the computation graph and therefore the `Node`s, each 
+    
+    Attributes:
+        index (Optional[int]): Integer index of this `Node` within its greater computation graph.
+        graph (Graph): 
+        target (Union[Callable, Protocol]): Callable to execute as this `Node`'s operation. Might be a `Protocol` which is handled differently in node execution.
+    """
 
     def __init__(
         self,
@@ -53,6 +60,8 @@ class Node:
         self.remaining_dependencies = 0
         self.executed = False
 
+        self.meta_data = self._meta_data()
+
         # If theres an alive Graph, add it.
         if self.attached:
 
@@ -63,11 +72,21 @@ class Node:
             
     @property
     def listeners(self) -> List[Self]:
+        """Iterator from index to `Node`.
+
+        Returns:
+            List[Self]: List of listener `Node`s.
+        """
         
         return [self.graph.nodes[index] for index in self._listeners]
     
     @property
     def dependencies(self) -> List[Self]:
+        """Iterator from index to `Node`.
+
+        Returns:
+            List[Self]: List of dependency `Node`s.
+        """
         
         return [self.graph.nodes[index] for index in self._dependencies]
 
@@ -117,7 +136,7 @@ class Node:
 
     @property
     def attached(self) -> bool:
-        """Checks to see if the weakref to the Graph is alive or dead.
+        """Checks to see if the `Graph` this `Node` is a part of is alive..
         Alive meaning the Graph is still open to tracing new Nodes.
 
         Returns:
@@ -262,17 +281,19 @@ class Node:
             else:
 
                 # Prepare arguments.
-                args, kwargs = Node.prepare_inputs((self.args, self.kwargs))
+                args, kwargs = self.prepare_inputs((self.args, self.kwargs))
 
                 # Call the target to get value.
                 output = self.target(*args, **kwargs)
+    
 
                 # Set value.
                 self.set_value(output)
-
-        except Exception as e:
-            
+        except NNsightError as e:
             raise e
+        except Exception as e:
+            traceback_content = traceback.format_exc()
+            raise NNsightError(str(e), self.index, traceback_content)
 
     def set_value(self, value: Any) -> None:
         """Sets the value of this Node and logs the event.
@@ -317,6 +338,14 @@ class Node:
         self._value = inspect._empty
 
     def subgraph(self, subgraph: Optional[Set[int]] = None) -> Set[int]:
+        """Returns a Set of indexes starting from this node, and recursively iterating over all the Node's listeners.
+
+        Args:
+            subgraph (Optional[Set[int]], optional): Current subgraph. Defaults to None.
+
+        Returns:
+            Set[int]: Set of Node indexes.
+        """
 
         if subgraph is None:
             subgraph = set()
@@ -330,6 +359,42 @@ class Node:
             listener.subgraph(subgraph)
 
         return subgraph
+    
+    def _meta_data(self) -> Dict[str, Any]:
+        """ Creates a dictionary of meta-data for this node.
+        Contains the following key-value pairs:
+            - traceback: Optional[str]: If the Graph is in debug mode, 
+                a traceback string is compiled to be used if the execution of this Node raises an error.
+        
+        Returns:
+            Dict[str, Any]: Meta-Data dictionary.
+        """
+
+        meta_data = dict()
+
+        def traceback_str() -> str:
+            """ Compiles a string of all the lines in the Traceback up until nnsight code is called.
+            Returns:
+                Str: Call Stack
+            """
+
+            traceback_str = "Traceback (most recent call last):\n"
+            stack = traceback.extract_stack()
+            for frame in stack:
+                # exclude frames created by nnsight
+                if "nnsight/src/nnsight/" not in str(frame.filename):
+                    traceback_str += f"  File \"{frame.filename}\", line {frame.lineno}, in {frame.name}\n"
+                    traceback_str += f"    {frame.line}\n"
+                else:
+                    break
+
+            return traceback_str
+
+        if self.attached and self.graph.debug:
+            meta_data["traceback"] = traceback_str()
+
+        return meta_data
+
     ### Magic Methods #####################################
     def __str__(self) -> str:
         return f"{self.target.__name__} {self.index}"

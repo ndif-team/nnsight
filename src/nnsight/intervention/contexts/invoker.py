@@ -14,11 +14,11 @@ from ..graph import InterventionNode, InterventionProxy, InterventionProxyType
 
 if TYPE_CHECKING:
 
-    from . import InterventionTracer
+    from . import InterleavingTracer
 
 
 class Invoker(AbstractContextManager):
-    """An Invoker is meant to work in tandem with a :class:`nnsight.contexts.Tracer.Tracer` to enter input and manage intervention tracing.
+    """An Invoker is meant to work in tandem with a :class:`nnsight.intervention.contexts.InterleavingTracer` to enter input and manage intervention tracing.
 
     Attributes:
         tracer (nnsight.contexts.Tracer.Tracer): Tracer object to enter input and manage context.
@@ -33,14 +33,14 @@ class Invoker(AbstractContextManager):
 
     def __init__(
         self,
-        tracer: "InterventionTracer",
+        tracer: "InterleavingTracer",
         *args,
         scan: bool = False,
         **kwargs,
     ) -> None:
 
         self.tracer = tracer
-        self.input = (args, kwargs)
+        self.inputs = (args, kwargs)
 
         self.scan = scan
 
@@ -72,26 +72,30 @@ class Invoker(AbstractContextManager):
 
             return proxy
 
-        self.input = util.apply(self.input, check_for_proxies, InterventionProxy)
+        # We need to check if there were any Proxies in the actual Invoker input. This might be True in a Session where values from one trace are used as an input to another.
+        util.apply(self.inputs, check_for_proxies, InterventionProxy)
 
+        # We dont want to create new proxies during scanning/prepare_inputs so we exit the global tracing context.
         with GlobalTracingContext.exit_global_tracing_context():
 
+            # If we dont have proxies we can immediately prepare the input so the user can see it and the batch_size.
             if not has_proxies_in_inputs:
 
-                self.input, self.batch_size = self.tracer._model._prepare_input(
-                    *self.input[0], **self.input[1]
+                self.inputs, self.batch_size = self.tracer._model._prepare_input(
+                    *self.inputs[0], **self.inputs[1]
                 )
 
             if self.scan:
 
-                input = self.input
+                input = self.inputs
 
                 if has_proxies_in_inputs:
 
                     input = util.apply(input, lambda x: x.fake_value, InterventionNode)
 
-                    input, _ = self.tracer.session.model._prepare_input(*input[0], **input[1])
+                    input, _ = self.tracer._model._prepare_input(*input[0], **input[1])
 
+                # Clear all fake inputs and outputs because were going to re-populate them.
                 self.tracer._model._envoy._clear()
 
                 self.scanning = True
@@ -125,7 +129,7 @@ class Invoker(AbstractContextManager):
             else:
                 self.tracer._model._envoy._reset()
 
-            self.tracer.args.append(self.input)
+            self.tracer.args.append(self.inputs)
 
         return self
 

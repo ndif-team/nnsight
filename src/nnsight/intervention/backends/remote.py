@@ -4,7 +4,8 @@ import io
 import pickle
 import weakref
 import zlib
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+import sys
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 import requests
@@ -13,12 +14,14 @@ import torch
 from tqdm import tqdm
 
 from ... import CONFIG, remote_logger
-from ...schema.request import RequestModel
+from ...schema.request import RequestModel, StreamValueModel
 from ...schema.response import ResponseModel
 from ...schema.result import RESULT, ResultModel
 from ...tracing import protocols
 from ...tracing.backends import Backend
-from ...tracing.graph import Graph
+from ...tracing.graph import Graph, SubGraph
+from ...util import NNsightError
+from ..contexts.local import LocalContext, RemoteContext
 
 
 class RemoteBackend(Backend):
@@ -54,34 +57,15 @@ class RemoteBackend(Backend):
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
 
-    def serialize(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
+    def request(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
 
-        if self.format == "json":
-
-            data = RequestModel(graph=graph)
-
-            json = data.model_dump(mode="json")
-
-            data = msgspec.json.encode(json)
-
-        elif self.format == "pt":
-
-            data = io.BytesIO()
-
-            torch.save(graph, data)
-
-            data.seek(0)
-
-            data = data.read()
-
-        if self.zlib:
-
-            data = zlib.compress(data)
+        data = RequestModel.serialize(graph, self.format, self.zlib)
 
         headers = {
             "model_key": self.model_key,
             "format": self.format,
             "zlib": str(self.zlib),
+            "ndif-api-key": self.api_key,
         }
 
         return data, headers
@@ -101,7 +85,7 @@ class RemoteBackend(Backend):
         if result is not None:  
             ResultModel.inject(graph, result)
 
-    def handle_response(self, response: ResponseModel) -> Optional[RESULT]:
+    def handle_response(self, response: ResponseModel, graph:Optional[Graph] = None) -> Optional[RESULT]:
         """Handles incoming response data.
 
         Logs the response object.
@@ -138,22 +122,29 @@ class RemoteBackend(Backend):
         # If were receiving a streamed value:
         elif response.status == ResponseModel.JobStatus.STREAM:
 
-            # First item is arguments on how the RemoteMixin can get the correct StreamingDownload node.
-            # Second item is the steamed value from the remote service.
-            args, value = response.data
+            # Second item is index of LocalContext node.
+            # First item is the streamed value from the remote service.
 
-            # Get the local stream node in our intervention graph
-            node = self.object.remote_backend_get_stream_node(*args)
+            index, dependencies = response.data
+                        
+            ResultModel.inject(graph, dependencies)
 
-            # If its already been executed, it must mean this intervention subgraph should be executed every time.
-            if node.executed():
-                node.reset(propagate=True)
+            node = graph.nodes[index]
+            
+            node.execute()
 
-            # Inject it into the local intervention graph to kick off local execution.
-            node.set_value(value)
-
-            node.remaining_dependencies = -1
-
+        elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
+            if graph.debug:
+                error_node = graph.nodes[response.data['node_id']]
+                print(f"\n{response.data['traceback']}")
+                print("During handling of the above exception, another exception occurred:\n")
+                print(f"{error_node.meta_data['traceback']}")
+                sys.tracebacklimit = 0
+                raise NNsightError(response.data['err_message'], error_node.index)
+            else:
+                print(f"\n{response.data['traceback']}")
+                raise SystemExit("Remote exception.")
+            
     def submit_request(self, data: bytes, headers: Dict[str, Any]) -> Optional[ResponseModel]:
         """Sends request to the remote endpoint and handles the response object.
 
@@ -259,7 +250,6 @@ class RemoteBackend(Backend):
 
         # We need to do some processing / optimizations on both the graph were sending remotely
         # and our local intervention graph. In order handle the more complex Protocols for streaming.
-        # preprocess(request, streaming=True)
 
         # Create a socketio connection to the server.
         with socketio.SimpleClient(reconnection_attempts=10) as sio:
@@ -270,22 +260,21 @@ class RemoteBackend(Backend):
                 transports=["websocket"],
                 wait_timeout=10,
             )
+            
+            remote_graph = preprocess(graph)
 
-
-            data, headers = self.serialize(graph)
+            data, headers = self.request(remote_graph)
             
             headers['session_id'] = sio.sid
             
             # Submit request via
-            self.submit_request(data, headers)
+            response = self.submit_request(data, headers)
 
-            # We need to tell the StreamingUploadProtocol how to use our websocket connection
-            # so it can upload values during execution to our job.
-            # protocols.StreamingUploadProtocol.set(
-            #     lambda *args: self.stream_send(
-            #         *args, job_id=response.id, sio=sio
-            #     )
-            # )
+            LocalContext.set(
+                lambda *args: self.stream_send(
+                    *args, job_id=response.id, sio=sio
+            ))
+      
 
             try:
                 # Loop until
@@ -296,7 +285,7 @@ class RemoteBackend(Backend):
                     # Convert to pydantic object.
                     response = ResponseModel.unpickle(response)
                     # Handle the response.
-                    result = self.handle_response(response)
+                    result = self.handle_response(response, graph=graph)
                     # Break when completed.
                     if result is not None:
                         return result
@@ -306,12 +295,9 @@ class RemoteBackend(Backend):
                 raise e
 
             finally:
-                pass
+                LocalContext.set(None)
 
-                # Clear StreamingUploadProtocol state
-                # protocols.StreamingUploadProtocol.set(None)
-
-    def stream_send(self, value: Any, job_id: str, sio: socketio.SimpleClient):
+    def stream_send(self, values: Dict[int, Any], job_id: str, sio: socketio.SimpleClient):
         """Upload some value to the remote service for some job id.
 
         Args:
@@ -320,11 +306,7 @@ class RemoteBackend(Backend):
             sio (socketio.SimpleClient): Connected websocket client.
         """
 
-        from ...schema.request import StreamValueModel
-
-        request = StreamValueModel(value=value)
-
-        sio.emit("stream_upload", data=(request.model_dump_json(), job_id))
+        sio.emit("stream_upload", data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id))
 
     def non_blocking_request(self, graph: Graph):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
@@ -337,11 +319,10 @@ class RemoteBackend(Backend):
             request (RequestModel): Request if submitting a new request. Defaults to None
         """
 
-        from ...schema.response import ResponseModel
 
         if self.job_id is None:
             
-            data, headers = self.serialize(graph)
+            data, headers = self.request(graph)
 
             # Submit request via
             response = self.submit_request(data, headers)
@@ -372,108 +353,15 @@ class RemoteBackend(Backend):
 
                 raise e
 
-
-def preprocess(request: "RequestModel", streaming: bool = False):
-    """Optimizes the local and remote graph to handle streaming. Is required to use streaming protocols.
-
-    Args:
-        request (RequestModel): Request to optimize.
-        streaming (bool, optional): If streaming. Defaults to False.
-
-    Raises:
-        exception: _description_
-    """
-
-    from ...schema.format.functions import get_function_name
-    from ...schema.format.types import FunctionModel, GraphModel, NodeModel
-
-    # Exceptions might be resolved later during optimization so exceptions
-    # are stored here to added and removed.
-    # If there are any still in here after optimization, it raises the first one.
-    exceptions = {}
-
-    def inner(graph_model: GraphModel):
-        """Optimizes the given remote GraphModel
-
-        Args:
-            graph_model (GraphModel): Remote Graph Model to send remotely.
-        """
-
-        # GraphModel has an un-serialized reference to the real local Graph.
-        graph = graph_model.graph
-
-        for node_name, node_model in list(graph_model.nodes.items()):
-
-            # Get local nnsight Node
-            node = graph.nodes[node_name]
-
-            # Get name of Node.target
-            function_name = node_model.target.function_name
-
-            # If its a streaming download Node, we need to recursively remove these Nodes from the remote GraphModel.
-            # This is because we will be executing these nodes only locally when the root streaming node is download.
-            # This recursion ends at a streaming Upload Node and will resume remote execution of the intervention graph.
-            if streaming and function_name == get_function_name(
-                protocols.StreamingDownloadProtocol
-            ):
-
-                def pop_stream_listeners(node: "Node"):
-                    """Recursively removes listeners of streaming download nodes.
-
-                    Args:
-                        node (Node): Node.
-                    """
-
-                    for node in node.listeners:
-
-                        # Also reset it to prepare for its local execution.
-                        node.reset()
-
-                        if node.target is not protocols.StreamingUploadProtocol:
-
-                            # Remove from remote GraphModel
-                            graph_model.nodes.pop(node.name, None)
-                            # Also remove the exception for it.
-                            exceptions.pop(f"{graph_model.id}_{node.name}", None)
-
-                            pop_stream_listeners(node)
-
-                        # We also need to replace all args / dependencies of Upload Nodes to be the root stream Download Nodes.
-                        # This is because remote Upload nodes cant depend on nodes that will be local of course.
-                        # However it does need to depend on its root stream Download Nodes so the remote service only executes and waits at an Upload
-                        # AFTER it sends any values via the stream Download Nodes.
-                        else:
-
-                            graph_model.nodes[node.name].args = []
-                            graph_model.nodes[node.name].kwargs[node_name] = (
-                                NodeModel.Reference(name=node_name)
-                            )
-
-                pop_stream_listeners(node)
-
-            # Recurse into inner graphs.
-            elif function_name == get_function_name(
-                protocols.LocalBackendExecuteProtocol
-            ):
-
-                inner(node_model.args[0].graph)
-
-            else:
-                # If its still a node that will be executed remotely:
-                if node_name in graph_model.nodes:
-
-                    # We need to see if its whitelisted.
-                    try:
-
-                        FunctionModel.check_function_whitelist(function_name)
-                    # Put exception in dict as it may be removed during further iterations.
-                    except Exception as e:
-
-                        exceptions[f"{graph_model.id}_{node_name}"] = e
-
-    inner(request.object.graph)
-
-    # Raise any leftover exceptions
-    for exception in exceptions.values():
-
-        raise exception
+def preprocess(graph: Graph):
+        
+    new_graph = graph.copy()
+    
+    for node in new_graph.nodes:
+        
+        if node.target is LocalContext:
+            
+            graph.nodes[node.index].kwargs['uploads'] = RemoteContext.from_local(node)
+     
+    return new_graph
+            

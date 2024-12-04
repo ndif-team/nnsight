@@ -15,6 +15,9 @@ class ApiConfigModel(BaseModel):
 class AppConfigModel(BaseModel):
     LOGGING: bool = False
     REMOTE_LOGGING: bool = True
+    DEBUG: bool = True
+    CONTROL_FLOW_HACKS:bool = True
+    FRAME_INJECTION:bool = True
 
 class ConfigModel(BaseModel):
     API: ApiConfigModel = ApiConfigModel()
@@ -24,6 +27,12 @@ class ConfigModel(BaseModel):
 
         self.API.APIKEY = apikey
 
+        self.save()
+
+    def set_default_app_debug(self, debug: bool):
+
+        self.APP.DEBUG = debug
+        
         self.save()
 
     def save(self):

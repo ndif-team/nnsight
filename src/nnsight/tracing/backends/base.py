@@ -1,4 +1,8 @@
-from ..graph import Graph
+import inspect
+import sys
+
+from ...util import NNsightError
+from ..graph import Graph, Proxy
 from ..protocols import StopProtocol
 
 
@@ -11,15 +15,36 @@ class Backend:
 
 class ExecutionBackend(Backend):
 
+    def __init__(self, injection: bool = True) -> None:
+        self.injection = injection
+
     def __call__(self, graph: Graph) -> None:
 
         try:
 
             graph.nodes[-1].execute()
 
+            if self.injection:
+                frame = inspect.currentframe().f_back.f_back.f_back.f_back
+                for key, value in frame.f_locals.items():
+                    if isinstance(value, Proxy) and value.node.done:
+                        frame.f_locals[key] = value.value
+
         except StopProtocol.StopException:
 
             pass
+
+        except NNsightError as e:
+            if graph.debug:
+                print(f"\n{e.traceback_content}")
+                print(
+                    "During handling of the above exception, another exception occurred:\n"
+                )
+                print(f"{graph.nodes[e.node_id].meta_data['traceback']}")
+                sys.tracebacklimit = 0
+                raise e from None
+            else:
+                raise e
 
         finally:
 

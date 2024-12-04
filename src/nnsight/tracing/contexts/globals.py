@@ -26,6 +26,9 @@ def global_patch_class(cls: type) -> util.Patch:
 
     @wraps(fn)
     def inner(cls, *args, **kwargs):
+        
+        if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
+            return cls(*args, **kwargs)
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(cls, *args, **kwargs)
 
@@ -36,6 +39,9 @@ def global_patch_fn(fn: FunctionType) -> util.Patch:
 
     @wraps(fn)
     def inner(*args, **kwargs):
+        
+        if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
+            return fn(*args, **kwargs)
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(fn, *args, **kwargs)
 
@@ -165,34 +171,5 @@ class GlobalTracingContext(Tracer):
         """True if there is a `GraphBasedContext` registered globally. False otherwise."""
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph is not None
-
-    def __getattribute__(self, name: str) -> Any:
-        """Prevent attribute access if no `GraphBasedContext` registered."""
-
-        static_methods = [
-            name
-            for name, value in inspect.getmembers(Tracer, predicate=inspect.ismethod)
-        ]
-
-        if name in static_methods:
-
-            if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
-
-                raise Exception(
-                    "Global ops cannot be used outside of a tracing context."
-                )
-
-        return object.__getattribute__(self, name)
-    
-    def int(self, *args, **kwargs):
-        """NNsight helper method to create a traceable int."""
-
-        return self.apply(int, *args, **kwargs)
-    
-    def list(self, *args, **kwargs):
-        """NNsight helper method to create a traceable list."""
-
-        return self.apply(list, *args, **kwargs)
-
 
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()

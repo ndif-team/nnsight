@@ -5,6 +5,11 @@ if TYPE_CHECKING:
     from ..graph import GraphType, Node, Proxy
     
 class Protocol:
+    
+    @staticmethod
+    def is_protocol(thing:Any):
+        
+        return isinstance(thing, type) and issubclass(thing, Protocol)
 
     @classmethod
     def add(cls, graph:"GraphType",*args, **kwargs) -> "Proxy":
