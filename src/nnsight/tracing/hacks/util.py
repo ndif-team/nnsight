@@ -84,9 +84,13 @@ def visit(frame: FrameType, visitor_cls: Type[ast.NodeVisitor]) -> ast.stmt:
         line_no = line_no - inner_line_no + 1
 
     source = "".join(source_lines).lstrip()
+    print(source)
     tree = ast.parse(source)
 
     visitor = visitor_cls(line_no)
     visitor.visit(tree)
+    
+    print(line_no)
+    print(visitor.target)
 
     return visitor
