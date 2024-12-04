@@ -68,7 +68,7 @@ def handle_proxy(frame: FrameType, condition: "Proxy"):
             handle(get_else(if_node), frame, graph, branch)
 
     branch.__enter__()
-    
-    execute_until(frame.f_lineno, frame.f_lineno + len(if_node.body), frame, callback=lambda _: callback(if_node, frame, graph, branch))
+    end = frame.f_lineno + (if_node.end_lineno - if_node.lineno)
+    execute_until(frame.f_lineno, end, frame, callback=lambda _: callback(if_node, frame, graph, branch))
 
     return True

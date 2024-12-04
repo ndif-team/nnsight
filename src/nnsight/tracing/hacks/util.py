@@ -44,16 +44,16 @@ def execute_until(
     prev_trace = frame.f_trace
 
     def trace(new_frame: FrameType, *args):
-        
+
         if new_frame.f_code.co_filename == frame.f_code.co_filename and (
             new_frame.f_lineno > last_line or new_frame.f_lineno < first_line
         ):
-            
+
             frame.f_trace = prev_trace
             sys.settrace(prev_trace)
-            
+
             if prev_trace is not None:
-            
+
                 prev_trace(new_frame, *args)
 
             if callback is not None:
@@ -63,36 +63,33 @@ def execute_until(
     frame.f_trace = trace
     sys.settrace(trace)
 
+
 def is_ipython():
-    return '_ih' in locals()
+    return "_ih" in locals()
+
 
 def visit(frame: FrameType, visitor_cls: Type[ast.NodeVisitor]) -> ast.stmt:
 
     line_no = frame.f_lineno
-    
-    if '_ih' in frame.f_locals:
+
+    if "_ih" in frame.f_locals:
         import IPython
+
         ipython = IPython.get_ipython()
-        source_lines = ipython.user_global_ns['_ih'][-1]
+        source_lines = ipython.user_global_ns["_ih"][-1]
         inner_line_no = 0
-        
+
     else:
         source_lines, inner_line_no = inspect.getsourcelines(frame)
-    
-    
-            
+
     if inner_line_no > 0:
         line_no = line_no - inner_line_no + 1
 
     source = "".join(source_lines).lstrip()
-    print(source)
-    print('_ih' in frame.f_locals)
+
     tree = ast.parse(source)
 
     visitor = visitor_cls(line_no)
     visitor.visit(tree)
-    
-    print(line_no)
-    print(visitor.target)
 
     return visitor
