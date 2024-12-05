@@ -1,7 +1,5 @@
 from __future__ import annotations
-
-import sys
-from typing import (Any, Callable, Dict, Generic, Iterator, List, Optional,
+from typing import (Callable, Dict, Generic, Iterator, List, Optional,
                     Tuple, Type, TypeVar, Union, overload)
 
 from typing_extensions import Self
@@ -94,6 +92,9 @@ class Graph(Generic[NodeType, ProxyType]):
         Args:
             start (Optional[int], optional): `Node` index to start cleaning up from. Defaults to None.
         """
+        
+        if len(self) == 0:
+            return
 
         if start is None:
             start = self[0].index
@@ -190,7 +191,7 @@ class Graph(Generic[NodeType, ProxyType]):
     @overload
     def __getitem__(self, key: Union[slice, List[int]]) -> List[Node]: ...
 
-    def __getitem__(self, key: Any) -> Union[Node, List[Node]]:
+    def __getitem__(self, key: Union[int, Union[slice, List[int]]]) -> Union[Node, List[Node]]:
         return self.nodes[key]
 
     def __iter__(self) -> Iterator[Node]:
@@ -248,7 +249,7 @@ class SubGraph(Graph[NodeType, ProxyType]):
     @overload
     def __getitem__(self, key: Union[slice, List[int]]) -> List[Node]: ...
 
-    def __getitem__(self, key: Any) -> Union[Node, List[Node]]:
+    def __getitem__(self, key: Union[int, Union[slice, List[int]]]) -> Union[Node, List[Node]]:        
 
         index = self.subset[key]
 
