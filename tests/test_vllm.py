@@ -73,7 +73,7 @@ def test_multi_token_generation(vllm_gpt2, MSG_prompt: str):
             logits.append(vllm_gpt2.logits.output)
             vllm_gpt2.logits.next()
 
-    assert vllm_gpt2.tokenizer.batch_decode([logit.argmax(dim=-1) for logit in logits.value]) == [" New", " York", " City"]
+    assert vllm_gpt2.tokenizer.batch_decode([logit.argmax(dim=-1) for logit in logits]) == [" New", " York", " City"]
 
 
 """ def test_max_token_generation(vllm_gpt2, ET_prompt: str):
@@ -182,10 +182,10 @@ def test_mutli_token_generation_with_intervention(tp, vllm_gpt2, MSG_prompt: str
             logits.append(vllm_gpt2.logits.output)
             vllm_gpt2.logits.next()
 
-    assert [torch.all(hs == 0) for hs in hs_list.value] == [False, False, True, False, False]
+    assert [torch.all(hs == 0) for hs in hs_list] == [False, False, True, False, False]
 
     if tp == 1:
-        assert vllm_gpt2.tokenizer.batch_decode([logit.argmax(dim=-1) for logit in logits.value]) == [' New', ' York', '\n', '\n', 'The']
+        assert vllm_gpt2.tokenizer.batch_decode([logit.argmax(dim=-1) for logit in logits]) == [' New', ' York', '\n', '\n', 'The']
 
 
 """ def test_multi_referenced_module(vllm_gpt2, ET_prompt: str):

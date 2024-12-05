@@ -35,8 +35,7 @@ class ExecutionBackend(Backend):
                 for key, value in frame.f_locals.items():
                     if isinstance(value, Proxy) and value.node.done:
                         frame.f_locals[key] = value.value
-                        
-                ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
+                        ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
 
         except StopProtocol.StopException:
 
