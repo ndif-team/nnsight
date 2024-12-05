@@ -1,16 +1,12 @@
 import inspect
-import weakref
 from functools import wraps
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    TypeVar, Union)
+from typing import Any, Callable, Dict, Optional, TypeVar, Union
 
 from ...tracing.contexts import Tracer
-from ...tracing.graph import Proxy
 from ..graph import (InterventionNodeType, InterventionProxy,
                      InterventionProxyType)
 from . import LocalContext
 from ... import CONFIG
-
 
 class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
     """Extension of base Tracer to add additional intervention functionality and type hinting for intervention proxies.
@@ -48,3 +44,18 @@ class InterventionTracer(Tracer[InterventionNodeType, InterventionProxyType]):
 
             # TODO: error
             pass
+
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        default_style = super().style()
+
+        default_style["node"] = {"color": "purple", "shape": "polygon", "sides": 6}
+        default_style["arg_kname"][1] = "method"
+
+        return default_style

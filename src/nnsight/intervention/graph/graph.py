@@ -76,7 +76,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         self,
         context_node: InterventionNode,
         intervention_subgraphs: List[SubGraph],
-    ):
+    ) -> None:
 
         context_graph: SubGraph = context_node.args[0]
 
@@ -85,25 +85,26 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         for intervention_subgraph in intervention_subgraphs:
 
-            if intervention_subgraph.subset[-1] < start:
-                continue
-
-            if intervention_subgraph.subset[0] > end:
+            # continue if the subgraph does not overlap with the context's graph
+            if intervention_subgraph.subset[-1] < start or end < intervention_subgraph.subset[0]:
                 continue
 
             for intervention_index in intervention_subgraph.subset:
 
-                if intervention_index >= start and intervention_index <= end:
+                # if there's an overlapping node, make the context depend on the intervention node in the subgraph
+                if start <= intervention_index and intervention_index <= end:
 
+                    # the first node in the subgraph is an InterventionProtocol node
                     intervention_node = intervention_subgraph[0]
 
                     context_node._dependencies.add(intervention_node.index)
                     intervention_node._listeners.add(context_node.index)
+                    # TODO: maybe we don't need this
                     intervention_subgraph.subset.append(context_node.index)
 
                     break
 
-    def compile(self) -> None:
+    def compile(self) -> Optional[Dict[str, List[InterventionNode]]]:
 
         if self.compiled:
             return self.interventions
@@ -114,10 +115,14 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         intervention_subgraphs: List[SubGraph] = []
 
         start = self[0].index
-
-        if isinstance(self[0].target, type) and issubclass(self[0].target, Context):
+        # is the first node corresponding to an executable graph?
+        # occurs when a Conditional or Iterator context is explicitly entered by a user
+        if isinstance(self[0].target, type) and issubclass(
+            self[0].target, Context
+        ):
             graph = self[0].args[0]
 
+            # handle emtpy if statments or for loops
             if len(graph) > 0:
                 start = graph[0].index
 
@@ -127,10 +132,12 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         defer_start: int = None
         context_node: InterventionNode = None
 
+        # looping over all the nodes created within this graph's context
         for index in range(start, end):
 
             node: InterventionNodeType = self.nodes[index]
 
+            # is this node part of an inner context's subgraph?
             if context_node is None and node.graph is not self:
 
                 context_node = self.nodes[node.graph[-1].index + 1]
@@ -142,7 +149,8 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                 self.context_dependency(context_node, intervention_subgraphs)
 
             if node.target is InterventionProtocol:
-
+                
+                # build intervention subgraph
                 subgraph = SubGraph(self, subset=sorted(list(node.subgraph())))
 
                 module_path, *_ = node.args
@@ -151,10 +159,13 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
                 intervention_subgraphs.append(subgraph)
 
+                # if the InterventionProtocol is defined within a sub-context
                 if context_node is not None:
-
+  
+                    # make the current context node dependent on this intervention node
                     context_node._dependencies.add(node.index)
                     node._listeners.add(context_node.index)
+                    # TODO: maybe we don't need this
                     self.subset.append(node.index)
 
                     graph: SubGraph = node.graph
@@ -164,12 +175,12 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
                     node.kwargs["start"] = context_start
                     node.kwargs["defer_start"] = defer_start
 
+                    node.graph = self
+
                 else:
 
                     node.kwargs["start"] = self.subset.index(subgraph.subset[0])
                     node.kwargs["defer_start"] = node.kwargs["start"]
-
-                node.graph = self
 
             elif node.target is GradProtocol:
 
@@ -191,11 +202,11 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
                     node.kwargs["start"] = context_start
 
+                    node.graph = self
+
                 else:
 
                     node.kwargs["start"] = self.subset.index(subgraph.subset[1])
-
-                node.graph = self
 
             elif node.target is ApplyModuleProtocol:
 

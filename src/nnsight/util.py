@@ -1,25 +1,11 @@
 """Module for utility functions and classes used throughout the package."""
 
-from contextlib import AbstractContextManager
 import importlib
+from contextlib import AbstractContextManager
+from typing import Any, Callable, Collection, List, Optional, Type, TypeVar
+
 import torch
 from typing_extensions import Self
-import types
-from functools import wraps
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Collection,
-    Dict,
-    Generic,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    TypeVar,
-    Union,
-)
 
 # TODO Have an Exception you can raise to stop apply early
 
@@ -113,7 +99,6 @@ def from_import_path(import_path: str) -> type:
     return getattr(importlib.import_module(import_path), classname)
 
 
-
 class Patch:
     """Class representing a replacement of an attribute on a module.
 
@@ -180,6 +165,8 @@ class Patcher(AbstractContextManager):
         self.entered = False
         for patch in self.patches:
             patch.restore()
+
+
 class WrapperModule(torch.nn.Module):
     """Simple torch module which passes it's input through. Useful for hooking.
     If there is only one argument, returns the first element.

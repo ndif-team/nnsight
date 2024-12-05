@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict
 
 from . import Protocol
 
@@ -15,3 +15,17 @@ class LockProtocol(Protocol):
             node,
             fake_value=None,
         )
+    
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        default_style = super().style()
+
+        default_style["node"] = {"color": "brown", "shape": "ellipse"}
+
+        return default_style

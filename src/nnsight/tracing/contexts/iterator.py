@@ -1,7 +1,7 @@
 import copy
-from typing import Collection
+from typing import Collection, Dict, Any
 
-from ...tracing.graph import SubGraph, GraphType, NodeType, ProxyType
+from ...tracing.graph import SubGraph
 from ...tracing.graph import Node
 from ...tracing.graph import Proxy
 from . import Context
@@ -61,4 +61,16 @@ class Iterator(Context[SubGraph]):
             
         node.set_value(None)
 
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        default_style = super().style()
         
+        default_style["node"] = {"color": "blue", "shape": "polygon", "sides": 6}
+
+        return default_style
