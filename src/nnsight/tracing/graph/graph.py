@@ -224,6 +224,18 @@ class SubGraph(Graph[NodeType, ProxyType]):
 
         self.subset: List[int] = [] if subset is None else subset
 
+    def __getstate__(self):
+
+        return {
+            "nodes":self.nodes,
+            "subset":self.subset,
+            "defer_stack": self.defer_stack,
+        }
+    
+    def __setstate__(self, state: Dict) -> None:
+
+        self.__dict__.update(state)
+
     def add(self, node: NodeType) -> None:
 
         super().add(node)

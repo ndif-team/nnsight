@@ -1,13 +1,22 @@
 import dataclasses
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
+from functools import wraps
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union, Callable
 
 from nnsight import NNsight
+
 import torch
 import torch.distributed
 
-from vllm.distributed import get_pp_group
+from nnsight.intervention import NNsight
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather)
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               RowParallelLinear)
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
@@ -16,7 +25,11 @@ from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict, dump_input_when_exception)
 
+from ....intervention.protocols import InterventionProtocol
+from ....util import Patch, Patcher
+
 from ....intervention.interleaver import Interleaver
+
 from .. import VLLM
 from ..sampling import NNsightSamplingMetadata
 
@@ -47,8 +60,7 @@ class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMe
         if self.sampling_metadata is not None:
             tensor_dict["selected_token_indices"] = (
                 self.sampling_metadata.selected_token_indices)
-            tensor_dict["intervention_graph"] = self.sampling_metadata.intervention_graph
-            tensor_dict["call_counter"] = self.sampling_metadata.call_counter
+            tensor_dict["intervention_graph"] = self.sampling_metadata.intervention_graph.copy()
             tensor_dict["batch_group"] = self.sampling_metadata.batch_groups
         return tensor_dict
     
@@ -61,7 +73,6 @@ class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMe
         selected_token_indices = tensor_dict.pop("selected_token_indices", None)
         intervention_graph = tensor_dict.pop("intervention_graph", None)
         intervention_graph.attachments = dict()
-        call_counter = tensor_dict.pop("call_counter", None)
         batch_groups = tensor_dict.pop("batch_group", None)
         if selected_token_indices is not None:
             tensor_dict["sampling_metadata"] = NNsightSamplingMetadata(
@@ -70,7 +81,6 @@ class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMe
                 categorized_sample_indices=None,
                 num_prompts=0,
                 intervention_graph=intervention_graph,
-                call_counter=call_counter,
                 batch_groups=batch_groups
             )
         if attn_backend is not None:
@@ -209,7 +219,7 @@ class NNsightGPUModelRunner(ModelRunner):
                 "finished_requests_ids": model_input.finished_requests_ids,
                 "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
             }
-            if self.has_seqlen_agnostic
+            if self.has_inner_state
             else {}
         )
         if (
@@ -223,6 +233,8 @@ class NNsightGPUModelRunner(ModelRunner):
         ## NNSIGHT #########################################
 
         intervention_graph = model_input.sampling_metadata.intervention_graph
+        
+        intervention_graph.set(self.model)
 
         batch_groups = model_input.sampling_metadata.batch_groups
 
@@ -231,6 +243,8 @@ class NNsightGPUModelRunner(ModelRunner):
         )
 
         def inner():
+
+            nonlocal interleaver
 
             with set_forward_context(model_input.attn_metadata):
                 hidden_or_intermediate_states = self.model._model(
@@ -278,7 +292,13 @@ class NNsightGPUModelRunner(ModelRunner):
                 hidden_or_intermediate_states, model_input.sampling_metadata
             )
 
-            logits = self.model.logits(logits)
+            with Patcher(
+                [
+                    Patch(interleaver, [(idx, 1) for idx in range(len(interleaver.batch_groups))], "batch_groups"),
+                    Patch(interleaver, len(interleaver.batch_groups), "batch_size")    
+                ]
+            ):
+                logits = self.model.logits(logits)
 
             if not self.is_driver_worker:
                 return []
@@ -327,10 +347,72 @@ class NNsightGPUModelRunner(ModelRunner):
                 output.hidden_states = hidden_states
 
             return output
+        
+        def parallel_intervene(intervene_func: Callable) -> Callable:
+            """ Create an intervene wrapper that handles tensor parallelism execution of vLLM models.
 
-        output = NNsight.interleave(
-            self.model,
-            fn=inner,
-            interleaver=interleaver,
-        )
+            Args:
+                intervene_func (Callable): intervention function.
+            
+            Returns 
+            """
+
+            @wraps(intervene_func)
+            def parallel_intervene_wrapper(
+                activations: Any, 
+                module_path: str, 
+                module: torch.nn.Module, 
+                key: str, 
+                interleaver: Interleaver
+            ) -> Any:
+                """ InterventionProtocol.intervene wrapper handling the parallelized modules of vLLM.
+                If some activations were parallelized, then they need to be gathered as a full tensor to intervene on them,
+                and then split again before returning them.
+
+                Args:
+                    activations (Any): Either the inputs or outputs of a torch module.
+                    module_path (str): Module path of the current relevant module relative to the root model.
+                    module (torch.nn.Module): Module to be intervened on.
+                    key (str): Key denoting either "input" or "output" of module.
+                    interleaver (Interleaver): Handler object that stores the intervention graph and keeps track of module call count.
+
+                Returns:
+                    Any: The activations, potentially modified by the intervention graph.
+                """
+                # If the activations are parallelized, they must be gathered before intervening on them
+                if isinstance(module, ColumnParallelLinear) and key == "output" and not module.gather_output:
+                    full_tensor = tensor_model_parallel_all_gather(activations[0])
+                    activations = (full_tensor, ) + activations[1:]
+                if isinstance(module, RowParallelLinear) and key == "input" and module.input_is_parallel:
+                    full_tensor = tensor_model_parallel_all_gather(activations[0][0])
+                    activations = ((full_tensor,) + activations[0][1:], ) + activations[1:]
+
+                activations = intervene_func(activations, module_path, module, key, interleaver)
+
+                # If the activations were parallelized originally, they must be split again before returning them
+                if isinstance(module, ColumnParallelLinear) and key == "output" and not module.gather_output:
+                    tp_rank = get_tensor_model_parallel_rank()
+                    splitted_input = split_tensor_along_last_dim(activations[0], num_partitions=get_tensor_model_parallel_world_size())
+                    activations = (splitted_input[tp_rank].contiguous(),) + activations[1:]
+                if isinstance(module, RowParallelLinear) and key == "input" and module.input_is_parallel:
+                    tp_rank = get_tensor_model_parallel_rank()
+                    splitted_input = split_tensor_along_last_dim(activations[0][0], num_partitions=get_tensor_model_parallel_world_size())
+                    activations = ((splitted_input[tp_rank].contiguous(),) + activations[0][1:],) + activations[1:]
+
+                return activations
+            
+            return parallel_intervene_wrapper
+
+        if get_tensor_model_parallel_world_size() > 1:
+            intervene_patch = Patch(InterventionProtocol, parallel_intervene(InterventionProtocol.intervene), "intervene")
+        else:
+            intervene_patch = Patch(InterventionProtocol, InterventionProtocol.intervene, "intervene")
+
+        with Patcher([intervene_patch]):
+            output = NNsight.interleave(
+                self.model,
+                fn=inner,
+                interleaver=interleaver,
+            )
+ 
         return [output]

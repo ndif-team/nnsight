@@ -18,6 +18,7 @@ class NNsightSamplingParams(SamplingParams):
 
     intervention_graph: Optional[InterventionGraph] = None
     invoker_group: Optional[int] = None
+    is_default_param: bool = True
 
     def clone(self) -> "SamplingParams":
         """Deep copy excluding LogitsProcessor objects.

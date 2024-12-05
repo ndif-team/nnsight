@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Type, Union)
 
 import torch
 from typing_extensions import Self
