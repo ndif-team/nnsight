@@ -33,7 +33,8 @@ dependencies = [
     "accelerate",
     "diffusers",
     "einops",
-    "msgspec"
+    "msgspec",
+    "toml"
     ]
 
 [project.optional-dependencies]
