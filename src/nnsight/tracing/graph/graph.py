@@ -92,6 +92,9 @@ class Graph(Generic[NodeType, ProxyType]):
         Args:
             start (Optional[int], optional): `Node` index to start cleaning up from. Defaults to None.
         """
+        
+        if len(self) == 0:
+            return
 
         if start is None:
             start = self[0].index

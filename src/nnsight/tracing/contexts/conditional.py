@@ -14,14 +14,20 @@ class Condition(Context[SubGraph]):
         super().__init__(*args, **kwargs)
 
         self.args = [condition, branch]
+        self.index = None
 
     def else_(self, condition: Optional[Any] = None):
-
+        
         return Condition(
             condition,
-            branch=self.graph.nodes[self.graph[-1].index + 1],
+            branch=self.graph.nodes[self.index],
             parent=self.graph.stack[-1],
         )
+        
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        super().__exit__(exc_type, exc_val, exc_tb)
+        
+        self.index = self.graph.nodes[-1].index
 
     @classmethod
     def execute(cls, node: NodeType):
