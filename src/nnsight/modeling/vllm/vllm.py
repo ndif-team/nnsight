@@ -82,13 +82,8 @@ class VLLM(RemoteableMixin):
         )
 
         # creating the vllm engine configuration
-        """ dict(
-            (field.name, getattr(self, field.name)) for field in fields(self)) """
         vllm_config = engine_args.create_engine_config()
         vllm_config_dict = {field.name: getattr(vllm_config, field.name) for field in fields(type(vllm_config))}
-        
-        #dict((field.name, getattr(self, field.name)) for field in fields(engine_args.create_engine_config()))
-        #vllm_config_dict = engine_args.create_engine_config().to_dict()
 
         # starting the distributed environment
         init_distributed_environment(
@@ -103,13 +98,6 @@ class VLLM(RemoteableMixin):
         initialize_model_parallel(backend="gloo")
 
         # initialize the model
-        """ model = _initialize_model(
-            model_config=vllm_config_dict["model_config"],
-            load_config=vllm_config_dict["load_config"],
-            lora_config=None,
-            cache_config=vllm_config_dict["cache_config"],
-            scheduler_config=vllm_config_dict["scheduler_config"],
-        ) """
 
         model = _initialize_model(vllm_config)
 

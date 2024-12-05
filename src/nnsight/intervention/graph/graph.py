@@ -359,7 +359,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         new_graph.compiled = self.compiled
 
         for key, value in self.call_counter.items():
-            self.call_counter[memo[key]] = value
+            new_graph.call_counter[memo[key]] = value
 
         if new_graph.compiled:
 
@@ -371,7 +371,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
             for key, values in self.deferred.items():
 
-                new_graph[memo[key]] = [memo[index] for index in values]
+                new_graph.deferred[memo[key]] = [memo[index] for index in values]
 
             new_graph.grad_subgraph = [memo[index] for index in self.grad_subgraph]
 
