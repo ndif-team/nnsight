@@ -92,6 +92,9 @@ class Graph(Generic[NodeType, ProxyType]):
         Args:
             start (Optional[int], optional): `Node` index to start cleaning up from. Defaults to None.
         """
+        
+        if len(self) == 0:
+            return
 
         if start is None:
             start = self[0].index
@@ -220,6 +223,18 @@ class SubGraph(Graph[NodeType, ProxyType]):
         self.__dict__.update(parent.__dict__)
 
         self.subset: List[int] = [] if subset is None else subset
+
+    def __getstate__(self):
+
+        return {
+            "nodes":self.nodes,
+            "subset":self.subset,
+            "defer_stack": self.defer_stack,
+        }
+    
+    def __setstate__(self, state: Dict) -> None:
+
+        self.__dict__.update(state)
 
     def add(self, node: NodeType) -> None:
 

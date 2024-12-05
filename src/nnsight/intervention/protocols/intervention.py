@@ -82,6 +82,7 @@ class InterventionProtocol(EntryPoint):
         cls,
         activations: Any,
         module_path: str,
+        module: torch.nn.Module,
         key: str,
         interleaver: "Interleaver",
     ):

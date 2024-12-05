@@ -3,7 +3,13 @@ import toml
 
 def pytest_addoption(parser):
     parser.addoption("--device", action="store", default="cuda:0")
-
+    parser.addoption(
+        "--tp", 
+        action="store", 
+        type=int, 
+        default="1", 
+        help="An argument for specifying the number of gpus to be used by VLLM"
+    )
 
 def pytest_generate_tests(metafunc):
     # This is called for every test. Only get/set command line arguments
