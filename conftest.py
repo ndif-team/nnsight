@@ -4,7 +4,7 @@ import toml
 def pytest_addoption(parser):
     parser.addoption("--device", action="store", default="cuda:0")
     parser.addoption(
-        "--gpus", 
+        "--tp", 
         action="store", 
         type=int, 
         default="1", 
