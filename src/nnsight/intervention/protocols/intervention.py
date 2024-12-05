@@ -1,13 +1,12 @@
-from typing import TYPE_CHECKING, Any, List
-
+from typing import TYPE_CHECKING, Any, Dict
 
 import torch
 from ... import util
 from .entrypoint import EntryPoint
 
 if TYPE_CHECKING:
+    from ..graph import InterventionNodeType
     from ..interleaver import Interleaver
-    from ..graph import InterventionNodeType, InterventionProxyType, InterventionGraph, InterventionProxy, InterventionNode
 
 class InterventionProtocol(EntryPoint):
 
@@ -196,3 +195,20 @@ class InterventionProtocol(EntryPoint):
     def execute(cls, node: "InterventionNodeType"):
         # To prevent the node from looking like its executed when calling Graph.execute
         node.executed = False
+
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        default_style = super().style()
+
+        default_style["node"] = {"color": "green4", "shape": "box"}
+        default_style["arg_kname"][0] = "module_path"
+        default_style["arg_kname"][1] = "batch_group"
+        default_style["arg_kname"][2] = "call_counter"
+
+        return default_style

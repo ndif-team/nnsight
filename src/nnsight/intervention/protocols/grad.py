@@ -1,8 +1,9 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict
 
 import torch
+
 from ...tracing.protocols import Protocol
-from ...tracing.graph import GraphType
+
 if TYPE_CHECKING:
     from ..graph import InterventionNode, InterventionNodeType
     
@@ -36,11 +37,7 @@ class GradProtocol(Protocol):
         hook = None
 
         def grad(value):
-            
-            
-            # print(backwards_iteration, node)
-            
-                                   
+               
             # Set the value of the Node.
             node.set_value(value)
 
@@ -58,3 +55,19 @@ class GradProtocol(Protocol):
             
         # Register hook.
         hook = tensor.register_hook(grad)
+
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        default_style = super().style()
+
+        default_style["node"] = {"color": "green4", "shape": "box"}
+    
+        return default_style
+
+        
