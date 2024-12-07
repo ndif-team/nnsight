@@ -30,8 +30,8 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         _children (List[Envoy]): Immediate Envoy children of this Envoy.
         _fake_outputs (List[torch.Tensor]): List of 'meta' tensors built from the outputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
         _fake_inputs (List[torch.Tensor]): List of 'meta' tensors built from the inputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
-        _rename (Optional[Dict[str,str]]): Optional mapping of (regex string -> new name).
-            For example to rename all gpt 'attn' modules to 'attention' you would: rename={r"\.transformer\.h\.\d+.attn": "attention"}
+        _rename (Optional[Dict[str,str]]): Optional mapping of (old name -> new name).
+            For example to rename all gpt 'attn' modules to 'attention' you would: rename={r"attn": "attention"}
             Not this does not actually change the underlying module names, just how you access its envoy. Renaming will replace Envoy.path but Envoy._path represents the pre-renamed true attribute path.
         _tracer (nnsight.context.Tracer.Tracer): Object which adds this Envoy's module's output and input proxies to an intervention graph. Must be set on Envoys objects manually by the Tracer.
     """
@@ -346,10 +346,8 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             
             for key, value in self._rename.items():
                 
-                match = re.match(key, module_path)
-                
-                if match is not None:
-                    
+                if name == key:
+                                    
                     name = value
                     
                     alias_path = f"{self.path}.{name}"
