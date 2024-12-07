@@ -59,10 +59,11 @@ class NNsight:
     def __init__(
         self,
         model: torch.nn.Module,
+        rename: Optional[Dict[str,str]] = None
     ) -> None:
 
         self._model: torch.nn.Module = model
-        self._envoy: Envoy[InterventionProxy, InterventionNode] = Envoy(self._model)
+        self._envoy: Envoy[InterventionProxy, InterventionNode] = Envoy(self._model, rename=rename)
 
         self._session: Optional[Session] = None
         self._default_graph: Optional[InterventionGraph] = None

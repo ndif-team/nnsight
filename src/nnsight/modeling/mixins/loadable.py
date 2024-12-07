@@ -1,3 +1,5 @@
+from typing import Dict, Optional
+
 import torch
 
 from ...intervention import NNsight
@@ -5,7 +7,7 @@ from ...intervention import NNsight
 
 class LoadableMixin(NNsight):
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, rename: Optional[Dict[str,str]] = None, **kwargs) -> None:
 
         if not isinstance(args[0], torch.nn.Module):
 
@@ -15,7 +17,7 @@ class LoadableMixin(NNsight):
 
             model = args[0]
 
-        super().__init__(model)
+        super().__init__(model, rename=rename)
 
     def _load(self, *args, **kwargs) -> torch.nn.Module:
 

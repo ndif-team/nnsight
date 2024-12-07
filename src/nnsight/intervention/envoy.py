@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import inspect
+import re
 import warnings
 from contextlib import AbstractContextManager
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, Iterator, List,
-                    Optional, Tuple, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, Iterator,
+                    List, Optional, Tuple, Union)
 
 import torch
 from typing_extensions import Self
 
 from . import protocols
-from .contexts import InterventionTracer
-from .graph import InterventionProxyType, InterventionNodeType
 from .backends import EditingBackend
+from .contexts import InterventionTracer
+from .graph import InterventionNodeType, InterventionProxyType
+
 
 class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
     """Envoy objects act as proxies for torch modules themselves within a model's module tree in order to add nnsight functionality.
@@ -28,15 +30,20 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         _children (List[Envoy]): Immediate Envoy children of this Envoy.
         _fake_outputs (List[torch.Tensor]): List of 'meta' tensors built from the outputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
         _fake_inputs (List[torch.Tensor]): List of 'meta' tensors built from the inputs most recent _scan. Is list as there can be multiple shapes for a module called more than once.
-
+        _rename (Optional[Dict[str,str]]): Optional mapping of (old name -> new name).
+            For example to rename all gpt 'attn' modules to 'attention' you would: rename={r"attn": "attention"}
+            Not this does not actually change the underlying module names, just how you access its envoy. Renaming will replace Envoy.path but Envoy._path represents the pre-renamed true attribute path.
         _tracer (nnsight.context.Tracer.Tracer): Object which adds this Envoy's module's output and input proxies to an intervention graph. Must be set on Envoys objects manually by the Tracer.
     """
 
-    def __init__(self, module: torch.nn.Module, module_path: str = ""):
+    def __init__(self, module: torch.nn.Module, module_path: str = "", alias_path:Optional[str] = None, rename: Optional[Dict[str,str]] = None):
 
-        self.path = module_path
+        self.path = alias_path or module_path
+        self._path = module_path
 
         self._module = module
+        
+        self._rename = rename
 
         self._iteration_stack = [0]
 
@@ -111,7 +118,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
                 else:
                     fake_output = self._fake_outputs[iteration]
 
-                module_path = f"{self.path}.output"
+                module_path = f"{self._path}.output"
 
                 output = protocols.InterventionProtocol.add(
                     self._tracer.graph,
@@ -169,7 +176,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
                 else:
                     fake_input = self._fake_inputs[iteration]
 
-                module_path = f"{self.path}.input"
+                module_path = f"{self._path}.input"
 
                 input = protocols.InterventionProtocol.add(
                     self._tracer.graph,
@@ -330,8 +337,24 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             module (torch.nn.Module): Module to create Envoy for.
             name (str): name of envoy/attribute.
         """
+                
+        alias_path = None
+        
+        module_path = f"{self.path}.{name}"
+        
+        if self._rename is not None:
+            
+            for key, value in self._rename.items():
+                
+                if name == key:
+                                    
+                    name = value
+                    
+                    alias_path = f"{self.path}.{name}"
+                    
+                    break
 
-        envoy = Envoy(module, module_path=f"{self.path}.{name}")
+        envoy = Envoy(module, module_path=module_path, alias_path=alias_path, rename=self._rename)
 
         self._children.append(envoy)
 
