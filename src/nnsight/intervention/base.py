@@ -355,7 +355,23 @@ class NNsight:
     def clear_edits(self) -> None:
         """Resets the default graph of this model."""
         self._default_graph = None
+        
+    def get(self, module_path:str) -> Envoy:
+        """Gets the sub-module/Envoy via its module path.
+        
+        e.x:
+            model = nnsight.LanguageModel("openai-community/gpt2")
+            
+            module = model.get('transformer.h.0.mlp')
 
+        Args:
+            module_path (str): '.' separated module path.
+
+        Returns:
+            Envoy: Fetched sub-module/Envoy
+        """
+        return util.fetch_attr(self, module_path)
+    
     #### Private API ##############
 
     def to_device(self, data: Any) -> Any:
