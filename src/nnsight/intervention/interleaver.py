@@ -48,15 +48,15 @@ class Interleaver(AbstractContextManager):
 
         if input_hook is None:
             input_hook = (
-                lambda activations, module_path: InterventionProtocol.intervene(
-                    activations, module_path, "input", self
+                lambda activations, module_path, module: InterventionProtocol.intervene(
+                    activations, module_path, module, "input", self
                 )
             )
 
         if output_hook is None:
             output_hook = (
-                lambda activations, module_path: InterventionProtocol.intervene(
-                    activations, module_path, "output", self
+                lambda activations, module_path, module: InterventionProtocol.intervene(
+                    activations, module_path, module, "output", self
                 )
             )
 
@@ -96,7 +96,7 @@ class Interleaver(AbstractContextManager):
                 # Input hook activations are a tuple of (positional args, key-word arguments)
                 # Include the module_path not the module
                 def input_hook(module, input, kwargs, module_path=module_path):
-                    return self.input_hook((input, kwargs), module_path)
+                    return self.input_hook((input, kwargs), module_path, module)
 
                 self.handles.append(
                     module.register_forward_pre_hook(
@@ -107,7 +107,7 @@ class Interleaver(AbstractContextManager):
             elif hook_type == "output":
 
                 def output_hook(module, input, output, module_path=module_path):
-                    return self.output_hook(output, module_path)
+                    return self.output_hook(output, module_path, module)
 
                 self.handles.append(
                     module.register_forward_hook(output_hook, prepend=True)

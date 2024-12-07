@@ -1,27 +1,33 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
-from ...tracing.graph import NodeType, ProxyType, SubGraph
+from ...tracing.graph import NodeType, SubGraph
 from ..contexts import Context
 
 
 class Condition(Context[SubGraph]):
 
     def __init__(
-        self, condition: Any, branch: NodeType = False, *args, **kwargs
+        self, condition: Optional[NodeType], branch: Optional[NodeType] = None, *args, **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
 
         self.args = [condition, branch]
+        self.index = None
 
     def else_(self, condition: Optional[Any] = None):
-
+        
         return Condition(
             condition,
-            branch=self.graph.nodes[self.graph[-1].index + 1],
+            branch=self.graph.nodes[self.index],
             parent=self.graph.stack[-1],
         )
+        
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        super().__exit__(exc_type, exc_val, exc_tb)
+        
+        self.index = self.graph.nodes[-1].index
 
     @classmethod
     def execute(cls, node: NodeType):
@@ -32,6 +38,7 @@ class Condition(Context[SubGraph]):
         condition: Any
         condition, branch = node.prepare_inputs((condition, branch))
 
+        # else case has a True condition
         if condition is None and not branch:
             condition = True
 
@@ -45,5 +52,18 @@ class Condition(Context[SubGraph]):
             graph.clean()
             node.set_value(branch)
             
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
 
+        Returns:
+            - Dict: dictionary style.
+        """
+    
+        default_style = super().style()
+
+        default_style["node"] = {"color": "#FF8C00", "shape": "polygon", "sides": 6}
+        default_style["edge"][2] = {"style": "solid", "label": "branch", "color": "#FF8C00", "fontsize": 10}
+
+        return default_style
 

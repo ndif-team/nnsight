@@ -69,6 +69,16 @@ class Node:
             
             # Preprocess args.
             self.preprocess()
+
+    def __getstate__(self):
+
+        state = self.__dict__.copy()
+
+        return state
+    
+    def __setstate__(self, state: Dict) -> None:
+
+        self.__dict__.update(state)
             
     @property
     def listeners(self) -> List[Self]:

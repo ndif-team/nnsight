@@ -1,14 +1,13 @@
+from typing import TYPE_CHECKING, Any, Dict
 
-import inspect
-from typing import TYPE_CHECKING
 import torch
-from ...tracing.protocols import Protocol
 from typing_extensions import Self
-from ...tracing.graph import SubGraph
+
 from ... import util
+from ...tracing.protocols import Protocol
+
 if TYPE_CHECKING:
-    
-    from ..graph import InterventionProxyType, InterventionNode, InterventionGraph
+    from ..graph import InterventionGraph, InterventionNode
 
 class ApplyModuleProtocol(Protocol):
     """Protocol that references some root model, and calls its .forward() method given some input.
@@ -92,3 +91,16 @@ class ApplyModuleProtocol(Protocol):
 
         node.set_value(output)
 
+    @classmethod
+    def style(cls) -> Dict[str, Any]:
+        """Visualization style for this protocol node.
+
+        Returns:
+            - Dict: dictionary style.
+        """
+
+        default_style = super().style()
+
+        default_style["node"] = {"color": "green4", "shape": "polygon", "sides": 6}
+
+        return default_style

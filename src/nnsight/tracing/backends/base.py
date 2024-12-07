@@ -5,7 +5,6 @@ from ...util import NNsightError
 from ..graph import Graph, Proxy
 from ..protocols import StopProtocol
 
-
 class Backend:
 
     def __call__(self, graph: Graph) -> None:
@@ -25,10 +24,19 @@ class ExecutionBackend(Backend):
             graph.nodes[-1].execute()
 
             if self.injection:
-                frame = inspect.currentframe().f_back.f_back.f_back.f_back
+                
+                from ..contexts import Context
+                import ctypes
+
+                frame = inspect.currentframe().f_back
+                while frame.f_back is not None and 'self' in frame.f_locals and isinstance(frame.f_locals['self'], Context):
+                    frame = frame.f_back
+                    
                 for key, value in frame.f_locals.items():
                     if isinstance(value, Proxy) and value.node.done:
                         frame.f_locals[key] = value.value
+                        
+                ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
 
         except StopProtocol.StopException:
 

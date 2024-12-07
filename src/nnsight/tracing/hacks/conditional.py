@@ -4,19 +4,43 @@ import sys
 from types import FrameType
 from typing import TYPE_CHECKING
 
-from ..contexts import Condition, Context
-from .util import execute, execute_body, execute_until
-
+from ..contexts import Condition
+from .util import execute, execute_body, execute_until, visit
+from ..graph import Graph
 if TYPE_CHECKING:
     from ..graph import Proxy
 
+def get_else(node: ast.If):
 
-def handle_conditional(frame: FrameType, condition: "Proxy"):
+    return (
+        node.orelse[0]
+        if isinstance(node.orelse[0], ast.If)
+        else ast.If(
+            test=ast.Constant(value=None),
+            body=node.orelse,
+            orelse=[],
+            lineno=node.lineno,
+            col_offset=node.col_offset,
+        )
+    )
+    
+def handle(node: ast.If, frame:FrameType, graph:Graph, branch:Condition = None):
 
-    line_no = frame.f_lineno
-    source_lines, _ = inspect.getsourcelines(frame)
-    source = "".join(source_lines)
-    tree = ast.parse(source)
+    condition_expr = ast.Expression(
+        body=node.test, lineno=node.lineno, col_offset=node.col_offset
+    )
+
+    condition = execute(condition_expr, frame)
+        
+    context = Condition(condition, parent = graph) if branch is None else branch.else_(condition)
+
+    with context as branch:
+        execute_body(node.body, frame, branch.graph)
+
+    if node.orelse:
+        return handle(get_else(node), frame, graph, branch)
+    
+def handle_proxy(frame: FrameType, condition: "Proxy"):
 
     class Visitor(ast.NodeVisitor):
         def __init__(self, line_no):
@@ -28,53 +52,23 @@ def handle_conditional(frame: FrameType, condition: "Proxy"):
                 self.target = node
             self.generic_visit(node)
 
-    visitor = Visitor(line_no)
-    visitor.visit(tree)
+    visitor = visit(frame, Visitor)
 
-    if_node = visitor.target
-
+    if_node:ast.If = visitor.target
+    
     graph = condition.node.graph
 
     branch = Condition(condition, parent=graph)
 
-    def get_else(node: ast.If):
-
-        return (
-            node.orelse[0]
-            if isinstance(node.orelse[0], ast.If)
-            else ast.If(
-                test=ast.Constant(value=None),
-                body=node.orelse,
-                orelse=[],
-                lineno=node.lineno,
-                col_offset=node.col_offset,
-            )
-        )
-
-    def evaluate_and_execute(node: ast.stmt):
-
-        nonlocal branch
-
-        if isinstance(node, ast.If):
-
-            condition_expr = ast.Expression(
-                body=node.test, lineno=node.lineno, col_offset=node.col_offset
-            )
-
-            condition = execute(condition_expr, frame)
-
-            with branch.else_(condition) as branch:
-                execute_body(node.body, frame)
-
-            if node.orelse:
-                return evaluate_and_execute(get_else(node))
-
-    def callback(node: ast.If, context: Context, frame: FrameType):
+    def callback(node: ast.If, frame: FrameType, graph:Graph, branch:Condition):
+        
+        branch.__exit__(None, None, None)
 
         if node.orelse:
-            evaluate_and_execute(get_else(if_node))
+            handle(get_else(if_node), frame, graph, branch)
 
     branch.__enter__()
-    execute_until(branch, if_node, frame, callback=callback)
+    end = frame.f_lineno + (if_node.end_lineno - if_node.lineno)
+    execute_until(frame.f_lineno, end, frame, callback=lambda _: callback(if_node, frame, graph, branch))
 
     return True

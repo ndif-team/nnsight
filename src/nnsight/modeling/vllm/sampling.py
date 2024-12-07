@@ -18,6 +18,7 @@ class NNsightSamplingParams(SamplingParams):
 
     intervention_graph: Optional[InterventionGraph] = None
     invoker_group: Optional[int] = None
+    is_default_param: bool = True
 
     def clone(self) -> "SamplingParams":
         """Deep copy excluding LogitsProcessor objects.
@@ -137,10 +138,11 @@ class NNsightSamplingMetadata(SamplingMetadata):
             intervention_graph = None
         elif n_graphs == 1:
             intervention_graph =intervention_graphs[0]
-        else:
+
+        """ else:
             intervention_graph = MultiGraph(intervention_graphs.values())
             
-            InterventionProtocol.shift(intervention_graph)
+            InterventionProtocol.shift(intervention_graph) """
 
         ###########################################
 
