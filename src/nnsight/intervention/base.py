@@ -356,21 +356,24 @@ class NNsight:
         """Resets the default graph of this model."""
         self._default_graph = None
         
-    def get(self, module_path:str) -> Envoy:
-        """Gets the sub-module/Envoy via its module path.
+    def get(self, path:str) -> Union[Envoy, InterventionProxyType]:
+        """Gets the Envoy/Proxy via its path.
         
         e.x:
             model = nnsight.LanguageModel("openai-community/gpt2")
             
             module = model.get('transformer.h.0.mlp')
+            
+            with model.trace("Hello"):
+                value = model.get('transformer.h.0.mlp.output').save()
 
         Args:
-            module_path (str): '.' separated module path.
+            path (str): '.' separated path.
 
         Returns:
-            Envoy: Fetched sub-module/Envoy
+            Union[Envoy, InterventionProxyType]: Fetched Envoy/Proxy
         """
-        return util.fetch_attr(self, module_path)
+        return util.fetch_attr(self, path)
     
     #### Private API ##############
 
