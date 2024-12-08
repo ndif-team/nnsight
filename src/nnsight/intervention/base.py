@@ -199,7 +199,10 @@ class NNsight:
 
                     output = self._envoy.output.save()
 
-                return output.value
+                if CONFIG.APP.FRAME_INJECTION:
+                    return output
+                else:
+                    return output.value
 
         # If trace is False, you had to have provided an input.
         if not trace:
