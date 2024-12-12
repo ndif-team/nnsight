@@ -13,7 +13,7 @@ from . import InterventionNode, InterventionNodeType, InterventionProxyType
 
 if TYPE_CHECKING:
     from .. import NNsight
-    from ..tracing.graph.graph import GraphType, NodeType
+    from ...tracing.graph.graph import GraphType, NodeType
 
 
 class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
