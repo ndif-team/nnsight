@@ -2,6 +2,8 @@
 
 Run `pip install -r requirements.txt` while in the `nnsight/docs` directory.
 
+Optionally, run `pip install -e nnsight` from the root directory to use the working dir
+
 If you haven't already, you should also install pandoc. With brew run: `brew install pandoc`
 
 # Adding Tutorials
