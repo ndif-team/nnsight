@@ -199,7 +199,7 @@ class NNsight:
 
                     output = self._envoy.output.save()
 
-                return output.value
+                return output
 
         # If trace is False, you had to have provided an input.
         if not trace:
