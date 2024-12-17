@@ -292,12 +292,12 @@ class NNsightGPUModelRunner(ModelRunner):
                 hidden_or_intermediate_states, model_input.sampling_metadata
             )
 
-            with Patcher(
-                [
-                    Patch(interleaver, [(idx, 1) for idx in range(len(interleaver.batch_groups))], "batch_groups"),
-                    Patch(interleaver, len(interleaver.batch_groups), "batch_size")    
-                ]
-            ):
+            patches = [Patch(interleaver, logits.shape[0], "batch_size")]
+
+            if model_input.sampling_metadata.seq_groups[0].is_prompt:
+                patches.append(Patch(interleaver, model_input.sampling_metadata.nns_batch_groups, "batch_groups"))
+
+            with Patcher(patches):
                 logits = self.model.logits(logits)
 
             if not self.is_driver_worker:

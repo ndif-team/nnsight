@@ -139,19 +139,31 @@ def test_batched_intervention(vllm_gpt2, ET_prompt: str,):
 
 def test_batched_multi_token_generation(vllm_gpt2, ET_prompt: str, MSG_prompt: str):
     with vllm_gpt2.trace() as tracer:
-        with tracer.invoke(ET_prompt, max_tokens=3):
-            ET_logits = nnsight.list().save()
+        with tracer.invoke([MSG_prompt, ET_prompt], max_tokens=3):
+            MSG_ET_hs = nnsight.list().save()
+            MSG_ET_logits = nnsight.list().save()
             for ii in range(3):
-                ET_logits.append(vllm_gpt2.logits.output)
+                MSG_ET_hs.append(vllm_gpt2.transformer.h[5].output)
+                vllm_gpt2.transformer.h[5].next()
+                MSG_ET_logits.append(vllm_gpt2.logits.output)
                 vllm_gpt2.logits.next()
         with tracer.invoke(MSG_prompt, max_tokens=5):
+            MSG_hs = nnsight.list().save()
             MSG_logits = nnsight.list().save()
             for ii in range(5):
+                MSG_hs.append(vllm_gpt2.transformer.h[5].output)
+                vllm_gpt2.transformer.h[5].next()
                 MSG_logits.append(vllm_gpt2.logits.output)
                 vllm_gpt2.logits.next()
 
-    assert len(ET_logits) == 3
+    assert len(MSG_ET_hs) == 3
+    assert all(hs.shape[0] for hs in MSG_ET_hs[1:])
+    assert len(MSG_ET_logits) == 3
+    assert all(logit.shape[0] == 2 for logit in MSG_ET_logits)
+    assert len(MSG_hs) == 5
+    assert all(hs.shape[0] for hs in MSG_hs[1:])
     assert len(MSG_logits) == 5
+    assert all(logit.shape[0] == 1 for logit in MSG_logits)
 
 
 """ def test_batched_multi_token_generation_with_iter(vllm_gpt2, ET_prompt: str, MSG_prompt: str):

@@ -241,6 +241,7 @@ class VLLM(RemoteableMixin):
         for param in args[1]:
 
             param.intervention_graph = interleaver.graph
+            param.nns_batch_groups = interleaver.batch_groups
 
         if fn is None:
             fn = self._execute
