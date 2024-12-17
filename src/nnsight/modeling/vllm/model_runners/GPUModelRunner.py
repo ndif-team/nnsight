@@ -292,12 +292,12 @@ class NNsightGPUModelRunner(ModelRunner):
                 hidden_or_intermediate_states, model_input.sampling_metadata
             )
 
-            with Patcher(
-                [
-                    Patch(interleaver, [(idx, 1) for idx in range(len(interleaver.batch_groups))], "batch_groups"),
-                    Patch(interleaver, len(interleaver.batch_groups), "batch_size")    
-                ]
-            ):
+            patches = [Patch(interleaver, logits.shape[0], "batch_size")]
+
+            if model_input.sampling_metadata.seq_groups[0].is_prompt:
+                patches.append(Patch(interleaver, model_input.sampling_metadata.nns_batch_groups, "batch_groups"))
+
+            with Patcher(patches):
                 logits = self.model.logits(logits)
 
             if not self.is_driver_worker:
@@ -311,7 +311,19 @@ class NNsightGPUModelRunner(ModelRunner):
                 logits=logits,
                 sampling_metadata=model_input.sampling_metadata,
             )
-            output.sampled_token_ids = self.model.tokens(output.sampled_token_ids)
+
+            og_sample_tokens = torch.tensor([token.samples[0].output_token for token in output.outputs])
+
+            with Patcher(patches):
+                sample_tokens = self.model.samples(og_sample_tokens)
+
+            # inject any changes to the sampled tokens
+            for idx, seq_out in enumerate(output.outputs):
+                sample = seq_out.samples[0]
+                sample.output_token = sample_tokens[idx].item()
+                logprob = sample.logprobs.pop(og_sample_tokens[idx].item())
+                sample.logprobs[sample_tokens[idx].item()] = logprob
+            
             if (
                 self.observability_config is not None
                 and self.observability_config.collect_model_forward_time

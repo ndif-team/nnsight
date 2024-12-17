@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 from nnsight.intervention.graph import InterventionGraph
 import torch
@@ -17,6 +17,7 @@ from vllm.utils import async_tensor_h2d
 class NNsightSamplingParams(SamplingParams):
 
     intervention_graph: Optional[InterventionGraph] = None
+    nns_batch_groups: Optional[List[Tuple[int, int]]] = None
     invoker_group: Optional[int] = None
     is_default_param: bool = True
 
@@ -43,12 +44,14 @@ class NNsightSamplingParams(SamplingParams):
 class NNsightSamplingMetadata(SamplingMetadata):
 
     intervention_graph: Optional[InterventionGraph] = None
+    nns_batch_groups: Optional[List[Tuple[int, int]]] = None
     batch_groups: Optional[List[Tuple[int, int]]] = None
 
     def __init__(
         self,
         *args,
         intervention_graph: InterventionGraph = None,
+        nns_batch_groups: List[Tuple[int, int]] = None,
         batch_groups: Dict[int, Tuple[int, int]] = None,
         **kwargs,
     ):
@@ -56,6 +59,7 @@ class NNsightSamplingMetadata(SamplingMetadata):
         super().__init__(*args, **kwargs)
 
         self.intervention_graph = intervention_graph
+        self.nns_batch_groups = nns_batch_groups
         self.batch_groups = batch_groups
 
     @staticmethod
@@ -96,6 +100,7 @@ class NNsightSamplingMetadata(SamplingMetadata):
         ### NNSIGHT ###########################################
 
         intervention_graphs = []
+        nns_batch_groups = []
         batch_groups = []
         batch_groups_offset = 0
 
@@ -106,12 +111,16 @@ class NNsightSamplingMetadata(SamplingMetadata):
                 seq_group_intervention_graph = (
                     seq_group.sampling_params.intervention_graph
                 )
+
+                seq_group_nns_batch_groups = seq_group.sampling_params.nns_batch_groups
                 
                 if isinstance(seq_group_intervention_graph, InterventionGraph):
                     
                     if seq_group_intervention_graph not in intervention_graphs:
                     
                         intervention_graphs.append(seq_group_intervention_graph)
+
+                        nns_batch_groups.append(seq_group_nns_batch_groups)
 
                         batch_groups_offset = len(batch_groups)
 
@@ -136,8 +145,10 @@ class NNsightSamplingMetadata(SamplingMetadata):
         
         if n_graphs== 0:
             intervention_graph = None
+            nns_batch_groups = None
         elif n_graphs == 1:
             intervention_graph =intervention_graphs[0]
+            nns_batch_groups = nns_batch_groups[0]
 
         """ else:
             intervention_graph = MultiGraph(intervention_graphs.values())
@@ -152,6 +163,7 @@ class NNsightSamplingMetadata(SamplingMetadata):
             categorized_sample_indices=categorized_sample_indices,
             num_prompts=num_prompts,
             intervention_graph=intervention_graph,
+            nns_batch_groups = nns_batch_groups,
             batch_groups=batch_groups,
         )
 
