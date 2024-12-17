@@ -311,7 +311,19 @@ class NNsightGPUModelRunner(ModelRunner):
                 logits=logits,
                 sampling_metadata=model_input.sampling_metadata,
             )
-            output.sampled_token_ids = self.model.tokens(output.sampled_token_ids)
+
+            og_sample_tokens = torch.tensor([token.samples[0].output_token for token in output.outputs])
+
+            with Patcher(patches):
+                sample_tokens = self.model.samples(og_sample_tokens)
+
+            # inject any changes to the sampled tokens
+            for idx, seq_out in enumerate(output.outputs):
+                sample = seq_out.samples[0]
+                sample.output_token = sample_tokens[idx].item()
+                logprob = sample.logprobs.pop(og_sample_tokens[idx].item())
+                sample.logprobs[sample_tokens[idx].item()] = logprob
+            
             if (
                 self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
