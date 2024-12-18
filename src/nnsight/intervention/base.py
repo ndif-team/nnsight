@@ -11,7 +11,8 @@ from .backends import NoopBackend
 from .contexts import EditingTracer, InterleavingTracer, Session
 from .envoy import Envoy
 from .graph import (InterventionGraph, InterventionNode, InterventionProxy,
-                    InterventionProxyType, Proxy)
+                    InterventionProxyType)
+from .graph.proxy import Proxy
 from .interleaver import Interleaver
 from .. import CONFIG
 
