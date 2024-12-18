@@ -199,6 +199,10 @@ class NNsight:
 
                     output = self._envoy.output.save()
 
+                if isinstance(output, Proxy):
+
+                    output = output.value
+                
                 return output
 
         # If trace is False, you had to have provided an input.
