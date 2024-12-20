@@ -54,7 +54,7 @@ The primary method of interacting and running the model is ``.trace(...)``. This
 
 
 
-The :func:`trace <nnsight.models.NNsightModel.NNsightModel.trace>` context is has the most explicit control of all levels of nnsight tracing and interleaving, creating a parent context where sub, input specific, contexts are spawned from.
+The :func:`trace <nnsight.models.NNsightModel.NNsightModel.trace>` context has the most explicit control of all levels of nnsight tracing and interleaving, creating a parent context where sub, input specific, contexts are spawned from.
 
 .. code-block:: python
 

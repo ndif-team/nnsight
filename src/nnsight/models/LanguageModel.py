@@ -70,12 +70,6 @@ class LanguageModelProxy(InterventionProxy):
 
     This would save only the first token of the output for this module.
     This should be used when using multiple invokes as the batching and padding of multiple inputs could mean the indices for tokens shifts around and this take care of that.
-
-    Args:
-        InterventionProxy (_type_): _description_
-
-    Returns:
-        _type_: _description_
     """
 
     @property
@@ -110,15 +104,15 @@ class LanguageModelProxy(InterventionProxy):
 
 
 class LanguageModel(GenerationMixin, RemoteableMixin, NNsight):
-    """LanguageModels are NNsight wrappers around transformers language models.
+    """LanguageModels are an :class:`NNsight` subclass for wrapping transformers language models.
 
     Inputs can be in the form of:
-        Prompt: (str)
-        Prompts: (List[str])
-        Batched prompts: (List[List[str]])
-        Tokenized prompt: (Union[List[int], torch.Tensor])
-        Tokenized prompts: (Union[List[List[int]], torch.Tensor])
-        Direct input: (Dict[str,Any])
+      * Prompt: :type:`str`
+      * Prompts: :type:`List[str]`
+      * Batched prompts: :type:`List[List[str]]`
+      * Tokenized prompt: :type:`Union[List[int], torch.Tensor]`
+      * Tokenized prompts: :type:`Union[List[List[int]], torch.Tensor]`
+      * Direct input: :type:`Dict[str,Any]`
 
     If using a custom model, you also need to provide the tokenizer like ``LanguageModel(custom_model, tokenizer=tokenizer)``
 

@@ -36,10 +36,7 @@ from ..tracing.Graph import Graph
 
 
 class MetaDispatcher(TorchDispatchMode):
-    """This exists because `with torch.device('meta') is evil.
-
-    Ty Caden
-
+    """This exists because ``with torch.device('meta')`` is evil.
     """
 
     def __torch_dispatch__(self, func, types, args, kwargs=None):
@@ -50,9 +47,8 @@ class MetaDispatcher(TorchDispatchMode):
             kwargs["device"] = "meta"
         return func(*args, **kwargs)
 
-
 class NNsight:
-    """Main class to be implemented as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
+    """Main class that acts as a wrapper for PyTorch models wishing to gain this package's functionality. Can be used "as is" for basic models.
 
     Class Attributes:
 
