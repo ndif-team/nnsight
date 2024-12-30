@@ -73,6 +73,19 @@ def test_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
 
 @torch.no_grad()
+def test_invoke(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    hidden_states = []
+    with gpt2.trace(validate=True, backend=AssertSavedLenBackend(1)) as tracer:
+        for _ in range(3):
+            with tracer.invoke(MSG_prompt, scan=True) as invoker:
+                hs = gpt2.transformer.h[-1].output[0].save()
+                hidden_states.append(hs)
+        _test_serialize(tracer)
+
+    assert any(hs is not None for hs in hidden_states)
+
+
+@torch.no_grad()
 def test_save(gpt2: nnsight.LanguageModel):
     with gpt2.generate("Hello world", validate=True, scan=True, backend=AssertSavedLenBackend(2)) as tracer:
 
