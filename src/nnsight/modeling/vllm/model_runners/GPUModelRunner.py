@@ -292,8 +292,13 @@ class NNsightGPUModelRunner(ModelRunner):
                 hidden_or_intermediate_states, model_input.sampling_metadata
             )
 
+            # patching the batch_size to be the number of logits,
+            # since vLLM optimizes the inference by turning the size of the input to be of size power of 2.
             patches = [Patch(interleaver, logits.shape[0], "batch_size")]
 
+            # `batch_groups` is adapted to the token positions of the flattened input during the first token generation iteration
+            # since the logit and sample tensors have different number of tokens, 
+            # we need to patch `batch_groups` to reflect the correct batches specified by the invoker contexts defined by the user.
             if model_input.sampling_metadata.seq_groups[0].is_prompt:
                 patches.append(Patch(interleaver, model_input.sampling_metadata.nns_batch_groups, "batch_groups"))
 

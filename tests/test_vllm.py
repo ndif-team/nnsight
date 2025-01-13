@@ -186,7 +186,7 @@ def test_batched_multi_token_generation(vllm_gpt2, ET_prompt: str, MSG_prompt: s
                 vllm_gpt2.samples.next()
 
     assert len(MSG_ET_hs) == max_token_1
-    assert all(hs.shape[0] for hs in MSG_ET_hs[1:])
+    assert all(hs.shape[0] == num_prompts_1 for hs in MSG_ET_hs[1:])
 
     assert len(MSG_ET_logits) == max_token_1
     assert all(logit.shape[0] == num_prompts_1 for logit in MSG_ET_logits)
@@ -196,7 +196,7 @@ def test_batched_multi_token_generation(vllm_gpt2, ET_prompt: str, MSG_prompt: s
 
 
     assert len(MSG_hs) == max_token_2
-    assert all(hs.shape[0] for hs in MSG_hs[1:])
+    assert all(hs.shape[0] == num_prompts_2 for hs in MSG_hs[1:])
 
     assert len(MSG_logits) == max_token_2
     assert all(logit.shape[0] == num_prompts_2 for logit in MSG_logits)
