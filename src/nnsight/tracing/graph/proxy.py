@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import operator
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Iterator, TypeVar, Union
 
 from typing_extensions import Self
@@ -281,21 +282,25 @@ class Proxy:
     ### Hacks ##############################
 
     def __iter__(self) -> Iterator[Self]:
-        
+
         if not CONFIG.APP.CONTROL_FLOW_HACKS:
-            raise Exception('Iteration control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False')
+            raise Exception(
+                'Iteration control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False'
+            )
 
         from ..hacks import iterator
-        
+
         return iterator.handle_proxy(inspect.currentframe().f_back, self)
 
     def __bool__(self) -> Self:
-        
+
         if not CONFIG.APP.CONTROL_FLOW_HACKS:
-            raise Exception('Conditional control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False')
+            raise Exception(
+                'Conditional control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False'
+            )
 
         from ..hacks import conditional
-        
+
         return conditional.handle_proxy(inspect.currentframe().f_back, self)
 
     def __instancecheck__(self, __instance: Any) -> bool:
@@ -303,3 +308,31 @@ class Proxy:
 
 
 ProxyType = TypeVar("ProxyType", bound=Proxy)
+
+
+def proxy_patch(fn: Callable):
+
+    @wraps(fn)
+    def inner(*args, **kwargs):
+
+        found: Proxy = None
+
+        def find(proxy: Proxy):
+
+            nonlocal found
+
+            found = proxy
+
+        util.apply((args, kwargs), find, Proxy)
+
+        if found is not None:
+
+            return found.node.graph.create(
+                fn,
+                *args,
+                **kwargs,
+            )
+
+        return fn(*args, **kwargs)
+
+    return inner

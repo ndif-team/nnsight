@@ -12,6 +12,7 @@ from .contexts import EditingTracer, InterleavingTracer, Session
 from .envoy import Envoy
 from .graph import (InterventionGraph, InterventionNode, InterventionProxy,
                     InterventionProxyType)
+from .graph.proxy import Proxy
 from .interleaver import Interleaver
 from .. import CONFIG
 
@@ -199,7 +200,11 @@ class NNsight:
 
                     output = self._envoy.output.save()
 
-                return output.value
+                if isinstance(output, Proxy):
+
+                    output = output.value
+                
+                return output
 
         # If trace is False, you had to have provided an input.
         if not trace:

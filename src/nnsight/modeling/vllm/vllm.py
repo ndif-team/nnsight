@@ -9,6 +9,7 @@ from .executors.RayGPUExecutor import NNsightRayGPUExecutor
 from .sampling import NNsightSamplingParams
 from dataclasses import fields
 from ...intervention.interleaver import Interleaver
+from ...intervention import Envoy
 
 if TYPE_CHECKING:
     from ...intervention.graph import InterventionGraph
@@ -66,8 +67,8 @@ class VLLM(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-        self.logits: WrapperModule = WrapperModule()
-        self.tokens: WrapperModule = WrapperModule()
+        self.logits: Envoy = WrapperModule()
+        self.tokens: Envoy = WrapperModule()
 
     def _load_meta(self, repo_id: str, **kwargs) -> "Module":
 

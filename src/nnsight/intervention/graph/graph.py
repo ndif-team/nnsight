@@ -13,7 +13,7 @@ from . import InterventionNode, InterventionNodeType, InterventionProxyType
 
 if TYPE_CHECKING:
     from .. import NNsight
-    from ..tracing.graph.graph import GraphType, NodeType
+    from ...tracing.graph.graph import GraphType, NodeType
 
 
 class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
@@ -109,9 +109,10 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         if self.compiled:
             return self.interventions
 
-        if len(self.nodes) == 1:
+        if len(self) == 0:
+            self.compiled = True
             return
-
+        
         intervention_subgraphs: List[SubGraph] = []
 
         start = self[0].index

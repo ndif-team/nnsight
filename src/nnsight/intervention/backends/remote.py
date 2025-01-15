@@ -183,7 +183,7 @@ class RemoteBackend(Backend):
             return response
 
         else:
-            msg = response.json()["detail"]
+            msg = response.reason
             raise ConnectionError(msg)
 
     def get_response(self) -> Optional[RESULT]:
