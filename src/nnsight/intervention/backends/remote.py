@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import io
-import pickle
-import weakref
-import zlib
 import sys
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import msgspec
 import requests
@@ -17,11 +14,11 @@ from ... import CONFIG, remote_logger
 from ...schema.request import RequestModel, StreamValueModel
 from ...schema.response import ResponseModel
 from ...schema.result import RESULT, ResultModel
-from ...tracing import protocols
 from ...tracing.backends import Backend
-from ...tracing.graph import Graph, SubGraph
+from ...tracing.graph import Graph
 from ...util import NNsightError
 from ..contexts.local import LocalContext, RemoteContext
+from ... import __IPYTHON__
 
 
 class RemoteBackend(Backend):
@@ -136,11 +133,23 @@ class RemoteBackend(Backend):
         elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
             if graph.debug:
                 error_node = graph.nodes[response.data['node_id']]
-                print(f"\n{response.data['traceback']}")
-                print("During handling of the above exception, another exception occurred:\n")
-                print(f"{error_node.meta_data['traceback']}")
-                sys.tracebacklimit = 0
-                raise NNsightError(response.data['err_message'], error_node.index)
+                try:
+                    raise NNsightError(response.data['err_message'], error_node.index, response.data['traceback'])
+                except NNsightError as nns_err:
+                    if __IPYTHON__: # in IPython the traceback content is rendered by the Error itself
+                        # add the error node traceback to the the error's traceback
+                        nns_err.traceback_content += "\nDuring handling of the above exception, another exception occurred:\n\n"
+                        nns_err.traceback_content += error_node.meta_data['traceback']
+                    else: # else we print the traceback manually
+                        print(f"\n{response.data['traceback']}")
+                        print("During handling of the above exception, another exception occurred:\n")
+                        print(f"{error_node.meta_data['traceback']}")
+
+                    sys.tracebacklimit = 0
+                    raise nns_err from None
+                finally:
+                    if __IPYTHON__:
+                        sys.tracebacklimit = None
             else:
                 print(f"\n{response.data['traceback']}")
                 raise SystemExit("Remote exception.")
