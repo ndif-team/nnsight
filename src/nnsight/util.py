@@ -193,3 +193,15 @@ class NNsightError(Exception):
         self.traceback_content = traceback_content
         super().__init__(self.message)
 
+
+    def _render_traceback_(self) -> List[str]:
+        """
+        This function allows custom rendering of traceback in IPython
+        
+        Returns:
+            - List of string lines.
+        """
+        traceback_list = self.traceback_content.split("\n")
+        traceback_list.append(f"{str(self.__class__.__name__)}: {self.message}")
+
+        return traceback_list
