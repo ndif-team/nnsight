@@ -19,6 +19,13 @@ try:
 except PackageNotFoundError:
     __version__ = "unknown version"
 
+from IPython import get_ipython
+
+try:
+    __IPYTHON__ = get_ipython() is not None
+except NameError:
+    __IPYTHON__ = False
+
 import torch
 import yaml
 

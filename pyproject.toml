@@ -34,7 +34,8 @@ dependencies = [
     "diffusers",
     "einops",
     "msgspec",
-    "toml"
+    "toml",
+    "ipython",
     ]
 
 [project.optional-dependencies]
