@@ -85,7 +85,13 @@ def visit(frame: FrameType, visitor_cls: Type[ast.NodeVisitor]) -> ast.stmt:
     if inner_line_no > 0:
         line_no = line_no - inner_line_no + 1
 
-    source = "".join(source_lines).lstrip()
+        shift = len(source_lines[0]) - len(source_lines[0].lstrip())
+
+        if shift > 0:
+
+            source_lines = [source_line[shift:] for source_line in source_lines]
+
+    source = "".join(source_lines)
 
     tree = ast.parse(source)
 
