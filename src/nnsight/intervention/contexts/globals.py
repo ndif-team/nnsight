@@ -51,10 +51,10 @@ import einops
 
 # Einops
 for key, value in getmembers(einops.einops, isfunction):
-    proxy_patch(value)
+    setattr(einops.einops, key, proxy_patch(value))
 # math
 for key, value in getmembers(math, isbuiltin):
-    proxy_patch(value)
+    setattr(math, key, proxy_patch(value))
 
 
 # Give it InterventionTracer methods
