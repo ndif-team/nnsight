@@ -442,7 +442,7 @@ class BridgeProtocol(Protocol):
 
     class BridgeException(Exception):
         def __init__(self):
-            super.__init__(
+            super().__init__(
                 "Must define a Session context to make use of the Bridge"
             )
 
