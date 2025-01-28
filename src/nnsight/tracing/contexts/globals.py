@@ -3,9 +3,8 @@ from __future__ import annotations
 import inspect
 from contextlib import AbstractContextManager
 from functools import wraps
-from types import FunctionType
+from types import FunctionType, MethodType
 from typing import Any, Type, Union
-
 
 from ... import util
 from ..graph import Graph
@@ -47,6 +46,20 @@ def global_patch_fn(fn: FunctionType) -> util.Patch:
 
     return util.Patch(inspect.getmodule(fn), inner, fn.__name__)
 
+def global_patch_method(cls: type, fn: MethodType) -> None:
+
+    @wraps(fn)
+    def inner(*args, **kwargs):
+        
+        if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
+            return fn(*args, **kwargs)
+
+        return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(fn, *args, **kwargs)
+    
+    patch = util.Patch(cls, inner, fn.__name__)
+    
+    GlobalTracingContext.PATCHER.add(patch)
+    
 
 def global_patch(obj: Union[FunctionType, Type]):
 
