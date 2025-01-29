@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import io
 import sys
 from typing import Any, Dict, Optional, Tuple
@@ -63,6 +64,7 @@ class RemoteBackend(Backend):
             "format": self.format,
             "zlib": str(self.zlib),
             "ndif-api-key": self.api_key,
+            "sent-timestamp": str(datetime.now().timestamp())
         }
 
         return data, headers
