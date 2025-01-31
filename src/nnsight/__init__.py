@@ -10,7 +10,6 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 import os
 from functools import wraps
-
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Dict, Union
 
@@ -37,8 +36,8 @@ with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
 
-from .logger import logger, remote_logger
 from .intervention import Envoy, NNsight
+from .logger import logger, remote_logger
 from .modeling.language import LanguageModel
 
 logger.disabled = not CONFIG.APP.LOGGING
@@ -77,6 +76,22 @@ def fake_tensor_new_wrapper(fn):
 
 DEFAULT_PATCHER.add(
     Patch(FakeTensor, fake_tensor_new_wrapper(FakeTensor.__new__), "__new__")
+)
+
+def autoamp_init_wrapper(fn):
+    
+    @wraps(fn)
+    def inner(self, device_type, dtype=None, **kwargs):
+        
+        if device_type == "meta":
+            dtype = torch.get_autocast_cpu_dtype()
+            
+        return fn(self, device_type, dtype, **kwargs)
+    
+    return inner
+
+DEFAULT_PATCHER.add(
+    Patch(torch.autocast, autoamp_init_wrapper(torch.autocast.__init__), "__init__")
 )
 
 DEFAULT_PATCHER.__enter__()
