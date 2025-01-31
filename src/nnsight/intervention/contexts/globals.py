@@ -12,7 +12,7 @@ from torch.utils import data
 from ...tracing.contexts.globals import (
     GlobalTracingContext,
     global_patch,
-    global_patch_fn,
+    global_patch_method,
 )
 from ...tracing.graph.proxy import proxy_patch
 from . import InterventionTracer
@@ -37,6 +37,10 @@ global_patch(torch.randperm)
 global_patch(torch.zeros)
 global_patch(torch.cat)
 
+# Module methods
+
+global_patch_method(torch.nn.Module, torch.nn.Module.zero_grad)
+
 # All Optimizers
 for key, value in getmembers(torch.optim, isclass):
 
@@ -51,10 +55,10 @@ import einops
 
 # Einops
 for key, value in getmembers(einops.einops, isfunction):
-    proxy_patch(value)
+    setattr(einops.einops, key, proxy_patch(value))
 # math
 for key, value in getmembers(math, isbuiltin):
-    proxy_patch(value)
+    setattr(math, key, proxy_patch(value))
 
 
 # Give it InterventionTracer methods

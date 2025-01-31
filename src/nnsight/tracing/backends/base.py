@@ -4,6 +4,7 @@ import sys
 from ...util import NNsightError
 from ..graph import Graph, Proxy
 from ..protocols import StopProtocol
+from ... import __IPYTHON__
 
 class Backend:
 
@@ -43,17 +44,26 @@ class ExecutionBackend(Backend):
 
         except NNsightError as e:
             if graph.debug:
-                print(f"\n{e.traceback_content}")
-                print(
-                    "During handling of the above exception, another exception occurred:\n"
-                )
-                print(f"{graph.nodes[e.node_id].meta_data['traceback']}")
+                node_traceback = graph.nodes[e.node_id].meta_data['traceback']
+
+                if __IPYTHON__: # in IPython the traceback content is rendered by the Error itself
+                    # add the error node traceback to the the error's traceback
+                    e.traceback_content += "\nDuring handling of the above exception, another exception occurred:\n\n"
+                    e.traceback_content += node_traceback
+                else: # else we print the traceback manually
+                    print(f"\n{e.traceback_content}")
+                    print(
+                        "During handling of the above exception, another exception occurred:\n"
+                    )
+                    print(f"{node_traceback}")
+                    
                 sys.tracebacklimit = 0
                 raise e from None
             else:
                 raise e
 
         finally:
-
+            if __IPYTHON__:
+                sys.tracebacklimit = None
             graph.nodes.clear()
             graph.stack.clear()

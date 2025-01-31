@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import sys
+import re
 import traceback
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List,
                     Optional, Set, TypeVar, Union)
@@ -9,7 +9,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List,
 from typing_extensions import Self
 
 from ... import util
-from ..protocols import Protocol, StopProtocol
+from ..protocols import Protocol
 from .proxy import Proxy, ProxyType
 
 from ...util import NNsightError
@@ -387,16 +387,20 @@ class Node:
             Returns:
                 Str: Call Stack
             """
-
-            traceback_str = "Traceback (most recent call last):\n"
+            traceback_str = ""
             stack = traceback.extract_stack()
             for frame in stack:
-                # exclude frames created by nnsight
-                if "nnsight/src/nnsight/" not in str(frame.filename):
+                # exclude frames created by nnsight or from the python environment
+                if not bool(re.search((r'/lib/python3\.\d+/'), frame.filename)) and not ('/nnsight/src/nnsight/' in frame.filename):
                     traceback_str += f"  File \"{frame.filename}\", line {frame.lineno}, in {frame.name}\n"
                     traceback_str += f"    {frame.line}\n"
                 else:
-                    break
+                    if traceback_str == "":
+                        continue
+                    else:
+                        break
+
+            traceback_str = "Traceback (most recent call last):\n" + traceback_str
 
             return traceback_str
 

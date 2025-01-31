@@ -275,8 +275,8 @@ class LanguageModel(RemoteableMixin):
         if labels is not None:
 
             batched_labels = torch.cat((batched_labels, labels))
-
-        batched_inputs["attention_mask"][:1, : attention_mask.shape[1]] = attention_mask
+            
+        batched_inputs["attention_mask"][:-1, : attention_mask.shape[1]] = attention_mask
 
         return ((batched_inputs,), {"labels": batched_labels})
 
