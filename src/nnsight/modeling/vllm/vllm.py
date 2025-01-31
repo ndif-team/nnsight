@@ -40,7 +40,7 @@ class VLLM(RemoteableMixin):
         - vllm_entrypoint (vllm.LLM): vLLM language model.
         - tokenizer (vllm.transformers_utils.tokenizer.AnyTokenizer): tokenizer.
         - logits (nnsight.WrapperModule): logits.
-        - tokens (nnsight.WrapperModule): tokens.
+        - samples (nnsight.WrapperModule): sampled tokens.
 
     .. code-block:: python
         from nnsight.models.VLLM import VLLM
@@ -68,7 +68,7 @@ class VLLM(RemoteableMixin):
         super().__init__(*args, **kwargs)
 
         self.logits: Envoy = WrapperModule()
-        self.tokens: Envoy = WrapperModule()
+        self.samples: Envoy = WrapperModule()
 
     def _load_meta(self, repo_id: str, **kwargs) -> "Module":
 
@@ -242,6 +242,7 @@ class VLLM(RemoteableMixin):
         for param in args[1]:
 
             param.intervention_graph = interleaver.graph
+            param.nns_batch_groups = interleaver.batch_groups
 
         if fn is None:
             fn = self._execute

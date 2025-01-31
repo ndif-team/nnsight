@@ -76,6 +76,23 @@ def test_multi_token_generation(vllm_gpt2, MSG_prompt: str):
     assert vllm_gpt2.tokenizer.batch_decode([logit.argmax(dim=-1) for logit in logits]) == [" New", " York", " City"]
 
 
+def test_sampling(vllm_gpt2, MSG_prompt: str):
+    with vllm_gpt2.trace(max_tokens=3) as tracer:
+        with tracer.invoke(MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3):
+            samples_1 = nnsight.list().save()
+            for ii in range(3):
+                samples_1.append(vllm_gpt2.samples.output)
+                vllm_gpt2.samples.next()
+        with tracer.invoke(MSG_prompt, temperature=0.8, top_p=0.95):
+            samples_2 = nnsight.list().save()
+            for ii in range(3):
+                samples_2.append(vllm_gpt2.samples.output)
+                vllm_gpt2.samples.next()
+
+    assert vllm_gpt2.tokenizer.batch_decode(samples_1) == [" New", " York", " City"]
+    assert vllm_gpt2.tokenizer.batch_decode(samples_2) == [" Richmond", " on", " the"]
+
+
 """ def test_max_token_generation(vllm_gpt2, ET_prompt: str):
     with vllm_gpt2.trace(ET_prompt, max_tokens=10):
         logits = nnsight.list().save()
@@ -138,20 +155,54 @@ def test_batched_intervention(vllm_gpt2, ET_prompt: str,):
 
 
 def test_batched_multi_token_generation(vllm_gpt2, ET_prompt: str, MSG_prompt: str):
+    max_token_1: int = 3
+    max_token_2: int = 5
+
+    num_prompts_1: int = 2
+    num_prompts_2: int = 1
+
     with vllm_gpt2.trace() as tracer:
-        with tracer.invoke(ET_prompt, max_tokens=3):
-            ET_logits = nnsight.list().save()
-            for ii in range(3):
-                ET_logits.append(vllm_gpt2.logits.output)
+        with tracer.invoke([MSG_prompt, ET_prompt], max_tokens=max_token_1):
+            MSG_ET_hs = nnsight.list().save()
+            MSG_ET_logits = nnsight.list().save()
+            MSG_ET_samples = nnsight.list().save()
+            for ii in range(max_token_1):
+                MSG_ET_hs.append(vllm_gpt2.transformer.h[5].output)
+                vllm_gpt2.transformer.h[5].next()
+                MSG_ET_logits.append(vllm_gpt2.logits.output)
                 vllm_gpt2.logits.next()
-        with tracer.invoke(MSG_prompt, max_tokens=5):
+                MSG_ET_samples.append(vllm_gpt2.samples.output)
+                vllm_gpt2.samples.next()
+        with tracer.invoke(MSG_prompt, max_tokens=max_token_2):
+            MSG_hs = nnsight.list().save()
             MSG_logits = nnsight.list().save()
-            for ii in range(5):
+            MSG_samples = nnsight.list().save()
+            for ii in range(max_token_2):
+                MSG_hs.append(vllm_gpt2.transformer.h[5].output)
+                vllm_gpt2.transformer.h[5].next()
                 MSG_logits.append(vllm_gpt2.logits.output)
                 vllm_gpt2.logits.next()
+                MSG_samples.append(vllm_gpt2.samples.output)
+                vllm_gpt2.samples.next()
 
-    assert len(ET_logits) == 3
-    assert len(MSG_logits) == 5
+    assert len(MSG_ET_hs) == max_token_1
+    assert all(hs.shape[0] == num_prompts_1 for hs in MSG_ET_hs[1:])
+
+    assert len(MSG_ET_logits) == max_token_1
+    assert all(logit.shape[0] == num_prompts_1 for logit in MSG_ET_logits)
+
+    assert len(MSG_ET_samples) == max_token_1
+    assert all(sample.shape[0] == num_prompts_1 for sample in MSG_ET_samples)
+
+
+    assert len(MSG_hs) == max_token_2
+    assert all(hs.shape[0] == num_prompts_2 for hs in MSG_hs[1:])
+
+    assert len(MSG_logits) == max_token_2
+    assert all(logit.shape[0] == num_prompts_2 for logit in MSG_logits)
+
+    assert len(MSG_samples) == max_token_2
+    assert all(sample.shape[0] == num_prompts_2 for sample in MSG_samples)
 
 
 """ def test_batched_multi_token_generation_with_iter(vllm_gpt2, ET_prompt: str, MSG_prompt: str):
