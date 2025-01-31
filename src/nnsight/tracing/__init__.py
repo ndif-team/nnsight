@@ -1,8 +1,7 @@
-"""The `nnsight.tracing `module involves tracing operations in order to form a computation graph.
+"""The `tracing` module acts as a standalone library to trace and execute Python based deferred computation graphs.
 
-The :class:`Graph <nnsight.tracing.Graph.Graph>` class adds and stores operations as `Node`s . 
-
-The :class:`Node <nnsight.tracing.Node.Node>` class represents an individual operation in the :class:`Graph <nnsight.tracing.Graph.Graph>`.
-
-The :class:`Proxy <nnsight.tracing.Proxy.Proxy>` class handles interactions from the user in order to create new `Node`s. There is a `Proxy` for each `Node`.
+The `graph` sub-module defines the computation graph primitives.
+The `protocol` sub-module contains logic for adding custom operations to the computation graph.
+The `contexts` sub-module contains logic for defining scoped sub-graphs that handle execution of their piece of the computation graph.
+The `backends` sub-module contains logic for executing the traced computation graph.
 """

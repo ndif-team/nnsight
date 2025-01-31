@@ -4,43 +4,48 @@ import weakref
 from types import BuiltinFunctionType
 from types import FunctionType as FuncType
 from types import MethodDescriptorType
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
-from pydantic import (BaseModel, ConfigDict, Field, Strict, field_validator,
-                      model_serializer)
-from pydantic.functional_validators import AfterValidator
-from typing_extensions import Annotated
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    Strict,
+    ValidationError,
+    field_validator,
+    model_serializer,
+)
+from pydantic.functional_validators import AfterValidator, BeforeValidator
+from typing_extensions import Annotated, Self
 
-from ...contexts.session.Iterator import Iterator
-from ...contexts.session.Session import Session
-from ...contexts.Tracer import Tracer
-from ...models.NNsightModel import NNsight
-from ...tracing import protocols
-from ...tracing.Bridge import Bridge
-from ...tracing.Graph import Graph
-from ...tracing.Node import Node
+from ...intervention.graph import InterventionGraph, InterventionNode
+from ...tracing.graph import Graph, Node, SubGraph
 from . import FUNCTIONS_WHITELIST, get_function_name
+
+if TYPE_CHECKING:
+    from ... import NNsight
+
+FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, type]
+PRIMITIVE = Union[int, float, str, bool, None]
 
 
 class DeserializeHandler:
 
     def __init__(
         self,
-        graph: Graph = None,
-        nodes: Dict[str, Union[NodeModel, NodeType]] = None,
-        model: NNsight = None,
-        bridge: Bridge = None,
+        memo,
+        model: "NNsight"
     ) -> None:
 
-        self.graph = graph
-        self.nodes = nodes
+        self.memo = memo
         self.model = model
-        self.bridge = bridge
+        self.graph = Graph(node_class=InterventionNode)
 
 
-FUNCTION = Union[BuiltinFunctionType, FuncType, MethodDescriptorType, type]
-PRIMITIVE = Union[int, float, str, bool, None]
+
+MEMO = {}
 
 
 class BaseNNsightModel(BaseModel):
@@ -48,16 +53,36 @@ class BaseNNsightModel(BaseModel):
 
     type_name: Literal["TYPE_NAME"]
 
+    @classmethod
+    def to_model(cls, value: Any) -> Self:
+        raise NotImplementedError()
+
     def deserialize(self, handler: DeserializeHandler):
         raise NotImplementedError()
 
+
 def try_deserialize(value: BaseNNsightModel | Any, handler: DeserializeHandler):
-    
+
     if isinstance(value, BaseNNsightModel):
-        
+
         return value.deserialize(handler)
-    
+
     return value
+
+
+def memoized(fn):
+
+    def inner(value):
+
+        model = fn(value)
+
+        _id = id(value)
+
+        MEMO[_id] = model
+
+        return MemoReferenceModel(id=_id)
+
+    return inner
 
 
 ### Custom Pydantic types for all supported base types
@@ -65,68 +90,41 @@ class NodeModel(BaseNNsightModel):
 
     type_name: Literal["NODE"] = "NODE"
 
-    class Reference(BaseNNsightModel):
-        type_name: Literal["NODE_REFERENCE"] = "NODE_REFERENCE"
-
-        name: str
-
-        def deserialize(self, handler: DeserializeHandler) -> Node:
-            return handler.nodes[self.name].deserialize(handler)
-
-    name: str
-    target: Union[FunctionModel, FunctionType]
+    target: ValueTypes
     args: List[ValueTypes] = []
     kwargs: Dict[str, ValueTypes] = {}
-    condition: Union[
-        NodeReferenceType, NodeModel.Reference, None
-    ] = None
-    
-    @model_serializer(mode='wrap')
+
+    @staticmethod
+    @memoized
+    def to_model(value: Node) -> Self:
+
+        return NodeModel(target=value.target, args=value.args, kwargs=value.kwargs)
+
+    @model_serializer(mode="wrap")
     def serialize_model(self, handler):
-            
+
         dump = handler(self)
-        
-        if self.condition is None:
-            
-            dump.pop('condition')
-            
+
         if not self.kwargs:
-            
-            dump.pop('kwargs')
-            
+
+            dump.pop("kwargs")
+
         if not self.args:
-            
-            dump.pop('args')
-            
+
+            dump.pop("args")
+
         return dump
 
     def deserialize(self, handler: DeserializeHandler) -> Node:
 
-        if self.name in handler.graph.nodes:
-            return handler.graph.nodes[self.name]
-
-        node = handler.graph.create(
-            proxy_value=None,
-            target=self.target.deserialize(handler),
-            args=[try_deserialize(value, handler) for value in self.args],
-            kwargs={
-                key: try_deserialize(value, handler) for key, value in self.kwargs.items()
-            },
-            name=self.name,
+        return handler.graph.create(
+            self.target.deserialize(handler),
+            *[try_deserialize(value, handler) for value in self.args],
+            **{
+                key: try_deserialize(value, handler)
+                for key, value in self.kwargs.items()
+            }
         ).node
-
-        node.cond_dependency = try_deserialize(self.condition, handler)
-        
-        if isinstance(node.cond_dependency, Node):
-            node.cond_dependency.listeners.append(weakref.proxy(node))
-
-        if isinstance(node.target, type) and issubclass(
-            node.target, protocols.Protocol
-        ):
-
-            node.target.compile(node)
-
-        return node
 
 class TensorModel(BaseNNsightModel):
 
@@ -134,6 +132,12 @@ class TensorModel(BaseNNsightModel):
 
     values: List
     dtype: str
+
+    @staticmethod
+    @memoized
+    def to_model(value: torch.Tensor) -> Self:
+
+        return TensorModel(values=value.tolist(), dtype=str(value.dtype).split(".")[-1])
 
     def deserialize(self, handler: DeserializeHandler) -> torch.Tensor:
         dtype = getattr(torch, self.dtype)
@@ -148,12 +152,18 @@ class SliceModel(BaseNNsightModel):
     stop: ValueTypes
     step: ValueTypes
 
+    @staticmethod
+    @memoized
+    def to_model(value: slice) -> Self:
+
+        return SliceModel(start=value.start, stop=value.stop, step=value.step)
+
     def deserialize(self, handler: DeserializeHandler) -> slice:
 
         return slice(
             try_deserialize(self.start, handler),
             try_deserialize(self.stop, handler),
-            try_deserialize(self.step, handler)
+            try_deserialize(self.step, handler),
         )
 
 
@@ -175,6 +185,11 @@ class ListModel(BaseNNsightModel):
 
     values: List[ValueTypes]
 
+    @staticmethod
+    def to_model(value: List) -> Self:
+
+        return ListModel(values=value)
+
     def deserialize(self, handler: DeserializeHandler) -> list:
         return [try_deserialize(value, handler) for value in self.values]
 
@@ -184,6 +199,11 @@ class TupleModel(BaseNNsightModel):
     type_name: Literal["TUPLE"] = "TUPLE"
 
     values: List[ValueTypes]
+
+    @staticmethod
+    def to_model(value: Tuple) -> Self:
+
+        return TupleModel(values=value)
 
     def deserialize(self, handler: DeserializeHandler) -> tuple:
         return tuple([try_deserialize(value, handler) for value in self.values])
@@ -195,8 +215,15 @@ class DictModel(BaseNNsightModel):
 
     values: Dict[str, ValueTypes]
 
+    @staticmethod
+    def to_model(value: Dict) -> Self:
+
+        return DictModel(values=value)
+
     def deserialize(self, handler: DeserializeHandler) -> dict:
-        return {key: try_deserialize(value, handler) for key, value in self.values.items()}
+        return {
+            key: try_deserialize(value, handler) for key, value in self.values.items()
+        }
 
 
 class FunctionWhitelistError(Exception):
@@ -208,8 +235,16 @@ class FunctionModel(BaseNNsightModel):
     type_name: Literal["FUNCTION"] = "FUNCTION"
 
     function_name: str
+    
+    @staticmethod
+    def to_model(value:FUNCTION):
+        
+        model = FunctionModel(function_name=get_function_name(value))
+        
+        FunctionModel.check_function_whitelist(model.function_name)
+        
+        return model
 
-    @field_validator("function_name")
     @classmethod
     def check_function_whitelist(cls, qualname: str) -> str:
         if qualname not in FUNCTIONS_WHITELIST:
@@ -220,6 +255,9 @@ class FunctionModel(BaseNNsightModel):
         return qualname
 
     def deserialize(self, handler: DeserializeHandler) -> FUNCTION:
+
+        FunctionModel.check_function_whitelist(self.function_name)
+
         return FUNCTIONS_WHITELIST[self.function_name]
 
 
@@ -227,232 +265,183 @@ class GraphModel(BaseNNsightModel):
 
     type_name: Literal["GRAPH"] = "GRAPH"
 
-    id: int
-    sequential: bool
-    nodes: Dict[str, Union["NodeModel", "NodeType"]]
+    # We have a reference to the real Graph in the pydantic to be used by optimization logic
+    graph: Graph = Field(exclude=True, default=None, validate_default=False)
+
+    nodes: List[Union[MemoReferenceModel, NodeType]]
+
+    @staticmethod
+    def to_model(value: Graph) -> Self:
+
+        return GraphModel(graph=value, nodes=value.nodes)
 
     def deserialize(self, handler: DeserializeHandler) -> Graph:
 
-        graph = Graph(validate=False, sequential=self.sequential, graph_id=self.id)
-
-        handler.graph = graph
-        handler.nodes = self.nodes
-
-        # To preserve order
-        nodes = {}
-
-        for node_name, node in self.nodes.items():
+        for node in self.nodes:
 
             node.deserialize(handler)
 
-            # To preserve order
-            nodes[node_name] = graph.nodes[node_name]
-
-        # To preserve order
-        graph.nodes = nodes
-
-        return graph
+        return handler.graph
 
 
-class TracerModel(BaseNNsightModel):
+class SubGraphModel(BaseNNsightModel):
 
-    type_name: Literal["TRACER"] = "TRACER"
+    type_name: Literal["SUBGRAPH"] = "SUBGRAPH"
 
-    kwargs: Dict[str, ValueTypes]
-    invoker_inputs: List[ValueTypes]
-    graph: Union[GraphModel, GraphType]
+    subset: List[int]
 
-    def deserialize(self, handler: DeserializeHandler) -> Tracer:
+    @staticmethod
+    def to_model(value: SubGraph) -> Self:
 
-        _graph = handler.graph
-        _nodes = handler.nodes
+        return SubGraphModel(subset=value.subset)
 
-        graph = self.graph.deserialize(handler)
+    def deserialize(self, handler: DeserializeHandler) -> Graph:
 
-        handler.graph = graph
-
-        kwargs = {key: try_deserialize(value, handler) for key, value in self.kwargs.items()}
-
-        invoker_inputs = [
-            try_deserialize(invoker_input, handler) for invoker_input in self.invoker_inputs
-        ]
-
-        tracer = Tracer(
-            None, handler.model, bridge=handler.bridge, graph=graph, **kwargs
-        )
-        tracer._invoker_inputs = invoker_inputs
-
-        handler.graph = _graph
-        handler.nodes = _nodes
-
-        return tracer
+        value = SubGraph(handler.graph, subset=self.subset)
+        
+        for node in value:
+            node.graph = value
+            
+        return value
 
 
-class IteratorModel(BaseNNsightModel):
+class InterventionGraphModel(SubGraphModel):
 
-    type_name: Literal["ITERATOR"] = "ITERATOR"
+    type_name: Literal["INTERVENTIONGRAPH"] = "INTERVENTIONGRAPH"
 
-    data: ValueTypes
+    @staticmethod
+    def to_model(value: InterventionGraph) -> Self:
 
-    graph: Union[GraphModel, GraphType]
+        return InterventionGraphModel(subset=value.subset)
 
-    def deserialize(self, handler: DeserializeHandler) -> Iterator:
-
-        _graph = handler.graph
-        _nodes = handler.nodes
-
-        graph = self.graph.deserialize(handler)
-
-        handler.graph = graph
-
-        data = try_deserialize(self.data, handler)
-
-        iterator = Iterator(data, None, bridge=handler.bridge, graph=graph)
-
-        handler.graph = _graph
-        handler.nodes = _nodes
-
-        return iterator
+    def deserialize(self, handler: DeserializeHandler) -> Graph:
+        value = InterventionGraph(handler.graph, model=handler.model, subset=self.subset)
+    
+        for node in value:
+            node.graph = value
+            
+        return value
 
 
-class SessionModel(BaseNNsightModel):
+class MemoReferenceModel(BaseNNsightModel):
 
-    type_name: Literal["SESSION"] = "SESSION"
+    type_name: Literal["REFERENCE"] = "REFERENCE"
 
-    graph: Union[GraphModel, GraphType]
+    id: int
 
-    def deserialize(self, handler: DeserializeHandler) -> Session:
+    def deserialize(self, handler: DeserializeHandler):
+        
+        value = try_deserialize(handler.memo[self.id], handler)
 
-        bridge = Bridge()
+        handler.memo[self.id] = value
 
-        handler.bridge = bridge
-
-        graph = self.graph.deserialize(handler)
-
-        bridge.add(graph)
-
-        session = Session(None, handler.model, bridge=bridge, graph=graph)
-
-        return session
+        return value
 
 
 ### Define Annotated types to convert objects to their custom Pydantic counterpart
 
 GraphType = Annotated[
     Graph,
-    AfterValidator(
-        lambda value: GraphModel(
-            id=value.id, sequential=value.sequential, nodes=value.nodes
-        )
-    ),
+    AfterValidator(GraphModel.to_model),
 ]
 
-TensorType = Annotated[
-    torch.Tensor,
-    AfterValidator(
-        lambda value: TensorModel(
-            values=value.tolist(), dtype=str(value.dtype).split(".")[-1]
-        )
-    ),
+SubGraphType = Annotated[
+    SubGraph,
+    AfterValidator(SubGraphModel.to_model),
 ]
+
+InterventionGraphType = Annotated[
+    InterventionGraph,
+    AfterValidator(InterventionGraphModel.to_model),
+]
+
+TensorType = Annotated[torch.Tensor, AfterValidator(TensorModel.to_model)]
 
 SliceType = Annotated[
     slice,
-    AfterValidator(
-        lambda value: SliceModel(start=value.start, stop=value.stop, step=value.step)
-    ),
+    AfterValidator(SliceModel.to_model),
 ]
 
 EllipsisType = Annotated[
     type(...),  # It will be better to use EllipsisType, but it requires python>=3.10
-    AfterValidator(lambda value: EllipsisModel()),
+    AfterValidator(lambda _: EllipsisModel()),
 ]
 
 
-ListType = Annotated[list, AfterValidator(lambda value: ListModel(values=value))]
+ListType = Annotated[list, AfterValidator(ListModel.to_model)]
 
 TupleType = Annotated[
-    tuple, Strict(), AfterValidator(lambda value: TupleModel(values=list(value)))
+    tuple,
+    Strict(),
+    AfterValidator(TupleModel.to_model),
 ]
 
-DictType = Annotated[dict, AfterValidator(lambda value: DictModel(values=value))]
+DictType = Annotated[dict, AfterValidator(DictModel.to_model)]
 
 FunctionType = Annotated[
     FUNCTION,
-    AfterValidator(lambda value: FunctionModel(function_name=get_function_name(value))),
-]
-
-NodeReferenceType = Annotated[
-    Node, AfterValidator(lambda value: NodeModel.Reference(name=value.name))
+    AfterValidator(FunctionModel.to_model),
 ]
 
 NodeType = Annotated[
     Node,
-    AfterValidator(
-        lambda value: NodeModel(
-            name=value.name,
-            target=value.target,
-            args=value.args,
-            kwargs=value.kwargs,
-            condition=value.cond_dependency,
-        )
-    ),
+    AfterValidator(NodeModel.to_model),
 ]
 
-TracerType = Annotated[
-    Tracer,
-    AfterValidator(
-        lambda value: TracerModel(
-            kwargs=value._kwargs,
-            invoker_inputs=value._invoker_inputs,
-            graph=value.graph,
-        )
-    ),
-]
 
-IteratorType = Annotated[
-    Iterator,
-    AfterValidator(lambda value: IteratorModel(graph=value.graph, data=value.data)),
-]
+def check_memo(object: Any):
 
-SessionType = Annotated[
-    Session,
-    AfterValidator(lambda value: SessionModel(graph=value.graph)),
-]
+    _id = id(object)
+
+    if _id in MEMO:
+
+        return MemoReferenceModel(id=_id)
+
+    raise ValueError()
+
+
+MemoType = Annotated[object, BeforeValidator(check_memo)]
 
 ### Register all custom Pydantic objects to convert objects to
-TOTYPES = Union[
-    TracerModel,
-    IteratorModel,
-    SessionModel,
-    NodeModel.Reference,
-    SliceModel,
-    TensorModel,
-    TupleModel,
-    ListModel,
-    DictModel,
-    EllipsisModel,
+TOTYPES = Annotated[
+    Union[
+        MemoReferenceModel,
+        NodeModel,
+        SliceModel,
+        TensorModel,
+        TupleModel,
+        ListModel,
+        DictModel,
+        FunctionModel,
+        EllipsisModel,
+        InterventionGraphModel,
+        SubGraphModel,
+        GraphModel,
+    ],
+    Field(discriminator="type_name"),
 ]
 ### Register all Annotated types objects to convert objects from
-FROMTYPES = Union[
-    TracerType,
-    IteratorType,
-    SessionType,
-    NodeReferenceType,
-    SliceType,
-    TensorType,
-    TupleType,
-    ListType,
-    DictType,
-    EllipsisType,
+FROMTYPES = Annotated[
+    Union[
+        MemoType,
+        NodeType,
+        InterventionGraphType,
+        SubGraphType,
+        GraphType,
+        FunctionType,
+        SliceType,
+        TensorType,
+        TupleType,
+        ListType,
+        DictType,
+        EllipsisType,
+    ],
+    Field(union_mode="left_to_right"),
 ]
 
 ### Final registration
 ValueTypes = Union[
     PRIMITIVE,
-    Annotated[
-        TOTYPES,
-        Field(discriminator="type_name"),
-    ],
+    TOTYPES,
     FROMTYPES,
 ]
