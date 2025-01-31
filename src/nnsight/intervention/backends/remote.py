@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
 import io
 import sys
+import time
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 import msgspec
@@ -11,7 +12,7 @@ import socketio
 import torch
 from tqdm import tqdm
 
-from ... import CONFIG, remote_logger
+from ... import __IPYTHON__, CONFIG, remote_logger
 from ...schema.request import RequestModel, StreamValueModel
 from ...schema.response import ResponseModel
 from ...schema.result import RESULT, ResultModel
@@ -19,7 +20,6 @@ from ...tracing.backends import Backend
 from ...tracing.graph import Graph
 from ...util import NNsightError
 from ..contexts.local import LocalContext, RemoteContext
-from ... import __IPYTHON__
 
 
 class RemoteBackend(Backend):
@@ -64,7 +64,7 @@ class RemoteBackend(Backend):
             "format": self.format,
             "zlib": str(self.zlib),
             "ndif-api-key": self.api_key,
-            "sent-timestamp": str(datetime.now().timestamp())
+            "sent-timestamp": str(time.time()),
         }
 
         return data, headers
@@ -80,11 +80,13 @@ class RemoteBackend(Backend):
 
             # Otherwise we are getting the status / result of the existing job.
             result = self.non_blocking_request(graph)
-            
-        if result is not None:  
+
+        if result is not None:
             ResultModel.inject(graph, result)
 
-    def handle_response(self, response: ResponseModel, graph:Optional[Graph] = None) -> Optional[RESULT]:
+    def handle_response(
+        self, response: ResponseModel, graph: Optional[Graph] = None
+    ) -> Optional[RESULT]:
         """Handles incoming response data.
 
         Logs the response object.
@@ -125,26 +127,34 @@ class RemoteBackend(Backend):
             # First item is the streamed value from the remote service.
 
             index, dependencies = response.data
-                        
+
             ResultModel.inject(graph, dependencies)
 
             node = graph.nodes[index]
-            
+
             node.execute()
 
         elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
             if graph.debug:
-                error_node = graph.nodes[response.data['node_id']]
+                error_node = graph.nodes[response.data["node_id"]]
                 try:
-                    raise NNsightError(response.data['err_message'], error_node.index, response.data['traceback'])
+                    raise NNsightError(
+                        response.data["err_message"],
+                        error_node.index,
+                        response.data["traceback"],
+                    )
                 except NNsightError as nns_err:
-                    if __IPYTHON__: # in IPython the traceback content is rendered by the Error itself
+                    if (
+                        __IPYTHON__
+                    ):  # in IPython the traceback content is rendered by the Error itself
                         # add the error node traceback to the the error's traceback
                         nns_err.traceback_content += "\nDuring handling of the above exception, another exception occurred:\n\n"
-                        nns_err.traceback_content += error_node.meta_data['traceback']
-                    else: # else we print the traceback manually
+                        nns_err.traceback_content += error_node.meta_data["traceback"]
+                    else:  # else we print the traceback manually
                         print(f"\n{response.data['traceback']}")
-                        print("During handling of the above exception, another exception occurred:\n")
+                        print(
+                            "During handling of the above exception, another exception occurred:\n"
+                        )
                         print(f"{error_node.meta_data['traceback']}")
 
                     sys.tracebacklimit = 0
@@ -155,8 +165,10 @@ class RemoteBackend(Backend):
             else:
                 print(f"\n{response.data['traceback']}")
                 raise SystemExit("Remote exception.")
-            
-    def submit_request(self, data: bytes, headers: Dict[str, Any]) -> Optional[ResponseModel]:
+
+    def submit_request(
+        self, data: bytes, headers: Dict[str, Any]
+    ) -> Optional[ResponseModel]:
         """Sends request to the remote endpoint and handles the response object.
 
         Raises:
@@ -181,7 +193,7 @@ class RemoteBackend(Backend):
             response = ResponseModel(**response.json())
 
             self.handle_response(response)
-            
+
             return response
 
         else:
@@ -271,21 +283,19 @@ class RemoteBackend(Backend):
                 transports=["websocket"],
                 wait_timeout=10,
             )
-            
+
             remote_graph = preprocess(graph)
 
             data, headers = self.request(remote_graph)
-            
-            headers['session_id'] = sio.sid
-            
+
+            headers["session_id"] = sio.sid
+
             # Submit request via
             response = self.submit_request(data, headers)
 
             LocalContext.set(
-                lambda *args: self.stream_send(
-                    *args, job_id=response.id, sio=sio
-            ))
-      
+                lambda *args: self.stream_send(*args, job_id=response.id, sio=sio)
+            )
 
             try:
                 # Loop until
@@ -308,7 +318,9 @@ class RemoteBackend(Backend):
             finally:
                 LocalContext.set(None)
 
-    def stream_send(self, values: Dict[int, Any], job_id: str, sio: socketio.SimpleClient):
+    def stream_send(
+        self, values: Dict[int, Any], job_id: str, sio: socketio.SimpleClient
+    ):
         """Upload some value to the remote service for some job id.
 
         Args:
@@ -317,7 +329,10 @@ class RemoteBackend(Backend):
             sio (socketio.SimpleClient): Connected websocket client.
         """
 
-        sio.emit("stream_upload", data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id))
+        sio.emit(
+            "stream_upload",
+            data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id),
+        )
 
     def non_blocking_request(self, graph: Graph):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
@@ -330,9 +345,8 @@ class RemoteBackend(Backend):
             request (RequestModel): Request if submitting a new request. Defaults to None
         """
 
-
         if self.job_id is None:
-            
+
             data, headers = self.request(graph)
 
             # Submit request via
@@ -353,7 +367,7 @@ class RemoteBackend(Backend):
                     CONFIG.API.JOB_ID = None
 
                     CONFIG.save()
-                    
+
                     return result
 
             except Exception as e:
@@ -364,15 +378,15 @@ class RemoteBackend(Backend):
 
                 raise e
 
+
 def preprocess(graph: Graph):
-        
+
     new_graph = graph.copy()
-    
+
     for node in new_graph.nodes:
-        
+
         if node.target is LocalContext:
-            
-            graph.nodes[node.index].kwargs['uploads'] = RemoteContext.from_local(node)
-     
+
+            graph.nodes[node.index].kwargs["uploads"] = RemoteContext.from_local(node)
+
     return new_graph
-            
