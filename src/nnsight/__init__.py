@@ -79,6 +79,22 @@ DEFAULT_PATCHER.add(
     Patch(FakeTensor, fake_tensor_new_wrapper(FakeTensor.__new__), "__new__")
 )
 
+def autoamp_init_wrapper(fn):
+    
+    @wraps(fn)
+    def inner(self, device_type, dtype=None, **kwargs):
+        
+        if device_type == "meta":
+            dtype = torch.get_autocast_cpu_dtype()
+            
+        return fn(self, device_type, dtype, **kwargs)
+    
+    return inner
+
+DEFAULT_PATCHER.add(
+    Patch(torch.autocast, autoamp_init_wrapper(torch.autocast.__init__), "__init__")
+)
+
 DEFAULT_PATCHER.__enter__()
 
 from .intervention.contexts import GlobalInterventionTracingContext
