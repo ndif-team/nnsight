@@ -10,6 +10,7 @@
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 import os
 from functools import wraps
+
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Dict, Union
 
@@ -36,8 +37,8 @@ with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
 
 
-from .intervention import Envoy, NNsight
 from .logger import logger, remote_logger
+from .intervention import Envoy, NNsight
 from .modeling.language import LanguageModel
 
 logger.disabled = not CONFIG.APP.LOGGING
