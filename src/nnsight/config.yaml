@@ -8,6 +8,6 @@ API:
 APP:
   DEBUG: true
   FRAME_INJECTION: true
-  CONTROL_FLOW_HACKS: true 
+  CONTROL_FLOW_HANDLING: true 
   LOGGING: false
   REMOTE_LOGGING: true

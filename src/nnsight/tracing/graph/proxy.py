@@ -283,7 +283,7 @@ class Proxy:
 
     def __iter__(self) -> Iterator[Self]:
 
-        if not CONFIG.APP.CONTROL_FLOW_HACKS:
+        if not CONFIG.APP.CONTROL_FLOW_HANDLING:
             raise Exception(
                 'Iteration control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False'
             )
@@ -294,7 +294,7 @@ class Proxy:
 
     def __bool__(self) -> Self:
 
-        if not CONFIG.APP.CONTROL_FLOW_HACKS:
+        if not CONFIG.APP.CONTROL_FLOW_HANDLING:
             raise Exception(
                 'Conditional control flow encountered but "CONFIG.APP.CONTROL_FLOW_HACKS" is set to False'
             )

@@ -16,7 +16,7 @@ class AppConfigModel(BaseModel):
     LOGGING: bool = False
     REMOTE_LOGGING: bool = True
     DEBUG: bool = True
-    CONTROL_FLOW_HACKS:bool = True
+    CONTROL_FLOW_HANDLING:bool = True
     FRAME_INJECTION:bool = True
 
 class ConfigModel(BaseModel):
