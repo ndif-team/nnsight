@@ -13,9 +13,11 @@ class MetaMixin(LoadableMixin):
         self, *args, dispatch: bool = False, meta_buffers: bool = True, rename: Optional[Dict[str,str]] = None, **kwargs
     ) -> None:
 
-        self.dispatched = dispatch
+        self.dispatched = False
         
         if isinstance(args[0], torch.nn.Module) or dispatch:
+            
+            self.dispatched = True
 
             super().__init__(*args, **kwargs)
 
