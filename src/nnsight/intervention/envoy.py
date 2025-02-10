@@ -645,8 +645,6 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         attr = getattr(self._module, key)
  
         if self._tracing() and isinstance(attr, torch.Tensor):
-            # print("Hi ", key)
-            # print(self._tracer)
             attr_proxy = protocols.ParameterProtocol.add(self._tracer.graph, self._path, key)
 
             return attr_proxy
