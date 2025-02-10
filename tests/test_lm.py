@@ -421,3 +421,56 @@ def test_input_setting(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     prediction_2 = gpt2.tokenizer.decode(tokens_out_2[0][-1])
 
     assert prediction_1 == prediction_2
+
+
+def test_parameter_protocol(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    og_weights = gpt2.transformer.h[0].mlp.c_proj.weight
+    og_bias = gpt2.transformer.h[0].mlp.c_proj.bias
+
+    with gpt2.trace(MSG_prompt, backend=AssertSavedLenBackend(2)):
+        cl_weights = gpt2.transformer.h[0].mlp.c_proj.weight.save()
+        cl_bias = gpt2.transformer.h[0].mlp.c_proj.bias.save()
+
+    assert not (cl_weights is og_weights)
+    assert not (cl_bias is og_bias)
+
+    assert torch.equal(og_weights, cl_weights)
+    assert torch.equal(og_bias, cl_bias)
+
+
+def test_parameter_protocol_meta(MSG_prompt: str):
+    model = nnsight.LanguageModel("openai-community/gpt2")
+
+    with model.trace(MSG_prompt, backend=AssertSavedLenBackend(2)):
+        weights = model.transformer.h[0].mlp.c_proj.weight.save()
+        bias = model.transformer.h[0].mlp.c_proj.bias.save()
+
+    assert weights.device.type != "meta"
+    assert bias.device.type != "bias"
+
+
+def test_parameter_protocol_result(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(MSG_prompt, backend=AssertSavedLenBackend(2)):
+        weights = gpt2.transformer.h[0].mlp.c_proj.weight
+        bias = gpt2.transformer.h[0].mlp.c_proj.bias
+
+        c_proj_in = gpt2.transformer.h[0].mlp.c_proj.input
+
+        c_proj_out_2 = torch.addmm(bias, c_proj_in.view(-1, c_proj_in.size(-1)), weights).save()
+
+        c_proj_out = gpt2.transformer.h[0].mlp.c_proj.output[0].save()
+
+    assert torch.equal(c_proj_out_2, c_proj_out)
+
+
+def test_parameter_protocol_safety(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(MSG_prompt, backend=AssertSavedLenBackend(1)):
+        hs_1 = gpt2.transformer.h[0].mlp.c_proj.output[0].save()
+
+    with gpt2.trace(MSG_prompt, backend=AssertSavedLenBackend(0)):
+        gpt2.transformer.h[0].mlp.c_proj.weight[:] = 0
+
+    with gpt2.trace(MSG_prompt, backend=AssertSavedLenBackend(1)):
+        hs_2 = gpt2.transformer.h[0].mlp.c_proj.output[0].save()
+
+    assert torch.equal(hs_1, hs_2)
