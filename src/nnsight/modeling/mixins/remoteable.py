@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 from typing_extensions import Self
 
@@ -15,8 +15,8 @@ class RemoteableMixin(MetaMixin):
     def trace(
         self,
         *inputs: Any,
-        method: str | None = None,
-        backend: Backend | str | None = None,
+        method: Union[str, None] = None,
+        backend: Union[Backend, str, None] = None,
         remote: bool = False,
         blocking: bool = True,
         trace: bool = True,
@@ -46,7 +46,7 @@ class RemoteableMixin(MetaMixin):
 
     def session(
         self,
-        backend: Backend | str = None,
+        backend: Union[Backend, str] = None,
         remote: bool = False,
         blocking: bool = True,
         **kwargs,

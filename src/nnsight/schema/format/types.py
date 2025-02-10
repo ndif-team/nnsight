@@ -61,7 +61,7 @@ class BaseNNsightModel(BaseModel):
         raise NotImplementedError()
 
 
-def try_deserialize(value: BaseNNsightModel | Any, handler: DeserializeHandler):
+def try_deserialize(value: Union[BaseNNsightModel, Any], handler: DeserializeHandler):
 
     if isinstance(value, BaseNNsightModel):
 

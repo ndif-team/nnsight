@@ -7,7 +7,7 @@ from inspect import (
     ismethod,
     ismethoddescriptor,
 )
-from typing import Callable
+from typing import Callable, Union
 
 import einops
 import torch
@@ -35,7 +35,7 @@ def get_function_name(fn, module_name=None):
     return f"{module_name}.{fn.__qualname__}"
 
 
-def update_function(function: str | Callable, new_function: Callable):
+def update_function(function: Union[str,  Callable], new_function: Callable):
 
     if not isinstance(function, str):
 
