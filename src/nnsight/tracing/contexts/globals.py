@@ -6,7 +6,7 @@ from functools import wraps
 from types import FunctionType, MethodType
 from typing import Any, Type, Union
 
-from ... import util
+from ... import util, CONFIG
 from ..graph import Graph
 from . import Tracer
 
@@ -25,7 +25,7 @@ def global_patch_class(cls: type) -> util.Patch:
 
     @wraps(fn)
     def inner(cls, *args, **kwargs):
-        
+
         if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
             return cls(*args, **kwargs)
 
@@ -38,7 +38,7 @@ def global_patch_fn(fn: FunctionType) -> util.Patch:
 
     @wraps(fn)
     def inner(*args, **kwargs):
-        
+
         if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
             return fn(*args, **kwargs)
 
@@ -46,20 +46,21 @@ def global_patch_fn(fn: FunctionType) -> util.Patch:
 
     return util.Patch(inspect.getmodule(fn), inner, fn.__name__)
 
+
 def global_patch_method(cls: type, fn: MethodType) -> None:
 
     @wraps(fn)
     def inner(*args, **kwargs):
-        
+
         if not GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
             return fn(*args, **kwargs)
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.apply(fn, *args, **kwargs)
-    
+
     patch = util.Patch(cls, inner, fn.__name__)
-    
+
     GlobalTracingContext.PATCHER.add(patch)
-    
+
 
 def global_patch(obj: Union[FunctionType, Type]):
 
@@ -72,7 +73,8 @@ def global_patch(obj: Union[FunctionType, Type]):
         patch = global_patch_fn(obj)
 
     GlobalTracingContext.PATCHER.add(patch)
-    
+
+
 class GlobalTracingContext(Tracer):
     """The Global Tracing Context handles adding tracing operations globally without reference to a given `GraphBasedContext`.
     There should only be one of these and that is `GlobalTracingContext.GLOBAL_TRACING_CONTEXT`.
@@ -87,13 +89,17 @@ class GlobalTracingContext(Tracer):
 
         def __enter__(self) -> Any:
 
-            GlobalTracingContext.PATCHER.__exit__(None, None, None)
+            if CONFIG.APP.GLOBAL_TRACING:
+
+                GlobalTracingContext.PATCHER.__exit__(None, None, None)
 
             return self
 
         def __exit__(self, exc_type, exc_val, traceback):
 
-            GlobalTracingContext.PATCHER.__enter__()
+            if CONFIG.APP.GLOBAL_TRACING:
+
+                GlobalTracingContext.PATCHER.__enter__()
 
             if isinstance(exc_val, BaseException):
 
@@ -121,11 +127,13 @@ class GlobalTracingContext(Tracer):
             bool: True if registering ws successful, False otherwise.
         """
 
-        if GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
+        if CONFIG.APP.GLOBAL_TRACING:
 
-            return False
+            if GlobalTracingContext.GLOBAL_TRACING_CONTEXT:
 
-        GlobalTracingContext.register(graph_based_context)
+                return False
+
+            GlobalTracingContext.register(graph_based_context)
 
         return True
 
@@ -140,15 +148,18 @@ class GlobalTracingContext(Tracer):
         Returns:
             bool: True if deregistering ws successful, False otherwise.
         """
-        if (
-            not GlobalTracingContext.GLOBAL_TRACING_CONTEXT
-            or graph_based_context.graph
-            is not GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph
-        ):
 
-            return False
-        
-        GlobalTracingContext.deregister()
+        if CONFIG.APP.GLOBAL_TRACING:
+
+            if (
+                not GlobalTracingContext.GLOBAL_TRACING_CONTEXT
+                or graph_based_context.graph
+                is not GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph
+            ):
+
+                return False
+
+            GlobalTracingContext.deregister()
 
         return True
 
@@ -184,5 +195,6 @@ class GlobalTracingContext(Tracer):
         """True if there is a `GraphBasedContext` registered globally. False otherwise."""
 
         return GlobalTracingContext.GLOBAL_TRACING_CONTEXT.graph is not None
+
 
 GlobalTracingContext.GLOBAL_TRACING_CONTEXT = GlobalTracingContext()
