@@ -12,7 +12,7 @@ from typing_extensions import Self
 
 from . import protocols
 from .backends import EditingBackend
-from .contexts import InterventionTracer
+from .contexts import InterleavingTracer
 from .graph import InterventionNodeType, InterventionProxyType
 
 
@@ -53,7 +53,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self._output_stack: List[Optional[InterventionProxyType]] = [None]
         self._input_stack: List[Optional[InterventionProxyType]] = [None]
 
-        self._tracer: InterventionTracer = None
+        self._tracer: InterleavingTracer = None
 
         self._children: List[Envoy] = []
 
@@ -408,7 +408,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         # Update the class on the instance
         self.__class__ = new_cls
 
-    def _set_tracer(self, tracer: InterventionTracer, propagate=True):
+    def _set_tracer(self, tracer: InterleavingTracer, propagate=True):
         """Set tracer object on Envoy.
 
         Args:
