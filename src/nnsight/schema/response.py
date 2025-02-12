@@ -31,7 +31,6 @@ class ResponseModel(BaseModel):
 
     description: Optional[str] = ""
     data: Optional[Union[RESULT, Any]] = None
-    received: Optional[datetime] = None
     session_id: Optional[str] = None
 
     def __str__(self) -> str:
