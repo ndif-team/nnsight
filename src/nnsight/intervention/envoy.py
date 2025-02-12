@@ -12,7 +12,7 @@ from typing_extensions import Self
 
 from . import protocols
 from .backends import EditingBackend
-from .contexts import InterventionTracer
+from .contexts import InterleavingTracer
 from .graph import InterventionNodeType, InterventionProxyType
 
 
@@ -53,7 +53,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self._output_stack: List[Optional[InterventionProxyType]] = [None]
         self._input_stack: List[Optional[InterventionProxyType]] = [None]
 
-        self._tracer: InterventionTracer = None
+        self._tracer: InterleavingTracer = None
 
         self._children: List[Envoy] = []
 
@@ -63,7 +63,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         )
 
         # Recurse into PyTorch module tree.
-        for name, module in self._module.named_children():
+        for name, module in list(self._module.named_children()):
 
             setattr(self, name, module)
 
@@ -85,7 +85,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             hook = True
 
         return protocols.ApplyModuleProtocol.add(
-            self._tracer.graph, self.path, *args, hook=hook, **kwargs
+            self._tracer.graph, self._path, *args, hook=hook, **kwargs
         )
 
     @property
@@ -357,10 +357,12 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         envoy = Envoy(module, module_path=module_path, alias_path=alias_path, rename=self._rename)
 
         self._children.append(envoy)
+        
+        setattr(self._module, name, module)
 
         # If the module already has a sub-module named 'input' or 'output',
         # mount the proxy access to 'nns_input' or 'nns_output instead.
-        if hasattr(Envoy, name):
+        if hasattr(envoy, name):
 
             self._handle_overloaded_mount(envoy, name)
 
@@ -406,7 +408,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         # Update the class on the instance
         self.__class__ = new_cls
 
-    def _set_tracer(self, tracer: InterventionTracer, propagate=True):
+    def _set_tracer(self, tracer: InterleavingTracer, propagate=True):
         """Set tracer object on Envoy.
 
         Args:
@@ -646,9 +648,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
-        if key != "_module" and isinstance(value, torch.nn.Module):
-
-            setattr(self._module, key, value)
+        if key != "_module" and isinstance(value, torch.nn.Module):      
 
             self._add_envoy(value, key)
 

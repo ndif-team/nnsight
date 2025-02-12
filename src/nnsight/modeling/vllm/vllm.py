@@ -190,11 +190,11 @@ class VLLM(RemoteableMixin):
 
     def _batch(
         self,
-        batched_inputs: Tuple[Tuple[Any] | Dict[str, Any]] | None,
+        batched_inputs: Union[Tuple[Tuple[Any], Dict[str, Any]], None],
         prompts: List[str],
         params: List[NNsightSamplingParams],
         **kwargs,
-    ) -> Tuple[Tuple[Any] | Dict[str, Any]]:
+    ) -> Tuple[Union[Tuple[Any], Dict[str, Any]]]:
 
         if batched_inputs is None:
             batched_inputs = ([], []), {"invoker_group": 0}
