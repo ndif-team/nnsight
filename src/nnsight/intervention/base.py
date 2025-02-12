@@ -336,6 +336,8 @@ class NNsight:
         elif isinstance(fn, str):
             fn = getattr(self, fn)
 
+        interleaver.graph.execute()
+
         with interleaver:
             return fn(*args, **kwargs)
 

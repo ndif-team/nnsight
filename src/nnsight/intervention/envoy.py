@@ -633,17 +633,25 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
         return len(self._module)
 
-    def __getattr__(self, key: str) -> Envoy[InterventionProxyType, InterventionNodeType]:
-        """Wrapper method for underlying module's attributes.
+    def __getattr__(self, key: str) -> Union[InterventionProxyType, Any]:
+        """Wrapper method for underlying module's attributes. 
+        If the attribute is a tensor (e.g. weights or bias) and accessed during tracing, then an InterventionProxy is created.
 
         Args:
             key (str): Key.
 
         Returns:
-            Any: Attribute.
+            Union[InterventionProxyType, Any]: Attribute.
         """
 
-        return getattr(self._module, key)
+        attr = getattr(self._module, key)
+ 
+        if self._tracing() and isinstance(attr, torch.Tensor):
+            attr_proxy = protocols.ParameterProtocol.add(self._tracer.graph, self._path, key)
+
+            return attr_proxy
+
+        return attr
 
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
