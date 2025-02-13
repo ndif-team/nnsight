@@ -12,7 +12,7 @@ from typing_extensions import Self
 
 from . import protocols
 from .backends import EditingBackend
-from .contexts import InterventionTracer
+from .contexts import InterleavingTracer
 from .graph import InterventionNodeType, InterventionProxyType
 
 
@@ -36,13 +36,19 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         _tracer (nnsight.context.Tracer.Tracer): Object which adds this Envoy's module's output and input proxies to an intervention graph. Must be set on Envoys objects manually by the Tracer.
     """
 
-    def __init__(self, module: torch.nn.Module, module_path: str = "", alias_path:Optional[str] = None, rename: Optional[Dict[str,str]] = None):
+    def __init__(
+        self,
+        module: torch.nn.Module,
+        module_path: str = "",
+        alias_path: Optional[str] = None,
+        rename: Optional[Dict[str, str]] = None,
+    ):
 
         self.path = alias_path or module_path
         self._path = module_path
 
         self._module = module
-        
+
         self._rename = rename
 
         self._iteration_stack = [0]
@@ -53,7 +59,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self._output_stack: List[Optional[InterventionProxyType]] = [None]
         self._input_stack: List[Optional[InterventionProxyType]] = [None]
 
-        self._tracer: InterventionTracer = None
+        self._tracer: InterleavingTracer = None
 
         self._children: List[Envoy] = []
 
@@ -125,7 +131,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
                     module_path,
                     self._tracer._invoker_group,
                     iteration,
-                    fake_value=fake_output,  
+                    fake_value=fake_output,
                 )
 
         self._output_stack.append(output)
@@ -183,7 +189,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
                     module_path,
                     self._tracer._invoker_group,
                     iteration,
-                    fake_value=fake_input,  
+                    fake_value=fake_input,
                 )
 
         self._input_stack.append(input)
@@ -337,7 +343,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             module (torch.nn.Module): Module to create Envoy for.
             name (str): name of envoy/attribute.
         """
-                
+
         alias_path = None
         
         module_path = f"{self._path}.{name}"
@@ -351,12 +357,12 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         envoy = Envoy(module, module_path=module_path, alias_path=alias_path, rename=self._rename)
 
         self._children.append(envoy)
-        
+
         setattr(self._module, name, module)
 
         # If the module already has a sub-module named 'input' or 'output',
         # mount the proxy access to 'nns_input' or 'nns_output instead.
-        if hasattr(envoy, name):
+        if hasattr(Envoy, name):
 
             self._handle_overloaded_mount(envoy, name)
 
@@ -402,7 +408,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         # Update the class on the instance
         self.__class__ = new_cls
 
-    def _set_tracer(self, tracer: InterventionTracer, propagate=True):
+    def _set_tracer(self, tracer: InterleavingTracer, propagate=True):
         """Set tracer object on Envoy.
 
         Args:
@@ -449,7 +455,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
     def _set_iteration(
         self, iteration: Optional[int] = None, propagate: bool = True
     ) -> None:
-    
+
         if iteration is not None:
             self._iteration_stack.append(iteration)
             self._output_stack.append(None)
@@ -606,7 +612,9 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
         return iter(self._children)
 
-    def __getitem__(self, key: int) -> Envoy[InterventionProxyType, InterventionNodeType]:
+    def __getitem__(
+        self, key: int
+    ) -> Envoy[InterventionProxyType, InterventionNodeType]:
         """Wrapper method for underlying ModuleList getitem.
 
         Args:
@@ -627,22 +635,36 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
         return len(self._module)
 
-    def __getattr__(self, key: str) -> Envoy[InterventionProxyType, InterventionNodeType]:
+    def __getattr__(
+        self, key: str
+    ) -> Union[
+        Envoy[InterventionProxyType, InterventionNodeType], InterventionProxyType, Any
+    ]:
         """Wrapper method for underlying module's attributes.
+        If the attribute is a tensor (e.g. weights or bias) and accessed during tracing, then an InterventionProxy is created.
 
         Args:
             key (str): Key.
 
         Returns:
-            Any: Attribute.
+            Union[InterventionProxyType, Any]: Attribute.
         """
 
-        return getattr(self._module, key)
+        attr = getattr(self._module, key)
+
+        if self._tracing() and isinstance(attr, torch.Tensor):
+            attr_proxy = protocols.ParameterProtocol.add(
+                self._tracer.graph, self._path, key
+            )
+
+            return attr_proxy
+
+        return attr
 
     def __setattr__(self, key: Any, value: Any) -> None:
         """Overload setattr to create and set an Envoy when trying to set a torch Module."""
 
-        if key != "_module" and isinstance(value, torch.nn.Module):      
+        if key != "_module" and isinstance(value, torch.nn.Module):
 
             self._add_envoy(value, key)
 

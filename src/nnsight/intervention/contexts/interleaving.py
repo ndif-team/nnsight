@@ -153,9 +153,7 @@ class InterleavingTracer(InterventionTracer):
         graph.compile()
 
         graph.reset()
-
-        graph.execute()
-                
+        
         interleaver = Interleaver(graph, batch_groups=batch_groups)
         
         graph.model.interleave(interleaver, *invoker_args, fn=method,**kwargs, **invoker_kwargs)
