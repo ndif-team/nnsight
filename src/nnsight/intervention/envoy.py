@@ -340,20 +340,14 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
                 
         alias_path = None
         
-        module_path = f"{self.path}.{name}"
+        module_path = f"{self._path}.{name}"
         
-        if self._rename is not None:
+        if self._rename is not None and name in self._rename:
             
-            for key, value in self._rename.items():
-                
-                if name == key:
-                                    
-                    name = value
-                    
-                    alias_path = f"{self.path}.{name}"
-                    
-                    break
-
+            name = self._rename[name]
+                  
+            alias_path = f"{self.path}.{name}"
+            
         envoy = Envoy(module, module_path=module_path, alias_path=alias_path, rename=self._rename)
 
         self._children.append(envoy)
