@@ -4,6 +4,8 @@ from typing import Optional
 import yaml
 from pydantic import BaseModel
 
+from ..logger import remote_logger
+
 
 class ApiConfigModel(BaseModel):
     HOST: str = "ndif.dev"
@@ -21,6 +23,16 @@ class AppConfigModel(BaseModel):
     CONTROL_FLOW_HANDLING: bool = True
     FRAME_INJECTION: bool = True
     GLOBAL_TRACING: bool = True
+
+    def __setattr__(self, name, value):
+        if name == "REMOTE_LOGGING":
+            self.on_remote_logging_change(value)
+        super().__setattr__(name, value)
+
+    def on_remote_logging_change(self, value: bool):
+        if value != self.REMOTE_LOGGING:
+            remote_logger.disabled = (not value)
+        self.__dict__["REMOTE_LOGGING"] = value
 
 
 class ConfigModel(BaseModel):
