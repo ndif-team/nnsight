@@ -10,7 +10,7 @@ import msgspec
 import requests
 import socketio
 import torch
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from ... import __IPYTHON__, CONFIG, remote_logger
 from ...schema.request import RequestModel, StreamValueModel
