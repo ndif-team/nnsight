@@ -295,7 +295,7 @@ class LanguageModel(RemoteableMixin):
         inputs = inputs.to(self.device)
 
         return self._model(
-            **inputs,
+            input_ids=inputs["input_ids"], # Fix because of stupid things
             **kwargs,
         )
 
