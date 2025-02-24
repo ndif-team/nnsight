@@ -44,6 +44,33 @@ from .modeling.language import LanguageModel
 logger.disabled = not CONFIG.APP.LOGGING
 remote_logger.disabled = not CONFIG.APP.REMOTE_LOGGING
 
+import requests
+def ndif_status():
+
+    try:
+        ping_response = requests.get("http://" + CONFIG.API.HOST + "/ping")
+
+        if ping_response.status_code == 200:
+            response = requests.get("http://" + CONFIG.API.HOST + "/stats")
+
+            if response.status_code == 200:
+                data = [model_info["repo_id"] for model_info in response.json().values()]
+                
+                if len(data) == 0:
+                    print("⚠️ NDIF is up, but no models are deployed!")
+                else:
+                    print("✅ NDIF is up!\n\n" + "\n".join(f"- `{model}`" for model in data))
+            else:
+                print("Response Status: ", response.status_code)
+                raise Exception("🚫 NDIF is down!")
+        else:
+            print("Response Status: ", ping_response.status_code)
+            raise Exception("🚫 Failed to reach NDIF. It might be down or unreachable.")
+        
+    except Exception as e:
+        print(e)
+
+
 # Below do default patching:
 DEFAULT_PATCHER = Patcher()
 
