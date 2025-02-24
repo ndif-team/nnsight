@@ -60,6 +60,8 @@ def ndif_status():
                     print("⚠️ NDIF is up, but no models are deployed!")
                 else:
                     print("✅ NDIF is up!\n\n" + "\n".join(f"- `{model}`" for model in data))
+
+                return data
             else:
                 print("Response Status: ", response.status_code)
                 raise Exception("🚫 NDIF is down!")
