@@ -12,7 +12,7 @@ import socketio
 import torch
 from tqdm.auto import tqdm
 
-from ... import __IPYTHON__, CONFIG, remote_logger
+from ... import __IPYTHON__, __version__, CONFIG, remote_logger
 from ...schema.request import RequestModel, StreamValueModel
 from ...schema.response import ResponseModel
 from ...schema.result import RESULT, ResultModel
@@ -54,6 +54,7 @@ class RemoteBackend(Backend):
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
+        self.version = __version__
 
     def request(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
 
@@ -65,6 +66,7 @@ class RemoteBackend(Backend):
             "zlib": str(self.zlib),
             "ndif-api-key": self.api_key,
             "sent-timestamp": str(time.time()),
+            "version": self.version,
         }
 
         return data, headers
@@ -197,7 +199,10 @@ class RemoteBackend(Backend):
             return response
 
         else:
-            msg = response.reason
+            try:
+                msg = response.json()["detail"]
+            except:
+                msg = response.reason
             raise ConnectionError(msg)
 
     def get_response(self) -> Optional[RESULT]:
