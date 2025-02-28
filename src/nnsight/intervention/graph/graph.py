@@ -223,7 +223,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
         start: int = 0,
         grad: bool = False,
         defer: bool = False,
-        defer_start: int = 0,
+        defer_start: int = None,
     ) -> None:
 
         err: Tuple[int, NNsightError] = None

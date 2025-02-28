@@ -4,18 +4,16 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
-from .executors.GPUExecutor import NNsightGPUExecutor
-from .executors.RayGPUExecutor import NNsightRayGPUExecutor
+from .workers.GPUWorker import NNsightGPUWorker
 from .sampling import NNsightSamplingParams
 from dataclasses import fields
 from ...intervention.interleaver import Interleaver
 from ...intervention import Envoy
 
 if TYPE_CHECKING:
-    from ...intervention.graph import InterventionGraph
     from torch.nn import Module
     from vllm.transformers_utils.tokenizer import AnyTokenizer
-    from vllm.config import ModelConfig, SchedulerConfig, ParallelConfig
+    from vllm.config import ModelConfig, SchedulerConfig, ParallelConfig, LoRAConfig
 
 try:
     from vllm.distributed import (destroy_distributed_environment,
@@ -117,31 +115,24 @@ class VLLM(RemoteableMixin):
         model_config: "ModelConfig", 
         scheduler_config: "SchedulerConfig", 
         parallel_config: "ParallelConfig", 
-        enable_lora: bool) -> "AnyTokenizer":
+        lora_config: "LoRAConfig") -> "AnyTokenizer":
         
         return init_tokenizer_from_configs(
             model_config=model_config,
             scheduler_config=scheduler_config,
             parallel_config=parallel_config,
-            enable_lora=enable_lora,
+            lora_config=lora_config,
         ).tokenizer
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
 
         destroy_model_parallel()
         destroy_distributed_environment()
-
-        distributed_executor_backend = NNsightGPUExecutor
-        if (
-            "tensor_parallel_size" in kwargs.keys()
-            and kwargs["tensor_parallel_size"] > 1
-        ):
-            distributed_executor_backend = NNsightRayGPUExecutor
-
+        
         llm = LLM(
             repo_id,
+            worker_cls=NNsightGPUWorker,
             **kwargs,
-            distributed_executor_backend=distributed_executor_backend,
         )
 
         self.vllm_entrypoint = llm
@@ -151,7 +142,7 @@ class VLLM(RemoteableMixin):
             model_config=llm.llm_engine.model_config,
             scheduler_config=llm.llm_engine.scheduler_config,
             parallel_config=llm.llm_engine.parallel_config,
-            enable_lora=bool(llm.llm_engine.lora_config),
+            lora_config=llm.llm_engine.lora_config,
         )
 
         if kwargs.get("tensor_parallel_size", 1) > 1:

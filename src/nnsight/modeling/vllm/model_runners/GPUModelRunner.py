@@ -6,8 +6,8 @@ from nnsight import NNsight
 
 import torch
 import torch.distributed
+from vllm.distributed import get_kv_transfer_group
 
-from nnsight.intervention import NNsight
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -17,20 +17,19 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
-    _init_attn_metadata_from_tensor_dict, dump_input_when_exception)
+    _init_attn_metadata_from_tensor_dict)
 
 from ....intervention.protocols import InterventionProtocol
 from ....util import Patch, Patcher
 
 from ....intervention.interleaver import Interleaver
 
-from .. import VLLM
 from ..sampling import NNsightSamplingMetadata
 
 if TYPE_CHECKING:
@@ -72,7 +71,6 @@ class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMe
     ) -> "ModelInputForGPUWithSamplingMetadata":
         selected_token_indices = tensor_dict.pop("selected_token_indices", None)
         intervention_graph = tensor_dict.pop("intervention_graph", None)
-        intervention_graph.attachments = dict()
         batch_groups = tensor_dict.pop("batch_group", None)
         if selected_token_indices is not None:
             tensor_dict["sampling_metadata"] = NNsightSamplingMetadata(
@@ -95,13 +93,21 @@ class NNsightGPUModelRunner(ModelRunner):
         NNsightModelInputForGPUWithSamplingMetadata
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, model_runner):
+        
+        from .. import VLLM
+        
+        self._base_runner = model_runner
 
-        super().__init__(*args, **kwargs)
+        self.__dict__.update(model_runner.__dict__)
+
 
         self.model: VLLM
 
     def load_model(self) -> None:
+        
+        from .. import VLLM
+
         super().load_model()
 
         self.model = VLLM(self.model)
@@ -164,13 +170,12 @@ class NNsightGPUModelRunner(ModelRunner):
         )
 
     @torch.inference_mode()
-    @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
     def execute_model(
         self,
         model_input: NNsightModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        num_steps: int = 1,
+        num_steps: int = 1,**kwargs
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
 
         if model_input.sampling_metadata.intervention_graph is None:
@@ -180,6 +185,7 @@ class NNsightGPUModelRunner(ModelRunner):
                 kv_caches,
                 intermediate_tensors=intermediate_tensors,
                 num_steps=num_steps,
+                **kwargs
             )
 
         if num_steps > 1:
@@ -206,26 +212,32 @@ class NNsightGPUModelRunner(ModelRunner):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
-        if prefill_meta is None and decode_meta.use_cuda_graph:
-            assert model_input.input_tokens is not None
-            graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = self.graph_runners[virtual_engine][graph_batch_size]
-        else:
-            model_executable = self.model
+
+        model_executable = self.model._model
+            
+        bypass_model_exec = False
+        if self.need_recv_kv(model_input, kv_caches):
+            hidden_or_intermediate_states, bypass_model_exec, model_input = \
+                get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                    # model is used to know which layer the current worker
+                    # is working on, so that we can receive KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches=kv_caches
+                )
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        seqlen_agnostic_kwargs = (
-            {
-                "finished_requests_ids": model_input.finished_requests_ids,
-                "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
-            }
-            if self.has_inner_state
-            else {}
-        )
-        if (
-            self.observability_config is not None
-            and self.observability_config.collect_model_forward_time
-        ):
+        seqlen_agnostic_kwargs = {
+            "finished_requests_ids": model_input.finished_requests_ids,
+            "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
+        } if self.has_inner_state else {}
+        previous_hidden_states = kwargs.get("previous_hidden_states")
+        model_kwargs = {}
+        if previous_hidden_states is not None:
+            model_kwargs["previous_hidden_states"] = previous_hidden_states
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
@@ -245,18 +257,20 @@ class NNsightGPUModelRunner(ModelRunner):
         def inner():
 
             nonlocal interleaver
-
-            with set_forward_context(model_input.attn_metadata):
-                hidden_or_intermediate_states = self.model._model(
+            nonlocal hidden_or_intermediate_states
+            
+            with set_forward_context(model_input.attn_metadata,self.vllm_config, virtual_engine):
+                hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
                     kv_caches=kv_caches,
                     attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalInputs.as_kwargs(
+                    **MultiModalKwargs.as_kwargs(
                         multi_modal_kwargs, device=self.device
                     ),
                     **seqlen_agnostic_kwargs,
+                    **model_kwargs
                 )
 
             if (
@@ -264,28 +278,33 @@ class NNsightGPUModelRunner(ModelRunner):
                 and self.observability_config.collect_model_forward_time
             ):
                 model_forward_end.record()
-
+            if self.need_send_kv(model_input, kv_caches):
+                get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                    # model_executable is used to know which layer the current
+                    # worker is working on, so that we can send KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                    hidden_or_intermediate_states,
+                )
             # Compute the logits in the last pipeline stage.
             if not get_pp_group().is_last_rank:
-                if (
-                    self.is_driver_worker
-                    and hidden_or_intermediate_states is not None
-                    and isinstance(hidden_or_intermediate_states, IntermediateTensors)
-                    and self.observability_config is not None
-                    and self.observability_config.collect_model_forward_time
-                ):
+                if (self.is_driver_worker
+                        and hidden_or_intermediate_states is not None
+                        and isinstance(hidden_or_intermediate_states,
+                                    IntermediateTensors)
+                        and self.observability_config is not None
+                        and self.observability_config.collect_model_forward_time):
                     model_forward_end.synchronize()
                     model_forward_time = model_forward_start.elapsed_time(
-                        model_forward_end
-                    )
+                        model_forward_end)
                     orig_model_forward_time = 0.0
                     if intermediate_tensors is not None:
                         orig_model_forward_time = intermediate_tensors.tensors.get(
-                            "model_forward_time", torch.tensor(0.0)
-                        ).item()
+                            "model_forward_time", torch.tensor(0.0)).item()
                     hidden_or_intermediate_states.tensors["model_forward_time"] = (
-                        torch.tensor(model_forward_time + orig_model_forward_time)
-                    )
+                        torch.tensor(model_forward_time + orig_model_forward_time))
                 return hidden_or_intermediate_states
 
             logits = self.model.compute_logits(
@@ -310,6 +329,8 @@ class NNsightGPUModelRunner(ModelRunner):
 
             if model_input.async_callback is not None:
                 model_input.async_callback()
+                
+            
 
             # Sample the next token.
             output: SamplerOutput = self.model.sample(
@@ -426,6 +447,7 @@ class NNsightGPUModelRunner(ModelRunner):
             intervene_patch = Patch(InterventionProtocol, InterventionProtocol.intervene, "intervene")
 
         with Patcher([intervene_patch]):
+            
             output = NNsight.interleave(
                 self.model,
                 fn=inner,
