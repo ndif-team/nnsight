@@ -67,6 +67,7 @@ class VLLM(RemoteableMixin):
 
         self.logits: Envoy = WrapperModule()
         self.samples: Envoy = WrapperModule()
+        self.generator: Envoy = WrapperModule()
 
     def _load_meta(self, repo_id: str, **kwargs) -> "Module":
 
@@ -240,12 +241,13 @@ class VLLM(RemoteableMixin):
         elif isinstance(fn, str):
             fn = getattr(self, fn)            
     
-        return fn(*args, **kwargs)
+        return fn(*args, interleaver=interleaver, **kwargs)
 
     def _execute(
         self,
         prompts: List[str],
         params: List[NNsightSamplingParams],
+        interleaver: Interleaver,
         **kwargs,
     ) -> Any:
 
@@ -257,7 +259,10 @@ class VLLM(RemoteableMixin):
                     if hasattr(NNsightSamplingParams, attr):
                         setattr(param, attr, value)
 
-        self.vllm_entrypoint.generate(prompts, sampling_params=params)
+        out = self.vllm_entrypoint.generate(prompts, sampling_params=params)
+        
+        with interleaver:
+            self.generator(out)
 
 if TYPE_CHECKING:
     
