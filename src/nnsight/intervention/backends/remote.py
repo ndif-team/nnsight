@@ -17,6 +17,7 @@ from ...schema.request import RequestModel, StreamValueModel
 from ...schema.response import ResponseModel
 from ...schema.result import RESULT, ResultModel
 from ...tracing.backends import Backend
+from ...tracing.backends.base import frame_injection
 from ...tracing.graph import Graph
 from ...util import NNsightError
 from ..contexts.local import LocalContext, RemoteContext
@@ -83,6 +84,10 @@ class RemoteBackend(Backend):
 
         if result is not None:
             ResultModel.inject(graph, result)
+            
+            if CONFIG.APP.FRAME_INJECTION:
+                        
+                frame_injection()
 
     def handle_response(
         self, response: ResponseModel, graph: Optional[Graph] = None
