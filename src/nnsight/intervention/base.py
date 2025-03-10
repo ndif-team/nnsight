@@ -172,6 +172,15 @@ class NNsight:
         else:
             parent = None
 
+        # Case: Model is kwargs only.
+        if len(inputs) == 0 and len(kwargs) > 0:
+            inputs = (kwargs,)
+            kwargs = {}
+            self._kwargs_only = True
+        
+        else:
+            self._kwargs_only = False
+
         # Create Tracer.
         tracer = InterleavingTracer(
             self,
@@ -448,6 +457,10 @@ class NNsight:
     def _execute(self, *args, **kwargs) -> Any:
 
         args, kwargs = self.to_device((args, kwargs))
+
+        if self._kwargs_only:
+            kwargs = args[0]
+            args = ()
 
         return self._model(*args, **kwargs)
 
