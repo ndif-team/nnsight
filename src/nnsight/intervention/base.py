@@ -173,7 +173,7 @@ class NNsight:
             parent = None
 
         # Case: Model is kwargs only.
-        if len(inputs) == 0 and len(kwargs) > 0:
+        if len(inputs) == 0 and len(kwargs) > 0 and 'validate' not in kwargs:
             inputs = (kwargs,)
             kwargs = {}
             self._kwargs_only = True
