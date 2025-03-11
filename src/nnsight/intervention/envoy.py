@@ -324,7 +324,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Used when loading the real weights (dispatching) and need to replace the underlying modules.
         """
 
-        self._module = module
+        self._module = weakref.proxy(module)
 
         self._hook_handle.remove()
 
