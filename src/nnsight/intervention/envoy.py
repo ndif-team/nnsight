@@ -47,7 +47,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self.path = alias_path or module_path
         self._path = module_path
 
-        self._module = module
+        self._module = weakref.proxy(module)
 
         self._rename = rename
 
@@ -65,7 +65,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
         # Register hook on underlying module to update the _fake_outputs and _fake_inputs on forward pass.
         self._hook_handle = self._module.register_forward_hook(
-            lambda *args, **kwargs: Envoy._hook(weakref.proxy(self), *args, **kwargs), with_kwargs=True
+            self._hook, with_kwargs=True
         )
 
         # Recurse into PyTorch module tree.
@@ -329,7 +329,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self._hook_handle.remove()
 
         self._hook_handle = self._module.register_forward_hook(
-            lambda *args, **kwargs: Envoy._hook(weakref.proxy(self), *args, **kwargs), with_kwargs=True
+            self._hook, with_kwargs=True
         )
 
         for i, module in enumerate(self._module.children()):
@@ -514,22 +514,20 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             for envoy in self._children:
                 envoy._clear(propagate=True)
 
-    @classmethod
     def _hook(
-        cls,
-        envoy:Envoy,
+        self,
         module: torch.nn.Module,
         input: Any,
         input_kwargs: Dict,
         output: Any,
     ):
 
-        if envoy._scanning():
+        if self._scanning():
 
             input = (input, input_kwargs)
 
-            envoy._fake_outputs.append(output)
-            envoy._fake_inputs.append(input)
+            self._fake_outputs.append(output)
+            self._fake_inputs.append(input)
 
     def _repr_module_list(self):
 
