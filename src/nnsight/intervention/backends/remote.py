@@ -54,7 +54,6 @@ class RemoteBackend(Backend):
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
-        self.version = __version__
 
     def request(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
 
@@ -66,7 +65,7 @@ class RemoteBackend(Backend):
             "zlib": str(self.zlib),
             "ndif-api-key": self.api_key,
             "sent-timestamp": str(time.time()),
-            "version": self.version,
+            "nnsight-version": __version__,
         }
 
         return data, headers
