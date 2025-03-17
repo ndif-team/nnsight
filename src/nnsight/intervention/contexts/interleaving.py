@@ -126,7 +126,7 @@ class InterleavingTracer(InterventionTracer):
 
         if batched_input is None:
 
-            batched_input = (((0, -1),), dict())
+            return (tuple(), dict()), ((0, -1),)
 
         return batched_input, batch_groups
 
@@ -139,6 +139,8 @@ class InterleavingTracer(InterventionTracer):
     def execute(cls, node: InterventionNodeType):
 
         graph, method, *invoker_inputs = node.args
+        
+        
         
         graph: InterventionGraph
         model = graph.model

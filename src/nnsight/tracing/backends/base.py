@@ -26,17 +26,7 @@ class ExecutionBackend(Backend):
 
             if self.injection:
                 
-                from ..contexts import Context
-                import ctypes
-
-                frame = inspect.currentframe().f_back
-                while frame.f_back is not None and 'self' in frame.f_locals and isinstance(frame.f_locals['self'], Context):
-                    frame = frame.f_back
-                    
-                for key, value in frame.f_locals.items():
-                    if isinstance(value, Proxy) and value.node.done:
-                        frame.f_locals[key] = value.value
-                        ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
+                frame_injection()
 
         except StopProtocol.StopException:
 
@@ -67,3 +57,19 @@ class ExecutionBackend(Backend):
                 sys.tracebacklimit = None
             graph.nodes.clear()
             graph.stack.clear()
+
+
+def frame_injection():
+    
+    from ..contexts import Context
+    import ctypes
+
+    frame = inspect.currentframe().f_back
+    while frame.f_back is not None and 'self' in frame.f_locals and isinstance(frame.f_locals['self'], (Context,Backend)):
+        frame = frame.f_back
+        
+    for key, value in frame.f_locals.items():
+                
+        if isinstance(value, Proxy) and value.node.done:
+            frame.f_locals[key] = value.value
+            ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
