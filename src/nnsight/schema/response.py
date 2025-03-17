@@ -38,8 +38,7 @@ class ResponseModel(BaseModel):
 
     def log(self, logger: logging.Logger) -> ResponseModel:
         if self.status == ResponseModel.JobStatus.ERROR:
-            logger.error(str(self))
-            raise SystemExit("Remote exception.")
+            raise SystemExit(f"{self.description}\nRemote exception.")
         elif self.status == ResponseModel.JobStatus.STREAM:
             pass
         else:
@@ -67,7 +66,7 @@ class ResponseModel(BaseModel):
         """Loads a ResponseModel from pickled bytes.
 
         Args:
-            data (bytes): Pickled ResoonseModel.
+            data (bytes): Pickled ResponseModel.
 
         Returns:
             ResponseModel: Response.
