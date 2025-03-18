@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import re
+import weakref
 import warnings
 from contextlib import AbstractContextManager
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, Iterator,
@@ -47,7 +47,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self.path = alias_path or module_path
         self._path = module_path
 
-        self._module = module
+        self._module = weakref.proxy(module)
 
         self._rename = rename
 
@@ -324,7 +324,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Used when loading the real weights (dispatching) and need to replace the underlying modules.
         """
 
-        self._module = module
+        self._module = weakref.proxy(module)
 
         self._hook_handle.remove()
 
