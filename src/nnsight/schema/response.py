@@ -37,9 +37,8 @@ class ResponseModel(BaseModel):
         return f"{self.id} - {self.status.name}: {self.description}"
 
     def log(self, logger: logging.Logger) -> ResponseModel:
-        if self.status == ResponseModel.JobStatus.ERROR:
-            raise SystemExit(f"{self.description}\nRemote exception.")
-        elif self.status == ResponseModel.JobStatus.STREAM:
+       
+        if self.status == ResponseModel.JobStatus.STREAM:
             pass
         else:
             logger.info(str(self))

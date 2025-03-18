@@ -108,6 +108,9 @@ class RemoteBackend(Backend):
         Returns:
             ResponseModel: ResponseModel.
         """
+        
+        if response.status == ResponseModel.JobStatus.ERROR:
+            raise SystemExit(f"{response.description}\nRemote exception.")
 
         # Log response for user
         response.log(remote_logger)
