@@ -110,8 +110,6 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             if isinstance(self._module, torch.nn.ModuleList):
 
                 output = [envoy.output for envoy in self._children]
-
-                return output
             else:
 
                 iteration = self._iteration_stack[-1]
@@ -168,8 +166,6 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
             if isinstance(self._module, torch.nn.ModuleList):
 
                 input = [envoy.input for envoy in self._children]
-
-                return input
             else:
 
                 iteration = self._iteration_stack[-1]
