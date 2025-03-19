@@ -38,8 +38,9 @@ class MetaMixin(LoadableMixin):
 
     def dispatch(self) -> None:
 
-        self._model = self._load(*self.args, **self.kwargs)
-        self._envoy._update(self._model)
+        model = self._load(*self.args, **self.kwargs)
+        self._envoy._update(model)
+        self._model = model
 
         self.dispatched = True
 
