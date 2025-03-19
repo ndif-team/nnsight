@@ -4,8 +4,18 @@ import inspect
 import weakref
 import warnings
 from contextlib import AbstractContextManager
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, Iterator,
-                    List, Optional, Tuple, Union)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import torch
 from typing_extensions import Self
@@ -47,7 +57,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self.path = alias_path or module_path
         self._path = module_path
 
-        self._module = weakref.proxy(module)
+        self._module: torch.nn.Module = weakref.proxy(module)
 
         self._rename = rename
 
@@ -324,17 +334,22 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Used when loading the real weights (dispatching) and need to replace the underlying modules.
         """
 
-        self._module = weakref.proxy(module)
-
         self._hook_handle.remove()
 
-        self._hook_handle = self._module.register_forward_hook(
-            self._hook, with_kwargs=True
-        )
+        self._hook_handle = module.register_forward_hook(self._hook, with_kwargs=True)
 
-        for i, module in enumerate(self._module.children()):
+        i = 0
 
-            self._children[i]._update(module)
+        for i, child in enumerate(module.children()):
+
+            self._children[i]._update(child)
+
+        # Handle extra modules added after initialization: issues/376
+        for name, child in list(self._module.named_children())[i + 1 :]:
+
+            setattr(module, name, child)
+
+        self._module = weakref.proxy(module)
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> None:
         """Adds a new Envoy for a given torch module under this Envoy.
@@ -345,16 +360,18 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         """
 
         alias_path = None
-        
+
         module_path = f"{self._path}.{name}"
-        
+
         if self._rename is not None and name in self._rename:
-            
+
             name = self._rename[name]
-                  
+
             alias_path = f"{self.path}.{name}"
-            
-        envoy = Envoy(module, module_path=module_path, alias_path=alias_path, rename=self._rename)
+
+        envoy = Envoy(
+            module, module_path=module_path, alias_path=alias_path, rename=self._rename
+        )
 
         self._children.append(envoy)
 
