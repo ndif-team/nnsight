@@ -119,9 +119,9 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
             if isinstance(self._module, torch.nn.ModuleList):
 
-                output = [envoy.output for envoy in self._children]
-
-                return output
+                from .. import list as nnsight_list
+                output = nnsight_list()
+                output.extend([envoy.output for envoy in self._children])
             else:
 
                 iteration = self._iteration_stack[-1]
@@ -177,9 +177,9 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
 
             if isinstance(self._module, torch.nn.ModuleList):
 
-                input = [envoy.input for envoy in self._children]
-
-                return input
+                from .. import list as nnsight_list
+                input = nnsight_list()
+                input.extend([envoy.input for envoy in self._children])
             else:
 
                 iteration = self._iteration_stack[-1]
