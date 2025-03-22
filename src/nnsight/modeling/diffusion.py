@@ -97,7 +97,7 @@ class DiffusionModel(RemoteableMixin):
         if seed is not None:
 
             if isinstance(prepared_inputs, list):
-                generator = [torch.Generator().manual_seed(seed) for _ in range(len(prepared_inputs))]
+                generator = [torch.Generator().manual_seed(seed) for _ in range(len(prepared_inputs) * kwargs.get('num_images_per_prompt', 1))]
             else:
                 generator = generator.manual_seed(seed)
             
