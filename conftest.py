@@ -28,4 +28,4 @@ def load_pyproject_toml():
     except toml.TomlDecodeError as e:
         pytest.fail(f"Failed to load pyproject.toml: {e}")
 
-collect_ignore = ["examples/test_server.py", "examples/test_server_llama.py"]
+collect_ignore = []
