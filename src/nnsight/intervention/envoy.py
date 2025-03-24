@@ -113,6 +113,14 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Returns:
             InterventionProxy: Output proxy.
         """
+        if not self._tracing():
+            raise RuntimeError(
+                "Property 'output' can only be accessed within a tracing context. "
+                "Make sure you're using the model within a Session or other appropriate context manager. "
+                "If you need to access the value outside of the tracing context, use '.save()' on the proxy "
+                "within the context (e.g., 'x = model.transformer.h[0].output.save()')."
+            )
+            
         output = self._output_stack.pop()
 
         if output is None:
@@ -170,6 +178,13 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Returns:
             InterventionProxy: Input proxy.
         """
+        if not self._tracing():
+            raise RuntimeError(
+                "Property 'inputs' can only be accessed within a tracing context. "
+                "Make sure you're using the model within a Session or other appropriate context manager. "
+                "If you need to access the value outside of the tracing context, use '.save()' on the proxy "
+                "within the context (e.g., 'x = model.transformer.h[0].inputs.save()')."
+            )
 
         input = self._input_stack.pop()
 
@@ -226,6 +241,13 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Returns:
             InterventionProxy: Input proxy.
         """
+        if not self._tracing():
+            raise RuntimeError(
+                "Property 'input' can only be accessed within a tracing context. "
+                "Make sure you're using the model within a Session or other appropriate context manager. "
+                "If you need to access the value outside of the tracing context, use '.save()' on the proxy "
+                "within the context (e.g., 'x = model.transformer.h[0].input.save()')."
+            )
 
         return self.inputs[0][0]
 
