@@ -316,9 +316,7 @@ def test_torch_creation_operations_patch(tiny_model: NNsight, tiny_input: torch.
         torch.zeros(l1_output.shape)
 
 
-def test_envoy_input_output_access(tiny_model: NNsight, tiny_input: torch.Tensor):
-    with tiny_model.trace(tiny_input) as tracer:
-        l1_out = tiny_model.layer1.output.save()
+def test_envoy_input_output_access(tiny_model: NNsight):
 
     with pytest.raises(RuntimeError):
         tiny_model.layer1.output

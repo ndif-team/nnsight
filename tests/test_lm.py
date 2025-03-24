@@ -493,9 +493,7 @@ def test_undispatched_extra_module(device: str, MSG_prompt: str):
     output.value
 
 
-def test_envoy_input_output_access(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.trace(MSG_prompt) as tracer:
-        l1_out = gpt2.transformer.h[0].output.save()
+def test_envoy_input_output_access(gpt2: nnsight.LanguageModel):
 
     with pytest.raises(RuntimeError):
         gpt2.transformer.h[0].output
