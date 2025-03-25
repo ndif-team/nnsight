@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union, Optional
 
 import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
-from transformers import BatchEncoding
+from transformers import BatchEncoding, PreTrainedTokenizer
 
 from .LanguageModel import LanguageModel
 
@@ -28,13 +28,13 @@ class UnifiedTransformer(LanguageModel):
     """
 
     def __init__(
-        self, model: str, *args, processing: bool = True, **kwargs
+        self, model: str, *args, processing: bool = True, tokenizer: Optional[PreTrainedTokenizer] = None, **kwargs
     ) -> None:
         if processing:
-            hooked_model = HookedTransformer.from_pretrained(model, *args, **kwargs)
+            hooked_model = HookedTransformer.from_pretrained(model, *args, tokenizer=tokenizer, **kwargs)
         else:
             hooked_model = HookedTransformer.from_pretrained_no_processing(
-                model, *args, **kwargs
+                model, *args, tokenizer=tokenizer, **kwargs
             )
 
         self.tokenizer = hooked_model.tokenizer

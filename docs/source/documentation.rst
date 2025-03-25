@@ -4,10 +4,9 @@ Documentation
 .. toctree::
    :titlesonly:
 
-   documentation/models
-   documentation/envoy
-   documentation/contexts
-   documentation/util
-   documentation/intervention
+   documentation/modeling
    documentation/tracing
-   documentation/patching
+   documentation/intervention
+   documentation/schema
+   documentation/util
+

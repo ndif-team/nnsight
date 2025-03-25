@@ -37,7 +37,7 @@ Features
             </div> 
             <div>
                <h5 class="card-title">Getting</h5>
-               <p class="card-text">Accessing values</p>
+               <p class="card-text">Access values</p>
             </div>
          </div>
 
@@ -55,9 +55,28 @@ Features
             </div> 
             <div>
                <h5 class="card-title">Setting</h5>
-               <p class="card-text">Intervening on values</p>
+               <p class="card-text">Intervene on values</p>
             </div>
          </div>
+
+   .. grid-item-card::
+      :link: notebooks/features/scan_validate.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-binoculars fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Scan and Validate</h5>
+               <p class="card-text">Debug tensor shapes</p>
+            </div>
+         </div>
+
 
    .. grid-item-card:: 
       :link: notebooks/features/operations.ipynb
@@ -73,7 +92,7 @@ Features
             </div> 
             <div>
                <h5 class="card-title">Operations</h5>
-               <p class="card-text">Editing values</p>
+               <p class="card-text">Edit values</p>
             </div>
          </div>
 
@@ -91,7 +110,79 @@ Features
             </div> 
             <div>
                <h5 class="card-title">Modules</h5>
-               <p class="card-text">Applying modules</p>
+               <p class="card-text">Apply modules</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/custom_functions.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-atom fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Custom Functions</h5>
+               <p class="card-text">Add thing to the Intervention Graph</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/gradients.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-backward fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Gradients</h5>
+               <p class="card-text">Intervene on gradients</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/early_stopping.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-circle-stop fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Early Stopping</h5>
+               <p class="card-text">Save computation time</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/conditionals.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-code-branch fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Conditional Interventions</h5>
+               <p class="card-text">Use If Needed</p>
             </div>
          </div>
 
@@ -127,12 +218,12 @@ Features
             </div> 
             <div>
                <h5 class="card-title">Generation</h5>
-               <p class="card-text">Multiple tokens</p>
+               <p class="card-text">Generate multiple tokens</p>
             </div>
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/features/gradients.ipynb
+      :link: notebooks/features/model_editing.ipynb
       :class-card: surface
       :class-body: surface
 
@@ -141,13 +232,14 @@ Features
 
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-backward fa-2x"></i>
+               <i class="fa-solid fa-pen-to-square fa-2x"></i>
             </div> 
             <div>
-               <h5 class="card-title">Gradients</h5>
-               <p class="card-text">Intervene on gradients</p>
+               <h5 class="card-title">Model Editing</h5>
+               <p class="card-text">Add persistent interventions</p>
             </div>
          </div>
+
 
    .. grid-item-card:: 
       :link: notebooks/features/remote_execution.ipynb
@@ -163,24 +255,97 @@ Features
             </div> 
             <div>
                <h5 class="card-title">Remote Execution</h5>
-               <p class="card-text">Transparent deep learning</p>
+               <p class="card-text">Use our servers</p>
             </div>
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/features/token_indexing.ipynb
+      :link: notebooks/features/sessions.ipynb
       :class-card: surface
       :class-body: surface
+
+   
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-bars fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Sessions</h5>
+               <p class="card-text">Do many traces in one request</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/streaming.ipynb
+      :class-card: surface
+      :class-body: surface
+
 
       .. raw:: html
 
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-regular fa-object-ungroup fa-2x"></i>
+               <i class="fa-solid fa-paper-plane fa-2x"></i>
             </div> 
             <div>
-               <h5 class="card-title">Multi-Token Indexing</h5>
-               <p class="card-text">Easy token indexing</p>
+               <h5 class="card-title">Streaming</h5>
+               <p class="card-text">Send remote values to local</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/iterator.ipynb
+      :class-card: surface
+      :class-body: surface
+
+   
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-arrow-rotate-left fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Iterative Interventions</h5>
+               <p class="card-text">Make loops</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/lora_training.ipynb
+      :class-card: surface
+      :class-body: surface
+
+   
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-tower-broadcast fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">LORA</h5>
+               <p class="card-text">Train one</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/features/vllm_support.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-stopwatch fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">vLLM Support</h5>
+               <p class="card-text">Fast inference</p>
             </div>
          </div>
    

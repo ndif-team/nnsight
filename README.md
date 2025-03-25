@@ -1,11 +1,12 @@
 <img src="./docs/source/_static/images/nnsight_logo.svg" alt="drawing" style="width:200px;float:left"/>
 
 # nnsight 
-<a href="https://pypi.org/project/nnsight/"><img src="https://img.shields.io/pypi/v/nnsight?color=purple"></img></a>
+
+<a href="https://arxiv.org/abs/2407.14561"><img src="https://img.shields.io/badge/READ%20THE%20PAPER%20HERE!-orange" style="transform: scale(3);"></a>
 
 <a href="https://www.nnsight.net"><img src="https://img.shields.io/badge/-Read%20the%20Docs%20Here-blue?style=for-the-badge&logo=Read-the-Docs&logoColor=white"></img></a> <a href="https://discord.gg/6uFJmCSwW7"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 
-The `nnsight`  package enables interpreting and manipulating the internals of deep learned models.
+The `nnsight`  package enables interpreting and manipulating the internals of deep learned models. Read our [paper!](https://arxiv.org/abs/2407.14561)
 
 #### Installation
 
@@ -22,7 +23,7 @@ from nnsight import LanguageModel
 
 model = LanguageModel('openai-community/gpt2', device_map='auto')
 
-with model.trace('The Eiffel Tower is in the city of'):
+with model.trace('The Eiffel Tower is in the city of') as tracer:
 
       hidden_states = model.transformer.h[-1].output[0].save()
 
@@ -357,11 +358,13 @@ More examples can be found at [nnsight.net](https://www.nnsight.net)
 If you use `nnsight` in your research, please cite using the following
 
 ```bibtex
-@software{nnsight,
-author = {Jaden Fiotto-Kaufman},
-license = {MIT},
-title = {{nnsight: The package for interpreting and manipulating the internals of deep learned models.
-}},
-url = {https://github.com/JadenFiotto-Kaufman/nnsight}
+@article{fiottokaufman2024nnsightndifdemocratizingaccess,
+      title={NNsight and NDIF: Democratizing Access to Foundation Model Internals}, 
+      author={Jaden Fiotto-Kaufman and Alexander R Loftus and Eric Todd and Jannik Brinkmann and Caden Juang and Koyena Pal and Can Rager and Aaron Mueller and Samuel Marks and Arnab Sen Sharma and Francesca Lucchetti and Michael Ripa and Adam Belfki and Nikhil Prakash and Sumeet Multani and Carla Brodley and Arjun Guha and Jonathan Bell and Byron Wallace and David Bau},
+      year={2024},
+      eprint={2407.14561},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2407.14561}, 
 }
 ``````

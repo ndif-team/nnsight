@@ -45,8 +45,26 @@ Tutorials
             </div>
          </div>
 
+
    .. grid-item-card:: 
-      :link: notebooks/tutorials/ioi_patching.ipynb
+      :link: notebooks/tutorials/start_remote_access.ipynb
+      :class-card: surface
+      :class-body: surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-satellite-dish fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Access LLMs</h5>
+               <p class="card-text">Use our hosted models</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/activation_patching.ipynb
       :class-card: surface
       :class-body: surface
 
@@ -80,6 +98,40 @@ Tutorials
          </div>
 
    .. grid-item-card:: 
+      :link: notebooks/tutorials/boundless_DAS.ipynb
+      :class-card: surface
+      :class-body: surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-magnifying-glass fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Boundless DAS</h5>
+               <p class="card-text">Identifying Causal Mechanisms in Alpaca</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/dict_learning.ipynb
+      :class-card: surface
+      :class-body: surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-book-open fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Dictionary Learning</h5>
+               <p class="card-text">Sparse autoencoders</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
       :link: notebooks/tutorials/logit_lens.ipynb
       :class-card: surface
       :class-body: surface
@@ -97,7 +149,7 @@ Tutorials
          </div>
 
    .. grid-item-card:: 
-      :link: notebooks/tutorials/future_lens.ipynb
+      :link: notebooks/tutorials/LoRA_tutorial.ipynb
       :class-card: surface
       :class-body: surface
 
@@ -105,49 +157,13 @@ Tutorials
 
          <div class="d-flex align-items-center">
             <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-eye fa-2x"></i>
+               <i class="fa-solid fa-sliders fa-2x"></i>
             </div> 
             <div>
-               <h5 class="card-title">Future Lens</h5>
-               <p class="card-text">Probe future tokens</p>
+               <h5 class="card-title">LoRA</h5>
+               <p class="card-text">Fine tuning for sentiment analysis</p>
             </div>
-         </div>
-
-   .. grid-item-card:: 
-      :link: notebooks/tutorials/function_vectors.ipynb
-      :class-card: surface
-      :class-body: surface
-
-      .. raw:: html
-
-         <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-rocket fa-2x"></i>
-            </div> 
-            <div>
-               <h5 class="card-title">Function Vectors</h5>
-               <p class="card-text">Lambdas</p>
-            </div>
-         </div>
-
-   .. grid-item-card:: 
-      :link: notebooks/tutorials/sae.ipynb
-      :class-card: surface
-      :class-body: surface
-
-      .. raw:: html
-
-         <div class="d-flex align-items-center">
-            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
-               <i class="fa-solid fa-book-open fa-2x"></i>
-            </div> 
-            <div>
-               <h5 class="card-title">Dictionary Learning</h5>
-               <p class="card-text">Sparse autoencoders</p>
-            </div>
-         </div>
-
-
+         </div>         
 
 .. toctree::
    :glob:
