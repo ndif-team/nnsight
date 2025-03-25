@@ -1,14 +1,24 @@
 import operator
-from inspect import getmembers, isbuiltin, isfunction, ismethod, ismethoddescriptor, isclass
+from inspect import (
+    getmembers,
+    isbuiltin,
+    isclass,
+    isfunction,
+    ismethod,
+    ismethoddescriptor,
+)
+from typing import Callable, Union
 
 import einops
 import torch
 from torch.utils.data.dataloader import DataLoader
 
-from ... import intervention, util
+from ... import util
+from ...intervention import protocols as intervention_protocols
 from ...tracing import protocols
-from ...tracing.Proxy import Proxy
-
+from ...tracing.graph import Proxy
+from ...tracing import contexts
+from ...intervention import contexts as intervention_contexts
 
 def get_function_name(fn, module_name=None):
     if isinstance(fn, str):
@@ -23,6 +33,17 @@ def get_function_name(fn, module_name=None):
         return fn.__qualname__
 
     return f"{module_name}.{fn.__qualname__}"
+
+
+def update_function(function: Union[str,  Callable], new_function: Callable):
+
+    if not isinstance(function, str):
+
+        function = get_function_name(function)
+
+    new_function.__name__ = function
+
+    FUNCTIONS_WHITELIST[function] = new_function
 
 
 FUNCTIONS_WHITELIST = {}
@@ -97,7 +118,7 @@ FUNCTIONS_WHITELIST.update(
         get_function_name(print): print,
         get_function_name(setattr): setattr,
         get_function_name(util.fetch_attr): util.fetch_attr,
-        get_function_name(Proxy.proxy_call): Proxy.proxy_call,
+        get_function_name(Proxy.call): Proxy.call,
     }
 )
 
@@ -113,7 +134,22 @@ FUNCTIONS_WHITELIST.update(
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(protocol): protocol
-        for key, protocol in getmembers(intervention)
+        for key, protocol in getmembers(intervention_protocols)
+        if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
+    }
+)
+FUNCTIONS_WHITELIST.update(
+    {
+        get_function_name(protocol): protocol
+        for key, protocol in getmembers(contexts)
+        if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
+    }
+)
+
+FUNCTIONS_WHITELIST.update(
+    {
+        get_function_name(protocol): protocol
+        for key, protocol in getmembers(intervention_contexts)
         if isinstance(protocol, type) and issubclass(protocol, protocols.Protocol)
     }
 )
