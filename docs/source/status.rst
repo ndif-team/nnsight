@@ -242,13 +242,13 @@
                                 console.log('Stats error', statsError);
                             });
                     } else {
-                        update("NDIF is Unavailable", error_color);
+                        update("NDIF is unavailable", error_color);
                         loading(false);
                         console.log('Ping error');
                     }
                 })
                 .catch((pingError) => {
-                    update("NDIF is Unavailable", error_color);
+                    update("NDIF is unavailable", error_color);
                     loading(false);
                     console.error('Ping fetch failed:', pingError);
                 });
