@@ -45,6 +45,24 @@ Tutorials
             </div>
          </div>
 
+
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/start_remote_access.ipynb
+      :class-card: surface
+      :class-body: surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-satellite-dish fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Access LLMs</h5>
+               <p class="card-text">Use our hosted models</p>
+            </div>
+         </div>
+
    .. grid-item-card:: 
       :link: notebooks/tutorials/activation_patching.ipynb
       :class-card: surface
