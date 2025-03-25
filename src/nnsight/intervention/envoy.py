@@ -108,9 +108,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         if output is None:
 
             if isinstance(self._module, torch.nn.ModuleList):
-
-                from .. import list as nnsight_list
-                output = nnsight_list()
+                output = self._tracer.apply(list)
                 output.extend([envoy.output for envoy in self._children])
             else:
 
@@ -166,10 +164,8 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         if input is None:
 
             if isinstance(self._module, torch.nn.ModuleList):
-
-                from .. import list as nnsight_list
-                input = nnsight_list()
-                input.extend([envoy.input for envoy in self._children])
+                input = self._tracer.apply(list)
+                input.extend([envoy.inputs for envoy in self._children])
             else:
 
                 iteration = self._iteration_stack[-1]
@@ -216,6 +212,12 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Returns:
             InterventionProxy: Input proxy.
         """
+
+        if isinstance(self._module, torch.nn.ModuleList):
+            input = self._tracer.apply(list)
+            input.extend([envoy.input for envoy in self._children])
+
+            return input
 
         return self.inputs[0][0]
 
@@ -345,16 +347,18 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         """
 
         alias_path = None
-        
+
         module_path = f"{self._path}.{name}"
-        
+
         if self._rename is not None and name in self._rename:
-            
+
             name = self._rename[name]
-                  
+
             alias_path = f"{self.path}.{name}"
-            
-        envoy = Envoy(module, module_path=module_path, alias_path=alias_path, rename=self._rename)
+
+        envoy = Envoy(
+            module, module_path=module_path, alias_path=alias_path, rename=self._rename
+        )
 
         self._children.append(envoy)
 
