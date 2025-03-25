@@ -140,7 +140,7 @@ class Node:
         """
 
         if not self.done:
-            raise ValueError("Accessing value before it's been set.")
+            raise ValueError("Accessing value before it's been set. Did you forget to call .save()?")
 
         return self._value
 
