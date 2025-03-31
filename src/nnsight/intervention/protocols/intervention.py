@@ -120,8 +120,9 @@ class InterventionProtocol(EntryPoint):
 
             # Multiple intervention nodes can have same module_path if there are multiple invocations.
             # Is a set of node indexes making up the intervention subgraph
-            for node in intervention_nodes:
-
+            for index in intervention_nodes:
+                
+                node = interleaver.graph.nodes[index]
                 # Args for intervention nodes are (module_path, batch_group, iteration).
                 _, batch_group, iteration = node.args
 

@@ -40,7 +40,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
         self.model = model
 
-        self.interventions: Dict[str, List[InterventionNode]] = defaultdict(list)
+        self.interventions: Dict[str, List[int]] = defaultdict(list)
         self.grad_subgraph: Set[int] = set()
 
         self.compiled = False
@@ -156,7 +156,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
 
                 module_path, *_ = node.args
 
-                self.interventions[module_path].append(node)
+                self.interventions[module_path].append(node.index)
 
                 intervention_subgraphs.append(subgraph)
 
@@ -378,7 +378,7 @@ class InterventionGraph(SubGraph[InterventionNode, InterventionProxyType]):
             for module_path, list_of_nodes in self.interventions.items():
 
                 new_graph.interventions[module_path] = [
-                    new_graph.nodes[memo[node.index]] for node in list_of_nodes
+                    new_graph.nodes[memo[index]].index for index in list_of_nodes
                 ]
 
             for key, values in self.deferred.items():
