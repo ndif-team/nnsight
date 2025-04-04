@@ -4,6 +4,7 @@ from enum import auto
 import pytest
 import torch
 
+import nnsight
 from nnsight.tracing.backends import Backend
 from nnsight.tracing.graph import Graph
 from nnsight.tracing.protocols import StopProtocol
@@ -314,3 +315,11 @@ def test_torch_creation_operations_patch(tiny_model: NNsight, tiny_input: torch.
         torch.randn(l1_output.shape)
         torch.randperm(l1_output.shape[0])
         torch.zeros(l1_output.shape)
+
+def test_nested_value_injection(tiny_model: NNsight, tiny_input: torch.Tensor):
+    arr = list()
+
+    with tiny_model.trace(tiny_input):
+        arr.append(tiny_model.output.save())
+
+    assert isinstance(arr[0], torch.Tensor)     

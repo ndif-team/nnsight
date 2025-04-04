@@ -1,7 +1,7 @@
 import inspect
 import sys
 
-from ...util import NNsightError
+from ...util import NNsightError, apply
 from ..graph import Graph, Proxy
 from ..protocols import StopProtocol
 from ... import __IPYTHON__
@@ -69,7 +69,7 @@ def frame_injection():
         frame = frame.f_back
         
     for key, value in frame.f_locals.items():
-                
-        if isinstance(value, Proxy) and value.node.done:
-            frame.f_locals[key] = value.value
-            ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
+       
+        frame.f_locals[key] = apply(value, lambda x: x.value, Proxy, inplace=True)
+
+        ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), 0)
