@@ -40,6 +40,11 @@ class ResponseModel(BaseModel):
        
         if self.status == ResponseModel.JobStatus.STREAM:
             pass
+        elif self.status == ResponseModel.JobStatus.LOG:
+            disable_flag = logger.disabled
+            logger.disabled = False
+            logger.info(str(self))
+            logger.disabled = disable_flag
         else:
             logger.info(str(self))
 
