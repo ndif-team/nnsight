@@ -37,6 +37,9 @@ class Envoy:
         self._module = module
         self._path = path
         
+        
+        self._module.__path__ = path
+        
         self._input = None
         self._output = None
         self._source = None
@@ -58,10 +61,11 @@ class Envoy:
         Returns:
             The module's output tensor(s)
         """
+        
         if self._output is None:
-            # Set up the future request            
+            # Set up the future request
             self._output = await self._interleaver.get_value(
-                Events.OUTPUT, self._module
+                f"{self._path}.output"
             )
         return self._output
 
@@ -74,7 +78,7 @@ class Envoy:
             value: The new output value to use
         """
         self._output = value
-        self._interleaver.set_swap(value, self._module, Events.OUTPUT)
+        self._interleaver.set_swap(value, f"{self._path}.output")
 
     @output.deleter
     def output(self):
@@ -91,7 +95,7 @@ class Envoy:
         """
         if self._input is None:
             # Set up the future request
-            self._input = await self._interleaver.get_value(Events.INPUT, self._module)
+            self._input = await self._interleaver.get_value(f"{self._path}.input")
         return self._input
 
     @inputs.setter
@@ -103,7 +107,7 @@ class Envoy:
             value: The new input value(s) to use
         """
         self._input = value
-        self._interleaver.set_swap(value, self._module, Events.INPUT)
+        self._interleaver.set_swap(value, f"{self._path}.input")
 
     @inputs.deleter
     def inputs(self):
@@ -229,7 +233,7 @@ class Envoy:
 
     def __str__(self):
         """String representation of the Envoy."""
-        return f"model{self._path}"
+        return f"model.{self._path}"
 
     def __repr__(self):
         """Representation of the Envoy."""
@@ -344,7 +348,7 @@ class OperationEnvoy:
         if self._output is None:
             # Set up the future request            
             self._output = await self.interleaver.get_value(
-                Events.OUTPUT, (self.module, self.name)
+                f"{self.module.__path__}.{self.name}.output"
             )
         return self._output
 
@@ -357,7 +361,7 @@ class OperationEnvoy:
             value: The new output value
         """
         self._output = value
-        self.interleaver.set_swap(value, (self.module, self.name), Events.OUTPUT)
+        self.interleaver.set_swap(value, f"{self.module.__path__}.{self.name}.output")
 
     @output.deleter
     def output(self):
@@ -374,7 +378,7 @@ class OperationEnvoy:
         """
         if self._input is None:
             # Set up the future request
-            self._input = await self.interleaver.get_value(Events.INPUT, (self.module, self.name))
+            self._input = await self.interleaver.get_value(f"{self.module.__path__}.{self.name}.input")
         return self._input
 
     @inputs.setter
@@ -386,7 +390,7 @@ class OperationEnvoy:
             value: The new input value(s)
         """
         self._input = value
-        self.interleaver.set_swap(value, (self.module, self.name), Events.INPUT)
+        self.interleaver.set_swap(value, f"{self.module.__path__}.{self.name}.input")
 
     @inputs.deleter
     def inputs(self):

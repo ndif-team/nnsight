@@ -31,6 +31,8 @@ class Compiler:
                 ),
             ]
         )
+        
+        #print(source)
 
         # Create the async function definition
         # Create a dictionary to store the compiled function
