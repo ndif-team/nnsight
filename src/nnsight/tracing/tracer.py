@@ -2,12 +2,10 @@ import inspect
 import ast
 import sys
 import re
-from .Interleaver import Interleaver
-from typing import TYPE_CHECKING, Any, Optional, Callable
-from .Compiler import Compiler
+from typing import TYPE_CHECKING, Any, Optional, Callable, List
+from .compiler import Compiler
 if TYPE_CHECKING:
-    from .Envoy import Envoy
-
+    from ..intervention.envoy import Envoy
     
 class ExitTracingException(Exception):
     pass
@@ -16,16 +14,18 @@ class Tracer:
     
     class Info:
         
-        def __init__(self, node: ast.AST, source: ast.List[str], start_line: int, end_line: int):
+        def __init__(self, node: ast.AST, source: List[str], start_line: int, end_line: int):
             self.node = node
             self.source = source
             self.start_line = start_line
             self.end_line = end_line
+            self.indent = 1
             
             
             
     
     def __init__(self, model: "Envoy", fn: Callable, *args, backend: Optional[str] = None, info: Optional[Info] = None,  **kwargs):
+        
         self.model = model
         self.fn = fn    
         
@@ -36,18 +36,27 @@ class Tracer:
         
         self.source = []
         
-        if info is None:
+        self.frame = None
+        
+        if info is not None:
             self.trace(info)
         
         
     def root(self):
                 
-        # Get the caller's frame
-        frame = inspect.currentframe().f_back
-
+        # Get the caller's frame that is outside of nnsight code
+        frame = inspect.currentframe()
+        while frame:
+            
+            frame = frame.f_back
+            if frame and frame.f_code.co_filename.find('nnsight') == -1:
+                break
         # Extract function name & source lines
-        source_lines, _ = inspect.getsourcelines(frame)
-        start_line = frame.f_lineno
+        
+        self.frame = frame
+        
+        source_lines, _ = inspect.getsourcelines(self.frame)
+        start_line = self.frame.f_lineno
         
         #TODO only past start line
         
@@ -70,18 +79,11 @@ class Tracer:
         
         end_line = visitor.target.end_lineno
         
-        self.info = self.Info(visitor.target, source_lines[start_line:end_line], start_line, end_line)
         
         
-        
-        self.trace()
-        
-                
-        breakpoint()
-        
-        
-        
-        self.source.extend(source_lines[start_line:end_line])   
+        info = self.Info(visitor.target, source_lines[start_line-1:end_line], start_line, end_line)
+         
+        self.trace(info)        
         
         def skip(new_frame, event, arg):
             if new_frame is frame and event == 'line' and new_frame.f_lineno >= start_line:
@@ -90,9 +92,9 @@ class Tracer:
                 raise ExitTracingException()
      
         sys.settrace(skip)
-        frame.f_trace = skip
+        self.frame.f_trace = skip
         
-    def trace(self):
+    def trace(self, info:Info):
         
         class Visitor(ast.NodeVisitor):
             def __init__(self, line_no):
@@ -120,10 +122,41 @@ class Tracer:
                 
                 
         
-        visitor = Visitor(start_line)
-        visitor.visit(tree)
+        visitor = Visitor(info.start_line)
+        visitor.visit(info.node)
         
-        self.source.append("async def root(user_locals):\n")
+        source = info.source
+        
+        
+        source = [
+            "async def inner(interleaver):\n",
+            "    try:\n",
+            *["    " + line for line in source[1:]],
+            "    except Exception as exception:\n",
+            "        interleaver.exception(exception)\n",
+            "    else:\n",
+            "        interleaver.continue_execution()\n"
+        ]
+                                
+        self.source.extend(source)
+        
+        def convert_with_trace(code: str) -> str:
+            # Pattern with optional "as" clause
+            pattern = r'with\s+(model\.trace\([^)]*\))(\s+as\s+(\w+))?:'
+            match = re.search(pattern, code)
+            if match:
+                expr = match.group(1)            # model.trace(...) part
+                var = match.group(3)             # optional variable after "as"
+                if var:
+                    return f"{var} = {expr}.execute(inner)"
+                else:
+                    return f"{expr}.execute(inner)"
+            return code  # Return original if no match
+        
+
+        
+        self.source.append(f"{convert_with_trace(info.source[0])}\n")
+                
         
         
     def __enter__(self):
@@ -135,16 +168,24 @@ class Tracer:
     def __exit__(self, exc_type, exc_val, exc_tb):        
         # Suppress the ExitTracingException but let other exceptions propagate
         if exc_type is ExitTracingException:
-            frame_locals = inspect.currentframe().f_back.f_locals  
-            frame_globals = inspect.currentframe().f_back.f_globals
+            frame_locals = self.frame.f_locals
+            frame_globals = self.frame.f_globals
             
-            interventions = Compiler()(self.source, frame_globals)
+
+            root = Compiler()(self.source, frame_globals)
+
+            root(self.model,frame_locals)
             
             # Returning True tells Python to suppress the exception
-            with Interleaver(interventions) as interleaver:
-                self.model._interleaver = interleaver
-                interleaver(self.fn, frame_locals, *self.args, **self.kwargs)    
+            
             return True
+        
+    
+    def execute(self, fn: Callable):
+        
+        fn(*self.args, **self.kwargs)
+        
+        return self
 
 
 
