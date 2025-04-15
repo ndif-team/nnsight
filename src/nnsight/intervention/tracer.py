@@ -18,7 +18,7 @@ class InterleavingTracer(Tracer):
     and allowing for custom interventions at specific points in the model's forward pass.
     """
 
-    def __init__(self, model: "Envoy", module: Any, fn: Callable, *args, **kwargs):
+    def __init__(self, model: "Envoy", fn: Callable, *args, **kwargs):
         """
         Initialize the InterleavingTracer.
         
