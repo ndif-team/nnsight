@@ -76,19 +76,39 @@ class Invoker(Tracer):
             
         self.tracer.mediators.append(Mediator(fn, self.info))
 
+
 class Cache:
+    """
+    A cache for storing and transforming tensor values during tracing.
     
-    def __init__(self, device:Optional[torch.device] = None, dtype:Optional[torch.dtype] = None, detach:Optional[bool] = False):
+    This class provides functionality to store tensor values with optional
+    transformations such as detaching from computation graph, moving to a
+    specific device, or converting to a specific dtype.
+    """
+    
+    def __init__(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, detach: Optional[bool] = False):
+        """
+        Initialize a Cache with optional transformation parameters.
         
+        Args:
+            device: Optional device to move tensors to
+            dtype: Optional dtype to convert tensors to
+            detach: Whether to detach tensors from computation graph
+        """
         self.device = device
         self.dtype = dtype
         self.detach = detach
         
         self.cache = {}
         
+    def add(self, provider: str, value: Any):
+        """
+        Add a value to the cache with optional transformations.
         
-    def add(self, provider:str, value:Any):
-        
+        Args:
+            provider: The key to store the value under
+            value: The tensor value to store
+        """
         # TODO: util .apply
         
         if self.detach:
@@ -99,8 +119,6 @@ class Cache:
                 
         if self.dtype is not None:
             value = value.to(self.dtype)
-            
-            
             
         self.cache[provider] = value
                 
@@ -178,7 +196,6 @@ class InterleavingTracer(Tracer):
         else:    
             self.info.frame.f_locals.update(interleaver.state)
         
-        
     ### Public API ####
         
     def invoke(self, *args, **kwargs):
@@ -194,13 +211,20 @@ class InterleavingTracer(Tracer):
         """
         return Invoker(self, *args, **kwargs)
 
-
-    def cache(self, device:Optional[torch.device] = None, dtype:Optional[torch.dtype] = None, detach:Optional[bool] = False):
+    def cache(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, detach: Optional[bool] = False):
+        """
+        Get or create a cache for storing intermediate values during tracing.
         
+        Args:
+            device: Optional device to move tensors to
+            dtype: Optional dtype to convert tensors to
+            detach: Whether to detach tensors from computation graph
+            
+        Returns:
+            A dictionary containing the cached values
+        """
         if self._cache is None:
-           
            self._cache = Cache(device, dtype, detach)
-           
            self.model._interleaver.set_user_cache(self._cache)
            
         return self._cache.cache
