@@ -17,7 +17,7 @@ from ..tracing.util import get_frame
 from .tracers.backwards import BackwardsTracer
 if TYPE_CHECKING:
     from .envoy import Envoy
-    from .tracers.tracer import Tracer
+    from .tracers.tracer import Tracer, Cache
     from .envoy import EnvoySource
 class Events(Enum):
     """Enum for different types of events in the interleaving process."""
@@ -215,7 +215,10 @@ class Interleaver:
     def register(self, mediator: Mediator):
         
         self.mediators[threading.current_thread().name].register(mediator) 
-
+        
+    def set_user_cache(self, cache: "Cache"):
+        
+        self.mediators[threading.current_thread().name].set_user_cache(cache) 
 class Mediator:
     """
     Manages the interleaving of model execution and interventions.
@@ -242,6 +245,8 @@ class Mediator:
        self.missed_providers = set()
        
        self.cache = {}
+       
+       self.user_cache: "Cache" = None
        
        self.children:List[Mediator] = []
        
@@ -309,8 +314,15 @@ class Mediator:
                 
         for child in self.children:
             child.handle(provider, value)
+            
+        result = self.cache.get(provider, value)
+            
+        if self.user_cache is not None and provider is not None:
+            
+            self.user_cache.add(provider, result)
+        
                     
-        return self.cache.get(provider, value)
+        return result
     
     def handle_value_event(self, requester: Any, provider: Any, value: Any):
         """
@@ -324,6 +336,8 @@ class Mediator:
         Returns:
             Modified value if a swap is requested, otherwise inspect._empty
         """
+        
+       
         if provider == requester:  
             self.respond(value)
             
@@ -425,6 +439,7 @@ class Mediator:
         response = self.response_queue.get()
         
         self.pull()
+        
         if isinstance(response, Exception):
             raise response
     
@@ -441,7 +456,7 @@ class Mediator:
         Returns:
             The requested value
         """
-        
+                
         if requester in self.cache:
             return self.cache[requester]
         
@@ -483,5 +498,9 @@ class Mediator:
     def register(self, mediator: Mediator):
         
         self.send(Events.REGISTER, mediator)
+        
+    def set_user_cache(self, cache: "Cache"):
+        
+        self.user_cache = cache
         
         

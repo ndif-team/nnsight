@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import MethodType
-from typing import Any, List, Optional, Union, Callable
+from typing import Any, List, Optional, Tuple, Union, Callable
 import torch
 
 from .interleaver import Interleaver
@@ -32,9 +32,9 @@ class Envoy:
             interleaver: Optional interleaver for managing execution flow
             path: Optional path string representing the module's location in the model hierarchy
         """
-        self._module = module
-        self._path = path
+        self.path = path
         
+        self._module = module
         self._module.__path__ = path
         
         self._source = None
@@ -63,7 +63,7 @@ class Envoy:
         """
 
         return self._interleaver.request(
-            f"{self._path}.output"
+            f"{self.path}.output"
         )
 
     @output.setter
@@ -74,7 +74,7 @@ class Envoy:
         Args:
             value: The new output value to use
         """
-        self._interleaver.swap(f"{self._path}.output", value)
+        self._interleaver.swap(f"{self.path}.output", value)
 
     @output.deleter
     def output(self):
@@ -90,7 +90,7 @@ class Envoy:
         Returns:
             The module's input tensor(s)
         """
-        return self._interleaver.request(f"{self._path}.input")
+        return self._interleaver.request(f"{self.path}.input")
 
     @inputs.setter
     def inputs(self, value: Any):
@@ -100,7 +100,7 @@ class Envoy:
         Args:
             value: The new input value(s) to use
         """
-        self._interleaver.swap(f"{self._path}.input", value)
+        self._interleaver.swap(f"{self.path}.input", value)
 
     @inputs.deleter
     def inputs(self):
@@ -180,6 +180,42 @@ class Envoy:
         """
         return Session(self)
     
+    
+    def modules(
+        self,
+        include_fn: Callable[[Envoy], bool] = None,
+        names: bool = False,
+    ) -> List[Envoy]:
+     
+        result = []
+        
+
+        for envoy in self._children:
+            
+            result.extend(envoy.modules(include_fn=include_fn, names=names))
+            
+            
+        if include_fn is None or include_fn(self):
+            
+            if names:
+                result.append((self.path, self))
+            else:
+                result.append(self)
+        
+        return result
+
+    def named_modules(self, *args, **kwargs) -> List[Tuple[str, Envoy]]:
+        """Returns all Envoys in the Envoy tree along with their name/module_path.
+
+        Args:
+            include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+
+        Returns:
+            List[Tuple[str, Envoy]]: Included Envoys and their names/module_paths.
+        """
+
+        return self.modules(*args, **kwargs, names=True)
+    
     #### Private methods ####
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> None:
@@ -191,7 +227,7 @@ class Envoy:
             name: Name of envoy/attribute.
         """
         alias_path = None
-        module_path = f"{self._path}.{name}"
+        module_path = f"{self.path}.{name}"
 
         # if self._rename is not None and name in self._rename:
         #     name = self._rename[name]
@@ -238,7 +274,7 @@ class Envoy:
 
     def __str__(self):
         """String representation of the Envoy."""
-        return f"model{self._path}"
+        return f"model{self.path}"
 
     def __repr__(self):
         """Representation of the Envoy."""

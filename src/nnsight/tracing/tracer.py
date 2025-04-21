@@ -2,7 +2,7 @@ import inspect
 import ast
 import sys
 from typing import TYPE_CHECKING, Any, Optional, Callable, List
-from .util import get_frame
+
 class ExitTracingException(Exception):
     """Exception raised to exit the tracing process."""
     pass
@@ -60,7 +60,11 @@ class Tracer:
         to exit the normal execution flow.
         """
         # Find the frame outside of nnsight
-        frame = get_frame(inspect.currentframe())
+        frame = inspect.currentframe()
+        while frame:
+            frame = frame.f_back
+            if frame and frame.f_code.co_filename.find('nnsight') == -1:
+                break
             
         # Get source code lines
         if 'tracing_info' in frame.f_locals:
