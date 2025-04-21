@@ -244,8 +244,6 @@ class NNsightGPUModelRunner(ModelRunner):
 
         def inner():
 
-            nonlocal interleaver
-
             with set_forward_context(model_input.attn_metadata):
                 hidden_or_intermediate_states = self.model._model(
                     input_ids=model_input.input_tokens,
