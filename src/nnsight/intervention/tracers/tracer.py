@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING, Any, Optional, Callable, List
 
+import torch
+
 from ..interleaver import Interleaver, Mediator
 from ...tracing.tracer import Tracer
 from ...tracing.util import try_catch
@@ -74,6 +76,34 @@ class Invoker(Tracer):
             
         self.tracer.mediators.append(Mediator(fn, self.info))
 
+class Cache:
+    
+    def __init__(self, device:Optional[torch.device] = None, dtype:Optional[torch.dtype] = None, detach:Optional[bool] = False):
+        
+        self.device = device
+        self.dtype = dtype
+        self.detach = detach
+        
+        self.cache = {}
+        
+        
+    def add(self, provider:str, value:Any):
+        
+        # TODO: util .apply
+        
+        if self.detach:
+            value = value.detach()
+        
+        if self.device is not None:
+            value = value.to(self.device)
+                
+        if self.dtype is not None:
+            value = value.to(self.dtype)
+            
+            
+            
+        self.cache[provider] = value
+                
 
 class InterleavingTracer(Tracer):
     """
@@ -97,6 +127,8 @@ class InterleavingTracer(Tracer):
         self.model = model
         
         self.mediators = []
+        
+        self._cache = None
                         
         super().__init__(*args, **kwargs)
         
@@ -139,8 +171,15 @@ class InterleavingTracer(Tracer):
             interleaver(self.fn, *self.args, **self.kwargs)
             
         self.model._clear()
-
-        self.info.frame.f_locals.update(interleaver.state)
+        
+        if self.info.frame.f_code.co_filename == '<string>':
+            self.info.frame.f_globals.update(interleaver.state)
+            
+        else:    
+            self.info.frame.f_locals.update(interleaver.state)
+        
+        
+    ### Public API ####
         
     def invoke(self, *args, **kwargs):
         """
@@ -154,3 +193,14 @@ class InterleavingTracer(Tracer):
             An Invoker instance
         """
         return Invoker(self, *args, **kwargs)
+
+
+    def cache(self, device:Optional[torch.device] = None, dtype:Optional[torch.dtype] = None, detach:Optional[bool] = False):
+        
+        if self._cache is None:
+           
+           self._cache = Cache(device, dtype, detach)
+           
+           self.model._interleaver.set_user_cache(self._cache)
+           
+        return self._cache.cache
