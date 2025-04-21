@@ -1,17 +1,35 @@
+from __future__ import annotations
+
+
+import ctypes
 import inspect
+import time
+from types import MethodType
+import types
 import torch
-from typing import Any, Callable, Dict, Tuple, Optional, TYPE_CHECKING
-import asyncio
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, List
+import threading
 from enum import Enum
 from functools import wraps
+from threading import Thread
+from queue import Queue
+from ..tracing.util import get_frame
+from .tracers.backwards import BackwardsTracer
 if TYPE_CHECKING:
     from .envoy import Envoy
-
+    from .tracers.tracer import Tracer
+    from .envoy import EnvoySource
 class Events(Enum):
     """Enum for different types of events in the interleaving process."""
     VALUE = 'value'      # Request for a value
-    CONTINUE = 'continue'  # Signal to continue execution
+    SWAP = 'swap'        # Request for a swap
+    END = 'continue'  # Signal to continue execution
     EXCEPTION = 'exception'  # Signal that an exception occurred
+    REGISTER = 'register'  # Signal that a mediator has been registered
+
+class Cancelation(Exception):
+    """Exception raised when a request is canceled."""
+    pass
 
 
 class Interleaver:
@@ -23,61 +41,87 @@ class Interleaver:
     modification of intermediate values.
     """
     
-    def __init__(self, interventions: Callable) -> None:
+    def __init__(self, mediators: List[Mediator]) -> None:
         """
         Initialize an Interleaver with intervention functions.
         
         Args:
             interventions: A callable that defines the intervention logic
         """
-        self.interventions = interventions
+        self.mediators = {mediator.name: mediator for mediator in mediators}
+        
         
         self.original_call = None
-        self.value_future = None
-        self.swap_future = None
-        self.event_future = None
-        self.async_loop = None
+        self.original_grad = None
+        self.original_backward = None
         
         self.missed_providers = set()
+        self.state = dict()
         
-    def wrap(self, fn: Callable, include_module: bool = False, name: Optional[str] = None):
-        """
-        Wrap a function to enable interleaving at its inputs and outputs.
-        
-        Args:
-            fn: The function to wrap
-            include_module: Whether to include the module as the first argument
-            name: Optional name for the function
-            
-        Returns:
-            A wrapped version of the function
-        """
-        @wraps(fn)
-        def inner(module, *args, **kwargs):
-            
-            requester = module.__path__ if name is None else f"{module.__path__}.{name}"
-            
-            # Call our hook before the original __call__
-            new_args = self.hook(f"{requester}.input", (args, kwargs))
-            
-            if new_args is not inspect._empty:
-                args, kwargs = new_args
+    def wrap(self, fn: Callable):
 
-            # Call the original __call__ method
-            if include_module:
-                value = fn(module, *args, **kwargs)
-            else:
-                value = fn(*args, **kwargs)
- 
-            new_value = self.hook(f"{requester}.output", value)
+        @wraps(fn)
+        def inner(module:torch.nn.Module, *args, **kwargs):
             
-            if new_value is not inspect._empty:
-                value = new_value
+            requester = module.__path__ 
+            # Call our hook before the original __call__
+            args, kwargs = self.handle(f"{requester}.input", (args, kwargs))
+            
+            value = fn(module, *args, **kwargs)
+ 
+            value = self.handle(f"{requester}.output", value)
             
             return value
         
         return inner
+    
+    def wrap_operation(self, fn: Callable, name:str):
         
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            
+            nonlocal fn
+                    
+            fn = self.handle(f"{name}.fn", fn)
+            
+            args, kwargs = self.handle(f"{name}.input", (args, kwargs))
+            
+            value = fn(*args, **kwargs)
+ 
+            value = self.handle(f"{name}.output", value)
+            
+            return value
+        
+        return inner
+    
+    
+    def grad(self):
+        
+        def inner(tensor: torch.Tensor):
+            
+            requester = id(tensor)
+            
+            def inner2(grad: torch.Tensor):
+                
+                grad = self.handle(f"{requester}.grad", grad)
+                
+                return grad
+            
+                tensor.register_hook(inner)
+
+            
+            
+    def wrap_backward(self):
+        
+        def inner(tensor: torch.Tensor, *args, **kwargs):
+            breakpoint()
+            with BackwardsTracer(tensor) as tracer:
+                pass
+            
+        return inner
+        
+      
+                
     def __enter__(self):
         """
         Context manager entry point. Replaces torch.nn.Module.__call__ with wrapped version.
@@ -87,10 +131,13 @@ class Interleaver:
         """
         # Save the original __call__ method
         self.original_call = torch.nn.Module.__call__
-    
+        self.original_grad = torch.Tensor.register_hook
+        self.original_backward = torch.Tensor.backward
         # Replace the __call__ method with our wrapped version
-        torch.nn.Module.__call__ = self.wrap(torch.nn.Module.__call__, include_module=True)
-        
+        torch.nn.Module.__call__ = self.wrap(torch.nn.Module.__call__)
+      
+            
+        torch.Tensor.backward = self.wrap_backward()
         return self
         
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -105,7 +152,10 @@ class Interleaver:
         self.cancel()
         # Restore the original __call__ method
         torch.nn.Module.__call__ = self.original_call
+        torch.Tensor.backward = self.original_backward
+        
         self.original_call = None
+        self.original_backward = None
             
     def __call__(self, fn: Callable, *args, **kwargs):
         """
@@ -116,22 +166,117 @@ class Interleaver:
             *args: Arguments to pass to the function
             **kwargs: Keyword arguments to pass to the function
         """
-        self.value_future = asyncio.Future()
-        self.event_future = asyncio.Future()
-        self.swap_future = asyncio.Future()
-        # Create and start the task for running interventions
-        self.async_loop = asyncio.get_event_loop()
-        self.intervention_task = self.async_loop.create_task(self.interventions(self))
+        
+        
+        
+        for mediator in self.mediators.values():
+            mediator.start(self)
+            
+        fn(*args, **kwargs)
+        
+        #TODO
+        # for mediator in self.mediators:
+        #     if mediator.has_pending_event():
+        #         requested_event, requester = mediator.get_event()
+        #         print(requested_event, requester)
+        #         raise ValueError(f"Execution complete but {requester} was not provided. Did you call an Envoy out of order? Investigate why this module was not called.")
+        
+    ### Provider Methods ###
+    
+    def handle(self, provider: Optional[Any] = None, value: Optional[Any] = None):
+                
+        for mediator in self.mediators.values():
+            new_value = mediator.handle(provider, value)
+            
+        if new_value is not value:
+            print("new value", provider, new_value, value)
+            return new_value
+            
+        return value
+            
+            
+        #TODO concat all the mediators
+        
+    def cancel(self):
+        """Cancel the intervention threads."""
+        for mediator in self.mediators.values():
+            mediator.cancel()
+    
+    ### Requester Methods ###
+    
+    def request(self, requester: Any):
+                
+        return self.mediators[threading.current_thread().name].request(requester)
+
+    def swap(self, requester: Any, value: Any):
+        
+        return self.mediators[threading.current_thread().name].swap(requester, value)
+    
+    def register(self, mediator: Mediator):
+        
+        self.mediators[threading.current_thread().name].register(mediator) 
+
+class Mediator:
+    """
+    Manages the interleaving of model execution and interventions.
+    
+    This class coordinates the flow between the model's forward pass and
+    user-defined intervention functions, allowing for inspection and
+    modification of intermediate values.
+    """
+    
+    def __init__(self, intervention: Callable, info: "Tracer.Info", name: Optional[str] = None)  -> None:
+       
+       self.intervention = intervention
+       self.name = name if name else f"Mediator{id(self)}"
+       self.info = info
+       
+       self.event_queue = Queue()
+       self.response_queue = Queue()
+       self.swap_queue = Queue()
+       
+       self.thread = None
+       
+       self.interleaver = None
+              
+       self.missed_providers = set()
+       
+       self.cache = {}
+       
+       self.children:List[Mediator] = []
+       
+       self._frame = None
+       
+    def start(self, interleaver: Interleaver):
+        
+        self.interleaver = interleaver
+         
+        self.thread = Thread(target=self.intervention, args=(self, self.info), daemon=True, name=self.name)
+        self.thread.start()
         
         self.wait()
                 
-        fn(*args, **kwargs)
+        self.handle()
         
-        if self.event_future.done():
-            requested_event, requester = self.event_future.result()
-            raise ValueError(f"Execution complete but {requester} was not provided. Did you call an Envoy out of order? Investigate why this module was not called.")
+    
+    ### Provider Methods ###
         
-    def hook(self, provider: Optional[Any] = None, value: Optional[Any] = None):
+    def wait(self):
+        """Wait for the next event to be set."""
+        """Wait until the event queue is not empty."""
+        while self.event_queue.empty():
+            # Keep checking until there's an event in the queue
+            time.sleep(0.001)  # Small sleep to prevent CPU spinning
+        
+    def cancel(self):
+        """Cancel the intervention thread."""
+        #TODO custom canceled error
+        
+        self.cache.clear()
+        
+        self.response_queue.put(Cancelation())
+        
+    def handle(self, provider: Optional[Any] = None, value: Optional[Any] = None):
         """
         Hook function called during model execution to handle interventions.
         
@@ -142,23 +287,31 @@ class Interleaver:
         Returns:
             Modified value if a swap is requested, otherwise inspect._empty
         """
-        if self.event_future.done():
-            event, data = self.event_future.result()
-            self.event_future = asyncio.Future()
+        
+        process = not self.event_queue.empty()
+        
+        while process:
             
+            event, data = self.event_queue.get()            
             if event == Events.VALUE:
-                return self.handle_value_event(data, provider, value)
+                process = self.handle_value_event(data, provider, value)
+            elif event == Events.SWAP:
+                requester, swap_value = data
+                process = self.handle_swap_event(requester, provider, swap_value)
             elif event == Events.EXCEPTION:
                 self.handle_exception_event(data)
-            elif event == Events.CONTINUE:
+                process = False
+            elif event == Events.END:
                 self.cancel()
+                process = False
+            elif event == Events.REGISTER:
+                self.handle_register_event(data)
                 
-        return inspect._empty
+        for child in self.children:
+            child.handle(provider, value)
+                    
+        return self.cache.get(provider, value)
     
-    def wait(self):
-        """Wait for the next event to be set."""
-        self.async_loop.run_until_complete(self.event_future)
-        
     def handle_value_event(self, requester: Any, provider: Any, value: Any):
         """
         Handle a value event by providing the requested value or recording a missed provider.
@@ -171,30 +324,37 @@ class Interleaver:
         Returns:
             Modified value if a swap is requested, otherwise inspect._empty
         """
-        if provider == requester:
-            self.set_value(value)
-
-            if provider in self.missed_providers:
-                self.missed_providers.remove(provider)
+        if provider == requester:  
+            self.respond(value)
             
-            self.wait()
-            self.hook()
         else:
             if requester in self.missed_providers:
-                raise ValueError(f"Value was missed for {requester}. Did you call an Envoy out of order?")
-            
-            self.missed_providers.add(provider)         
-            self.event_future.set_result((Events.VALUE, requester))        
-            
-        return self.get_swap(provider)
+                self.respond(ValueError(f"Value was missed for {requester}. Did you call an Envoy out of order?"))
+            else:
+                self.missed_providers.add(provider)
+                self.event_queue.put((Events.VALUE, requester))
+                
+                return False
+                
+        return True
+                
+    def handle_swap_event(self, requester: Any, provider: Any, swap_value: Any):
+        """
+        Handle a swap event by providing the requested value.
+        """
+        if provider == requester:
+            self.respond()
+        else:
+            if requester in self.missed_providers:
+                self.respond(ValueError(f"Setting {requester} is out of scope for scope {provider}. Did you call an Envoy out of order?"))
+            else:
+                self.missed_providers.add(provider)
+                self.event_queue.put((Events.SWAP, (requester, swap_value)))
+                
+                return False
+                
+        return True
                       
-    def cancel(self):
-        """Cancel the intervention task and close the async loop."""
-        if not self.intervention_task.cancelled():
-            self.intervention_task.cancel()
-            
-        self.event_future = asyncio.Future()
-        self.async_loop.close()
         
     def handle_exception_event(self, exception: Exception):
         """
@@ -204,18 +364,74 @@ class Interleaver:
             exception: The exception to raise
         """
         raise exception
+    
+    def handle_register_event(self, mediator: Mediator):
+        
+        self.children.append(mediator)
+        
+        self.interleaver.mediators[mediator.name] = mediator
+        
+        mediator.start(self.interleaver)
+        
+        self.respond()
+        
                 
-    def set_value(self, value: Any):
+    def respond(self, value: Optional[Any] = None):
         """
         Set the value for a pending value request.
         
         Args:
             value: The value to provide
         """
-        self.value_future.set_result(value)
-        self.value_future = asyncio.Future()
         
-    async def get_value(self, requester: Any):
+        self.response_queue.put(value)
+        
+        self.wait()
+                
+    ### Requester Methods ###
+    
+    @property
+    def frame(self):
+        
+        if self._frame is None:
+            
+            frame = inspect.currentframe()
+            
+            while frame:
+                frame = frame.f_back
+                if frame and frame.f_code.co_filename == "<string>":
+                    break
+            self._frame = frame
+            
+        return self._frame
+    
+    def push(self):
+        
+        self.interleaver.state.update(self.frame.f_locals)
+        
+    def pull(self):
+        
+        self.interleaver.state.pop('mediator', None)
+        self.interleaver.state.pop('tracing_info', None)
+        
+        self.frame.f_globals.update(self.interleaver.state)
+    
+    def send(self, event: Events, requester: Any):
+        
+        self.push()
+        
+        self.event_queue.put((event, requester))
+
+        response = self.response_queue.get()
+        
+        self.pull()
+        if isinstance(response, Exception):
+            raise response
+    
+        return response
+   
+        
+    def request(self, requester: Any):
         """
         Request a value from a specific module or function.
         
@@ -225,10 +441,17 @@ class Interleaver:
         Returns:
             The requested value
         """
-        self.event_future.set_result((Events.VALUE, requester))
-        return await self.value_future
+        
+        if requester in self.cache:
+            return self.cache[requester]
+        
+        value = self.send(Events.VALUE, requester)
+        
+        self.cache[requester] = value
+        
+        return value
     
-    def set_swap(self, value: Any, envoy: "Envoy"):
+    def swap(self, requester: Any, value: Any):
         """
         Set a value to swap during execution.
         
@@ -236,33 +459,17 @@ class Interleaver:
             value: The value to swap in
             envoy: The envoy requesting the swap
         """
-        self.swap_future.set_result((value, envoy))
-    
-    def get_swap(self, provider: Any):
-        """
-        Get a swap value if one is available.
         
-        Args:
-            provider: The module or function providing a value
-            
-        Returns:
-            The swap value if available, otherwise inspect._empty
-        """
-        if self.swap_future is not None and self.swap_future.done():
-            value, setter = self.swap_future.result()
-                        
-            if setter != provider:
-                raise ValueError(f"Setting {setter} is out of scope.")
-            
-            self.swap_future = asyncio.Future()
-            
-            return value
+        self.send(Events.SWAP, (requester, value))
         
-        return inspect._empty
-        
-    def continue_execution(self):
+        self.cache[requester] = value
+               
+    def end(self):
         """Signal that execution should continue without further intervention."""
-        self.event_future.set_result((Events.CONTINUE, None))
+        
+        self.push()
+        
+        self.event_queue.put((Events.END, None))
         
     def exception(self, exception: Exception):
         """
@@ -271,4 +478,10 @@ class Interleaver:
         Args:
             exception: The exception that occurred
         """
-        self.event_future.set_result((Events.EXCEPTION, exception))
+        self.event_queue.put((Events.EXCEPTION, exception))
+
+    def register(self, mediator: Mediator):
+        
+        self.send(Events.REGISTER, mediator)
+        
+        

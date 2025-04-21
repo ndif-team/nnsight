@@ -1,14 +1,12 @@
 from __future__ import annotations
 
+from types import MethodType
 from typing import Any, List, Optional, Union, Callable
 import torch
-import inspect
-import astor
-import ast
-from .interleaver import Events, Interleaver
-from .tracer import InterleavingTracer
-import textwrap
-from types import MethodType
+
+from .interleaver import Interleaver
+from .tracers.tracer import InterleavingTracer
+
 from .inject import convert as inject
 
 
@@ -37,11 +35,8 @@ class Envoy:
         self._module = module
         self._path = path
         
-        
         self._module.__path__ = path
         
-        self._input = None
-        self._output = None
         self._source = None
         
         self._interleaver = interleaver
@@ -51,23 +46,25 @@ class Envoy:
         for name, module in list(self._module.named_children()):
             setattr(self, name, module)
             
+    def __getitem__(self, key: str) -> Envoy:
+        
+        return self._children[key]
+            
+            
     #### Properties ####
 
     @property
-    async def output(self) -> Union[Any, torch.Tensor]:
+    def output(self) -> Union[Any, torch.Tensor]:
         """
         Get the output of the module's forward pass.
         
         Returns:
             The module's output tensor(s)
         """
-        
-        if self._output is None:
-            # Set up the future request
-            self._output = await self._interleaver.get_value(
-                f"{self._path}.output"
-            )
-        return self._output
+
+        return self._interleaver.request(
+            f"{self._path}.output"
+        )
 
     @output.setter
     def output(self, value: Any):
@@ -77,26 +74,23 @@ class Envoy:
         Args:
             value: The new output value to use
         """
-        self._output = value
-        self._interleaver.set_swap(value, f"{self._path}.output")
+        self._interleaver.swap(f"{self._path}.output", value)
 
     @output.deleter
     def output(self):
         """Clear the cached output value."""
+        #TODO
         self._output = None
 
     @property
-    async def inputs(self) -> Union[Any, torch.Tensor]:
+    def inputs(self) -> Union[Any, torch.Tensor]:
         """
         Get the inputs to the module's forward pass.
         
         Returns:
             The module's input tensor(s)
         """
-        if self._input is None:
-            # Set up the future request
-            self._input = await self._interleaver.get_value(f"{self._path}.input")
-        return self._input
+        return self._interleaver.request(f"{self._path}.input")
 
     @inputs.setter
     def inputs(self, value: Any):
@@ -106,8 +100,7 @@ class Envoy:
         Args:
             value: The new input value(s) to use
         """
-        self._input = value
-        self._interleaver.set_swap(value, f"{self._path}.input")
+        self._interleaver.swap(f"{self._path}.input", value)
 
     @inputs.deleter
     def inputs(self):
@@ -115,15 +108,28 @@ class Envoy:
         self._input = None
         
     @property
-    async def input(self) -> Union[Any, torch.Tensor]:
+    def input(self) -> Union[Any, torch.Tensor]:
         """
         Get the first input to the module's forward pass.
         
         Returns:
             The first input tensor
         """
-        inputs = await self.inputs
+        
+        inputs = self.inputs
+        
         return [*inputs[0], *inputs[1].values()][0]
+    
+    @input.setter
+    def input(self, value: Any):
+        """
+        Set a new value for the module's input.
+        """
+        inputs = self.inputs
+        
+        value = (value, *inputs[0][1:]), inputs[1]
+                
+        self.inputs = value
         
     @property
     def source(self) -> EnvoySource:
@@ -136,10 +142,11 @@ class Envoy:
         try:
             if self._source is None:
                 def wrap(fn: Callable, **kwargs):
-                    return self._interleaver.wrap(fn, **kwargs)
-                source, line_numbers = inject(self._module, wrap)
+                    return self._interleaver.wrap_operation(fn, **kwargs)
+                source, line_numbers, forward = inject(self._module.forward, wrap, self._module.__path__)
+                self._module.forward = MethodType(forward, self._module)
                 
-                self._source = EnvoySource(self._module, source, line_numbers)
+                self._source = EnvoySource(self._module.__path__, source, line_numbers)
                 self._source._set_interleaver(self._interleaver)
                 
         except Exception as e:
@@ -161,7 +168,7 @@ class Envoy:
         Returns:
             An InterleavingTracer for this module
         """
-        return InterleavingTracer(self, self._module, *args, **kwargs)
+        return InterleavingTracer(self._module, self, *args, **kwargs)
     
 
     def session(self):
@@ -221,8 +228,6 @@ class Envoy:
     
     def _clear(self):
         """Clear all cached values and references."""
-        self._input = None
-        self._output = None
         self._interleaver = None
         
         if self._source is not None:
@@ -233,7 +238,7 @@ class Envoy:
 
     def __str__(self):
         """String representation of the Envoy."""
-        return f"model.{self._path}"
+        return f"model{self._path}"
 
     def __repr__(self):
         """Representation of the Envoy."""
@@ -289,7 +294,7 @@ class OperationEnvoy:
     operations within a module's execution.
     """
     
-    def __init__(self, module: torch.nn.Module, name: str, source: str, line_number: int):
+    def __init__(self, name: str, source: str, line_number: int, interleaver: Optional[Interleaver] = None):
         """
         Initialize an OperationEnvoy.
         
@@ -299,15 +304,13 @@ class OperationEnvoy:
             source: The source code of the module
             line_number: The line number of the operation in the source
         """
-        self.module = module
         self.name = name
-        self.source = source
+        self.source_code = source
         self.line_number = line_number
                 
-        self._output = None
-        self._input = None
+        self._interleaver = interleaver
         
-        self.interleaver = None
+        self._source = None
         
     def __str__(self):
         """
@@ -316,7 +319,7 @@ class OperationEnvoy:
         Returns:
             A formatted string showing the operation's source code with context
         """
-        source_lines = self.source.split('\n')
+        source_lines = self.source_code.split('\n')
         start_idx = max(0, self.line_number - 5)
         end_idx = min(len(source_lines) - 1, self.line_number + 8)
                 
@@ -338,20 +341,18 @@ class OperationEnvoy:
         return '\n'.join(highlighted_lines)
         
     @property
-    async def output(self) -> Union[Any, torch.Tensor]:
+    def output(self) -> Union[Any, torch.Tensor]:
         """
         Get the output of this operation.
         
         Returns:
             The operation's output value(s)
         """
-        if self._output is None:
-            # Set up the future request            
-            self._output = await self.interleaver.get_value(
-                f"{self.module.__path__}.{self.name}.output"
-            )
-        return self._output
-
+        
+        return self._interleaver.request(
+            f"{self.name}.output"
+        )
+        
     @output.setter
     def output(self, value: Any):
         """
@@ -360,26 +361,20 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
-        self._output = value
-        self.interleaver.set_swap(value, f"{self.module.__path__}.{self.name}.output")
+        self._interleaver.swap(f"{self.name}.output", value)
 
-    @output.deleter
-    def output(self):
-        """Clear the cached output value."""
-        self._output = None
 
     @property
-    async def inputs(self) -> Union[Any, torch.Tensor]:
+    def inputs(self) -> Union[Any, torch.Tensor]:
         """
         Get the inputs to this operation.
         
         Returns:
             The operation's input value(s)
         """
-        if self._input is None:
-            # Set up the future request
-            self._input = await self.interleaver.get_value(f"{self.module.__path__}.{self.name}.input")
-        return self._input
+        return self._interleaver.request(
+            f"{self.name}.input"
+        )
 
     @inputs.setter
     def inputs(self, value: Any):
@@ -389,8 +384,7 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        self._input = value
-        self.interleaver.set_swap(value, f"{self.module.__path__}.{self.name}.input")
+        self._interleaver.swap(f"{self.name}.input", value)
 
     @inputs.deleter
     def inputs(self):
@@ -398,15 +392,56 @@ class OperationEnvoy:
         self._input = None
         
     @property
-    async def input(self) -> Union[Any, torch.Tensor]:
+    def input(self) -> Union[Any, torch.Tensor]:
         """
-        Get the first input to this operation.
+        Get the first input to the module's forward pass.
         
         Returns:
-            The first input value
+            The first input tensor
         """
-        inputs = await self.inputs
+        
+        inputs = self.inputs
+        
         return [*inputs[0], *inputs[1].values()][0]
+    
+    
+    @input.setter
+    def input(self, value: Any):
+        """
+        Set a new value for the module's input.
+        """
+        inputs = self.inputs
+        
+        value = (value, *inputs[0][1:]), inputs[1]
+                
+        self.inputs = value
+        
+        
+    @property
+    def source(self) -> str:
+        """
+        Get the source code of the operation.
+        """
+        
+        print("requesting", f"{self.name}.fn")
+        fn = self._interleaver.request(
+            f"{self.name}.fn"
+        )
+        print("got fn", fn)
+        def wrap(fn: Callable, **kwargs):
+            return self._interleaver.wrap_operation(fn, **kwargs)
+        
+        source, line_numbers, fn = inject(fn, wrap, self.name)
+        
+        self._source = EnvoySource(self.name, source, line_numbers, interleaver=self._interleaver)
+        
+        print(''.join(source))
+        
+        self._interleaver.swap(f"{self.name}.fn", fn)
+        
+        return self._source
+        
+    
 
     # @input.setter
     # def input(self, value: Any):
@@ -426,15 +461,12 @@ class OperationEnvoy:
         Args:
             interleaver: The interleaver to use
         """
-        self.interleaver = interleaver
+        self._interleaver = interleaver
 
     def _clear(self):
         """Clear all cached values and references."""
-        self._input = None
-        self._output = None
         self._interleaver = None
-
-
+        
 class EnvoySource:
     """
     Represents the source code of a module with operations highlighted.
@@ -443,7 +475,7 @@ class EnvoySource:
     source code, allowing for inspection and intervention.
     """
     
-    def __init__(self, module: torch.nn.Module, source: str, line_numbers: dict):
+    def __init__(self, name:str, source: str, line_numbers: dict, interleaver: Optional[Interleaver] = None):
         """
         Initialize an EnvoySource.
         
@@ -454,15 +486,14 @@ class EnvoySource:
         """
         self.source = source
         self.line_numbers = line_numbers
-        self.reverse_line_numbers = {v: k for k, v in line_numbers.items()}
         
         self.operations = []
         
-        for name, line_number in line_numbers.items():
-            operation = OperationEnvoy(module, name, source, line_number)
-            setattr(self, name, operation)
+        for _name, line_number in line_numbers.items():
+            operation = OperationEnvoy(f"{name}.{_name}", source, line_number, interleaver=interleaver)
+            setattr(self, _name, operation)
             self.operations.append(operation)
-
+            
     def __str__(self):
         """
         String representation showing the source code with operations highlighted.
@@ -474,17 +505,38 @@ class EnvoySource:
         max_name_length = max(len(name) for name in self.line_numbers.keys()) if self.line_numbers else 0
         
         source_lines = self.source.split('\n')
-        formatted_lines = [" " * (max_name_length + 6) +'+ '  + source_lines[0]]  # Keep the function definition unchanged
+        formatted_lines = [" " * (max_name_length + 6) +'* '  + source_lines[0]]  # Keep the function definition unchanged
+        
+        # Group operations by line number
+        operations_by_line = {}
+        for name, line_number in self.line_numbers.items():
+            if line_number not in operations_by_line:
+                operations_by_line[line_number] = []
+            operations_by_line[line_number].append(name)
         
         for i, line in enumerate(source_lines[1:]):
-            # Find if this line number matches any operation
-            name = self.reverse_line_numbers.get(i, None)
-            if name:
-                line_prefix = f" {name:{max_name_length}} ->{i:3d} "
-            else:
-                line_prefix = " " * (max_name_length + 4) + f'{i:3d} '
+            line_number = i
+            
+            # Check if this line has operations
+            if line_number in operations_by_line:
+                # Handle multiple operations on the same line
+                operations = operations_by_line[line_number]
                 
-            formatted_lines.append(f"{line_prefix}{line}")
+                # First operation gets the line number
+                first_op = operations[0]
+                line_prefix = f" {first_op:{max_name_length}} ->{line_number:3d} "
+                formatted_lines.append(f"{line_prefix}{line}")
+                
+                # For nested operations, unwrap them onto separate lines
+                if len(operations) > 1:
+                    for op in operations[1:]:
+                        continuation_prefix = f" {op:{max_name_length}} ->  + "
+                        # Instead of just showing a vertical line, show the operation on its own line
+                        formatted_lines.append(f"{continuation_prefix}{' ' * (len(line) - len(line.lstrip()))}...")
+            else:
+                # Regular line with no operations
+                line_prefix = " " * (max_name_length + 4) + f'{line_number:3d} '
+                formatted_lines.append(f"{line_prefix}{line}")
         
         source = "\n".join(formatted_lines)
         
@@ -499,8 +551,13 @@ class EnvoySource:
         """
         for operation in self.operations:
             operation._set_interleaver(interleaver)
+            
     
     def _clear(self):
         """Clear all cached values in all operations."""
         for operation in self.operations:
             operation._clear()
+            
+            if operation._source is not None:
+                operation._source._clear()
+            

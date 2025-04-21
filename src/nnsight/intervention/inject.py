@@ -1,20 +1,17 @@
-import torch
 import ast
 import astor
 import textwrap
-from types import MethodType
 from typing import Callable
 import inspect
 from collections import defaultdict
 
 class FunctionCallWrapper(ast.NodeTransformer):
     
-    
-    def __init__(self):
+    def __init__(self, name:str):
         
         self.name_index = defaultdict(int)
         self.line_numbers = {}
-        
+        self.name = name
         
     def get_name(self, node:ast.Name):
         
@@ -34,13 +31,12 @@ class FunctionCallWrapper(ast.NodeTransformer):
             # Reverse to get the correct order (e.g., torch.nn.functional)
             func_name = "_".join(reversed(parts))
             
-        func_name = f'{func_name}_{self.name_index[func_name]}'
+        name = f'{func_name}_{self.name_index[func_name]}'
         
         self.name_index[func_name] += 1
         
-        return func_name
+        return name
   
-
     def visit_Call(self, node):
         self.generic_visit(node)  # First, process nested calls
         # Get the fully qualified name of the function being called
@@ -50,33 +46,32 @@ class FunctionCallWrapper(ast.NodeTransformer):
             func=ast.Call(
                 func=ast.Name(id='wrap', ctx=ast.Load()),
                 args=[node.func],
-                keywords=[ast.keyword(arg='name', value=ast.Constant(value=func_name))]
+                keywords=[ast.keyword(arg='name', value=ast.Constant(value=f'{self.name}.{func_name}'))]
             ),
-            args=[ast.Name('self', ctx=ast.Load())] + node.args,
+            args=node.args,
             keywords=node.keywords
         )
 
-def convert(module:torch.nn.Module, wrap:Callable):
+def convert(fn:Callable, wrap:Callable, name:str):
     
+ 
+    source = textwrap.dedent(inspect.getsource(fn))
     
-    source =  textwrap.dedent(inspect.getsource(module.forward))
-                
-                
+    # Get the module where the forward method is defined
+    module_globals = inspect.getmodule(fn).__dict__
+    
     tree = ast.parse(source)
-    transformer = FunctionCallWrapper()
+    transformer = FunctionCallWrapper(name)
     tree = transformer.visit(tree)
     ast.fix_missing_locations(tree)
     
     local_namespace = {'wrap': wrap}
     
-    global_namespace = {**globals(), 'wrap': wrap}
+    # Include both globals from this module and the module where forward is defined
+    global_namespace = {**globals(), **module_globals, 'wrap': wrap}
             
     exec(astor.to_source(tree), global_namespace, local_namespace)
             
-    fn = local_namespace['forward']
-    
-    fn = MethodType(fn, module)
-            
-    module.forward = fn
+    fn = local_namespace[fn.__name__]
 
-    return source, transformer.line_numbers
+    return source, transformer.line_numbers, fn

@@ -1,193 +1,169 @@
 import inspect
 import ast
 import sys
-import re
 from typing import TYPE_CHECKING, Any, Optional, Callable, List
-from .compiler import Compiler
-if TYPE_CHECKING:
-    from ..intervention.envoy import Envoy
-    
+from .util import get_frame
 class ExitTracingException(Exception):
+    """Exception raised to exit the tracing process."""
     pass
 
 class Tracer:
+    """
+    Captures and executes code within a tracing context.
+    
+    This class allows for capturing code blocks within a 'with' statement,
+    compiling them into callable functions, and executing them with access
+    to the model and local variables.
+    """
     
     class Info:
+        """
+        Container for information about the traced code.
         
-        def __init__(self, node: ast.AST, source: List[str], start_line: int, end_line: int):
-            self.node = node
+        Attributes:
+            source: List of source code lines
+            frame: Frame information from the call stack
+        """
+        
+        def __init__(self, source: List[str], frame: inspect.FrameInfo):
+            """
+            Initialize Info with source code and frame information.
+            
+            Args:
+                source: List of source code lines
+                frame: Frame information from the call stack
+            """
             self.source = source
-            self.start_line = start_line
-            self.end_line = end_line
-            self.indent = 1
+            self.frame = frame
             
-            
-            
-    
-    def __init__(self, model: "Envoy", fn: Callable, *args, backend: Optional[str] = None, info: Optional[Info] = None,  **kwargs):
+    def __init__(self, *args, **kwargs):
+        """
+        Initialize a Tracer instance.
         
-        self.model = model
-        self.fn = fn    
-        
-        self.backend = backend
-        
+        Args:
+            *args: Additional arguments to pass to the traced function
+            **kwargs: Additional keyword arguments to pass to the traced function
+        """
         self.args = args
         self.kwargs = kwargs
         
-        self.source = []
+        self.info = None   
+         
+        self.capture()
+
+    def capture(self):
+        """
+        Capture the code block within the 'with' statement.
         
-        self.frame = None
-        
-        if info is not None:
-            self.trace(info)
-        
-        
-    def root(self):
-                
-        # Get the caller's frame that is outside of nnsight code
-        frame = inspect.currentframe()
-        while frame:
+        This method walks up the call stack to find the frame outside of nnsight,
+        extracts the source code of the 'with' block, and raises an exception
+        to exit the normal execution flow.
+        """
+        # Find the frame outside of nnsight
+        frame = get_frame(inspect.currentframe())
             
-            frame = frame.f_back
-            if frame and frame.f_code.co_filename.find('nnsight') == -1:
-                break
-        # Extract function name & source lines
+        # Get source code lines
+        if 'tracing_info' in frame.f_locals:
+            source_lines = frame.f_locals['tracing_info'].source
+        else:
+            source_lines, _ = inspect.getsourcelines(frame)
+            
+        start_line = frame.f_lineno
         
-        self.frame = frame
-        
-        source_lines, _ = inspect.getsourcelines(self.frame)
-        start_line = self.frame.f_lineno
-        
-        #TODO only past start line
-        
-        # Find the 'with' statement and extract its block
+        # Parse the source code to find the 'with' block
         tree = ast.parse("".join(source_lines))
         
-        class Visitor(ast.NodeVisitor):
-            def __init__(self, line_no):
-                self.target = None
-               
-                self.line_no = line_no
-                
-                
-            def visit_With(self, node):
-                if node.lineno == self.line_no:
-                    self.target = node
-
-        visitor = Visitor(start_line)
-        visitor.visit(tree)
+        end_line = self.parse(tree, start_line)
         
-        end_line = visitor.target.end_lineno
-        
-        
-        
-        info = self.Info(visitor.target, source_lines[start_line-1:end_line], start_line, end_line)
+        # Store the captured information
+        self.info = Tracer.Info(source_lines[start_line:end_line], frame)
          
-        self.trace(info)        
-        
+        # Set up trace function to exit normal execution
         def skip(new_frame, event, arg):
-            if new_frame is frame and event == 'line' and new_frame.f_lineno >= start_line:
+            if new_frame is frame and event == 'line' and new_frame.f_lineno >= start_line-1:
                 sys.settrace(None)
                 frame.f_trace = None
                 raise ExitTracingException()
      
         sys.settrace(skip)
-        self.frame.f_trace = skip
+        frame.f_trace = skip
         
-    def trace(self, info:Info):
         
+    def parse(self, tree, start_line):
+    
         class Visitor(ast.NodeVisitor):
+            """AST visitor to find the 'with' node at the specified line."""
             def __init__(self, line_no):
                 self.target = None
-                self.object_name = None
-                self.context_name = None
                 self.line_no = line_no
-                
-                self.inner_traces = []
                 
             def visit_With(self, node):
                 if node.lineno == self.line_no:
                     self.target = node
                     
-                    self.object_name = node.items[0].context_expr.func.value.id
-                    self.context_name = node.items[0].optional_vars.id if node.items[0].optional_vars else None
-                    
-                    self.generic_visit(node)
-                    
-                elif node.lineno <= self.target.end_lineno and node.items[0].context_expr.func.value.id == self.object_name:
-                    self.inner_traces.append(node)
-                else:
-                    self.generic_visit(node)    
-                    
+        visitor = Visitor(start_line)
+        visitor.visit(tree)
                 
-                
+        end_line = visitor.target.end_lineno
         
-        visitor = Visitor(info.start_line)
-        visitor.visit(info.node)
+        return end_line
+
+    def compile(self) -> Callable:
+        """
+        Compile the captured code block into a callable function.
         
-        source = info.source
-        
-        
-        source = [
-            "async def inner(interleaver):\n",
-            "    try:\n",
-            *["    " + line for line in source[1:]],
-            "    except Exception as exception:\n",
-            "        interleaver.exception(exception)\n",
-            "    else:\n",
-            "        interleaver.continue_execution()\n"
+        Returns:
+            A callable function that executes the captured code block
+        """
+        # Wrap the captured code in a function definition
+        self.info.source = [
+            "def fn(model, tracer, user_locals, tracing_info):\n",
+            *self.info.source
         ]
-                                
-        self.source.extend(source)
         
-        def convert_with_trace(code: str) -> str:
-            # Pattern with optional "as" clause
-            pattern = r'with\s+(model\.trace\([^)]*\))(\s+as\s+(\w+))?:'
-            match = re.search(pattern, code)
-            if match:
-                expr = match.group(1)            # model.trace(...) part
-                var = match.group(3)             # optional variable after "as"
-                if var:
-                    return f"{var} = {expr}.execute(inner)"
-                else:
-                    return f"{expr}.execute(inner)"
-            return code  # Return original if no match
+        source = "".join(self.info.source)
         
+        local_namespace = {}
 
+        # Execute the function definition in the local namespace
+        exec(source, self.info.frame.f_globals, local_namespace)
         
-        self.source.append(f"{convert_with_trace(info.source[0])}\n")
-                
-        
-        
-    def __enter__(self):
-        
-        self.root()
-            
-        
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):        
-        # Suppress the ExitTracingException but let other exceptions propagate
-        if exc_type is ExitTracingException:
-            frame_locals = self.frame.f_locals
-            frame_globals = self.frame.f_globals
-            
-
-            root = Compiler()(self.source, frame_globals)
-
-            root(self.model,frame_locals)
-            
-            # Returning True tells Python to suppress the exception
-            
-            return True
-        
+        return local_namespace["fn"]
     
     def execute(self, fn: Callable):
+        """
+        Execute the compiled function.
         
-        fn(*self.args, **self.kwargs)
+        Args:
+            fn: The compiled function to execute
+        """
+        fn(self, self.info.frame.f_locals, self.info)
+    
+    def __enter__(self):
+        """
+        Enter the tracing context.
         
+        Returns:
+            The Tracer instance
+        """
         return self
-
-
-
-
-
+                
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Exit the tracing context.
+        
+        If an ExitTracingException is caught, compile and execute the captured code.
+        
+        Args:
+            exc_type: Exception type if an exception was raised
+            exc_val: Exception value if an exception was raised
+            exc_tb: Exception traceback if an exception was raised
+            
+        Returns:
+            True if an ExitTracingException was caught, None otherwise
+        """
+        # Suppress the ExitTracingException but let other exceptions propagate
+        if exc_type is ExitTracingException:
+            fn = self.compile()
+            self.execute(fn)
+            return True
