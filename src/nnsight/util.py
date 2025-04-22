@@ -4,7 +4,6 @@ import importlib
 from contextlib import AbstractContextManager
 from typing import Any, Callable, Collection, List, Optional, Type, TypeVar
 
-import torch
 from typing_extensions import Self
 
 # TODO Have an Exception you can raise to stop apply early
@@ -165,43 +164,3 @@ class Patcher(AbstractContextManager):
         self.entered = False
         for patch in self.patches:
             patch.restore()
-
-
-class WrapperModule(torch.nn.Module):
-    """Simple torch module which passes it's input through. Useful for hooking.
-    If there is only one argument, returns the first element.
-    """
-
-    def forward(self, *args, **kwargs):
-        if len(args) == 1:
-            args = args[0]
-
-        return args
-
-class NNsightError(Exception):
-    """NNsight Execption class for raising error during execution.
-    
-    Attributes:
-        - message (str): error message.
-        - node_id (int): node id.
-        - traceback_content (Optional[str]): traceback of the original exception being raised.
-    """
-
-    def __init__(self, message: str, node_id: int, traceback_content: Optional[str] = None):
-        self.message = message
-        self.node_id = node_id
-        self.traceback_content = traceback_content
-        super().__init__(self.message)
-
-
-    def _render_traceback_(self) -> List[str]:
-        """
-        This function allows custom rendering of traceback in IPython
-        
-        Returns:
-            - List of string lines.
-        """
-        traceback_list = self.traceback_content.split("\n")
-        traceback_list.append(f"{str(self.__class__.__name__)}: {self.message}")
-
-        return traceback_list
