@@ -49,7 +49,7 @@ class Tracer:
         
         self.info = None   
          
-        self.capture()
+        
 
     def capture(self):
         """
@@ -67,10 +67,13 @@ class Tracer:
                 break
             
         # Get source code lines
-        if 'tracing_info' in frame.f_locals:
+        
+        if frame.f_code.co_filename != '<string>':
+            source_lines, _ = inspect.getsourcelines(frame)
+        elif 'tracing_info' in frame.f_locals:
             source_lines = frame.f_locals['tracing_info'].source
         else:
-            source_lines, _ = inspect.getsourcelines(frame)
+            raise ValueError('No source code found')
             
         start_line = frame.f_lineno
         
@@ -124,7 +127,7 @@ class Tracer:
             "def fn(model, tracer, user_locals, tracing_info):\n",
             *self.info.source
         ]
-        
+                
         source = "".join(self.info.source)
         
         local_namespace = {}
@@ -150,6 +153,9 @@ class Tracer:
         Returns:
             The Tracer instance
         """
+        
+        self.capture()
+        
         return self
                 
     def __exit__(self, exc_type, exc_val, exc_tb):

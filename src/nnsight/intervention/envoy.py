@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import MethodType
-from typing import Any, List, Optional, Tuple, Union, Callable
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable
 import torch
 
 from .interleaver import Interleaver
@@ -16,6 +16,8 @@ class Envoy:
     
     This class provides access to module inputs and outputs during forward passes,
     and allows for modification of these values through an interleaving mechanism.
+    It serves as the primary interface for inspecting and modifying the behavior
+    of neural network modules during execution.
     """
 
     def __init__(
@@ -47,8 +49,19 @@ class Envoy:
             setattr(self, name, module)
             
     def __getitem__(self, key: str) -> Envoy:
+        """
+        Access a child Envoy by index.
         
+        Args:
+            key: The index of the child Envoy to retrieve
+            
+        Returns:
+            The child Envoy at the specified index
+        """
         return self._children[key]
+    
+    
+    
             
             
     #### Properties ####
@@ -58,8 +71,11 @@ class Envoy:
         """
         Get the output of the module's forward pass.
         
+        This property allows access to the return values produced by the module
+        during the forward pass.
+        
         Returns:
-            The module's output tensor(s)
+            The module's output values
         """
 
         return self._interleaver.request(
@@ -71,6 +87,9 @@ class Envoy:
         """
         Set a new value for the module's output.
         
+        This allows for intervention by replacing the module's output with
+        a custom value during execution.
+        
         Args:
             value: The new output value to use
         """
@@ -78,7 +97,12 @@ class Envoy:
 
     @output.deleter
     def output(self):
-        """Clear the cached output value."""
+        """
+        Clear the cached output value.
+        
+        This removes any stored output value, forcing it to be recomputed
+        on the next access.
+        """
         #TODO
         self._output = None
 
@@ -87,8 +111,11 @@ class Envoy:
         """
         Get the inputs to the module's forward pass.
         
+        This property provides access to all input values passed to the module
+        during the forward pass.
+        
         Returns:
-            The module's input tensor(s)
+            The module's input values as a tuple of positional and keyword arguments
         """
         return self._interleaver.request(f"{self.path}.input")
 
@@ -97,14 +124,22 @@ class Envoy:
         """
         Set new values for the module's inputs.
         
+        This allows for intervention by replacing the module's inputs with
+        custom values during execution.
+        
         Args:
-            value: The new input value(s) to use
+            value: The new input value(s) to use, structured as a tuple of (args, kwargs)
         """
         self._interleaver.swap(f"{self.path}.input", value)
 
     @inputs.deleter
     def inputs(self):
-        """Clear the cached input value."""
+        """
+        Clear the cached input value.
+        
+        This removes any stored input values, forcing them to be recomputed
+        on the next access.
+        """
         self._input = None
         
     @property
@@ -112,8 +147,11 @@ class Envoy:
         """
         Get the first input to the module's forward pass.
         
+        This is a convenience property that returns just the first input value
+        from all inputs passed to the module.
+        
         Returns:
-            The first input tensor
+            The first input value
         """
         
         inputs = self.inputs
@@ -123,7 +161,13 @@ class Envoy:
     @input.setter
     def input(self, value: Any):
         """
-        Set a new value for the module's input.
+        Set a new value for the module's first input.
+        
+        This is a convenience method that replaces just the first input value
+        while preserving all other inputs.
+        
+        Args:
+            value: The new value for the first input
         """
         inputs = self.inputs
         
@@ -136,8 +180,11 @@ class Envoy:
         """
         Get the source code representation of the module.
         
+        This property provides access to the module's source code with operations
+        highlighted, allowing for inspection and intervention at specific points.
+        
         Returns:
-            An EnvoySource object containing the module's source code
+            An EnvoySource object containing the module's source code and operations
         """
         try:
             if self._source is None:
@@ -161,6 +208,9 @@ class Envoy:
         """
         Create a tracer for this module.
         
+        This method returns a tracer that can be used to capture and modify
+        the execution of the module.
+        
         Args:
             *args: Arguments to pass to the tracer
             **kwargs: Keyword arguments to pass to the tracer
@@ -175,10 +225,29 @@ class Envoy:
         """
         Create a session for this module.
         
+        A session provides a context for executing the module with interventions.
+        
         Returns:
             A Session object for this module
         """
         return Session(self)
+    
+    
+    def to(self, device: torch.device):
+        """
+        Move the module to a specific device.
+        
+        This method moves the underlying PyTorch module to the specified device.
+        
+        Args:
+            device: The device to move the module to
+            
+        Returns:
+            Self, for method chaining
+        """
+        self._module.to(device)
+        
+        return self
     
     
     def modules(
@@ -186,7 +255,19 @@ class Envoy:
         include_fn: Callable[[Envoy], bool] = None,
         names: bool = False,
     ) -> List[Envoy]:
-     
+        """
+        Get all modules in the Envoy tree.
+        
+        This method returns all Envoys in the tree, optionally filtered by
+        an inclusion function.
+        
+        Args:
+            include_fn: Optional function to filter modules
+            names: Whether to include module names in the result
+            
+        Returns:
+            A list of Envoys or (name, Envoy) tuples
+        """
         result = []
         
 
@@ -205,10 +286,14 @@ class Envoy:
         return result
 
     def named_modules(self, *args, **kwargs) -> List[Tuple[str, Envoy]]:
-        """Returns all Envoys in the Envoy tree along with their name/module_path.
+        """
+        Returns all Envoys in the Envoy tree along with their name/module_path.
+        
+        This is a convenience method that calls modules() with names=True.
 
         Args:
             include_fn (Callable, optional): Optional function to be ran against all Envoys to check if they should be included in the final collection of Envoys. Defaults to None.
+            *args, **kwargs: Additional arguments to pass to modules()
 
         Returns:
             List[Tuple[str, Envoy]]: Included Envoys and their names/module_paths.
@@ -221,6 +306,9 @@ class Envoy:
     def _add_envoy(self, module: torch.nn.Module, name: str) -> None:
         """
         Adds a new Envoy for a given torch module under this Envoy.
+        
+        This method creates a new Envoy for a child module and adds it to
+        this Envoy's children.
 
         Args:
             module: Module to create Envoy for.
@@ -251,6 +339,9 @@ class Envoy:
         """
         Set the interleaver for this Envoy and all its children.
         
+        This method recursively sets the interleaver for this Envoy and all
+        its children.
+        
         Args:
             interleaver: The interleaver to set
         """
@@ -263,7 +354,12 @@ class Envoy:
             self._source._set_interleaver(interleaver)
     
     def _clear(self):
-        """Clear all cached values and references."""
+        """
+        Clear all cached values and references.
+        
+        This method removes all cached values and references to the interleaver,
+        preparing the Envoy for garbage collection.
+        """
         self._interleaver = None
         
         if self._source is not None:
@@ -273,18 +369,29 @@ class Envoy:
     #### Dunder methods ####
 
     def __str__(self):
-        """String representation of the Envoy."""
+        """
+        String representation of the Envoy.
+        
+        Returns:
+            A string representation of the Envoy showing its path
+        """
         return f"model{self.path}"
 
     def __repr__(self):
-        """Representation of the Envoy."""
+        """
+        Representation of the Envoy.
+        
+        Returns:
+            The string representation of the Envoy
+        """
         return self.__str__()
 
     def __getattr__(self, name: str) -> Union[torch.nn.Module, Envoy, Any]:
         """
         Get an attribute from the underlying module.
         
-        If the attribute is callable, it will be wrapped in a tracer.
+        If the attribute is callable, it will be wrapped in a tracer to enable
+        intervention during execution.
         
         Args:
             name: The name of the attribute to get
@@ -310,7 +417,8 @@ class Envoy:
         """
         Set an attribute on the Envoy.
         
-        If the value is a PyTorch module, it will be wrapped in an Envoy.
+        If the value is a PyTorch module, it will be wrapped in an Envoy to enable
+        intervention during execution.
         
         Args:
             key: The attribute name
@@ -327,7 +435,8 @@ class OperationEnvoy:
     Represents a specific operation within a module's forward pass.
     
     This class provides access to the inputs and outputs of individual
-    operations within a module's execution.
+    operations within a module's execution, allowing for fine-grained
+    inspection and intervention at the operation level.
     """
     
     def __init__(self, name: str, source: str, line_number: int, interleaver: Optional[Interleaver] = None):
@@ -335,10 +444,10 @@ class OperationEnvoy:
         Initialize an OperationEnvoy.
         
         Args:
-            module: The module containing the operation
-            name: The name of the operation
-            source: The source code of the module
+            name: The fully qualified name of the operation
+            source: The source code of the module containing the operation
             line_number: The line number of the operation in the source
+            interleaver: Optional interleaver for managing execution flow
         """
         self.name = name
         self.source_code = source
@@ -351,6 +460,9 @@ class OperationEnvoy:
     def __str__(self):
         """
         String representation showing the operation in context.
+        
+        This method returns a formatted string showing the operation's source code
+        with surrounding context lines and highlighting the operation line.
         
         Returns:
             A formatted string showing the operation's source code with context
@@ -381,6 +493,9 @@ class OperationEnvoy:
         """
         Get the output of this operation.
         
+        This property provides access to the return value(s) produced by the operation
+        during execution.
+        
         Returns:
             The operation's output value(s)
         """
@@ -390,9 +505,12 @@ class OperationEnvoy:
         )
         
     @output.setter
-    def output(self, value: Any):
+    def output(self, value: Any) -> None:
         """
         Set a new value for the operation's output.
+        
+        This allows for intervention by replacing the operation's output with
+        a custom value during execution.
         
         Args:
             value: The new output value
@@ -401,9 +519,12 @@ class OperationEnvoy:
 
 
     @property
-    def inputs(self) -> Union[Any, torch.Tensor]:
+    def inputs(self) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
         """
         Get the inputs to this operation.
+        
+        This property provides access to all input value(s) passed to the operation
+        during execution, structured as a tuple of positional and keyword arguments.
         
         Returns:
             The operation's input value(s)
@@ -413,9 +534,12 @@ class OperationEnvoy:
         )
 
     @inputs.setter
-    def inputs(self, value: Any):
+    def inputs(self, value: Any) -> None:
         """
         Set new values for the operation's inputs.
+        
+        This allows for intervention by replacing the operation's inputs with
+        custom values during execution.
         
         Args:
             value: The new input value(s)
@@ -424,16 +548,24 @@ class OperationEnvoy:
 
     @inputs.deleter
     def inputs(self):
-        """Clear the cached input value."""
+        """
+        Clear the cached input value.
+        
+        This removes any stored input values, forcing them to be recomputed
+        on the next access.
+        """
         self._input = None
         
     @property
     def input(self) -> Union[Any, torch.Tensor]:
         """
-        Get the first input to the module's forward pass.
+        Get the first input to the operation.
+        
+        This is a convenience property that returns just the first input value
+        from all inputs passed to the operation.
         
         Returns:
-            The first input tensor
+            The first input value
         """
         
         inputs = self.inputs
@@ -442,9 +574,15 @@ class OperationEnvoy:
     
     
     @input.setter
-    def input(self, value: Any):
+    def input(self, value: Any) -> None:
         """
-        Set a new value for the module's input.
+        Set a new value for the operation's first input.
+        
+        This is a convenience method that replaces just the first positional input
+        while preserving all other inputs.
+        
+        Args:
+            value: The new value for the first input
         """
         inputs = self.inputs
         
@@ -454,9 +592,15 @@ class OperationEnvoy:
         
         
     @property
-    def source(self) -> str:
+    def source(self) -> EnvoySource:
         """
         Get the source code of the operation.
+        
+        This property provides access to the operation's source code with nested
+        operations highlighted, allowing for inspection and intervention at specific points.
+        
+        Returns:
+            An EnvoySource object containing the operation's source code and nested operations
         """
         
         print("requesting", f"{self.name}.fn")
@@ -495,12 +639,17 @@ class OperationEnvoy:
         Set the interleaver for this operation.
         
         Args:
-            interleaver: The interleaver to use
+            interleaver: The interleaver to use for managing execution flow
         """
         self._interleaver = interleaver
 
     def _clear(self):
-        """Clear all cached values and references."""
+        """
+        Clear all cached values and references.
+        
+        This method removes all cached values and references to the interleaver,
+        preparing the OperationEnvoy for garbage collection.
+        """
         self._interleaver = None
         
 class EnvoySource:
@@ -508,7 +657,9 @@ class EnvoySource:
     Represents the source code of a module with operations highlighted.
     
     This class provides access to the individual operations within a module's
-    source code, allowing for inspection and intervention.
+    source code, allowing for inspection and intervention at specific points
+    in the code. It serves as a bridge between the source code representation
+    and the runtime execution of operations.
     """
     
     def __init__(self, name:str, source: str, line_numbers: dict, interleaver: Optional[Interleaver] = None):
@@ -516,9 +667,10 @@ class EnvoySource:
         Initialize an EnvoySource.
         
         Args:
-            module: The module whose source code is being represented
+            name: The fully qualified name of the module or operation
             source: The source code string
             line_numbers: A dictionary mapping operation names to line numbers
+            interleaver: Optional interleaver for managing execution flow
         """
         self.source = source
         self.line_numbers = line_numbers
@@ -534,8 +686,11 @@ class EnvoySource:
         """
         String representation showing the source code with operations highlighted.
         
+        This method returns a formatted string showing the source code with
+        operation names and line numbers, making it easy to identify intervention points.
+        
         Returns:
-            A formatted string showing the source code with operation names
+            A formatted string showing the source code with operation names and line numbers
         """
         # Find the longest name for proper alignment
         max_name_length = max(len(name) for name in self.line_numbers.keys()) if self.line_numbers else 0
@@ -582,18 +737,25 @@ class EnvoySource:
         """
         Set the interleaver for all operations.
         
+        This method recursively sets the interleaver for all operations
+        in this source code representation.
+        
         Args:
-            interleaver: The interleaver to use
+            interleaver: The interleaver to use for managing execution flow
         """
         for operation in self.operations:
             operation._set_interleaver(interleaver)
             
     
     def _clear(self):
-        """Clear all cached values in all operations."""
+        """
+        Clear all cached values in all operations.
+        
+        This method recursively clears all cached values and references
+        in all operations, preparing them for garbage collection.
+        """
         for operation in self.operations:
             operation._clear()
             
             if operation._source is not None:
                 operation._source._clear()
-            

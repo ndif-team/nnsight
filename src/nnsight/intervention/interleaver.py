@@ -26,11 +26,15 @@ class Events(Enum):
     END = 'continue'  # Signal to continue execution
     EXCEPTION = 'exception'  # Signal that an exception occurred
     REGISTER = 'register'  # Signal that a mediator has been registered
-
 class Cancelation(Exception):
     """Exception raised when a request is canceled."""
     pass
 
+class EarlyStopException(Exception):
+    """
+    Exception raised to stop the execution of the model.
+    """
+    pass
 
 class Interleaver:
     """
@@ -167,12 +171,17 @@ class Interleaver:
             **kwargs: Keyword arguments to pass to the function
         """
         
+        try:
         
-        
-        for mediator in self.mediators.values():
-            mediator.start(self)
+            for mediator in list(self.mediators.values()):
+                mediator.start(self)
+                
+                fn(*args, **kwargs)
             
-        fn(*args, **kwargs)
+        except EarlyStopException:
+            pass
+        
+        #TODO check all mediator events
         
         #TODO
         # for mediator in self.mediators:
@@ -185,11 +194,10 @@ class Interleaver:
     
     def handle(self, provider: Optional[Any] = None, value: Optional[Any] = None):
                 
-        for mediator in self.mediators.values():
+        for mediator in list(self.mediators.values()):
             new_value = mediator.handle(provider, value)
             
         if new_value is not value:
-            print("new value", provider, new_value, value)
             return new_value
             
         return value
@@ -212,10 +220,14 @@ class Interleaver:
         
         return self.mediators[threading.current_thread().name].swap(requester, value)
     
-    def register(self, mediator: Mediator):
+    def iter(self, mediator: Mediator, iteration: int):
         
-        self.mediators[threading.current_thread().name].register(mediator) 
+        return self.mediators[threading.current_thread().name].iter(mediator, iteration)
+    
+    def stop(self):
         
+        return self.mediators[threading.current_thread().name].stop()
+    
     def set_user_cache(self, cache: "Cache"):
         
         self.mediators[threading.current_thread().name].set_user_cache(cache) 
@@ -242,14 +254,12 @@ class Mediator:
        
        self.interleaver = None
               
-       self.missed_providers = set()
+       self.history = set()
        
        self.cache = {}
        
        self.user_cache: "Cache" = None
-       
-       self.children:List[Mediator] = []
-       
+              
        self._frame = None
        
     def start(self, interleaver: Interleaver):
@@ -269,7 +279,7 @@ class Mediator:
     def wait(self):
         """Wait for the next event to be set."""
         """Wait until the event queue is not empty."""
-        while self.event_queue.empty():
+        while self.event_queue.empty() and self.thread.is_alive():
             # Keep checking until there's an event in the queue
             time.sleep(0.001)  # Small sleep to prevent CPU spinning
         
@@ -278,8 +288,12 @@ class Mediator:
         #TODO custom canceled error
         
         self.cache.clear()
+        self.history.clear()
         
-        self.response_queue.put(Cancelation())
+        self._frame = None
+        
+        if self.thread.is_alive():        
+            self.response_queue.put(Cancelation())
         
     def handle(self, provider: Optional[Any] = None, value: Optional[Any] = None):
         """
@@ -304,16 +318,12 @@ class Mediator:
                 requester, swap_value = data
                 process = self.handle_swap_event(requester, provider, swap_value)
             elif event == Events.EXCEPTION:
-                self.handle_exception_event(data)
-                process = False
+                process = self.handle_exception_event(data)
             elif event == Events.END:
                 self.cancel()
                 process = False
             elif event == Events.REGISTER:
-                self.handle_register_event(data)
-                
-        for child in self.children:
-            child.handle(provider, value)
+                process = self.handle_register_event(data)
             
         result = self.cache.get(provider, value)
             
@@ -342,10 +352,10 @@ class Mediator:
             self.respond(value)
             
         else:
-            if requester in self.missed_providers:
+            if requester in self.history:
                 self.respond(ValueError(f"Value was missed for {requester}. Did you call an Envoy out of order?"))
             else:
-                self.missed_providers.add(provider)
+                self.history.add(provider)
                 self.event_queue.put((Events.VALUE, requester))
                 
                 return False
@@ -359,16 +369,15 @@ class Mediator:
         if provider == requester:
             self.respond()
         else:
-            if requester in self.missed_providers:
+            if requester in self.history:
                 self.respond(ValueError(f"Setting {requester} is out of scope for scope {provider}. Did you call an Envoy out of order?"))
             else:
-                self.missed_providers.add(provider)
+                self.history.add(provider)
                 self.event_queue.put((Events.SWAP, (requester, swap_value)))
                 
                 return False
                 
-        return True
-                      
+        return True              
         
     def handle_exception_event(self, exception: Exception):
         """
@@ -377,17 +386,23 @@ class Mediator:
         Args:
             exception: The exception to raise
         """
-        raise exception
+        
+        if not isinstance(exception, Cancelation):
+            raise exception
+        
+        return False
     
     def handle_register_event(self, mediator: Mediator):
         
-        self.children.append(mediator)
-        
+        # del self.interleaver.mediators[self.name]
         self.interleaver.mediators[mediator.name] = mediator
-        
+                
         mediator.start(self.interleaver)
         
-        self.respond()
+        self.response_queue.put(None)
+        
+        return False
+        
         
                 
     def respond(self, value: Optional[Any] = None):
@@ -444,8 +459,7 @@ class Mediator:
             raise response
     
         return response
-   
-        
+      
     def request(self, requester: Any):
         """
         Request a value from a specific module or function.
@@ -478,7 +492,23 @@ class Mediator:
         self.send(Events.SWAP, (requester, value))
         
         self.cache[requester] = value
-               
+        
+    def iter(self, mediator: Mediator, iteration: int):
+        
+        for i in range(iteration):
+                    
+            self.send(Events.REGISTER, mediator)
+            
+            mediator.thread.join()
+            
+            self.interleaver.mediators.pop(mediator.name)
+            
+    def stop(self):
+        
+        self.push()
+        
+        raise EarlyStopException()
+                           
     def end(self):
         """Signal that execution should continue without further intervention."""
         
@@ -494,11 +524,7 @@ class Mediator:
             exception: The exception that occurred
         """
         self.event_queue.put((Events.EXCEPTION, exception))
-
-    def register(self, mediator: Mediator):
-        
-        self.send(Events.REGISTER, mediator)
-        
+            
     def set_user_cache(self, cache: "Cache"):
         
         self.user_cache = cache
