@@ -278,6 +278,24 @@ Features
          </div>
 
    .. grid-item-card:: 
+      :link: notebooks/features/streaming.ipynb
+      :class-card: surface
+      :class-body: surface
+
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-paper-plane fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Streaming</h5>
+               <p class="card-text">Send remote values to local</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
       :link: notebooks/features/iterator.ipynb
       :class-card: surface
       :class-body: surface

@@ -120,8 +120,9 @@ class InterventionProtocol(EntryPoint):
 
             # Multiple intervention nodes can have same module_path if there are multiple invocations.
             # Is a set of node indexes making up the intervention subgraph
-            for node in intervention_nodes:
-
+            for index in intervention_nodes:
+                
+                node = interleaver.graph.nodes[index]
                 # Args for intervention nodes are (module_path, batch_group, iteration).
                 _, batch_group, iteration = node.args
 
@@ -175,20 +176,21 @@ class InterventionProtocol(EntryPoint):
                 if 'swap' in node.kwargs:
                     value:InterventionNodeType = node.kwargs.pop('swap')
 
-                # If we narrowed any data, we need to concat it with data before and after it.
-                if narrowed:
-
-                    activations = cls.concat(
-                        activations,
-                        value,
-                        batch_start,
-                        batch_size,
-                        interleaver.batch_size,
-                    )
-                # Otherwise just return the whole value as the activations.
-                else:
-
-                    activations = value
+                    # If we narrowed any data, we need to concat it with data before and after it.
+                    if narrowed:
+                        # Slicing a leaf tensor that requires grad will break the autograd graph, so we concatenate.
+                            if activations.is_leaf and activations.requires_grad:
+                                activations = cls.concat(
+                                    activations,
+                                    value,
+                                    batch_start,
+                                    batch_size,
+                                    interleaver.batch_size,
+                                )
+                            else:
+                                activations[batch_start:batch_start+batch_size][:] = value[:]
+                    else:
+                        activations = value
 
         return activations
 

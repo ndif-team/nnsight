@@ -92,7 +92,7 @@ class NNsight:
             trace (bool, optional): If to open a tracing context. Otherwise immediately run the model and return the raw output. Defaults to True.
             scan (bool): Exposed invoker kwarg to scan for the provided input. No effect if there is no input.
             method (Optional[str]): String name of method to interleave with. Defaults to None and therefore NNsight._execute
-            invoker_args (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
+            invoker_kwargs (Dict[str, Any], optional): Keyword arguments to pass to Invoker initialization, and then downstream to the model's .prepare_inputs(...) method. Used when giving input directly to `.trace(...)`. Defaults to None.
             kwargs (Dict[str, Any]): Keyword arguments passed to Tracer initialization, and then downstream to the model's execution method.
 
         Raises:

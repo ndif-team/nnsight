@@ -98,7 +98,6 @@ def viz_graph(
                 - pgv.AGraph: Graph Visualization Object.
             """
 
-            nonlocal subgraphs
             if group:
                 if id(node.graph) != id(graph):
                     if not id(node.graph) in subgraphs.keys():
