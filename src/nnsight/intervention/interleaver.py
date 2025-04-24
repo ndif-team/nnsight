@@ -70,6 +70,8 @@ class Interleaver(AbstractContextManager):
             self.batch_size = (
                 sum(self.batch_groups[-1]) if batch_size is None else batch_size
             )
+        else:
+            self.batch_size = batch_size
 
     def __enter__(self) -> Interleaver:
         """Registers input and output hooks to modules involved in the `InterventionGraph`.
