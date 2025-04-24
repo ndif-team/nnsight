@@ -179,7 +179,7 @@ class InterventionProtocol(EntryPoint):
                     # If we narrowed any data, we need to concat it with data before and after it.
                     if narrowed:
                         # Slicing a leaf tensor that requires grad will break the autograd graph, so we concatenate.
-                            if node.kwargs and (activations.is_leaf and activations.requires_grad):
+                            if activations.is_leaf and activations.requires_grad:
                                 activations = cls.concat(
                                     activations,
                                     value,
