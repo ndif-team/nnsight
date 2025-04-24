@@ -4,8 +4,6 @@ from __future__ import annotations
 import ctypes
 import inspect
 import time
-from types import MethodType
-import types
 import torch
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING, List
 import threading
@@ -13,19 +11,18 @@ from enum import Enum
 from functools import wraps
 from threading import Thread
 from queue import Queue
-from ..tracing.util import get_frame
-from .tracers.backwards import BackwardsTracer
+from .tracing.backwards import BackwardsTracer
+from ..util import Patcher, Patch
+
 if TYPE_CHECKING:
-    from .envoy import Envoy
-    from .tracers.tracer import Tracer, Cache
-    from .envoy import EnvoySource
+    from .tracing.tracer import Tracer, Cache
 class Events(Enum):
     """Enum for different types of events in the interleaving process."""
     VALUE = 'value'      # Request for a value
     SWAP = 'swap'        # Request for a swap
-    END = 'continue'  # Signal to continue execution
+    END = 'continue'     # Signal to continue execution
     EXCEPTION = 'exception'  # Signal that an exception occurred
-    REGISTER = 'register'  # Signal that a mediator has been registered
+    REGISTER = 'register'    # Signal that a mediator has been registered
 class Cancelation(Exception):
     """Exception raised when a request is canceled."""
     pass
@@ -47,23 +44,27 @@ class Interleaver:
     
     def __init__(self, mediators: List[Mediator]) -> None:
         """
-        Initialize an Interleaver with intervention functions.
+        Initialize an Interleaver with mediators.
         
         Args:
-            interventions: A callable that defines the intervention logic
+            mediators: A list of Mediator objects that define intervention logic
         """
         self.mediators = {mediator.name: mediator for mediator in mediators}
         
+        self.patcher = None
         
-        self.original_call = None
-        self.original_grad = None
-        self.original_backward = None
-        
-        self.missed_providers = set()
         self.state = dict()
         
     def wrap(self, fn: Callable):
-
+        """
+        Wrap a function to intercept inputs and outputs for intervention.
+        
+        Args:
+            fn: The function to wrap
+            
+        Returns:
+            A wrapped version of the function
+        """
         @wraps(fn)
         def inner(module:torch.nn.Module, *args, **kwargs):
             
@@ -80,7 +81,16 @@ class Interleaver:
         return inner
     
     def wrap_operation(self, fn: Callable, name:str):
+        """
+        Wrap an operation to intercept inputs and outputs for intervention.
         
+        Args:
+            fn: The function to wrap
+            name: The name of the operation
+            
+        Returns:
+            A wrapped version of the function
+        """
         @wraps(fn)
         def inner(*args, **kwargs):
             
@@ -100,7 +110,12 @@ class Interleaver:
     
     
     def grad(self):
+        """
+        Create a hook for gradient intervention.
         
+        Returns:
+            A function that can be used to intercept gradients
+        """
         def inner(tensor: torch.Tensor):
             
             requester = id(tensor)
@@ -116,11 +131,15 @@ class Interleaver:
             
             
     def wrap_backward(self):
+        """
+        Wrap the backward method to intercept backpropagation.
         
+        Returns:
+            A wrapped version of the backward method
+        """
         def inner(tensor: torch.Tensor, *args, **kwargs):
             breakpoint()
-            with BackwardsTracer(tensor) as tracer:
-                pass
+            tracer = BackwardsTracer(tensor)
             
         return inner
         
@@ -133,15 +152,17 @@ class Interleaver:
         Returns:
             The Interleaver instance
         """
-        # Save the original __call__ method
-        self.original_call = torch.nn.Module.__call__
-        self.original_grad = torch.Tensor.register_hook
-        self.original_backward = torch.Tensor.backward
-        # Replace the __call__ method with our wrapped version
-        torch.nn.Module.__call__ = self.wrap(torch.nn.Module.__call__)
-      
-            
-        torch.Tensor.backward = self.wrap_backward()
+        
+        self.patcher = Patcher(
+            [Patch(torch.nn.Module, self.wrap(torch.nn.Module.__call__), '__call__'),
+            #  Patch(torch.Tensor, 'register_hook', self.wrap_grad()),
+            Patch(torch.Tensor, self.wrap_backward(), 'backward')
+             ]
+        )
+        
+        self.patcher.__enter__()
+          
+        # torch.Tensor.backward = self.wrap_backward()
         return self
         
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -154,12 +175,8 @@ class Interleaver:
             exc_tb: Exception traceback if an exception was raised
         """
         self.cancel()
-        # Restore the original __call__ method
-        torch.nn.Module.__call__ = self.original_call
-        torch.Tensor.backward = self.original_backward
         
-        self.original_call = None
-        self.original_backward = None
+        self.patcher.__exit__(None, None, None)
             
     def __call__(self, fn: Callable, *args, **kwargs):
         """
@@ -176,7 +193,7 @@ class Interleaver:
             for mediator in list(self.mediators.values()):
                 mediator.start(self)
                 
-                fn(*args, **kwargs)
+            fn(*args, **kwargs)
             
         except EarlyStopException:
             pass
@@ -193,12 +210,26 @@ class Interleaver:
     ### Provider Methods ###
     
     def handle(self, provider: Optional[Any] = None, value: Optional[Any] = None):
-                
-        for mediator in list(self.mediators.values()):
-            new_value = mediator.handle(provider, value)
+        """
+        Handle a provider's value, allowing mediators to consume and modify it.
+        
+        Args:
+            provider: The identifier of the provider
+            value: The value being provided
             
-        if new_value is not value:
-            return new_value
+        Returns:
+            The original or modified value
+        """
+        
+        original_value = value  
+        
+        # TODO Invoker stuff
+        
+        for mediator in list(self.mediators.values()):
+            value = mediator.handle(provider, value)
+            
+        if original_value is not value:
+            return value
             
         return value
             
@@ -206,49 +237,80 @@ class Interleaver:
         #TODO concat all the mediators
         
     def cancel(self):
-        """Cancel the intervention threads."""
+        """Cancel all intervention threads."""
         for mediator in self.mediators.values():
             mediator.cancel()
     
     ### Requester Methods ###
     
     def request(self, requester: Any):
-                
+        """
+        Request a value from the current mediator.
+        
+        Args:
+            requester: The identifier of the requester
+            
+        Returns:
+            The requested value
+        """
         return self.mediators[threading.current_thread().name].request(requester)
 
     def swap(self, requester: Any, value: Any):
+        """
+        Swap a value in the current mediator.
         
+        Args:
+            requester: The identifier of the requester
+            value: The value to swap in
+        """
         return self.mediators[threading.current_thread().name].swap(requester, value)
     
     def iter(self, mediator: Mediator, iteration: int):
+        """
+        Iterate a mediator a specified number of times.
         
+        Args:
+            mediator: The mediator to iterate
+            iteration: The number of iterations
+        """
         return self.mediators[threading.current_thread().name].iter(mediator, iteration)
     
     def stop(self):
-        
+        """Stop the execution of the model."""
         return self.mediators[threading.current_thread().name].stop()
     
     def set_user_cache(self, cache: "Cache"):
+        """
+        Set the user cache for the current mediator.
         
+        Args:
+            cache: The cache to set
+        """
         self.mediators[threading.current_thread().name].set_user_cache(cache) 
 class Mediator:
     """
-    Manages the interleaving of model execution and interventions.
+    Mediates between the model execution and intervention functions.
     
-    This class coordinates the flow between the model's forward pass and
+    This class handles the communication between the model's forward pass and
     user-defined intervention functions, allowing for inspection and
     modification of intermediate values.
     """
     
     def __init__(self, intervention: Callable, info: "Tracer.Info", name: Optional[str] = None)  -> None:
+       """
+       Initialize a Mediator with an intervention function.
        
+       Args:
+           intervention: The intervention function
+           info: Information about the tracing context
+           name: Optional name for the mediator
+       """
        self.intervention = intervention
        self.name = name if name else f"Mediator{id(self)}"
        self.info = info
        
        self.event_queue = Queue()
        self.response_queue = Queue()
-       self.swap_queue = Queue()
        
        self.thread = None
        
@@ -263,7 +325,12 @@ class Mediator:
        self._frame = None
        
     def start(self, interleaver: Interleaver):
+        """
+        Start the mediator's intervention thread.
         
+        Args:
+            interleaver: The interleaver managing this mediator
+        """
         self.interleaver = interleaver
          
         self.thread = Thread(target=self.intervention, args=(self, self.info), daemon=True, name=self.name)
@@ -277,14 +344,13 @@ class Mediator:
     ### Provider Methods ###
         
     def wait(self):
-        """Wait for the next event to be set."""
-        """Wait until the event queue is not empty."""
+        """Wait for the next event to be set in the event queue."""
         while self.event_queue.empty() and self.thread.is_alive():
             # Keep checking until there's an event in the queue
             time.sleep(0.001)  # Small sleep to prevent CPU spinning
         
     def cancel(self):
-        """Cancel the intervention thread."""
+        """Cancel the intervention thread and clear caches."""
         #TODO custom canceled error
         
         self.cache.clear()
@@ -297,60 +363,60 @@ class Mediator:
         
     def handle(self, provider: Optional[Any] = None, value: Optional[Any] = None):
         """
-        Hook function called during model execution to handle interventions.
+        Handle events in the event queue and process provider values.
         
         Args:
-            provider: The module or function providing a value
+            provider: The identifier of the provider
             value: The value being provided
             
         Returns:
-            Modified value if a swap is requested, otherwise inspect._empty
+            The original or modified value
         """
         
-        process = not self.event_queue.empty()
+        self.cache.pop(provider, None)
         
+        process = not self.event_queue.empty()
+            
         while process:
             
-            event, data = self.event_queue.get()            
+            event, data = self.event_queue.get()  
+                      
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider, value)
             elif event == Events.SWAP:
                 requester, swap_value = data
                 process = self.handle_swap_event(requester, provider, swap_value)
+                value = self.cache.get(provider, value)
+            elif event == Events.REGISTER:
+                process = self.handle_register_event(data)
             elif event == Events.EXCEPTION:
                 process = self.handle_exception_event(data)
             elif event == Events.END:
                 self.cancel()
                 process = False
-            elif event == Events.REGISTER:
-                process = self.handle_register_event(data)
-            
-        result = self.cache.get(provider, value)
             
         if self.user_cache is not None and provider is not None:
             
-            self.user_cache.add(provider, result)
+            self.user_cache.add(provider, value)
         
-                    
-        return result
+        return value
     
     def handle_value_event(self, requester: Any, provider: Any, value: Any):
         """
         Handle a value event by providing the requested value or recording a missed provider.
         
         Args:
-            requester: The module or function requesting a value
-            provider: The module or function providing a value
+            requester: The identifier of the requester
+            provider: The identifier of the provider
             value: The value being provided
             
         Returns:
-            Modified value if a swap is requested, otherwise inspect._empty
+            Boolean indicating whether to continue processing events
         """
         
        
         if provider == requester:  
             self.respond(value)
-            
         else:
             if requester in self.history:
                 self.respond(ValueError(f"Value was missed for {requester}. Did you call an Envoy out of order?"))
@@ -364,9 +430,18 @@ class Mediator:
                 
     def handle_swap_event(self, requester: Any, provider: Any, swap_value: Any):
         """
-        Handle a swap event by providing the requested value.
+        Handle a swap event by swapping the value if the provider matches the requester.
+        
+        Args:
+            requester: The identifier of the requester
+            provider: The identifier of the provider
+            swap_value: The value to swap in
+            
+        Returns:
+            Boolean indicating whether to continue processing events
         """
         if provider == requester:
+            
             self.respond()
         else:
             if requester in self.history:
@@ -385,6 +460,9 @@ class Mediator:
         
         Args:
             exception: The exception to raise
+            
+        Returns:
+            Boolean indicating whether to continue processing events
         """
         
         if not isinstance(exception, Cancelation):
@@ -393,6 +471,15 @@ class Mediator:
         return False
     
     def handle_register_event(self, mediator: Mediator):
+        """
+        Handle a register event by registering a new mediator.
+        
+        Args:
+            mediator: The mediator to register
+            
+        Returns:
+            Boolean indicating whether to continue processing events
+        """
         
         # del self.interleaver.mediators[self.name]
         self.interleaver.mediators[mediator.name] = mediator
@@ -421,6 +508,12 @@ class Mediator:
     
     @property
     def frame(self):
+        """
+        Get the frame of the intervention function.
+        
+        Returns:
+            The frame of the intervention function
+        """
         
         if self._frame is None:
             
@@ -435,17 +528,33 @@ class Mediator:
         return self._frame
     
     def push(self):
+        """Push local variables to the interleaver state."""
         
         self.interleaver.state.update(self.frame.f_locals)
         
     def pull(self):
+        """Pull variables from the interleaver state to the frame globals."""
         
-        self.interleaver.state.pop('mediator', None)
-        self.interleaver.state.pop('tracing_info', None)
+        for key in list(self.interleaver.state.keys()):
+            if key.startswith('__nnsight'):
+                self.interleaver.state.pop(key)
         
         self.frame.f_globals.update(self.interleaver.state)
-    
+        self.frame.f_locals.update(self.interleaver.state)
+        
+        ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(self.frame), ctypes.c_int(0))
+            
     def send(self, event: Events, requester: Any):
+        """
+        Send an event to the event queue and wait for a response.
+        
+        Args:
+            event: The event to send
+            requester: The identifier of the requester
+            
+        Returns:
+            The response from the provider
+        """
         
         self.push()
         
@@ -462,10 +571,10 @@ class Mediator:
       
     def request(self, requester: Any):
         """
-        Request a value from a specific module or function.
+        Request a value from a specific provider.
         
         Args:
-            requester: The module or function to request a value from
+            requester: The identifier of the provider to request a value from
             
         Returns:
             The requested value
@@ -485,8 +594,8 @@ class Mediator:
         Set a value to swap during execution.
         
         Args:
+            requester: The identifier of the requester
             value: The value to swap in
-            envoy: The envoy requesting the swap
         """
         
         self.send(Events.SWAP, (requester, value))
@@ -494,6 +603,13 @@ class Mediator:
         self.cache[requester] = value
         
     def iter(self, mediator: Mediator, iteration: int):
+        """
+        Iterate a mediator a specified number of times.
+        
+        Args:
+            mediator: The mediator to iterate
+            iteration: The number of iterations
+        """
         
         for i in range(iteration):
                     
@@ -502,8 +618,11 @@ class Mediator:
             mediator.thread.join()
             
             self.interleaver.mediators.pop(mediator.name)
-            
+
+        self.pull()
+                        
     def stop(self):
+        """Stop the execution of the model by raising an EarlyStopException."""
         
         self.push()
         
@@ -526,7 +645,11 @@ class Mediator:
         self.event_queue.put((Events.EXCEPTION, exception))
             
     def set_user_cache(self, cache: "Cache"):
+        """
+        Set the user cache for this mediator.
+        
+        Args:
+            cache: The cache to set
+        """
         
         self.user_cache = cache
-        
-        

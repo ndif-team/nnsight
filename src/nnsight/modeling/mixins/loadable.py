@@ -2,7 +2,7 @@ from typing import Dict, Optional
 
 import torch
 
-from ...intervention import NNsight
+from ..base import NNsight
 
 
 class LoadableMixin(NNsight):

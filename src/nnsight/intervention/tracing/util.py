@@ -1,5 +1,5 @@
 import inspect
-from typing import List
+from typing import List, Callable
 
 
 def indent(source: List[str], indent: int = 1):
@@ -35,3 +35,7 @@ def get_frame(frame: inspect.FrameInfo, until:str="nnsight"):
         if frame and frame.f_code.co_filename.find(until) == -1:
             break
     return frame
+
+def get_dependencies(fn:Callable):
+    used_names = fn.__code__.co_names
+    return {name: fn.__globals__[name] for name in used_names if name in fn.__globals__}

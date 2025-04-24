@@ -1,5 +1,5 @@
 import torch
-from ...tracing.tracer import Tracer
+from .base import Tracer
 import ast
 
 class BackwardsTracer(Tracer):

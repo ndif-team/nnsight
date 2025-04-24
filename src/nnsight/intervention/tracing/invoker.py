@@ -1,8 +1,8 @@
 from typing import Callable, TYPE_CHECKING, Any
 
 from ..interleaver import Mediator
-from ...tracing.tracer import Tracer
-from ...tracing.util import try_catch
+from .base import Tracer
+from .util import try_catch
 
 
 if TYPE_CHECKING:
@@ -42,22 +42,12 @@ class Invoker(Tracer):
             A callable intervention function
         """
         self.info.source = [
-            "def ifn(mediator, tracing_info):\n",
+            "def ifn(__nnsight_mediator__, __nnsight_tracing_info__):\n",
             *try_catch(self.info.source, 
-                       exception_source=["mediator.exception(exception)\n"],
-                       else_source=["mediator.end()\n"],)
+                       exception_source=["__nnsight_mediator__.exception(exception)\n"],
+                       else_source=["__nnsight_mediator__.end()\n"],)
         ]
         
-        source = "".join(
-            self.info.source
-        )
-                                
-        local_namespace = {}
-        
-        # Execute the function definition in the local namespace
-        exec(source, {**self.info.frame.f_globals, **self.info.frame.f_locals}, local_namespace)
-        
-        return local_namespace["ifn"]
             
     def execute(self, fn: Callable):
         """
@@ -71,8 +61,9 @@ class Invoker(Tracer):
         """
         # TODO: batch the interventions
         
-        self.tracer.args = self.args
-        self.tracer.kwargs = self.kwargs
-                    
+        if self.args:
+            self.tracer.args = self.args
+            self.tracer.kwargs = self.kwargs
+                        
         self.tracer.mediators.append(Mediator(fn, self.info))
 

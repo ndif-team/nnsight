@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union, Callable
 import torch
 
 from .interleaver import Interleaver
-from .tracers.tracer import InterleavingTracer
-
+from .tracing.tracer import InterleavingTracer
+from .backends.editing import EditingBackend
 from .inject import convert as inject
 
 
@@ -25,6 +25,7 @@ class Envoy:
         module: torch.nn.Module,
         interleaver: Optional[Interleaver] = None,
         path: Optional[str] = "",
+        rename: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Initialize an Envoy for a PyTorch module.
@@ -43,6 +44,8 @@ class Envoy:
         
         self._interleaver = interleaver
         
+        self._default_source:List[str] = None     
+        
         self._children: List[Envoy] = []
         
         for name, module in list(self._module.named_children()):
@@ -59,10 +62,6 @@ class Envoy:
             The child Envoy at the specified index
         """
         return self._children[key]
-    
-    
-    
-            
             
     #### Properties ####
 
@@ -82,29 +81,7 @@ class Envoy:
             f"{self.path}.output"
         )
 
-    @output.setter
-    def output(self, value: Any):
-        """
-        Set a new value for the module's output.
-        
-        This allows for intervention by replacing the module's output with
-        a custom value during execution.
-        
-        Args:
-            value: The new output value to use
-        """
-        self._interleaver.swap(f"{self.path}.output", value)
-
-    @output.deleter
-    def output(self):
-        """
-        Clear the cached output value.
-        
-        This removes any stored output value, forcing it to be recomputed
-        on the next access.
-        """
-        #TODO
-        self._output = None
+   
 
     @property
     def inputs(self) -> Union[Any, torch.Tensor]:
@@ -186,20 +163,15 @@ class Envoy:
         Returns:
             An EnvoySource object containing the module's source code and operations
         """
-        try:
-            if self._source is None:
-                def wrap(fn: Callable, **kwargs):
-                    return self._interleaver.wrap_operation(fn, **kwargs)
-                source, line_numbers, forward = inject(self._module.forward, wrap, self._module.__path__)
-                self._module.forward = MethodType(forward, self._module)
+        if self._source is None:
+            def wrap(fn: Callable, **kwargs):
+                return self._interleaver.wrap_operation(fn, **kwargs)
+            source, line_numbers, forward = inject(self._module.forward, wrap, self._module.__path__)
+            self._module.forward = MethodType(forward, self._module)
+            
+            self._source = EnvoySource(self._module.__path__, source, line_numbers)
+            self._source._set_interleaver(self._interleaver)
                 
-                self._source = EnvoySource(self._module.__path__, source, line_numbers)
-                self._source._set_interleaver(self._interleaver)
-                
-        except Exception as e:
-            print(e)
-            breakpoint()
-        
         return self._source
     
     #### Public methods ####
@@ -219,6 +191,10 @@ class Envoy:
             An InterleavingTracer for this module
         """
         return InterleavingTracer(self._module, self, *args, **kwargs)
+    
+    
+    def edit(self):
+        return InterleavingTracer(self._module, self, backend=EditingBackend())
     
 
     def session(self):
@@ -375,8 +351,9 @@ class Envoy:
         Returns:
             A string representation of the Envoy showing its path
         """
-        return f"model{self.path}"
-
+        #TODO custom
+        return str(self._module)
+    
     def __repr__(self):
         """
         Representation of the Envoy.
@@ -603,20 +580,16 @@ class OperationEnvoy:
             An EnvoySource object containing the operation's source code and nested operations
         """
         
-        print("requesting", f"{self.name}.fn")
         fn = self._interleaver.request(
             f"{self.name}.fn"
         )
-        print("got fn", fn)
         def wrap(fn: Callable, **kwargs):
             return self._interleaver.wrap_operation(fn, **kwargs)
         
         source, line_numbers, fn = inject(fn, wrap, self.name)
         
         self._source = EnvoySource(self.name, source, line_numbers, interleaver=self._interleaver)
-        
-        print(''.join(source))
-        
+                
         self._interleaver.swap(f"{self.name}.fn", fn)
         
         return self._source
@@ -759,3 +732,8 @@ class EnvoySource:
             
             if operation._source is not None:
                 operation._source._clear()
+                
+                
+    def __getattr__(self, name: str) -> Union[OperationEnvoy]:
+        
+        return super().__getattr__(name)

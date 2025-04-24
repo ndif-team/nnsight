@@ -1,9 +1,11 @@
+import ast
 from typing import TYPE_CHECKING, Any, Optional, Callable
 
 import torch
 
 from ..interleaver import Interleaver
-from ...tracing.tracer import ExitTracingException, Tracer
+from .base import ExitTracingException, Tracer
+from .util import indent
 from .iterator import IteratorProxy
 from .invoker import Invoker
 
@@ -87,6 +89,68 @@ class InterleavingTracer(Tracer):
                         
         super().__init__(*args, **kwargs)
         
+    # def parse(self, source_lines, start_line):
+        
+    #     tree = ast.parse("".join(source_lines))
+    
+    #     class Visitor(ast.NodeVisitor):
+    #         """AST visitor to find the 'with' node at the specified line."""
+    #         def __init__(self, line_no):
+    #             self.target = None
+    #             self.line_no = line_no
+    #             self.invokes = []
+                
+    #         def visit_With(self, node):
+    #             if node.lineno == self.line_no:
+    #                 self.target = node
+                    
+    #                 self.generic_visit(node)
+                    
+                    
+    #             if node.lineno <= self.target.end_lineno:
+                        
+    #                 # Check if this is an invoke with statement
+    #                 for item in node.items:
+    #                     if isinstance(item.context_expr, ast.Call) and hasattr(item.context_expr.func, 'attr') and item.context_expr.func.attr == 'invoke':
+    #                         self.invokes.append((node.lineno, node.end_lineno))
+                            
+    #             else:
+                
+    #                 # Continue visiting child nodes
+    #                 self.generic_visit(node)
+                        
+    #     visitor = Visitor(start_line)
+    #     visitor.visit(tree)
+        
+    #     start = start_line
+        
+    #     base_invoker_lines = []
+        
+    #     invoker_lines = []
+        
+    #     for invoke in visitor.invokes:
+            
+    #         base_invoker_lines.extend(source_lines[start:invoke[0]-1])
+                        
+    #         start = invoke[1]
+            
+    #         invoker_lines.extend(source_lines[invoke[0]-1:invoke[1]])
+                
+                
+    #     end_line = visitor.target.end_lineno
+        
+    #     base_invoker_lines.extend(source_lines[start:end_line])
+        
+    #     base_invoker_lines = ["    with tracer.invoke():\n"] + indent(base_invoker_lines)
+        
+    #     source_lines = base_invoker_lines + invoker_lines
+    #     print(''.join(source_lines))
+        
+    #     breakpoint()
+        
+    #     return new_lines
+
+        
     def compile(self) -> Callable:
         """
         Compile the captured code block into a callable function.
@@ -95,7 +159,15 @@ class InterleavingTracer(Tracer):
             A callable function that executes the captured code block
         """
         # Wrap the captured code in a function definition
-        
+
+        if self.model._default_source is not None:
+            
+            invoker = self.invoke()
+            
+            invoker.info = Tracer.Info(self.model._default_source, self.info.frame)
+            
+            invoker.__exit__(ExitTracingException, None, None)
+                    
         if self.args:
         
             invoker = self.invoke(*self.args)
@@ -104,20 +176,15 @@ class InterleavingTracer(Tracer):
             
             invoker.__exit__(ExitTracingException, None, None)
             
-            self.info.source = ['    pass']
+            self.info.source = ['    pass\n']
         
         self.info.source = [
-            "def fn(model, tracer, tracing_info):\n",
-            *self.info.source
+            "def fn(__nnsight_model__, __nnsight_tracer__, __nnsight_tracing_info__):\n",
+            *self.info.source,
+            "    __nnsight_tracer__.push()\n"
         ]
-        
-        source = "".join(self.info.source)
-        
-        local_namespace = {}
-        # Execute the function definition in the local namespace
-        exec(source, self.info.frame.f_globals, local_namespace)
-        
-        return local_namespace["fn"]
+                        
+    
 
     def execute(self, fn: Callable):
         """
@@ -130,19 +197,15 @@ class InterleavingTracer(Tracer):
             fn: The compiled function to execute
         """
         fn(self.model, self, self.info)
-                
+                        
         with Interleaver(self.mediators) as interleaver:
             self.model._set_interleaver(interleaver)
             interleaver(self.fn, *self.args, **self.kwargs)
             
         self.model._clear()
         
-        if self.info.frame.f_code.co_filename == '<string>':
-            self.info.frame.f_globals.update(interleaver.state)
-            
-        else:    
-            self.info.frame.f_locals.update(interleaver.state)
-        
+        self.push(interleaver.state)
+
     ### Public API ####
         
     def invoke(self, *args, **kwargs):

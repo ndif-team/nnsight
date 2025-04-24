@@ -31,10 +31,6 @@ from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
 
-from ..intervention import Envoy
-from ..intervention.contexts import InterleavingTracer
-from ..intervention.graph import InterventionNodeType, InterventionProxyType
-from ..util import WrapperModule
 from .mixins import RemoteableMixin
 
 
@@ -61,25 +57,10 @@ class LanguageModel(RemoteableMixin):
 
     """
 
-    __methods__ = {"generate": "_generate"}
 
     tokenizer: PreTrainedTokenizer
 
-    class Generator(WrapperModule):
-
-        class Streamer(WrapperModule):
-
-            def put(self, *args):
-                return self(*args)
-
-            def end(self):
-                pass
-
-        def __init__(self) -> None:
-
-            super().__init__()
-
-            self.streamer = LanguageModel.Generator.Streamer()
+    
 
     def __init__(
         self,
@@ -102,9 +83,9 @@ class LanguageModel(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-        self.generator: Envoy[InterventionProxyType, InterventionNodeType] = (
-            LanguageModel.Generator()
-        )
+        # self.generator = (
+        #     LanguageModel.Generator()
+        # )
 
     def _load_config(self, repo_id: str, **kwargs):
 
@@ -342,5 +323,4 @@ if TYPE_CHECKING:
 
     class LanguageModel(LanguageModel, PreTrainedModel):
 
-        def generate(self, *args, **kwargs) -> InterleavingTracer:
-            pass
+        pass

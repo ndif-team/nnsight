@@ -3,7 +3,7 @@ from typing import Dict, Optional
 import torch
 from accelerate import init_empty_weights
 
-from ...intervention import NNsight
+from .. import NNsight
 from .loadable import LoadableMixin
 
 
