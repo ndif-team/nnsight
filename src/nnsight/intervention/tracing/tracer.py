@@ -164,7 +164,7 @@ class InterleavingTracer(Tracer):
             
             invoker = self.invoke()
             
-            invoker.info = Tracer.Info(self.model._default_source, self.info.frame)
+            invoker.info = Tracer.Info(self.model._default_source, self.info.frame, self.info.start_line)
             
             invoker.__exit__(ExitTracingException, None, None)
                     

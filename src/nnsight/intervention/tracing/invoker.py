@@ -48,6 +48,9 @@ class Invoker(Tracer):
                        else_source=["__nnsight_mediator__.end()\n"],)
         ]
         
+        # Because of the "try" line
+        self.info.start_line -= 1
+        
             
     def execute(self, fn: Callable):
         """
@@ -64,6 +67,8 @@ class Invoker(Tracer):
         if self.args:
             self.tracer.args = self.args
             self.tracer.kwargs = self.kwargs
+            
+        mediator = Mediator(fn, self.info)
                         
-        self.tracer.mediators.append(Mediator(fn, self.info))
+        self.tracer.mediators.append(mediator)
 

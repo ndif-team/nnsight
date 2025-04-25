@@ -54,6 +54,8 @@ class FunctionCallWrapper(ast.NodeTransformer):
 
 def convert(fn:Callable, wrap:Callable, name:str):
     
+    #TODO what about exceptions?
+    
  
     source = textwrap.dedent(inspect.getsource(fn))
     
@@ -69,8 +71,12 @@ def convert(fn:Callable, wrap:Callable, name:str):
     
     # Include both globals from this module and the module where forward is defined
     global_namespace = {**globals(), **module_globals, 'wrap': wrap}
-            
-    exec(astor.to_source(tree), global_namespace, local_namespace)
+    
+    filename = "<nnsight>"
+    
+    code_obj = compile(astor.to_source(tree), filename, 'exec')
+    
+    exec(code_obj, global_namespace, local_namespace)
             
     fn = local_namespace[fn.__name__]
 

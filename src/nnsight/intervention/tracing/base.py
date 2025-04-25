@@ -2,6 +2,7 @@ import ctypes
 import inspect
 import ast
 import sys
+from types import FrameType
 from typing import TYPE_CHECKING, Any, Optional, Callable, List, Dict
 from ..backends.base import Backend
 from ..backends.execution import ExecutionBackend
@@ -41,7 +42,7 @@ class Tracer:
             indent: Number of spaces/tabs used for indentation in the original code
         """
         
-        def __init__(self, source: List[str], frame: inspect.FrameInfo, indent: int=0):
+        def __init__(self, source: List[str], frame: FrameType, start_line: int, indent: int=0):
             """
             Initialize Info with source code and frame information.
             
@@ -52,7 +53,7 @@ class Tracer:
             """
             self.source = source
             self.frame = frame
-            
+            self.start_line = start_line
             self.indent = indent
             
     def __init__(self, *args, backend: Backend=None, **kwargs):
@@ -87,24 +88,25 @@ class Tracer:
         frame = inspect.currentframe()
         while frame:
             frame = frame.f_back
-            if frame and frame.f_code.co_filename.find('nnsight') == -1:
+            if frame and frame.f_code.co_filename.find('nnsight/') == -1:
                 break
             
         # Get source code lines from the appropriate location
         start_line = frame.f_lineno
         
-        if frame.f_code.co_filename != '<string>':
+        if frame.f_code.co_filename != '<nnsight>':
             # For regular files, get source lines using inspect
             source_lines, offset = inspect.getsourcelines(frame)
                         
+            
             start_line = start_line if offset == 0 else start_line - offset + 1
             
         elif '__nnsight_tracing_info__' in frame.f_locals:
             # For dynamically generated code, get source from tracing info
+            #TODO maybe we need precompiled source
             source_lines = frame.f_locals['__nnsight_tracing_info__'].source
         else:
-            raise ValueError('No source code found')
-                
+            raise ValueError('No source code found')                
         # Calculate indentation level of the Tracer creation line.
         stripped = source_lines[start_line-1].lstrip('\t ')  # removes leading tabs/spaces
         indent = len(source_lines[start_line-1]) - len(stripped)
@@ -116,7 +118,7 @@ class Tracer:
         source_lines = [line[indent:] for line in source_lines]
         
         # Store the captured information for later use
-        self.info = Tracer.Info(source_lines, frame, indent=indent)
+        self.info = Tracer.Info(source_lines, frame, start_line, indent=indent)
          
         # The trace function will be set up in __enter__
         
@@ -166,7 +168,7 @@ class Tracer:
         """
         # Wrap the captured code in a function definition with appropriate parameters
         self.info.source = [
-            "def fn(__nnsight_model__, __nnsight_tracer__, __nnsight_tracing_info__):\n",
+            "def fn(__nnsight_tracer__, __nnsight_tracing_info__):\n",
             *self.info.source
         ]
                 
@@ -181,7 +183,7 @@ class Tracer:
         Args:
             fn: The compiled function to execute
         """
-        fn(self, self.info.frame.f_locals, self.info)
+        fn(self, self.info)
         
     def push(self, state:Dict=None):
         """
@@ -201,13 +203,13 @@ class Tracer:
             
             while state_frame:
                 state_frame = state_frame.f_back
-                if state_frame and state_frame.f_code.co_filename == "<string>":
+                if state_frame and state_frame.f_code.co_filename == "<nnsight>":
                     break
                 
             # Collect all non-nnsight variables from the frame
             state = {k:v for k,v in state_frame.f_locals.items() if not k.startswith('__nnsight')}
                     
-        if frame.f_code.co_filename == '<string>':
+        if frame.f_code.co_filename == '<nnsight>':
             # For dynamically generated code, update both globals and locals
             frame.f_globals.update(state)
             frame.f_locals.update(state)

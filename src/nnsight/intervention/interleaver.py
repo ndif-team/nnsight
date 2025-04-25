@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-
+from .tracing.util import wrap_exception
 import ctypes
 import inspect
 import time
@@ -466,6 +466,9 @@ class Mediator:
         """
         
         if not isinstance(exception, Cancelation):
+            
+            exception = wrap_exception(exception, self.info)
+            
             raise exception
         
         return False
@@ -521,7 +524,7 @@ class Mediator:
             
             while frame:
                 frame = frame.f_back
-                if frame and frame.f_code.co_filename == "<string>":
+                if frame and frame.f_code.co_filename == "<nnsight>":
                     break
             self._frame = frame
             
