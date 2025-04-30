@@ -92,12 +92,12 @@ class DiffusionModel(RemoteableMixin):
 
             kwargs["num_inference_steps"] = 1
 
-        generator = torch.Generator()
+        generator = torch.Generator(self.device)
 
         if seed is not None:
 
-            if isinstance(prepared_inputs, list):
-                generator = [torch.Generator().manual_seed(seed) for _ in range(len(prepared_inputs) * kwargs.get('num_images_per_prompt', 1))]
+            if isinstance(prepared_inputs, list) and len(prepared_inputs) > 1:
+                generator = [torch.Generator(self.device).manual_seed(seed + offset) for offset in range(len(prepared_inputs) * kwargs.get('num_images_per_prompt', 1))]
             else:
                 generator = generator.manual_seed(seed)
             
