@@ -133,6 +133,54 @@ def test_set2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert (post.value == 0).all().item()
     assert output != "Madison Square Garden is located in the city of New"
 
+@torch.no_grad()
+def test_set3(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.generate(validate=True, backend=AssertSavedLenBackend(3)) as generator:
+        with generator.invoke(MSG_prompt, scan=True) as invoker:
+            pre = gpt2.transformer.h[-1].output.save()
+
+            gpt2.transformer.h[-1].output = (torch.zeros_like(gpt2.transformer.h[-1].output[0]),) + gpt2.transformer.h[-1].output[1:]
+
+            post = gpt2.transformer.h[-1].output.save()
+
+            output = gpt2.generator.output.save()
+
+        _test_serialize(generator)
+
+    output = gpt2.tokenizer.decode(output.value[0])
+
+    assert not (pre.value[0] == 0).all().item()
+    assert (post.value[0] == 0).all().item()
+    assert output != "Madison Square Garden is located in the city of New"
+
+@torch.no_grad()
+def test_set4(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(validate=True, backend=AssertSavedLenBackend(2)) as tracer:
+        with tracer.invoke(MSG_prompt, scan=True):
+            gpt2.transformer.h[-1].output = (torch.zeros_like(gpt2.transformer.h[-1].output[0]),) + gpt2.transformer.h[-1].output[1:]
+
+        with tracer.invoke(MSG_prompt, scan=True):
+            hs = gpt2.transformer.h[-1].output.save()
+            out = gpt2.lm_head.output[0][-1].argmax(dim=-1).save()
+
+    assert isinstance(hs.value, tuple)
+    assert torch.all(hs.value[0] != 0)
+    assert gpt2.tokenizer.decode(out.value) == " New"
+
+
+def test_set5(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(validate=True, backend=AssertSavedLenBackend(2)) as tracer:
+        gpt2.transformer.h[0].output[0].requires_grad_(True)
+        with tracer.invoke(MSG_prompt, scan=True):
+            gpt2.transformer.h[0].output = (torch.zeros_like(gpt2.transformer.h[0].output[0]),) + gpt2.transformer.h[0].output[1:]
+        
+        with tracer.invoke(MSG_prompt, scan=True):
+            hs = gpt2.transformer.h[0].output[0].save()
+            out = gpt2.lm_head.output[0][-1].argmax(dim=-1).save()
+    
+    assert torch.all(hs.value != 0)
+    assert gpt2.tokenizer.decode(out.value) == " New"
+
 
 @torch.no_grad()
 def test_adhoc_module(gpt2: nnsight.LanguageModel):

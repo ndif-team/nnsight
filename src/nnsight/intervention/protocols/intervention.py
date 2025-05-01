@@ -11,73 +11,6 @@ if TYPE_CHECKING:
 class InterventionProtocol(EntryPoint):
 
     @classmethod
-    def concat(
-        cls,
-        activations: Any,
-        value: Any,
-        batch_start: int,
-        batch_size: int,
-        total_batch_size: int,
-    ):
-        def _concat(values):
-
-            data_type = type(values[0])
-
-            if data_type == torch.Tensor:
-                orig_size = values[-1]
-                new_size = sum([value.shape[0] for value in values[:-1]])
-                if new_size == orig_size:
-                    return torch.concatenate(values[:-1])
-
-                return values[0]
-            elif data_type == list:
-                return [
-                    _concat([value[value_idx] for value in values])
-                    for value_idx in range(len(values[0]))
-                ]
-            elif data_type == tuple:
-                return tuple(
-                    [
-                        _concat([value[value_idx] for value in values])
-                        for value_idx in range(len(values[0]))
-                    ]
-                )
-            elif data_type == dict:
-                return {
-                    key: _concat([value[key] for value in values])
-                    for key in values[0].keys()
-                }
-            return values[0]
-
-        def narrow1(acts: torch.Tensor):
-            if total_batch_size == acts.shape[0]:
-                return acts.narrow(0, 0, batch_start)
-
-            return acts
-
-        pre = util.apply(activations, narrow1, torch.Tensor)
-
-        post_batch_start = batch_start + batch_size
-
-        def narrow2(acts: torch.Tensor):
-            if total_batch_size == acts.shape[0]:
-                return acts.narrow(
-                    0, post_batch_start, acts.shape[0] - post_batch_start
-                )
-
-            return acts
-
-        post = util.apply(
-            activations,
-            narrow2,
-            torch.Tensor,
-        )
-
-        orig_sizes = util.apply(activations, lambda x: x.shape[0], torch.Tensor)
-
-        return _concat([pre, value, post, orig_sizes])
-
-    @classmethod
     def intervene(
         cls,
         activations: Any,
@@ -175,21 +108,105 @@ class InterventionProtocol(EntryPoint):
                 # This would mean we want to replace activations for this batch with some other ones.
                 if 'swap' in node.kwargs:
                     value:InterventionNodeType = node.kwargs.pop('swap')
+                        
+                    def _concat(values):
+                        """
+                        Concatenates or merges values from different batches.
+                        
+                        This function handles the 'swap' intervention by replacing a specific batch group's
+                        activations with new values while preserving the structure of the original activations.
+                        
+                        Args:
+                            values: A list containing [original_activations, replacement_activations]
+                                   where replacement_activations will be inserted into original_activations
+                                   at the position specified by batch_start and batch_size.
+                        
+                        Returns:
+                            The merged activations with the batch group replaced by the new values.
+                        """
+                        data_type = type(values[0])
 
-                    # If we narrowed any data, we need to concat it with data before and after it.
-                    if narrowed:
-                        # Slicing a leaf tensor that requires grad will break the autograd graph, so we concatenate.
-                            if activations.is_leaf and activations.requires_grad:
-                                activations = cls.concat(
-                                    activations,
-                                    value,
-                                    batch_start,
-                                    batch_size,
-                                    interleaver.batch_size,
-                                )
+                        if data_type == torch.Tensor:
+                            def _concat_tensor(values):
+                                """
+                                Concatenates tensors for the 'swap' intervention.
+                                
+                                This function handles tensor concatenation by:
+                                1. Extracting the portion before the batch to be replaced (pre)
+                                2. Extracting the portion after the batch to be replaced (post)
+                                3. Concatenating [pre, replacement, post] if dimensions are compatible
+                                
+                                Args:
+                                    values: A list containing [original_tensor, replacement_tensor]
+                                           where replacement_tensor will replace the section of original_tensor
+                                           specified by batch_start and batch_size
+                                
+                                Returns:
+                                    torch.Tensor: The concatenated tensor with the batch section replaced,
+                                                 or the original tensor if dimensions don't match
+                                """
+                                pre = values[0].narrow(0, 0, batch_start)
+                                post = values[0].narrow(0, batch_start+batch_size, values[0].shape[0] - batch_start - batch_size) if interleaver.batch_size == values[0].shape[0] else values[0]
+
+                                # Verify dimensions match before concatenating
+                                if sum([pre.shape[0], values[1].shape[0], post.shape[0]]) == values[0].shape[0]:
+                                    return torch.concatenate([pre, values[1], post])
+                                else:
+                                    return values[0]
+
+
+                            if values[0].requires_grad:
+                                if values[0].is_leaf:
+                                    # For leaf tensors that require gradients, we need to use concatenation
+                                    # to preserve the gradient flow
+                                    return _concat_tensor(values)
+                                else:
+                                    # For non-leaf tensors, we can use in-place operations which are more efficient as long as 
+                                    # the view is not the output of a function that returns multiple views
+                                    if not torch.equal(values[0][batch_start:batch_start+batch_size], values[1]):
+                                        try:
+                                            values[0][batch_start:batch_start+batch_size] = values[1]
+                                        except RuntimeError as e:
+                                            if "This view is the output of a function that returns multiple views" in str(e):
+                                                return _concat_tensor(values)
+                                            else:
+                                                raise e
+                                        
+                                    return values[0]
                             else:
-                                activations[batch_start:batch_start+batch_size][:] = value[:]
+                                values[0][batch_start:batch_start+batch_size] = values[1]
+                                
+                                return values[0]
+                            
+                        elif data_type == list:
+                            # Recursively handle lists by concatenating each element
+                            return [
+                                _concat([value[value_idx] for value in values])
+                                for value_idx in range(len(values[0]))
+                            ]
+                        elif data_type == tuple:
+                            # Recursively handle tuples by concatenating each element
+                            return tuple(
+                                [
+                                    _concat([value[value_idx] for value in values])
+                                    for value_idx in range(len(values[0]))
+                                ]
+                            )
+                        elif data_type == dict:
+                            # Recursively handle dictionaries by concatenating each value
+                            return {
+                                key: _concat([value[key] for value in values])
+                                for key in values[0].keys()
+                            }
+                        
+                        # Default case: return the original value
+                        return values[0]
+                    
+                    if narrowed:
+                        # If the batch was narrowed, we need to merge the new values back into the original activations
+                        activations = _concat([activations, value])
                     else:
+                        # If the batch wasn't narrowed, we can directly replace the activations
                         activations = value
 
         return activations
