@@ -6,6 +6,7 @@ import torch
 from diffusers import DiffusionPipeline
 from transformers import BatchEncoding
 from typing_extensions import Self
+from transformers import PreTrainedTokenizerBase
 from ..intervention.contexts import InterventionTracer
 
 from .. import util
@@ -19,10 +20,8 @@ class Diffuser(util.WrapperModule):
         self.pipeline = DiffusionPipeline.from_pretrained(*args, **kwargs)
         
         for key, value in self.pipeline.__dict__.items():
-            if isinstance(value, torch.nn.Module):
+            if isinstance(value, torch.nn.Module) or isinstance(value, PreTrainedTokenizerBase):
                 setattr(self, key, value)
-
-        self.tokenizer = self.pipeline.tokenizer
 
 
 class DiffusionModel(RemoteableMixin):
