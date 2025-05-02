@@ -26,3 +26,4 @@ def test_generation(tiny_sd, cat_prompt):
 
     assert len(images) == num_images_per_prompt
     assert all([type(img) == PIL.Image.Image for img in images])
+    assert all(images[i] != images[j] for i in range(num_images_per_prompt) for j in range(i + 1, num_images_per_prompt))    
