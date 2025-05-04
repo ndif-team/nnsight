@@ -56,6 +56,9 @@ class Tracer:
             self.start_line = start_line
             self.indent = indent
             
+        def copy(self):
+            return Tracer.Info(self.source, self.frame, self.start_line, self.indent)
+            
     def __init__(self, *args, backend: Backend=None, **kwargs):
         """
         Initialize a Tracer instance.
@@ -86,9 +89,10 @@ class Tracer:
         """
         # Find the frame outside of nnsight by walking up the call stack
         frame = inspect.currentframe()
+        
         while frame:
             frame = frame.f_back
-            if frame and frame.f_code.co_filename.find('nnsight/') == -1:
+            if frame and (frame.f_code.co_filename.find('nnsight/tests') != -1 or frame.f_code.co_filename.find('nnsight/') == -1):
                 break
             
         # Get source code lines from the appropriate location
@@ -106,16 +110,17 @@ class Tracer:
             #TODO maybe we need precompiled source
             source_lines = frame.f_locals['__nnsight_tracing_info__'].source
         else:
-            raise ValueError('No source code found')                
+            raise ValueError('No source code found')    
+        
         # Calculate indentation level of the Tracer creation line.
         stripped = source_lines[start_line-1].lstrip('\t ')  # removes leading tabs/spaces
         indent = len(source_lines[start_line-1]) - len(stripped)
                 
         # Extract the code using AST parsing
-        source_lines = self.parse(source_lines, start_line)
+        start_line, source_lines = self.parse(source_lines, start_line)
         
         # Remove the indentation from each line to prepare for compilation
-        source_lines = [line[indent:] for line in source_lines]
+        source_lines = [line[indent:] if line.strip() else line for line in source_lines]
         
         # Store the captured information for later use
         self.info = Tracer.Info(source_lines, frame, start_line, indent=indent)
@@ -154,7 +159,9 @@ class Tracer:
                         
         end_line = visitor.target.end_lineno
         
-        return source_lines[start_line:end_line]
+        start_line = visitor.target.body[0].lineno - 1        
+                
+        return start_line, source_lines[start_line:end_line]
 
     def compile(self) -> Callable:
         """
@@ -196,7 +203,7 @@ class Tracer:
                   If None, automatically collects variables from the current frame.
         """
         frame = self.info.frame
-                            
+   
         if state is None:
             # Find the frame where the traced code is executing
             state_frame = inspect.currentframe()
@@ -206,9 +213,12 @@ class Tracer:
                 if state_frame and state_frame.f_code.co_filename == "<nnsight>":
                     break
                 
+            state = state_frame.f_locals
+                
             # Collect all non-nnsight variables from the frame
-            state = {k:v for k,v in state_frame.f_locals.items() if not k.startswith('__nnsight')}
-                    
+            
+        state = {k:v for k,v in state.items() if not k.startswith('__nnsight')}
+
         if frame.f_code.co_filename == '<nnsight>':
             # For dynamically generated code, update both globals and locals
             frame.f_globals.update(state)
@@ -219,7 +229,10 @@ class Tracer:
             
         else:    
             # For regular files, just update locals
-            frame.f_locals.update(state)
+            for key, value in state.items():
+                frame.f_locals[key] = value
+                
+                ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), ctypes.c_int(0))
     
     def __enter__(self):
         """
@@ -232,7 +245,8 @@ class Tracer:
             The Tracer instance for use in the 'with' statement
         """
         
-        self.capture()
+        if self.info is None:
+            self.capture()
         
         def skip(new_frame, event, arg):
             """
@@ -241,7 +255,9 @@ class Tracer:
             This prevents the actual execution of the traced code in its original context,
             allowing us to execute it later with our custom handling.
             """
-            if new_frame is self.info.frame and event == 'line' and new_frame.f_lineno >= self.info.frame.f_lineno-1:
+            new_lineno = new_frame.f_lineno - new_frame.f_code.co_firstlineno
+            
+            if new_frame.f_code.co_filename == self.info.frame.f_code.co_filename and new_lineno >= self.info.start_line:
                 sys.settrace(None)
                 self.info.frame.f_trace = None
                 raise ExitTracingException()

@@ -4,6 +4,7 @@ import importlib
 from contextlib import AbstractContextManager
 from typing import Any, Callable, Collection, List, Optional, Type, TypeVar
 
+import torch
 from typing_extensions import Self
 
 # TODO Have an Exception you can raise to stop apply early
@@ -164,3 +165,13 @@ class Patcher(AbstractContextManager):
         self.entered = False
         for patch in self.patches:
             patch.restore()
+
+
+class WrapperModule(torch.nn.Module):
+    
+    def forward(self, *args, **kwargs):
+        
+        if len(args) == 1:
+            return args[0]
+        
+        return args, kwargs

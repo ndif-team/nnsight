@@ -64,11 +64,9 @@ class Invoker(Tracer):
         """
         # TODO: batch the interventions
         
-        if self.args:
-            self.tracer.args = self.args
-            self.tracer.kwargs = self.kwargs
-            
-        mediator = Mediator(fn, self.info)
+        self.tracer.batcher.batch(self.tracer.model, *self.args, **self.kwargs)
                         
-        self.tracer.mediators.append(mediator)
+        invoker = Mediator(fn, self.info, batch_group=len(self.tracer.invokers))
+                        
+        self.tracer.invokers.append(invoker)
 

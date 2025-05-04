@@ -116,6 +116,7 @@ class ExceptionWrapper(Exception):
         Args:
             info: New tracer information to use
         """
+        print(info.start_line, self.offset)
         self.info = info
         self.offset += info.start_line - 1
             
@@ -126,6 +127,7 @@ class ExceptionWrapper(Exception):
         Returns:
             A string containing the formatted traceback with source code context
         """
+        
         source_lines, _ = inspect.getsourcelines(self.info.frame)
         
         traceback = self.original.__traceback__
@@ -138,13 +140,14 @@ class ExceptionWrapper(Exception):
             traceback = traceback.tb_next
             
         offset = traceback.tb_lineno - 1 + self.offset
-
+        
         traceback = [
             "\n\nTraceback (most recent call last):",
             f'  File "{self.info.frame.f_code.co_filename}", line {offset+1}, in {self.info.frame.f_code.co_name}',
             f'    {source_lines[offset].strip()}\n',
             f'{type(self.original).__name__}: {self.original}',
         ]
+    
         
         return "\n".join(traceback)
         
@@ -164,6 +167,7 @@ def wrap_exception(exception:Exception, info:"Tracer.Info"):
     Returns:
         A wrapped exception with enhanced traceback information
     """
+
     if isinstance(exception, ExceptionWrapper):
         # If already wrapped, just update the info
         exception.__suppress_context__ = True  # Kills "... during handling ..."

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import inspect
 from types import MethodType
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable, TYPE_CHECKING
 import torch
 
-from .interleaver import Interleaver
+from .interleaver import Events
 from .tracing.tracer import InterleavingTracer
 from .backends.editing import EditingBackend
 from .inject import convert as inject
+
+if TYPE_CHECKING:
+    from .interleaver import Interleaver
+else:
+    Interleaver = Any
 
 
 class Envoy:
@@ -62,6 +68,16 @@ class Envoy:
             The child Envoy at the specified index
         """
         return self._children[key]
+    
+    @property
+    def interleaving(self) -> bool:
+        """
+        Check if the Envoy is currently participating in an interleaving session.
+        
+        Returns:
+            True if the Envoy is interleaving, False otherwise
+        """
+        return self._interleaver is not None
             
     #### Properties ####
 
@@ -78,8 +94,34 @@ class Envoy:
         """
 
         return self._interleaver.request(
-            f"{self.path}.output"
+            f"{self.path}.output",
+            itertative=True
         )
+        
+    @output.setter
+    def output(self, value: Any):
+        """
+        Set new values for the module's output.
+        
+        This allows for intervention by replacing the module's output with
+        custom values during execution.
+        
+        Args:
+            value: The new output value to use.
+        """
+        self._interleaver.swap(f"{self.path}.output", value, itertative=True)
+
+    @output.deleter
+    def output(self):
+        """
+        Clear the cached output value.
+        
+        This removes any stored output values, forcing them to be recomputed
+        on the next access.
+        """
+        self._output = None
+        
+        #TODO
 
    
 
@@ -94,7 +136,7 @@ class Envoy:
         Returns:
             The module's input values as a tuple of positional and keyword arguments
         """
-        return self._interleaver.request(f"{self.path}.input")
+        return self._interleaver.request(f"{self.path}.input", itertative=True)
 
     @inputs.setter
     def inputs(self, value: Any):
@@ -107,7 +149,7 @@ class Envoy:
         Args:
             value: The new input value(s) to use, structured as a tuple of (args, kwargs)
         """
-        self._interleaver.swap(f"{self.path}.input", value)
+        self._interleaver.swap(f"{self.path}.input", value, itertative=True)
 
     @inputs.deleter
     def inputs(self):
@@ -174,6 +216,9 @@ class Envoy:
                 
         return self._source
     
+    def __call__(self, *args, **kwargs):
+        return self._module.forward(*args, **kwargs) if self.interleaving else self._module(*args, **kwargs)
+    
     #### Public methods ####
 
     def trace(self, *args, **kwargs):
@@ -224,6 +269,14 @@ class Envoy:
         self._module.to(device)
         
         return self
+    
+    @property
+    def device(self) -> Optional[torch.device]:
+
+        try:
+            return next(self._module.parameters()).device
+        except:
+            return None
     
     
     def modules(
@@ -276,6 +329,17 @@ class Envoy:
         """
 
         return self.modules(*args, **kwargs, names=True)
+    
+    def skip(self, replacement: Optional[Any] = inspect._empty):
+       
+        if replacement is inspect._empty:
+            replacement = self.input
+           
+        self.inputs = Events.SKIP
+           
+        self.output = replacement
+       
+        
     
     #### Private methods ####
 
@@ -382,9 +446,13 @@ class Envoy:
         if hasattr(self._module, name):
             value = getattr(self._module, name)
 
+            # It's a method bound to the module, create an interleaver for it
             if callable(value):
-                # It's a method bound to the module
-                return lambda *args, **kwargs: InterleavingTracer(self, value, *args, **kwargs)
+                
+                # If the Envoy defines a method with _name, use it instead to override
+                value = getattr(self, f"_{name}", value)
+                
+                return lambda *args, **kwargs: InterleavingTracer(value, self, *args, **kwargs)
             else:
                 return value
         else:
@@ -406,7 +474,7 @@ class Envoy:
         else:
             super().__setattr__(key, value)
 
-
+# TODO extend Envoy
 class OperationEnvoy:
     """
     Represents a specific operation within a module's forward pass.
@@ -478,7 +546,8 @@ class OperationEnvoy:
         """
         
         return self._interleaver.request(
-            f"{self.name}.output"
+            f"{self.name}.output",
+            itertative=True
         )
         
     @output.setter
@@ -492,7 +561,7 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
-        self._interleaver.swap(f"{self.name}.output", value)
+        self._interleaver.swap(f"{self.name}.output", value, itertative=True)
 
 
     @property
@@ -507,7 +576,8 @@ class OperationEnvoy:
             The operation's input value(s)
         """
         return self._interleaver.request(
-            f"{self.name}.input"
+            f"{self.name}.input",
+            itertative=True
         )
 
     @inputs.setter
@@ -521,7 +591,7 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        self._interleaver.swap(f"{self.name}.input", value)
+        self._interleaver.swap(f"{self.name}.input", value, itertative=True)
 
     @inputs.deleter
     def inputs(self):

@@ -1,15 +1,17 @@
 import ast
-from typing import TYPE_CHECKING, Any, Optional, Callable
+from typing import TYPE_CHECKING, Any, Optional, Callable, List
 
 import torch
 
 from ..interleaver import Interleaver
 from .base import ExitTracingException, Tracer
-from .util import indent
-from .iterator import IteratorProxy
 from .invoker import Invoker
+from ..batching import Batcher
+from ...util import apply
+from .iterator import IteratorProxy
 
 if TYPE_CHECKING:
+    from ..interleaver import Mediator, BATCH_GROUP
     from ..envoy import Envoy
 else:
     Envoy = Any
@@ -80,77 +82,18 @@ class InterleavingTracer(Tracer):
             *args: Additional arguments to pass to the function
             **kwargs: Additional keyword arguments to pass to the function
         """
+        
         self.fn = fn
         self.model = model
         
-        self.mediators = []
+        self.invokers:List[Mediator] = []
+       
+        self.batcher = Batcher(**kwargs)
         
         self._cache = None
                         
-        super().__init__(*args, **kwargs)
-        
-    # def parse(self, source_lines, start_line):
-        
-    #     tree = ast.parse("".join(source_lines))
-    
-    #     class Visitor(ast.NodeVisitor):
-    #         """AST visitor to find the 'with' node at the specified line."""
-    #         def __init__(self, line_no):
-    #             self.target = None
-    #             self.line_no = line_no
-    #             self.invokes = []
-                
-    #         def visit_With(self, node):
-    #             if node.lineno == self.line_no:
-    #                 self.target = node
-                    
-    #                 self.generic_visit(node)
-                    
-                    
-    #             if node.lineno <= self.target.end_lineno:
-                        
-    #                 # Check if this is an invoke with statement
-    #                 for item in node.items:
-    #                     if isinstance(item.context_expr, ast.Call) and hasattr(item.context_expr.func, 'attr') and item.context_expr.func.attr == 'invoke':
-    #                         self.invokes.append((node.lineno, node.end_lineno))
-                            
-    #             else:
-                
-    #                 # Continue visiting child nodes
-    #                 self.generic_visit(node)
-                        
-    #     visitor = Visitor(start_line)
-    #     visitor.visit(tree)
-        
-    #     start = start_line
-        
-    #     base_invoker_lines = []
-        
-    #     invoker_lines = []
-        
-    #     for invoke in visitor.invokes:
-            
-    #         base_invoker_lines.extend(source_lines[start:invoke[0]-1])
-                        
-    #         start = invoke[1]
-            
-    #         invoker_lines.extend(source_lines[invoke[0]-1:invoke[1]])
-                
-                
-    #     end_line = visitor.target.end_lineno
-        
-    #     base_invoker_lines.extend(source_lines[start:end_line])
-        
-    #     base_invoker_lines = ["    with tracer.invoke():\n"] + indent(base_invoker_lines)
-        
-    #     source_lines = base_invoker_lines + invoker_lines
-    #     print(''.join(source_lines))
-        
-    #     breakpoint()
-        
-    #     return new_lines
-
-        
+        super().__init__(*args)
+   
     def compile(self) -> Callable:
         """
         Compile the captured code block into a callable function.
@@ -158,8 +101,8 @@ class InterleavingTracer(Tracer):
         Returns:
             A callable function that executes the captured code block
         """
-        # Wrap the captured code in a function definition
 
+        # If Envoy has a default invoker ( created via Envoy.edit() ), add it
         if self.model._default_source is not None:
             
             invoker = self.invoke()
@@ -167,13 +110,15 @@ class InterleavingTracer(Tracer):
             invoker.info = Tracer.Info(self.model._default_source, self.info.frame, self.info.start_line)
             
             invoker.__exit__(ExitTracingException, None, None)
-                    
+            
+        #If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
-        
-            invoker = self.invoke(*self.args)
             
-            invoker.info = self.info
-            
+            invoker = self.invoke(*self.args, **self.kwargs)
+                        
+            invoker.info = self.info.copy()
+            invoker.info.start_line = 1
+                        
             invoker.__exit__(ExitTracingException, None, None)
             
             self.info.source = ['    pass\n']
@@ -183,6 +128,8 @@ class InterleavingTracer(Tracer):
             *self.info.source,
             "    __nnsight_tracer__.push()\n"
         ]
+        
+        self.args = tuple()
                         
     
 
@@ -196,11 +143,23 @@ class InterleavingTracer(Tracer):
         Args:
             fn: The compiled function to execute
         """
+        
         fn(self.model, self, self.info)
-                        
-        with Interleaver(self.mediators) as interleaver:
+
+        with Interleaver(self.invokers, batcher=self.batcher) as interleaver:
             self.model._set_interleaver(interleaver)
-            interleaver(self.fn, *self.args, **self.kwargs)
+            
+            args = self.batcher.batched_args
+            kwargs = self.batcher.batched_kwargs
+            
+            self.batcher.batched_args = tuple()
+            self.batcher.batched_kwargs = {}
+                            
+            device = self.model.device
+            
+            (args, kwargs) = apply((args, kwargs), lambda tensor: tensor.to(device), torch.Tensor)
+            
+            interleaver(self.fn, *args, **kwargs)
             
         self.model._clear()
         
@@ -219,6 +178,7 @@ class InterleavingTracer(Tracer):
         Returns:
             An Invoker instance
         """
+        #TODO make sure not already executing
         return Invoker(self, *args, **kwargs)
     
     def stop(self):
