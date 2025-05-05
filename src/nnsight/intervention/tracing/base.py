@@ -42,7 +42,7 @@ class Tracer:
             indent: Number of spaces/tabs used for indentation in the original code
         """
         
-        def __init__(self, source: List[str], frame: FrameType, start_line: int, indent: int=0):
+        def __init__(self, source: List[str], frame: FrameType, start_line: int):
             """
             Initialize Info with source code and frame information.
             
@@ -54,10 +54,10 @@ class Tracer:
             self.source = source
             self.frame = frame
             self.start_line = start_line
-            self.indent = indent
+            self.
             
         def copy(self):
-            return Tracer.Info(self.source, self.frame, self.start_line, self.indent)
+            return Tracer.Info(self.source, self.frame, self.start_line)
             
     def __init__(self, *args, backend: Backend=None, **kwargs):
         """
@@ -75,6 +75,8 @@ class Tracer:
         self.backend = ExecutionBackend() if backend is None else backend
         
         self.info = None   
+        
+        self.capture()
          
         
 

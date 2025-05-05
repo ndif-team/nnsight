@@ -253,7 +253,16 @@ class Envoy:
         """
         return Session(self)
     
-    
+    def skip(self, replacement: Optional[Any] = inspect._empty):
+       
+        if replacement is inspect._empty:
+            replacement = self.input
+           
+        self.inputs = Events.SKIP
+           
+        self.output = replacement
+       
+        
     def to(self, device: torch.device):
         """
         Move the module to a specific device.
@@ -277,6 +286,9 @@ class Envoy:
             return next(self._module.parameters()).device
         except:
             return None
+        
+    def parameters(self, recurse: bool = True):
+        return self._module.parameters(recurse)
     
     
     def modules(
@@ -330,16 +342,7 @@ class Envoy:
 
         return self.modules(*args, **kwargs, names=True)
     
-    def skip(self, replacement: Optional[Any] = inspect._empty):
-       
-        if replacement is inspect._empty:
-            replacement = self.input
-           
-        self.inputs = Events.SKIP
-           
-        self.output = replacement
-       
-        
+
     
     #### Private methods ####
 

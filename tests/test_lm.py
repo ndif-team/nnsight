@@ -246,25 +246,15 @@ def test_multi_grad(gpt2: nnsight.LanguageModel):
             logits = gpt2.lm_head.output
 
             
-
-            
-            print('asd0')
             with logits.sum().backward(retain_graph=True):
-                print('asd1')
                 hidden_states_grad1 = hidden_states.grad
-                print('asd2')
 
 
             logits = logits * 2
-            print('asd')
             with logits.sum().backward():
-                print('asd2')
                 
                 hidden_states_grad2 = hidden_states.grad
-                print('asd3')
                 
-            print('asd4')
-
         _test_serialize(tracer)
 
     assert not torch.all(hidden_states_grad1.eq(hidden_states_grad2))
