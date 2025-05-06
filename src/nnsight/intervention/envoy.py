@@ -352,6 +352,16 @@ class Envoy:
             
             interleaver(fn, *args, **kwargs)
 
+    #### Abstract methods ####
+
+    def _prepare_input(self, *args, **kwargs):
+        
+        return args, kwargs
+    
+    def _batch(self, batched_inputs, *args, **kwargs):
+        
+        raise NotImplementedError()
+
     #### Private methods ####
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> None:

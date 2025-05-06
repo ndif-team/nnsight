@@ -5,3 +5,5 @@ from .intervention.tracing.base import Tracer
 
 def session(*args, **kwargs):
     return Tracer(*args, **kwargs)
+
+#TODO legacy stuff like nnsight.listp
