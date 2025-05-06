@@ -14,6 +14,13 @@ class ExitTracingException(Exception):
     """
     pass
 
+class WithBlockNotFoundError(Exception):
+    """Exception raised when a with block is not found in the source code.
+    
+    This exception is used to indicate that a with block was not found at the specified line number.
+    """
+    pass
+
 class Tracer:
     """
     Captures and executes code within a tracing context.
@@ -54,7 +61,6 @@ class Tracer:
             self.source = source
             self.frame = frame
             self.start_line = start_line
-            self.
             
         def copy(self):
             return Tracer.Info(self.source, self.frame, self.start_line)
@@ -71,7 +77,7 @@ class Tracer:
         """
         self.args = args
         self.kwargs = kwargs
-        
+
         self.backend = ExecutionBackend() if backend is None else backend
         
         self.info = None   
@@ -125,7 +131,7 @@ class Tracer:
         source_lines = [line[indent:] if line.strip() else line for line in source_lines]
         
         # Store the captured information for later use
-        self.info = Tracer.Info(source_lines, frame, start_line, indent=indent)
+        self.info = Tracer.Info(source_lines, frame, start_line)
          
         # The trace function will be set up in __enter__
         
@@ -158,6 +164,9 @@ class Tracer:
                     
         visitor = Visitor(start_line)
         visitor.visit(tree)
+        
+        if visitor.target is None:
+            raise WithBlockNotFoundError(f"With block not found at line {start_line}")
                         
         end_line = visitor.target.end_lineno
         
@@ -178,7 +187,8 @@ class Tracer:
         # Wrap the captured code in a function definition with appropriate parameters
         self.info.source = [
             "def fn(__nnsight_tracer__, __nnsight_tracing_info__):\n",
-            *self.info.source
+            *self.info.source,
+            "    __nnsight_tracer__.push()\n"
         ]
                 
     
@@ -193,7 +203,7 @@ class Tracer:
             fn: The compiled function to execute
         """
         fn(self, self.info)
-        
+                
     def push(self, state:Dict=None):
         """
         Push local variables back to the original execution frame.

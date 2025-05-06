@@ -7,9 +7,9 @@ from ..interleaver import Interleaver
 from .base import ExitTracingException, Tracer
 from .invoker import Invoker
 from ..batching import Batcher
-from ...util import apply
-from .iterator import IteratorProxy
 
+from .iterator import IteratorProxy
+from ..backends.base import Backend
 if TYPE_CHECKING:
     from ..interleaver import Mediator, BATCH_GROUP
     from ..envoy import Envoy
@@ -72,7 +72,7 @@ class InterleavingTracer(Tracer):
     user-defined intervention functions through the Interleaver.
     """
 
-    def __init__(self, fn: Callable, model: Envoy, *args, **kwargs):
+    def __init__(self, fn: Callable, model: Envoy, *args, backend: Backend = None, **kwargs):
         """
         Initialize an InterleavingTracer with a function and model.
         
@@ -92,7 +92,8 @@ class InterleavingTracer(Tracer):
         
         self._cache = None
                         
-        super().__init__(*args)
+        super().__init__(*args, backend=backend)
+        
    
     def compile(self) -> Callable:
         """
@@ -103,13 +104,15 @@ class InterleavingTracer(Tracer):
         """
 
         # If Envoy has a default invoker ( created via Envoy.edit() ), add it
-        if self.model._default_source is not None:
+        if self.model._default_source:
             
-            invoker = self.invoke()
-            
-            invoker.info = Tracer.Info(self.model._default_source, self.info.frame, self.info.start_line)
-            
-            invoker.__exit__(ExitTracingException, None, None)
+            for source in self.model._default_source:
+                
+                invoker = self.invoke()
+                
+                invoker.info = Tracer.Info(source, self.info.frame, self.info.start_line)
+                
+                invoker.__exit__(ExitTracingException, None, None)
             
         #If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
@@ -143,25 +146,18 @@ class InterleavingTracer(Tracer):
         Args:
             fn: The compiled function to execute
         """
-        
+        #TODO need to give model a change to dispathc. used to have to call .interleave on the model.
         fn(self.model, self, self.info)
+        
+        args = self.batcher.batched_args
+        kwargs = self.batcher.batched_kwargs
+        
+        self.batcher.batched_args = tuple()
+        self.batcher.batched_kwargs = {}
 
-        with Interleaver(self.invokers, batcher=self.batcher) as interleaver:
-            self.model._set_interleaver(interleaver)
+        interleaver = Interleaver(self.invokers, batcher=self.batcher)
             
-            args = self.batcher.batched_args
-            kwargs = self.batcher.batched_kwargs
-            
-            self.batcher.batched_args = tuple()
-            self.batcher.batched_kwargs = {}
-                            
-            device = self.model.device
-            
-            (args, kwargs) = apply((args, kwargs), lambda tensor: tensor.to(device), torch.Tensor)
-            
-            interleaver(self.fn, *args, **kwargs)
-            
-        self.model._clear()
+        self.model.interleave(interleaver, self.fn, *args, **kwargs)
         
         self.push(interleaver.state)
 

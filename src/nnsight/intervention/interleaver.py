@@ -89,6 +89,9 @@ class Interleaver:
 
         @wraps(fn)
         def inner(module: torch.nn.Module, *args, **kwargs):
+            
+            if not hasattr(module, "__path__"):
+                return fn(module, *args, **kwargs)
 
             provider = module.__path__
 
@@ -501,7 +504,7 @@ class Mediator:
         event = None
 
         while process:
-
+            
             event, data = self.event_queue.get()
         
             if event == Events.VALUE:

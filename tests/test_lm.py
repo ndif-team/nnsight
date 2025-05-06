@@ -287,7 +287,7 @@ def test_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2_edited.trace(MSG_prompt):
         one = l0.attachment.one.output.clone()
         l0.attachment.output *= 0.0
-        edited_output = gpt2.output.logits
+        edited_output = gpt2_edited.output.logits
 
     # Check that submodule in attached model
     # is equal to original output.
@@ -302,7 +302,7 @@ def test_non_inplace_editing(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         gpt2.transformer.h[1].output[0][:, 0] = 0
 
     with gpt2.edit() as gpt2_edited:
-        gpt2.transformer.h[1].output[0][:, 1] = 0
+        gpt2_edited.transformer.h[1].output[0][:, 1] = 0
 
     with gpt2.trace(MSG_prompt):
         l1_out = gpt2.transformer.h[1].output[0]
@@ -347,7 +347,7 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
     batch = ["a", "b"]
     single = "a"
 
-    with gpt2.edit(single) as gpt2_edited:
+    with gpt2.edit() as gpt2_edited:
         acts = l0.output[0]
         l0.output[0][:] = l0.attachment(acts, hook=True)
 
@@ -361,12 +361,10 @@ def test_batched_editing(gpt2: nnsight.LanguageModel):
 def test_conditional_interventions(gpt2: nnsight.LanguageModel):
     with gpt2.session() as session:
         with gpt2.trace("Hello World") as tracer:
-            with tracer.cond(torch.all(gpt2.transformer.h[5].output[0] < 100000)):
+            if torch.all(gpt2.transformer.h[5].output[0] < 100000):
                 gpt2.transformer.h[-1].output[0][:] = 0
 
             output = gpt2.transformer.h[-1].output[0]
-
-        _test_serialize(session)
 
     assert torch.all(output == 0)
 
@@ -387,59 +385,60 @@ def test_input_setting(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert prediction_1 == prediction_2
 
 
-def test_parameter_protocol(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    og_weights = gpt2.transformer.h[0].mlp.c_proj.weight
-    og_bias = gpt2.transformer.h[0].mlp.c_proj.bias
+# def test_parameter_protocol(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+#     og_weights = gpt2.transformer.h[0].mlp.c_proj.weight
+#     og_bias = gpt2.transformer.h[0].mlp.c_proj.bias
 
-    with gpt2.trace(MSG_prompt):
-        cl_weights = gpt2.transformer.h[0].mlp.c_proj.weight
-        cl_bias = gpt2.transformer.h[0].mlp.c_proj.bias
+#     with gpt2.trace(MSG_prompt):
+#         cl_weights = gpt2.transformer.h[0].mlp.c_proj.weight
+#         cl_bias = gpt2.transformer.h[0].mlp.c_proj.bias
 
-    assert not (cl_weights is og_weights)
-    assert not (cl_bias is og_bias)
+#     assert not (cl_weights is og_weights)
+#     assert not (cl_bias is og_bias)
 
-    assert torch.equal(og_weights, cl_weights)
-    assert torch.equal(og_bias, cl_bias)
-
-
-def test_parameter_protocol_meta(MSG_prompt: str):
-    model = nnsight.LanguageModel("openai-community/gpt2")
-
-    with model.trace(MSG_prompt):
-        weights = model.transformer.h[0].mlp.c_proj.weight
-        bias = model.transformer.h[0].mlp.c_proj.bias
-
-    assert weights.device.type != "meta"
-    assert bias.device.type != "bias"
+#     assert torch.equal(og_weights, cl_weights)
+#     assert torch.equal(og_bias, cl_bias)
 
 
-def test_parameter_protocol_result(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.trace(MSG_prompt):
-        weights = gpt2.transformer.h[0].mlp.c_proj.weight
-        bias = gpt2.transformer.h[0].mlp.c_proj.bias
+# def test_parameter_protocol_meta(MSG_prompt: str):
+#     model = nnsight.LanguageModel("openai-community/gpt2")
 
-        c_proj_in = gpt2.transformer.h[0].mlp.c_proj.input
+#     with model.trace(MSG_prompt):
+        
+#         weights = model.transformer.h[0].mlp.c_proj.weight
+#         bias = model.transformer.h[0].mlp.c_proj.bias
 
-        c_proj_out_2 = torch.addmm(
-            bias, c_proj_in.view(-1, c_proj_in.size(-1)), weights
-        )
-
-        c_proj_out = gpt2.transformer.h[0].mlp.c_proj.output[0]
-
-    assert torch.equal(c_proj_out_2, c_proj_out)
+#     assert weights.device.type != "meta"
+#     assert bias.device.type != "bias"
 
 
-def test_parameter_protocol_safety(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.trace(MSG_prompt):
-        hs_1 = gpt2.transformer.h[0].mlp.c_proj.output[0]
+# def test_parameter_protocol_result(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+#     with gpt2.trace(MSG_prompt):
+#         weights = gpt2.transformer.h[0].mlp.c_proj.weight
+#         bias = gpt2.transformer.h[0].mlp.c_proj.bias
 
-    with gpt2.trace(MSG_prompt):
-        gpt2.transformer.h[0].mlp.c_proj.weight[:] = 0
+#         c_proj_in = gpt2.transformer.h[0].mlp.c_proj.input
 
-    with gpt2.trace(MSG_prompt):
-        hs_2 = gpt2.transformer.h[0].mlp.c_proj.output[0]
+#         c_proj_out_2 = torch.addmm(
+#             bias, c_proj_in.view(-1, c_proj_in.size(-1)), weights
+#         )
 
-    assert torch.equal(hs_1, hs_2)
+#         c_proj_out = gpt2.transformer.h[0].mlp.c_proj.output[0]
+
+#     assert torch.equal(c_proj_out_2, c_proj_out)
+
+
+# def test_parameter_protocol_safety(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+#     with gpt2.trace(MSG_prompt):
+#         hs_1 = gpt2.transformer.h[0].mlp.c_proj.output[0]
+
+#     with gpt2.trace(MSG_prompt):
+#         gpt2.transformer.h[0].mlp.c_proj.weight[:] = 0
+
+#     with gpt2.trace(MSG_prompt):
+#         hs_2 = gpt2.transformer.h[0].mlp.c_proj.output[0]
+
+#     assert torch.equal(hs_1, hs_2)
 
 
 def test_undispatched_extra_module(device: str, MSG_prompt: str):

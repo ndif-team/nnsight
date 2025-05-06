@@ -1,5 +1,5 @@
 
-from typing import Optional
+from typing import Optional, Self
 from ..intervention.envoy import Envoy
 
 class NNsight(Envoy):

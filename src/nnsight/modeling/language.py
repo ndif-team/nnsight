@@ -88,7 +88,7 @@ class LanguageModel(RemoteableMixin):
         )
         
         
-    def _generate(self, *args, **kwargs):
+    def __nnsight_generate__(self, *args, **kwargs):
         
         output = self._model.generate(*args, **kwargs)
         
