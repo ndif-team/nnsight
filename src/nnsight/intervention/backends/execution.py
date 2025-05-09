@@ -1,6 +1,7 @@
 from .base import Backend
 from typing import TYPE_CHECKING, Any
 from ..tracing.util import wrap_exception
+
 if TYPE_CHECKING:
     from ..tracing.tracer import Tracer
 else:
@@ -13,10 +14,8 @@ class ExecutionBackend(Backend):
         tracer.compile()
         
         source = "".join(tracer.info.source)
-                
-        filename = "<nnsight>"
-        
-        code_obj = compile(source, filename, 'exec')
+
+        code_obj = compile(source, tracer.info.filename, 'exec')
         
         local_namespace = {}
         
@@ -29,6 +28,7 @@ class ExecutionBackend(Backend):
         try:
             tracer.execute(fn)
         except Exception as e:
+        
             raise wrap_exception(e, tracer.info) from None
        
                 

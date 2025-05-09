@@ -127,7 +127,7 @@ class InterleavingTracer(Tracer):
             self.info.source = ['    pass\n']
         
         self.info.source = [
-            "def fn(__nnsight_model__, __nnsight_tracer__, __nnsight_tracing_info__):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_model__, __nnsight_tracer__, __nnsight_tracing_info__):\n",
             *self.info.source,
             "    __nnsight_tracer__.push()\n"
         ]
@@ -147,6 +147,7 @@ class InterleavingTracer(Tracer):
             fn: The compiled function to execute
         """
         #TODO need to give model a change to dispathc. used to have to call .interleave on the model.
+        
         fn(self.model, self, self.info)
         
         args = self.batcher.batched_args
@@ -156,7 +157,6 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_kwargs = {}
 
         interleaver = Interleaver(self.invokers, batcher=self.batcher)
-            
         self.model.interleave(interleaver, self.fn, *args, **kwargs)
         
         self.push(interleaver.state)

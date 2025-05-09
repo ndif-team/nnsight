@@ -49,7 +49,7 @@ class Tracer:
             indent: Number of spaces/tabs used for indentation in the original code
         """
         
-        def __init__(self, source: List[str], frame: FrameType, start_line: int):
+        def __init__(self, source: List[str], frame: FrameType, start_line: int, filename: str):
             """
             Initialize Info with source code and frame information.
             
@@ -61,6 +61,8 @@ class Tracer:
             self.source = source
             self.frame = frame
             self.start_line = start_line
+            self.filename = filename
+            
             
         def copy(self):
             return Tracer.Info(self.source, self.frame, self.start_line)
@@ -106,7 +108,7 @@ class Tracer:
         # Get source code lines from the appropriate location
         start_line = frame.f_lineno
         
-        if frame.f_code.co_filename != '<nnsight>':
+        if not frame.f_code.co_filename.startswith('<nnsight'):
             # For regular files, get source lines using inspect
             source_lines, offset = inspect.getsourcelines(frame)
                         
@@ -131,7 +133,7 @@ class Tracer:
         source_lines = [line[indent:] if line.strip() else line for line in source_lines]
         
         # Store the captured information for later use
-        self.info = Tracer.Info(source_lines, frame, start_line)
+        self.info = Tracer.Info(source_lines, frame, start_line, filename=f"<nnsight {id(self)}>")
          
         # The trace function will be set up in __enter__
         
@@ -170,7 +172,9 @@ class Tracer:
                         
         end_line = visitor.target.end_lineno
         
-        start_line = visitor.target.body[0].lineno - 1        
+        start_line = visitor.target.lineno
+        
+             
                 
         return start_line, source_lines[start_line:end_line]
 
@@ -186,7 +190,7 @@ class Tracer:
         """
         # Wrap the captured code in a function definition with appropriate parameters
         self.info.source = [
-            "def fn(__nnsight_tracer__, __nnsight_tracing_info__):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_tracer__, __nnsight_tracing_info__):\n",
             *self.info.source,
             "    __nnsight_tracer__.push()\n"
         ]
@@ -222,7 +226,7 @@ class Tracer:
             
             while state_frame:
                 state_frame = state_frame.f_back
-                if state_frame and state_frame.f_code.co_filename == "<nnsight>":
+                if state_frame and state_frame.f_code.co_filename.startswith('<nnsight'):
                     break
                 
             state = state_frame.f_locals
@@ -231,7 +235,7 @@ class Tracer:
             
         state = {k:v for k,v in state.items() if not k.startswith('__nnsight')}
 
-        if frame.f_code.co_filename == '<nnsight>':
+        if frame.f_code.co_filename.startswith('<nnsight'):
             # For dynamically generated code, update both globals and locals
             frame.f_globals.update(state)
             frame.f_locals.update(state)

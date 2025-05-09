@@ -42,13 +42,12 @@ class Invoker(Tracer):
             A callable intervention function
         """
         self.info.source = [
-            "def ifn(__nnsight_mediator__, __nnsight_tracing_info__):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
             *try_catch(self.info.source, 
                        exception_source=["__nnsight_mediator__.exception(exception)\n"],
                        else_source=["__nnsight_mediator__.end()\n"],)
         ]
         
-        # Because of the "try" line
         self.info.start_line -= 1
         
             
@@ -65,7 +64,7 @@ class Invoker(Tracer):
         # TODO: batch the interventions
         
         self.tracer.batcher.batch(self.tracer.model, *self.args, **self.kwargs)
-                        
+
         invoker = Mediator(fn, self.info, batch_group=len(self.tracer.invokers))
                         
         self.tracer.invokers.append(invoker)

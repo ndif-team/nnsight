@@ -619,9 +619,10 @@ class Mediator:
         Returns:
             Boolean indicating whether to continue processing events
         """
+        
 
         if not isinstance(exception, Cancelation):
-
+            
             exception = wrap_exception(exception, self.info)
 
             raise exception
@@ -688,7 +689,7 @@ class Mediator:
 
             while frame:
                 frame = frame.f_back
-                if frame and frame.f_code.co_filename == "<nnsight>":
+                if frame and frame.f_code.co_filename.startswith("<nnsight"):
                     break
             self._frame = frame
 

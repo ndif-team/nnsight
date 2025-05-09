@@ -82,6 +82,7 @@ def get_dependencies(fn:Callable):
     used_names = fn.__code__.co_names
     return {name: fn.__globals__[name] for name in used_names if name in fn.__globals__}
 
+from ... import CONFIG
 
 class ExceptionWrapper(Exception):
     """
@@ -102,9 +103,8 @@ class ExceptionWrapper(Exception):
         super().__init__(*args, **kwargs)
         
         self.original = original
-        
-        self.offset = 0
-        self.info = None
+         
+        self.infos = []
         
         self.set_info(info)
         
@@ -116,10 +116,12 @@ class ExceptionWrapper(Exception):
         Args:
             info: New tracer information to use
         """
-        print(info.start_line, self.offset)
-        self.info = info
-        self.offset += info.start_line - 1
-            
+
+        
+        # ex_info = ExceptionWrapper.Info(self.accumulator, info.frame.f_code.co_filename, info.frame.f_code.co_firstlineno, info.start_line, info.source, info.frame.f_code.co_name)
+        
+        self.infos.append(info)
+        
     def __str__(self):
         """
         Generates a formatted traceback string with proper context.
@@ -127,27 +129,92 @@ class ExceptionWrapper(Exception):
         Returns:
             A string containing the formatted traceback with source code context
         """
+    
+        accumulator = 0
+        co_first_line = 0
+        filename = ""
+        co_name = ""
+            
+        start_lines = {}
+        filename_mapping = {}
+        co_names = {}
+        source_lines = {}
         
-        source_lines, _ = inspect.getsourcelines(self.info.frame)
-        
+        for info in reversed(self.infos):
+            
+            if not info.frame.f_code.co_filename.startswith("<nnsight"):
+            
+                accumulator = info.frame.f_code.co_firstlineno - 1
+                filename = info.frame.f_code.co_filename
+                co_name = info.frame.f_code.co_name
+                
+            accumulator += info.start_line - 1
+                
+            start_lines[info.filename] = accumulator
+            filename_mapping[info.filename] = filename
+            co_names[info.filename] = co_name
+            source_lines[info.filename] = info.source
         traceback = self.original.__traceback__
         
+                
         #TODO handle multiple levels of traceback
         #    only build the traceback if the code is from <nnsight> otherwise we can get it from the frame
         
         # Find the deepest frame in the traceback
-        while traceback.tb_next is not None:
-            traceback = traceback.tb_next
+        # Find the deepest frame in the traceback
+        tb_frames = []
+        current_tb = traceback
+        
+        # info.frame.f_code.co_firstlineno - 1
+        import linecache
+        
+        while current_tb is not None:
+            frame = current_tb.tb_frame
+            filename = frame.f_code.co_filename
+            lineno = current_tb.tb_lineno
+            name = frame.f_code.co_name
             
-        offset = traceback.tb_lineno - 1 + self.offset
+            # Case 1: <nnsight> - our traced code
+            if filename.startswith("<nnsight"):                
+                
+                fname = filename_mapping[filename]
+                start_line = start_lines[filename]
+                co_name = co_names[filename] if '__nnsight_tracing_info__' in frame.f_locals else frame.f_code.co_name
+                source = source_lines[filename]
+                
+                line_number = lineno - 1 + start_line
+
+                tb_frames.append(f'  File "{fname}", line {line_number+1 + co_first_line}, in {co_name}')
+                tb_frames.append(f'    {source[lineno-1].strip()}')
+                
+                        
+            # Case 2: Skip internal nnsight code
+            elif "nnsight/" in filename:
+                if CONFIG.APP.DEBUG:
+                    tb_frames.append(f'  File "{filename}", line {lineno}, in {name}')
+                    try:
+                        line = linecache.getline(filename, lineno).strip()
+                        if line:
+                            tb_frames.append(f'    {line}')
+                    except:
+                        pass
+            # Case 3: Regular code - use normal traceback
+            else:
+                tb_frames.append(f'  File "{filename}", line {lineno}, in {name}')
+                try:
+                    line = linecache.getline(filename, lineno).strip()
+                    if line:
+                        tb_frames.append(f'    {line}')
+                except:
+                    pass
+            
+            current_tb = current_tb.tb_next
         
         traceback = [
-            "\n\nTraceback (most recent call last):",
-            f'  File "{self.info.frame.f_code.co_filename}", line {offset+1}, in {self.info.frame.f_code.co_name}',
-            f'    {source_lines[offset].strip()}\n',
-            f'{type(self.original).__name__}: {self.original}',
+            "\n\nTraceback (most recent call last):"
+        ] + tb_frames + [
+            f'\n{type(self.original).__name__}: {self.original}',
         ]
-    
         
         return "\n".join(traceback)
         
