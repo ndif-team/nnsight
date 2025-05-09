@@ -110,7 +110,7 @@ class InterleavingTracer(Tracer):
                 
                 invoker = self.invoke()
                 
-                invoker.info = Tracer.Info(source, self.info.frame, self.info.start_line)
+                invoker.info = Tracer.Info(source, self.info.frame, self.info.start_line, self.info.filename)
                 
                 invoker.__exit__(ExitTracingException, None, None)
             

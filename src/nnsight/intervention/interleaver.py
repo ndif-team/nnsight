@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 import torch
 
 from ..util import Patch, Patcher
-from .tracing.util import wrap_exception
 from .batching import Batcher
+from .tracing.base import WithBlockNotFoundError
+from .tracing.util import wrap_exception
+
 if TYPE_CHECKING:
     from .tracing.tracer import Cache, Tracer
-
 
 
 class Events(Enum):
@@ -31,6 +32,7 @@ class Events(Enum):
     REGISTER = "register"  # Signal that a mediator has been registered
     SKIP = "skip"  # Signal that an operation should be skipped
     CONTINUE = "continue"  # Signal that an operation should continue
+
 
 class Cancelation(Exception):
     """Exception raised when a request is canceled."""
@@ -55,9 +57,7 @@ class Interleaver:
     modification of intermediate values.
     """
 
-    def __init__(
-        self, invokers: List[Mediator], batcher: Batcher = None
-    ) -> None:
+    def __init__(self, invokers: List[Mediator], batcher: Batcher = None) -> None:
         """
         Initialize an Interleaver with mediators.
 
@@ -75,7 +75,6 @@ class Interleaver:
         self.state = dict()
         self.iteration_tracker = defaultdict(int)
 
-
     def wrap(self, fn: Callable):
         """
         Wrap a function to intercept inputs and outputs for intervention.
@@ -89,7 +88,7 @@ class Interleaver:
 
         @wraps(fn)
         def inner(module: torch.nn.Module, *args, **kwargs):
-            
+
             if not hasattr(module, "__path__"):
                 return fn(module, *args, **kwargs)
 
@@ -161,7 +160,7 @@ class Interleaver:
 
             # On backwards for this tensor
             def inner(grad: torch.Tensor):
-                
+
                 hook.remove()
                 # Inject the grad value
                 # Possibly editing it in the process
@@ -201,13 +200,16 @@ class Interleaver:
 
         def inner(tensor: torch.Tensor, *args, **kwargs):
 
-            tracer = BackwardsTracer(tensor, fn, self, *args, **kwargs)
-            
-            if not tracer.with_node:
+            try:
+
+                tracer = BackwardsTracer(tensor, fn, self, *args, **kwargs)
+
+            except WithBlockNotFoundError:
+
                 return fn(tensor, *args, **kwargs)
-            
+
             return tracer
-                
+
         return inner
 
     def __enter__(self):
@@ -277,7 +279,12 @@ class Interleaver:
 
     ### Provider Methods ###
 
-    def handle(self, provider: Optional[Any] = None, value: Optional[Any] = None, itertative:bool = False):
+    def handle(
+        self,
+        provider: Optional[Any] = None,
+        value: Optional[Any] = None,
+        itertative: bool = False,
+    ):
         """
         Handle a provider's value, allowing mediators to consume and modify it.
 
@@ -288,7 +295,7 @@ class Interleaver:
         Returns:
             The original or modified value
         """
-        
+
         if isinstance(provider, str) and itertative:
 
             iteration = self.iteration_tracker[provider]
@@ -302,7 +309,7 @@ class Interleaver:
         swap_happened = False
 
         for mediator in self.invokers:
-                        
+
             value = mediator.handle(provider, original_value)
 
             if original_value is Events.SKIP:
@@ -310,7 +317,7 @@ class Interleaver:
                     return value
             elif value is Events.SKIP:
                 return value
-                
+
         if original_value is not value:
             return value
 
@@ -330,7 +337,7 @@ class Interleaver:
         """Get the current mediator."""
         return self.mediators[threading.current_thread().name]
 
-    def request(self, requester: Any, itertative:bool = False):
+    def request(self, requester: Any, itertative: bool = False):
         """
         Request a value from the current mediator.
 
@@ -342,7 +349,7 @@ class Interleaver:
         """
         return self.current.request(requester, itertative)
 
-    def swap(self, requester: Any, value: Any, itertative:bool = False):
+    def swap(self, requester: Any, value: Any, itertative: bool = False):
         """
         Swap a value in the current mediator.
 
@@ -395,7 +402,11 @@ class Mediator:
     """
 
     def __init__(
-        self, intervention: Callable, info: "Tracer.Info", name: Optional[str] = None, batch_group: Optional[int] = 0
+        self,
+        intervention: Callable,
+        info: "Tracer.Info",
+        name: Optional[str] = None,
+        batch_group: Optional[int] = 0,
     ) -> None:
         """
         Initialize a Mediator with an intervention function.
@@ -455,7 +466,7 @@ class Mediator:
     def cancel(self):
         """Cancel the intervention thread and clear caches."""
         # TODO custom canceled error
-        
+
         self.interleaver.mediators.pop(self.name)
 
         self.history.clear()
@@ -480,20 +491,19 @@ class Mediator:
 
         """
 
-
         if self.child is not None:
 
             value = self.child.handle(provider, value)
 
             # If the child was canceled
             if self.child.thread is None:
-                
+
                 # Tell the parent (current mediator) to continue
                 self.response_queue.put(None)
 
                 # Wait until the parent has an event
                 self.wait()
-                
+
                 # Then wipe the child
                 self.child = None
 
@@ -504,18 +514,20 @@ class Mediator:
         event = None
 
         while process:
-            
+
             event, data = self.event_queue.get()
-        
+
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider, value)
             elif event == Events.SWAP:
                 requester, swap_value = data
-                process, new_value = self.handle_swap_event(requester, provider, swap_value)
-                
+                process, new_value = self.handle_swap_event(
+                    requester, provider, swap_value
+                )
+
                 if new_value is not inspect._empty:
                     value = new_value
-                    
+
             elif event == Events.REGISTER:
                 process = self.handle_register_event(*data)
             elif event == Events.EXCEPTION:
@@ -555,12 +567,13 @@ class Mediator:
         """
 
         if provider == requester:
-            
+
             value = self.interleaver.batcher.narrow(self.batch_group, value)
-            
+
             self.respond(value)
         else:
             if requester in self.history:
+                # TODO needs tests
                 self.respond(
                     ValueError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
@@ -591,11 +604,12 @@ class Mediator:
 
             if swap_value is Events.SKIP:
                 return False, swap_value
-            
+
             return True, swap_value
 
         else:
             if requester in self.history:
+                # TODO needs tests
                 self.respond(
                     ValueError(
                         f"Setting {requester} is out of scope for scope {provider}. Did you call an Envoy out of order?"
@@ -619,10 +633,9 @@ class Mediator:
         Returns:
             Boolean indicating whether to continue processing events
         """
-        
 
         if not isinstance(exception, Cancelation):
-            
+
             exception = wrap_exception(exception, self.info)
 
             raise exception
@@ -643,19 +656,19 @@ class Mediator:
         self.child = mediator
 
         self.child.info.start_line += self.info.start_line - 1
-                
+
         mediator.start(self.interleaver)
-        
+
         self.response_queue.put(None)
-        
+
         if fn is not None:
-            
+
             fn()
-            
+
             self.response_queue.put(None)
 
             self.wait()
-            
+
             self.handle()
 
         return False
@@ -738,7 +751,7 @@ class Mediator:
 
         return response
 
-    def request(self, requester: Any, itertative:bool = False):
+    def request(self, requester: Any, itertative: bool = False):
         """
         Request a value from a specific provider.
 
@@ -759,17 +772,17 @@ class Mediator:
     def register(self, mediator: Mediator, fn: Optional[Callable] = None):
 
         self.send(Events.REGISTER, (mediator, fn))
-        
+
         self.response_queue.get()
-        
+
         if fn is not None:
             self.event_queue.put((Events.CONTINUE, None))
-            
+
             self.response_queue.get()
-            
+
         self.pull()
 
-    def swap(self, requester: Any, value: Any, itertative:bool = False):
+    def swap(self, requester: Any, value: Any, itertative: bool = False):
         """
         Set a value to swap during execution.
 
@@ -824,7 +837,7 @@ class Mediator:
         """Signal that execution should continue without further intervention."""
 
         self.push()
-        
+
         self.event_queue.put((Events.END, None))
 
     def exception(self, exception: Exception):

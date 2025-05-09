@@ -65,7 +65,7 @@ class Tracer:
             
             
         def copy(self):
-            return Tracer.Info(self.source, self.frame, self.start_line)
+            return Tracer.Info(self.source, self.frame, self.start_line, self.filename)
             
     def __init__(self, *args, backend: Backend=None, **kwargs):
         """
@@ -172,9 +172,7 @@ class Tracer:
                         
         end_line = visitor.target.end_lineno
         
-        start_line = visitor.target.lineno
-        
-             
+        start_line = visitor.target.body[0].lineno - 1             
                 
         return start_line, source_lines[start_line:end_line]
 
