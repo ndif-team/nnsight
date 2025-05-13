@@ -8,8 +8,8 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Self,
 import torch
 
 from ..util import apply
+from .batching import Batchable
 from .inject import convert as inject
-from .interleaver import Events
 from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.tracer import InterleavingTracer
@@ -20,7 +20,7 @@ else:
     Interleaver = Any
 
 
-class Envoy:
+class Envoy(Batchable):
     """
     A proxy class that wraps a PyTorch module to enable intervention during execution.
 
@@ -97,7 +97,9 @@ class Envoy:
             The module's output values
         """
 
-        return self._interleaver.request(f"{self.path}.output", itertative=True)
+        return self._interleaver.current.request(
+            self._interleaver.current.iterate(f"{self.path}.output")
+        )
 
     @output.setter
     def output(self, value: Any):
@@ -110,7 +112,9 @@ class Envoy:
         Args:
             value: The new output value to use.
         """
-        self._interleaver.swap(f"{self.path}.output", value, itertative=True)
+        self._interleaver.current.swap(
+            self._interleaver.current.iterate(f"{self.path}.output"), value
+        )
 
     @output.deleter
     def output(self):
@@ -135,7 +139,9 @@ class Envoy:
         Returns:
             The module's input values as a tuple of positional and keyword arguments
         """
-        return self._interleaver.request(f"{self.path}.input", itertative=True)
+        return self._interleaver.current.request(
+            self._interleaver.current.iterate(f"{self.path}.input")
+        )
 
     @inputs.setter
     def inputs(self, value: Any):
@@ -148,7 +154,9 @@ class Envoy:
         Args:
             value: The new input value(s) to use, structured as a tuple of (args, kwargs)
         """
-        self._interleaver.swap(f"{self.path}.input", value, itertative=True)
+        self._interleaver.current.swap(
+            self._interleaver.current.iterate(f"{self.path}.input"), value
+        )
 
     @inputs.deleter
     def inputs(self):
@@ -261,9 +269,12 @@ class Envoy:
         if replacement is inspect._empty:
             replacement = self.input
 
-        self.inputs = Events.SKIP
+        self._interleaver.current.skip(self, replacement)
 
-        self.output = replacement
+    def wait(self):
+
+        self.inputs
+        self.output
 
     def to(self, device: torch.device):
         """
@@ -347,20 +358,10 @@ class Envoy:
         (args, kwargs) = apply(
             (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
         )
-        
+
         with interleaver:
-            
+
             interleaver(fn, *args, **kwargs)
-
-    #### Abstract methods ####
-
-    def _prepare_input(self, *args, **kwargs):
-        
-        return args, kwargs
-    
-    def _batch(self, batched_inputs, *args, **kwargs):
-        
-        raise NotImplementedError()
 
     #### Private methods ####
 
@@ -393,7 +394,7 @@ class Envoy:
             self._handle_overloaded_mount(envoy, name)
         else:
             super().__setattr__(name, envoy)
-            
+
     def _update(self, module: torch.nn.Module) -> None:
         """Updates the ._model attribute using a new model of the same architecture.
         Used when loading the real weights (dispatching) and need to replace the underlying modules.
@@ -407,9 +408,9 @@ class Envoy:
 
         # Handle extra modules added after initialization: issues/376
         for name, child in list(self._module.named_children())[i + 1 :]:
-            
+
             setattr(module, name, child)
-            
+
         self._module = module
 
     def _set_interleaver(self, interleaver: Interleaver):
@@ -606,7 +607,7 @@ class OperationEnvoy:
             The operation's output value(s)
         """
 
-        return self._interleaver.request(f"{self.name}.output", itertative=True)
+        return self._interleaver.current.request(f"{self.name}.output", itertative=True)
 
     @output.setter
     def output(self, value: Any) -> None:
@@ -619,7 +620,7 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
-        self._interleaver.swap(f"{self.name}.output", value, itertative=True)
+        self._interleaver.current.swap(f"{self.name}.output", value, itertative=True)
 
     @property
     def inputs(
@@ -634,7 +635,7 @@ class OperationEnvoy:
         Returns:
             The operation's input value(s)
         """
-        return self._interleaver.request(f"{self.name}.input", itertative=True)
+        return self._interleaver.current.request(f"{self.name}.input", itertative=True)
 
     @inputs.setter
     def inputs(self, value: Any) -> None:
@@ -647,7 +648,7 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        self._interleaver.swap(f"{self.name}.input", value, itertative=True)
+        self._interleaver.current.swap(f"{self.name}.input", value, itertative=True)
 
     @inputs.deleter
     def inputs(self):
@@ -704,7 +705,7 @@ class OperationEnvoy:
             An EnvoySource object containing the operation's source code and nested operations
         """
 
-        fn = self._interleaver.request(f"{self.name}.fn")
+        fn = self._interleaver.current.request(f"{self.name}.fn")
 
         def wrap(fn: Callable, **kwargs):
             return self._interleaver.wrap_operation(fn, **kwargs)
@@ -715,7 +716,7 @@ class OperationEnvoy:
             self.name, source, line_numbers, interleaver=self._interleaver
         )
 
-        self._interleaver.swap(f"{self.name}.fn", fn)
+        self._interleaver.current.swap(f"{self.name}.fn", fn)
 
         return self._source
 

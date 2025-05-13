@@ -3,7 +3,7 @@
 from typing import Any, Tuple
 
 import torch
-from ..util import apply
+from ..util import apply, applyn
 
 class Batchable:
     
@@ -30,6 +30,8 @@ class Batcher:
         self.first_input = True
         self.needs_batching = False
         
+        self.current_value = None
+        
         self._total_batch_size = None
         
         
@@ -42,7 +44,7 @@ class Batcher:
             
         return self._total_batch_size
             
-            
+
         
     def batch(self, batchable: Batchable, *args, **kwargs):
         
@@ -76,7 +78,7 @@ class Batcher:
             
             
     def narrow(self, batch_group: int, data:Any):
-        
+
         if not self.needs_batching:
             return data
     
@@ -97,3 +99,36 @@ class Batcher:
             _narrow,
             torch.Tensor,
         )
+        
+        
+    def swap(self, batch_group, swap_value: Any):
+        
+        if not self.needs_batching:
+            self.current_value = swap_value
+            return
+                
+        batch_start, batch_size = self.batch_groups[batch_group]
+
+        if batch_start == -1:
+            self.current_value = swap_value
+            return
+        
+        def _swap(current_value: torch.Tensor, swap_value: torch.Tensor):
+            
+            if current_value.shape[0] == self.total_batch_size:
+            
+                needs_concat = current_value.requires_grad and current_value.is_leaf
+              
+                if needs_concat:
+                    pre = current_value.narrow(0, 0, batch_start)
+                    post = current_value.narrow(0, batch_start+batch_size, current_value.shape[0] - batch_start - batch_size) if self.total_batch_size == current_value.shape[0] else current_value
+                    
+                    return torch.cat([pre, swap_value, post], dim=0)
+                
+                else:
+                    current_value[batch_start:batch_start+batch_size] = swap_value
+                    
+            return current_value
+                
+        self.current_value = applyn([self.current_value, swap_value], _swap, torch.Tensor)
+            

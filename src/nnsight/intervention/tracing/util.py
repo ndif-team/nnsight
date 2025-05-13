@@ -154,18 +154,12 @@ class ExceptionWrapper(Exception):
             filename_mapping[info.filename] = filename
             co_names[info.filename] = co_name
             source_lines[info.filename] = info.source
+            
         traceback = self.original.__traceback__
         
-                
-        #TODO handle multiple levels of traceback
-        #    only build the traceback if the code is from <nnsight> otherwise we can get it from the frame
-        
-        # Find the deepest frame in the traceback
-        # Find the deepest frame in the traceback
         tb_frames = []
         current_tb = traceback
         
-        # info.frame.f_code.co_firstlineno - 1
         import linecache
         
         while current_tb is not None:
@@ -186,8 +180,7 @@ class ExceptionWrapper(Exception):
 
                 tb_frames.append(f'  File "{fname}", line {line_number+1 + co_first_line}, in {co_name}')
                 tb_frames.append(f'    {source[lineno-1].strip()}')
-                
-                        
+    
             # Case 2: Skip internal nnsight code
             elif "nnsight/" in filename:
                 if CONFIG.APP.DEBUG:

@@ -25,4 +25,4 @@ class BackwardsTracer(Invoker):
                 
         mediator = Mediator(fn, self.info) 
                  
-        self.interleaver.register(mediator, lambda: self.fn(self.tensor, *self.args, **self.kwargs))
+        self.interleaver.current.register(mediator, lambda: self.fn(self.tensor, *self.args, **self.kwargs))

@@ -181,7 +181,7 @@ class InterleavingTracer(Tracer):
         """
         Raise an EarlyStopException to stop the execution of the model.
         """
-        self.model._interleaver.stop()
+        self.model._interleaver.current.stop()
     
 
     @property
@@ -202,6 +202,6 @@ class InterleavingTracer(Tracer):
         """
         if self._cache is None:
            self._cache = Cache(device, dtype, detach)
-           self.model._interleaver.set_user_cache(self._cache)
+           self.model._interleaver.current.set_user_cache(self._cache)
            
         return self._cache.cache

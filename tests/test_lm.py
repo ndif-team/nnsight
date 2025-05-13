@@ -120,7 +120,7 @@ def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
             output1 = gpt2.generator.output
 
         with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
-            gpt2.transformer.wte.output
+            gpt2.transformer.wte.wait()
             gpt2.transformer.wte.output = embeddings
 
             output2 = gpt2.generator.output

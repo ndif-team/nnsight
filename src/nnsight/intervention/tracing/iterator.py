@@ -27,7 +27,7 @@ class IteratorTracer(Invoker):
                 
         mediator = Mediator(fn, self.info)
         
-        self.tracer.model._interleaver.iter(mediator, self.iteration)
+        self.tracer.model._interleaver.current.iter(mediator, self.iteration)
     
     
     

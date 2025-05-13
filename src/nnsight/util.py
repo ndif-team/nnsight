@@ -62,6 +62,57 @@ def apply(
 
     return data
 
+
+def applyn(
+    data: C, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
+) -> C:
+    """Applies some function to all members of a collection of a give type (or types)
+
+    Args:
+        data (Any): Collection of data to apply function to.
+        fn (Callable): Function to apply.
+        cls (type): Type or Types to apply function to.
+        inplace (bool): If to apply the fn inplace. (For lists and dicts)
+
+    Returns:
+        Any: Same kind of collection as data, after then fn has been applied to members of given type.
+    """
+
+    if isinstance(data[0], cls):
+        return fn(*data)
+
+    data_type = type(data[0])
+
+    if data_type == list:
+        # if inplace:
+        #     for idx, _data in enumerate(data):
+        #         data[idx] = apply(_data, fn, cls, inplace=inplace)
+        #     return data
+        
+        return [applyn([_data[i] for _data in data], fn, cls, inplace=inplace) for i in range(len(data[0]))]
+
+    elif data_type == tuple:
+        return tuple([applyn([_data[i] for _data in data], fn, cls, inplace=inplace) for i in range(len(data[0]))])
+
+    elif data_type == dict:
+        # if inplace:
+        #     for key, value in data.items():
+        #         data[key] = apply(value, fn, cls, inplace=inplace)
+        #     return data
+        return {
+            key: applyn([_data[key] for _data in data], fn, cls, inplace=inplace)
+            for key in data[0].keys()
+        }
+
+    # elif data_type == slice:
+    #     return slice(
+    #         apply(data.start, fn, cls, inplace=inplace),
+    #         apply(data.stop, fn, cls, inplace=inplace),
+    #         apply(data.step, fn, cls, inplace=inplace),
+    #     )
+
+    return data[0]
+
 def fetch_attr(object: object, target: str) -> Any:
     """Retrieves an attribute from an object hierarchy given an attribute path. Levels are separated by '.' e.x (transformer.h.1)
 
