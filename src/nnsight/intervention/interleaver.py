@@ -772,12 +772,16 @@ class Mediator:
 
                 if i >= iteration.stop:
                     break
+                
+            self.iteration = i
 
         elif isinstance(iteration, int):
 
-            mediator.iteration = i
+            mediator.iteration = iteration
 
             self.register(mediator)
+            
+            self.iteration = iteration
 
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""
