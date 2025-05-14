@@ -116,7 +116,7 @@ class Tracer:
             import IPython
 
             ipython = IPython.get_ipython()
-            source_lines = ipython.user_global_ns["_ih"][-1]
+            source_lines = ipython.user_global_ns["_ih"][-1].splitlines(keepends=True)
             
         elif not frame.f_code.co_filename.startswith('<nnsight'):
             # For regular files, get source lines using inspect
