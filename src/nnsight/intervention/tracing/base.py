@@ -1,11 +1,14 @@
+import ast
 import ctypes
 import inspect
-import ast
 import sys
+import warnings
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Optional, Callable, List, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
 from ..backends.base import Backend
 from ..backends.execution import ExecutionBackend
+
 
 class ExitTracingException(Exception):
     """Exception raised to exit the tracing process.
@@ -117,6 +120,9 @@ class Tracer:
 
             ipython = IPython.get_ipython()
             source_lines = ipython.user_global_ns["_ih"][-1].splitlines(keepends=True)
+            
+            if not source_lines[-1].endswith('\n'):
+                source_lines[-1] += '\n'
             
         elif not frame.f_code.co_filename.startswith('<nnsight'):
             # For regular files, get source lines using inspect
@@ -284,7 +290,11 @@ class Tracer:
                 raise ExitTracingException()
      
         # Set the trace function at both global and frame level
-        sys.settrace(skip)
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            
+            sys.settrace(skip)
         self.info.frame.f_trace = skip
         
         return self
