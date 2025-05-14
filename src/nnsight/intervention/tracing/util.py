@@ -1,5 +1,8 @@
 import inspect
 from typing import List, Callable, TYPE_CHECKING
+import contextlib
+import os
+import sys
 
 if TYPE_CHECKING:
     from .base import Tracer
@@ -68,6 +71,18 @@ def get_frame(frame: inspect.FrameInfo, until:str="nnsight"):
             break
     return frame
 
+@contextlib.contextmanager
+def suppress_all_output():
+    with open(os.devnull, 'w') as devnull:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        try:
+            sys.stdout = devnull
+            sys.stderr = devnull
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
 def get_dependencies(fn:Callable):
     """
