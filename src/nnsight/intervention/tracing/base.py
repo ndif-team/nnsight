@@ -1,8 +1,9 @@
 import ast
 import ctypes
 import inspect
+import io
 import sys
-import warnings
+import contextlib
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -285,16 +286,21 @@ class Tracer:
             new_lineno = new_frame.f_lineno - new_frame.f_code.co_firstlineno
             
             if new_frame.f_code.co_filename == self.info.frame.f_code.co_filename and new_lineno >= self.info.start_line:
-                sys.settrace(None)
+                # To remove colab warning
+                f = io.StringIO()
+                with contextlib.redirect_stdout(f):
+                    sys.settrace(None)
+                    
                 self.info.frame.f_trace = None
                 raise ExitTracingException()
      
         # Set the trace function at both global and frame level
         
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            
+        # To remove colab warning
+        f = io.StringIO()
+        with contextlib.redirect_stdout(f):
             sys.settrace(skip)
+            
         self.info.frame.f_trace = skip
         
         return self
