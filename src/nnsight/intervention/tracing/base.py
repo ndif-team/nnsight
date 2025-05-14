@@ -108,17 +108,24 @@ class Tracer:
         # Get source code lines from the appropriate location
         start_line = frame.f_lineno
         
-        if not frame.f_code.co_filename.startswith('<nnsight'):
+        if '__nnsight_tracing_info__' in frame.f_locals:
+            # For dynamically generated code, get source from tracing info
+            source_lines = frame.f_locals['__nnsight_tracing_info__'].source
+            
+        elif "_ih" in frame.f_locals:
+            import IPython
+
+            ipython = IPython.get_ipython()
+            source_lines = ipython.user_global_ns["_ih"][-1]
+            
+        elif not frame.f_code.co_filename.startswith('<nnsight'):
             # For regular files, get source lines using inspect
             source_lines, offset = inspect.getsourcelines(frame)
                         
             
             start_line = start_line if offset == 0 else start_line - offset + 1
             
-        elif '__nnsight_tracing_info__' in frame.f_locals:
-            # For dynamically generated code, get source from tracing info
-            #TODO maybe we need precompiled source
-            source_lines = frame.f_locals['__nnsight_tracing_info__'].source
+        
         else:
             raise ValueError('No source code found')    
         

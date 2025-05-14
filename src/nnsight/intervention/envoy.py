@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from types import MethodType
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Self,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional,
                     Tuple, Union)
 
 import torch
@@ -443,7 +443,7 @@ class Envoy(Batchable):
         if self._source is not None:
             self._source._clear()
 
-    def _shallow_copy(self) -> Self:
+    def _shallow_copy(self) -> Envoy:
         """Creates a new instance copy of the same class with the all the attributes of the original instance.
 
         Returns:

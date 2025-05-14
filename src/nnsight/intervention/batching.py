@@ -117,7 +117,7 @@ class Batcher:
             
             if current_value.shape[0] == self.total_batch_size:
             
-                needs_concat = current_value.requires_grad and current_value.is_leaf
+                needs_concat = (current_value.requires_grad and current_value.is_leaf) or current_value._base is not None
               
                 if needs_concat:
                     pre = current_value.narrow(0, 0, batch_start)

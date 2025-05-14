@@ -1,5 +1,5 @@
 from types import MethodType
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional, Self,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional,
                     Tuple, Union)
 
 import torch
