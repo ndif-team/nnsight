@@ -116,16 +116,13 @@ class InterleavingTracer(Tracer):
             
         #If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
-            
             invoker = self.invoke(*self.args, **self.kwargs)
-                        
             invoker.info = self.info.copy()
-            invoker.info.start_line = 1
                         
             invoker.__exit__(ExitTracingException, None, None)
             
             self.info.source = ['    pass\n']
-        
+                    
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_model__, __nnsight_tracer__, __nnsight_tracing_info__):\n",
             *self.info.source,
@@ -146,7 +143,6 @@ class InterleavingTracer(Tracer):
         Args:
             fn: The compiled function to execute
         """
-        #TODO need to give model a change to dispathc. used to have to call .interleave on the model.
         
         fn(self.model, self, self.info)
         
