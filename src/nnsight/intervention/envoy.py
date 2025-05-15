@@ -498,9 +498,9 @@ class Envoy(Batchable):
             # It's a method bound to the module, create an interleaver for it
             if callable(value):
 
-                # If the Envoy defines a method with _name, use it instead to override
+                # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
                 value = getattr(self, f"__nnsight_{name}__", value)
-
+                #TODO trace=False, maybe not here  Legacy
                 def trace(*args, **kwargs):
                     try:
                         return InterleavingTracer(value, self, *args, **kwargs)
