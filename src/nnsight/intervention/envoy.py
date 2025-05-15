@@ -412,6 +412,7 @@ class Envoy(Batchable):
             setattr(module, name, child)
 
         self._module = module
+        self._module.__path__ = self.path
 
     def _set_interleaver(self, interleaver: Interleaver):
         """
