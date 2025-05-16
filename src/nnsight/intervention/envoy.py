@@ -268,8 +268,10 @@ class Envoy(Batchable):
 
         if replacement is inspect._empty:
             replacement = self.input
+            
+        requester = self._interleaver.current.iterate(f"{self.path}.input")
 
-        self._interleaver.current.skip(self, replacement)
+        self._interleaver.current.skip(requester, replacement)
 
     def wait(self):
 

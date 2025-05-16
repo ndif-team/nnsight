@@ -792,7 +792,7 @@ class Mediator:
     
     def skip(self, requester: Any, value: Any):
         
-        self.send((Events.SKIP, (requester, value)))
+        self.send(Events.SKIP, (requester, value))
 
     def end(self):
         """Signal that execution should continue without further intervention."""
