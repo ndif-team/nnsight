@@ -7,6 +7,5 @@ public/
 __pycache__/
 .DS_Store
 **/.DS_Store
-config.yaml
 .nfs*
 nnsight.log

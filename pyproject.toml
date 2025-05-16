@@ -23,7 +23,8 @@ classifiers = [
 
 dependencies = [
     "transformers",
-    "protobuf", 
+    "protobuf",
+    "astor", 
     "python-socketio[client]",
     "tokenizers>=0.13.0",
     "pydantic>=2.9.0",

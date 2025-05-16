@@ -1,18 +1,13 @@
-from typing import TYPE_CHECKING
-from ...tracing.backends import Backend
-
-from ...tracing.graph import Graph
+from .base import Backend
+from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
-    from .. import NNsight
-
+    from ..tracing.tracer import InterleavingTracer
+else:
+    InterleavingTracer = Any
+    
 class EditingBackend(Backend):
-    """Backend to set the default graph to the current InterventionGraph. Assumes the final Node is an InterleavingTracer.
-    """
     
-    def __init__(self, model: "NNsight") -> None:
-        
-        self.model = model
     
-    def __call__(self, graph: Graph) -> None:
-                        
-        self.model._default_graph = graph.nodes[-1].args[0]
+    def __call__(self, tracer: InterleavingTracer):
+                
+        tracer.model._default_source = tracer.model._default_source + [tracer.info.source]
