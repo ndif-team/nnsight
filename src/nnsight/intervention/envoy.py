@@ -294,6 +294,14 @@ class Envoy(Batchable):
 
         return self
 
+
+    def cpu(self, *args, **kwargs):
+        self._module.cpu(*args, **kwargs)
+        return self
+
+    def cuda(self, *args, **kwargs):
+        self._module.cuda(*args, **kwargs)
+        return self
     @property
     def device(self) -> Optional[torch.device]:
 
