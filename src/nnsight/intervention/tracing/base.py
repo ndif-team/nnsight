@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from ..backends.base import Backend
 from ..backends.execution import ExecutionBackend
+from .wrapper import Wrapper
 from .util import suppress_all_output
 
 
@@ -259,6 +260,8 @@ class Tracer:
         else:    
             # For regular files, just update locals
             for key, value in state.items():
+                if id(value) not in Wrapper.saves:
+                    continue
                 frame.f_locals[key] = value
                 
                 ctypes.pythonapi.PyFrame_LocalsToFast(ctypes.py_object(frame), ctypes.c_int(0))
