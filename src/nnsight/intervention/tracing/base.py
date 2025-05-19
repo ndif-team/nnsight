@@ -176,10 +176,12 @@ class Tracer:
             def visit_With(self, node):
                 if node.lineno == self.line_no:
                     self.target = node
+                else:
+                    self.generic_visit(node)
                     
         visitor = Visitor(start_line)
         visitor.visit(tree)
-        
+
         if visitor.target is None:
             raise WithBlockNotFoundError(f"With block not found at line {start_line}")
                         
