@@ -42,7 +42,7 @@ def test_tiny_1(tiny_model: NNsight, tiny_input: torch.Tensor):
 
     with tiny_model.trace(tiny_input):
 
-        hs = tiny_model.layer2.output
+        hs = tiny_model.layer2.output.save()
 
     assert isinstance(hs, torch.Tensor)
 
@@ -55,9 +55,9 @@ def test_grad_setting(tiny_model: NNsight, tiny_input: torch.Tensor):
         loss = tiny_model.output.sum()
 
         with loss.backward():
-            l1_grad = l1o.grad.clone()
+            l1_grad = l1o.grad.clone().save()
             l1o.grad = l1o.grad.clone() * 2
-            l1_grad_double = l1o.grad
+            l1_grad_double = l1o.grad.save()
 
     assert torch.equal(l1_grad * 2, l1_grad_double)
 
@@ -67,7 +67,7 @@ def test_external_proxy_intervention_executed_locally(
 ):
     with tiny_model.session() as sesh:
         with tiny_model.trace(tiny_input) as tracer_1:
-            l1_out = tiny_model.layer1.output
+            l1_out = tiny_model.layer1.output.save()
 
         with tiny_model.trace(tiny_input) as tracer_2:
             l1_out[:, 2] = 5
@@ -77,9 +77,9 @@ def test_external_proxy_intervention_executed_locally(
 
 def test_early_stop_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.trace(tiny_input) as tracer:
-        l1_out = tiny_model.layer1.output
+        l1_out = tiny_model.layer1.output.save()
         tracer.stop()
-        l2_out = tiny_model.layer2.output
+        l2_out = tiny_model.layer2.output.save()
 
     assert isinstance(l1_out, torch.Tensor)
 
@@ -92,7 +92,7 @@ def test_true_conditional_protocol(tiny_model: NNsight, tiny_input: torch.Tensor
         num = 5
         if num > 0:
             tiny_model.layer1.output[:] = 1
-            l1_out = tiny_model.layer1.output
+            l1_out = tiny_model.layer1.output.save()
 
     assert isinstance(l1_out, torch.Tensor)
     assert torch.all(l1_out == 1).item()
@@ -103,10 +103,10 @@ def test_false_conditional_protocol(tiny_model: NNsight, tiny_input: torch.Tenso
         num = 5
         if num < 0:
             tiny_model.layer1.output[:] = 1
-            l1_out = tiny_model.layer1.output
+            l1_out = tiny_model.layer1.output.save()
 
         # check that the condition does not persist outside the context
-        l2_out = tiny_model.layer2.output
+        l2_out = tiny_model.layer2.output.save()
 
     with pytest.raises(UnboundLocalError):
         l1_out
@@ -122,7 +122,7 @@ def test_node_as_condition(tiny_model: NNsight, tiny_input: torch.Tensor):
         out[:, 0] = 1
         if out[:, 0] != 1:
             tiny_model.layer1.output[:] = 1
-            l1_out = tiny_model.layer1.output
+            l1_out = tiny_model.layer1.output.save()
 
     with pytest.raises(UnboundLocalError):
         l1_out
@@ -134,7 +134,7 @@ def test_multiple_dependent_conditionals(tiny_model: NNsight, tiny_input: torch.
     with tiny_model.trace(tiny_input) as tracer:
         num = 5
         l1_out = tiny_model.layer1.output
-        l2_out = tiny_model.layer2.output
+        l2_out = tiny_model.layer2.output.save()
         if num > 0:
             l1_out[:] = 1
 
@@ -151,7 +151,7 @@ def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.trace(tiny_input) as tracer:
         num = 5
         if num > 0:  # True
-            l1_out = tiny_model.layer1.output
+            l1_out = tiny_model.layer1.output.save()
 
             if num > 0:  # True
                 tiny_model.layer1.output[:] = 1
@@ -163,7 +163,7 @@ def test_nested_conditionals(tiny_model: NNsight, tiny_input: torch.Tensor):
             tiny_model.layer2.output[:] = 0
 
             if num > 0:  # True
-                l2_out = tiny_model.layer2.output
+                l2_out = tiny_model.layer2.output.save()
 
     assert isinstance(l1_out, torch.Tensor)
     assert torch.all(l1_out == 1).item()
@@ -175,14 +175,14 @@ def test_conditional_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
         num = 5
         if num > 0:
             with tiny_model.trace(tiny_input):
-                output = tiny_model.output
+                output = tiny_model.output.save()
 
     assert isinstance(output, torch.Tensor)
 
 
 def test_conditional_iteration(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.session() as session:
-        result = []
+        result = [].save()
         for item in [0,1,2]:
             if item % 2 == 0:
                 with tiny_model.trace(tiny_input):
@@ -198,14 +198,14 @@ def test_bridge_protocol(tiny_model: NNsight, tiny_input: torch.Tensor):
             tiny_model.layer1.output[:] = (
                 val  # fetches the val proxy using the bridge protocol
             )
-            l1_out = tiny_model.layer1.output
+            l1_out = tiny_model.layer1.output.save()
 
     assert torch.all(l1_out == 0).item()
 
 
 def test_sequential_graph_based_context_exit(tiny_model: NNsight):
     with tiny_model.session() as session:
-        l = []
+        l = [].save()
         l.append(0)
 
         for item in [1, 2, 3, 4]:
@@ -222,7 +222,7 @@ def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
     with tiny_model.trace(tiny_input) as tracer:
         l1_out = tiny_model.layer1.output
         tracer.stop()
-        l1_out_double = l1_out * 2
+        l1_out_double = (l1_out * 2).save()
 
     with pytest.raises(UnboundLocalError):
         l1_out_double
@@ -230,7 +230,7 @@ def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
 
 def test_bridged_node_cleanup(tiny_model: NNsight):
     with tiny_model.session() as session:
-        l = []
+        l = [].save()
         for item in [0, 1, 2]:
             if item == 2:
                 break
@@ -242,11 +242,11 @@ def test_bridged_node_cleanup(tiny_model: NNsight):
 def test_nested_iterator(tiny_model: NNsight):
 
     with tiny_model.session() as session:
-        l = []
+        l = [].save()
         l.append([0])
         l.append([1])
         l.append([2])
-        l2 = []
+        l2 = [].save()
         for item in l:
             for item_2 in item:
                 l2.append(item_2)
@@ -256,9 +256,9 @@ def test_nested_iterator(tiny_model: NNsight):
 
 def test_nnsight_builtins(tiny_model: NNsight):
     with tiny_model.session() as session:
-        nn_list = []
-        sesh_list = []
-        apply_list = []
+        nn_list = [].save()
+        sesh_list = [].save()
+        apply_list = [].save()
 
         for l in [nn_list, sesh_list, apply_list]:
             l.append(int)
