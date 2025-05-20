@@ -82,6 +82,37 @@ static PyObject* mount_function(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+// Function to unmount a function by name
+static PyObject* unmount_function(PyObject* self, PyObject* args) {
+    const char* mount_point;
+    
+    if (!PyArg_ParseTuple(args, "s", &mount_point)) {
+        return NULL;
+    }
+    
+    // Remove from base object type
+    PyDict_DelItemString(PyBaseObject_Type.tp_dict, mount_point);
+    PyType_Modified(&PyBaseObject_Type);
+    
+    // Find and remove from our array
+    for (int i = 0; i < num_mounted_functions; i++) {
+        if (strcmp(mounted_functions[i].name, mount_point) == 0) {
+            // Found the function, remove it
+            Py_DECREF(mounted_functions[i].func);
+            free(mounted_functions[i].name);
+            
+            // Shift remaining elements
+            for (int j = i; j < num_mounted_functions - 1; j++) {
+                mounted_functions[j] = mounted_functions[j + 1];
+            }
+            num_mounted_functions--;
+            break;
+        }
+    }
+    
+    Py_RETURN_NONE;
+}
+
 // Cleanup function for mounted functions
 static void cleanup_mounted_functions(void) {
     for (int i = 0; i < num_mounted_functions; i++) {
@@ -97,6 +128,7 @@ static void cleanup_mounted_functions(void) {
 // Method definitions
 static PyMethodDef module_methods[] = {
     {"mount", mount_function, METH_VARARGS, "Mount a function to all objects"},
+    {"unmount", unmount_function, METH_VARARGS, "Unmount a function from all objects"},
     {NULL, NULL, 0, NULL}  // Sentinel
 };
 

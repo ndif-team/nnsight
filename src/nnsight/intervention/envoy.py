@@ -13,6 +13,7 @@ from .inject import convert as inject
 from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.tracer import InterleavingTracer
+from .tracing.globals import Object
 
 if TYPE_CHECKING:
     from .interleaver import Interleaver
@@ -86,7 +87,7 @@ class Envoy(Batchable):
     #### Properties ####
 
     @property
-    def output(self) -> Union[Any, torch.Tensor]:
+    def output(self) -> Object:
         """
         Get the output of the module's forward pass.
 
@@ -129,7 +130,7 @@ class Envoy(Batchable):
         # TODO
 
     @property
-    def inputs(self) -> Union[Any, torch.Tensor]:
+    def inputs(self) -> Tuple[Tuple[Object], Dict[str, torch.Tensor]]:
         """
         Get the inputs to the module's forward pass.
 
@@ -169,7 +170,7 @@ class Envoy(Batchable):
         self._input = None
 
     @property
-    def input(self) -> Union[Any, torch.Tensor]:
+    def input(self) -> Object:
         """
         Get the first input to the module's forward pass.
 
