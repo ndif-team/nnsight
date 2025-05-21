@@ -50,21 +50,6 @@ class DependencyCollector(ast.NodeVisitor):
             self.defined_imports.add(alias.asname or alias.name)
         self.generic_visit(node)
         
-    def visit_Assign(self, node):
-        # Record assignment and its dependencies
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                self.assignments[target.id] = node
-                self.defined_variables.add(target.id)  # Track defined variables
-                # Create a new collector just for this assignment's value
-                value_collector = DependencyCollector()
-                value_collector.visit(node.value)
-                self.variable_dependencies[target.id] = {
-                    'variables': value_collector.used_variables,
-                    'functions': value_collector.used_functions
-                }
-        self.generic_visit(node)
-    
     def visit_FunctionDef(self, node):
         self.defined_functions.add(node.name)
         self.defined_variables.add(node.name)  # Functions are also defined names
