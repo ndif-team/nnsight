@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Callable, Union
 
 import torch
 from typing_extensions import Self
@@ -13,6 +13,18 @@ class Object(torch.Tensor):
         Globals.saves.add(id(obj))
 
         return obj
+    
+    def __getattr__(self, name: str) -> Self:
+
+        return super().__getattr__(name)
+    
+    def __getitem__(self, key: Any) -> Self:
+        
+        return super().__getitem__(key)
+    
+    def __call__(self, *args: Any, **kwargs: Any) -> Self:
+        
+        return super().__call__(*args, **kwargs)
 
 
 class Globals:

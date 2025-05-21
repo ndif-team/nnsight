@@ -159,20 +159,39 @@ class Patch:
         parent (Any): Module or class to replace attribute.
     """
 
-    def __init__(self, parent: Any, replacement: Any, key: str) -> None:
+    def __init__(self, parent: Any, replacement: Any=None, key: str=None, as_dict:bool=False) -> None:
         self.parent = parent
         self.replacement = replacement
         self.key = key
-        self.orig = getattr(self.parent, key)
+        
+
+        self.as_dict = as_dict
+        
+        if self.as_dict:
+            self.orig = self.parent[key]
+        else:
+            self.orig = getattr(self.parent, key)
 
     def patch(self) -> None:
         """Carries out the replacement of an object in a module/class."""
-        setattr(self.parent, self.key, self.replacement)
+        if self.replacement is None:
+            if self.as_dict:
+                del self.parent[self.key]
+            else:
+                delattr(self.parent, self.key)
+        else:
+            if self.as_dict:
+                self.parent[self.key] = self.replacement
+            else:
+                setattr(self.parent, self.key, self.replacement)
 
     def restore(self) -> None:
         """Carries out the restoration of the original object on the objects module/class."""
 
-        setattr(self.parent, self.key, self.orig)
+        if self.as_dict:
+            self.parent[self.key] = self.orig
+        else:
+            setattr(self.parent, self.key, self.orig)
 
 class Patcher(AbstractContextManager):
     """Context manager that patches from a list of Patches on __enter__ and restores the patch on __exit__.

@@ -61,4 +61,4 @@ include-package-data = true
 license-files = ["LICENSE"]
 
 [tool.setuptools.package-data]
-nnsight = ["config.yaml", "nnsight.log"]
+nnsight = ["config.yaml"]

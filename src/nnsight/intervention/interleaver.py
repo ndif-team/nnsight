@@ -327,8 +327,6 @@ class Interleaver:
             
         return value
 
-        # TODO concat all the mediators
-
     def cancel(self):
         """Cancel all intervention threads."""
         for mediator in list(self.mediators.values()):

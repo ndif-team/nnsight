@@ -58,7 +58,7 @@ class Tracer:
         """
 
         def __init__(
-            self, source: List[str], frame: FrameType, start_line: int, filename: str
+            self, source: List[str], frame: FrameType, start_line: int, node:ast.With, filename: str = None
         ):
             """
             Initialize Info with source code and frame information.
@@ -67,16 +67,18 @@ class Tracer:
                 source: List of source code lines from the traced block
                 frame: Frame information from the call stack
                 indent: Number of spaces/tabs used for indentation in the original code
+                node: AST node of the with block
             """
             self.source = source
             self.frame = frame
             self.start_line = start_line
-            self.filename = filename
-
+            self.node = node
+            self.filename = filename if filename is not None else f"<nnsight {id(self)}>"
+            
         def copy(self):
-            return Tracer.Info(self.source, self.frame, self.start_line, self.filename)
+            return Tracer.Info(self.source, self.frame, self.start_line, self.node, self.filename)
 
-    def __init__(self, *args, backend: Backend = None, **kwargs):
+    def __init__(self, *args, backend: Backend = None, _info:Info = None, **kwargs):
         """
         Initialize a Tracer instance.
 
@@ -91,9 +93,10 @@ class Tracer:
 
         self.backend = ExecutionBackend() if backend is None else backend
 
-        self.info = None
+        self.info = _info if _info is not None else None
 
-        self.capture()
+        if self.info is None:   
+            self.capture()
 
     def capture(self):
         """
@@ -147,7 +150,7 @@ class Tracer:
         indent = len(source_lines[start_line - 1]) - len(stripped)
 
         # Extract the code using AST parsing
-        start_line, source_lines = self.parse(source_lines, start_line)
+        start_line, source_lines, node = self.parse(source_lines, start_line)
 
         # Remove the indentation from each line to prepare for compilation
         source_lines = [
@@ -156,7 +159,7 @@ class Tracer:
 
         # Store the captured information for later use
         self.info = Tracer.Info(
-            source_lines, frame, start_line, filename=f"<nnsight {id(self)}>"
+            source_lines, frame, start_line, node
         )
 
         # The trace function will be set up in __enter__
@@ -198,10 +201,10 @@ class Tracer:
             raise WithBlockNotFoundError(f"With block not found at line {start_line}")
 
         end_line = visitor.target.end_lineno
-
+        
         start_line = visitor.target.body[0].lineno - 1
 
-        return start_line, source_lines[start_line:end_line]
+        return start_line, source_lines[start_line:end_line], visitor.target
 
     def compile(self) -> Callable:
         """
