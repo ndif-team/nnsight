@@ -25,8 +25,12 @@ class RemoteBackend(Backend):
             fn=tracer.fn.__name__
         )
         
+        # from .DependencyCollector import DependencyCollector
         
+        # collector = DependencyCollector()
         
+        # variables, functions = collector.collect_dependencies_from_with_block(tracer.info.node)
+
         from ...tracing.tracer import InterleavingTracer, Tracer
         
         info = Tracer.Info(
@@ -64,7 +68,7 @@ class RemoteExecutionBackend(Backend):
             frame.f_locals[self.model_var_name] = self.model
             
             tracer.info.frame = frame
-            breakpoint()
+          
             with protector:
                 with escape:    
                     
