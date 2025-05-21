@@ -251,7 +251,7 @@ class Envoy(Batchable):
         Returns:
             An InterleavingTracer for this module
         """
-        return InterleavingTracer(self._module, self, *args, **kwargs)
+        return InterleavingTracer(self._module.__call__, self, *args, **kwargs)
 
     def edit(self, *, inplace: bool = False):
 

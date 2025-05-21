@@ -19,13 +19,15 @@ class RemoteBackend(Backend):
         request = Request(
             model_var_name = tracer.info.node.items[0].context_expr.func.value.id,
             source = tracer.info.source,
+            args=(tracer.args, tracer.kwargs),
             variables = {},
-            tracer_type = TracerTypes.TRACER
+            tracer_type = TracerTypes.TRACER,
+            fn=tracer.fn.__name__
         )
         
         
         
-        from ...tracing.tracer import Tracer
+        from ...tracing.tracer import InterleavingTracer, Tracer
         
         info = Tracer.Info(
             source = request.source,
@@ -34,7 +36,11 @@ class RemoteBackend(Backend):
             start_line = 0,
         )
         
-        tracer = Tracer( _info=info)
+        fn = getattr(self.model, request.fn)
+        
+        args, kwargs = request.args
+        
+        tracer = InterleavingTracer(fn, self.model, *args, **kwargs, _info=info)
         
         RemoteExecutionBackend(self.model, request.model_var_name)(tracer)
         
@@ -58,8 +64,10 @@ class RemoteExecutionBackend(Backend):
             frame.f_locals[self.model_var_name] = self.model
             
             tracer.info.frame = frame
-            
-            with protector, escape:
-                ExecutionBackend()(tracer)
+            breakpoint()
+            with protector:
+                with escape:    
+                    
+                    ExecutionBackend()(tracer)
                 
         execute()

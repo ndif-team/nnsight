@@ -147,18 +147,28 @@ whitelisted_builtins = {
     "type",
     "vars",
     "zip",
+    
+    "breakpoint",
+    "open",
+    "input"
 }
 
 
 class WhitelistedModule(BaseModel):
     name: str
-    
-    strict:bool = True
+
+    strict: bool = True
 
 
-whitelisted_modules = [WhitelistedModule(name="torch", strict=False)]
+whitelisted_modules = [
+    WhitelistedModule(name="torch", strict=False),
+    WhitelistedModule(name="pdb", strict=False),
+    WhitelistedModule(name="linecache", strict=False),
+    WhitelistedModule(name="reprlib", strict=False),
+]
 
 whitelisted_modules_deserialization = [*whitelisted_modules]
+
 
 class Importer:
 
@@ -182,16 +192,16 @@ class Importer:
                 return self.original_import(name, globals, locals, fromlist, level)
 
         raise ImportError(f"Module {name} is not whitelisted")
-    
+
     # def module_getattr(self, module:ModuleType, name:str):
 
 
 class Protector(Patcher):
 
-    def __init__(self, whitelisted_modules:List[WhitelistedModule]):
-        
+    def __init__(self, whitelisted_modules: List[WhitelistedModule]):
+
         super().__init__()
-        
+
         self.importer = Importer(whitelisted_modules)
 
         self.add(
@@ -199,67 +209,68 @@ class Protector(Patcher):
                 __builtins__,
                 replacement=self.importer.__call__,
                 key="__import__",
-                as_dict=True
+                as_dict=True,
             )
         )
-        
+
         # self.add(Patch(ModuleType, "__getattribute__", self.importer.module_getattr))
 
         for key in __builtins__.keys():
             if key not in whitelisted_builtins:
                 self.add(Patch(__builtins__, key=key, as_dict=True))
-                
-                
-    def builtins_getattr(self, obj:Any, name:str):
-        
+
+    def builtins_getattr(self, obj: Any, name: str):
+
         if name not in whitelisted_builtins:
             raise AttributeError(f"Attribute {name} is not whitelisted")
-        
+
         return obj[name]
 
 
-
 class ProtectorEscape(Patcher):
-    
-    
-    def __init__(self, protector:Protector):
-        
+
+    def __init__(self, protector: Protector):
+
         super().__init__()
-        
+
         self.protector = protector
-        
+
         from ...tracing.tracer import Tracer
-        
+
         safe_methods = [
-            ('__init__', Tracer),
-            ('__call__', ExecutionBackend),
+            ("__init__", Tracer),
+            ("__call__", ExecutionBackend),
         ]
-        
+
         for method, obj in safe_methods:
             self.add(Patch(obj, replacement=self.wrap(method, obj), key=method))
             
-        
-    def wrap(self, method:str, obj:Any):
-        
-        fn  = getattr(obj, method)
-        
+    def wrap(self, method: str, obj: Any):
+
+        fn = getattr(obj, method)
+
         @wraps(fn)
         def inner(*args, **kwargs):
             
             self.safe()
             
-            result = fn(*args, **kwargs)
+            try:
+                result = fn(*args, **kwargs)
+                
+            except:
+                raise
             
-            self.unsafe()
-            
+            finally:
+                self.unsafe()
+
             return result
-        
+
         return inner
-        
+
     def safe(self):
-        
+
         self.protector.__exit__(None, None, None)
-        
+
     def unsafe(self):
-        
+
         self.protector.__enter__()
