@@ -82,6 +82,9 @@ class Interleaver:
         self.state = dict()
         self.iteration_tracker = defaultdict(int)
         
+        #TODO legacy?
+        self.default_all = None
+        
     def iterate(self, provider:str):
         
         iteration = self.iteration_tracker[provider]
@@ -756,11 +759,16 @@ class Mediator:
             iteration: The number of iterations
         """
 
-        if isinstance(iteration, slice):
+        if isinstance(iteration, slice):            
 
             i = iteration.start if iteration.start is not None else self.iteration
+            
+            stop = iteration.stop
 
             while True:
+                
+                if self.interleaver.default_all is not None and stop is None:
+                    stop = self.interleaver.default_all
 
                 mediator.iteration = i
 
@@ -768,19 +776,15 @@ class Mediator:
 
                 i += 1
 
-                if i >= iteration.stop:
+                if stop is not None and i >= stop:
                     break
                 
-            self.iteration = i
-
         elif isinstance(iteration, int):
 
             mediator.iteration = iteration
 
             self.register(mediator)
             
-            self.iteration = iteration
-
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""
 

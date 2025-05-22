@@ -14,6 +14,7 @@ from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.tracer import InterleavingTracer
 from .tracing.globals import Object
+from .tracing.iterator import IteratorProxy
 
 if TYPE_CHECKING:
     from .interleaver import Interleaver
@@ -251,7 +252,7 @@ class Envoy(Batchable):
         Returns:
             An InterleavingTracer for this module
         """
-        return InterleavingTracer(self._module.__call__, self, *args, **kwargs)
+        return InterleavingTracer(self._module, self, *args, **kwargs)
 
     def edit(self, *, inplace: bool = False):
 
@@ -262,8 +263,14 @@ class Envoy(Batchable):
 
     # TODO legacy
     def session(self, *args, **kwargs):
-
         return Tracer()
+    # TODO legacy
+    @property
+    def iter(self):
+        return IteratorProxy(self._interleaver)
+    # TODO legacy
+    def all(self):
+        return self.iter[:]
 
     def skip(self, replacement: Optional[Any] = inspect._empty):
 
@@ -373,6 +380,8 @@ class Envoy(Batchable):
         with interleaver:
 
             interleaver(fn, *args, **kwargs)
+            
+        self._set_interleaver(None)
 
     #### Private methods ####
 
@@ -504,6 +513,7 @@ class Envoy(Batchable):
         Raises:
             AttributeError: If the attribute doesn't exist
         """
+        
         if hasattr(self._module, name):
             value = getattr(self._module, name)
 

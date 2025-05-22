@@ -222,19 +222,21 @@ class Patcher(AbstractContextManager):
         Returns:
             Patcher: Patcher
         """
-        
-        self.entered = True
-        
-        for patch in self.patches:
-            patch.patch()
+        if not self.entered:
+            self.entered = True
+            
+            for patch in self.patches:
+                patch.patch()
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Calls `.restore()` on all patches."""
-        self.entered = False
-        for patch in self.patches:
-            patch.restore()
+        
+        if self.entered:
+            self.entered = False
+            for patch in self.patches:
+                patch.restore()
 
 
 class WrapperModule(torch.nn.Module):

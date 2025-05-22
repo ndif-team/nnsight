@@ -90,7 +90,15 @@ class LanguageModel(RemoteableMixin):
         
     def __nnsight_generate__(self, *args, **kwargs):
         
+        max_new_tokens = kwargs.get("max_new_tokens", None)
+        
+        if max_new_tokens is not None and self._interleaver is not None:
+            self._interleaver.default_all = max_new_tokens
+        
         output = self._model.generate(*args, **kwargs)
+        
+        if self._interleaver is not None:
+            self._interleaver.default_all = None
         
         output = self.generator._module(output)
 

@@ -182,7 +182,10 @@ class InterleavingTracer(Tracer):
 
     @property
     def iter(self):
-        return IteratorProxy(self)
+        return IteratorProxy(self.model._interleaver)
+    
+    def all(self):
+        return self.iter[:]
 
     def cache(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, detach: Optional[bool] = False):
         """

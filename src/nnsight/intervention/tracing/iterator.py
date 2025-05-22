@@ -9,16 +9,18 @@ else:
     
 class IteratorProxy:
     
-    def __init__(self, tracer: InterleavingTracer):
-        self.tracer = tracer
+    def __init__(self, interleaver):
+        self.interleaver = interleaver
         
     def __getitem__(self, iteration: Union[int, slice]):
-        return IteratorTracer(iteration, self.tracer)
+        return IteratorTracer(iteration, self.interleaver, None)
     
 class IteratorTracer(Invoker):
     
-    def __init__(self, iteration: Union[int, slice], *args, **kwargs):
+    def __init__(self, iteration: Union[int, slice], interleaver, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        
+        self.interleaver = interleaver
         
         self.iteration = iteration
         
@@ -26,8 +28,8 @@ class IteratorTracer(Invoker):
     def execute(self, fn: Callable):
                 
         mediator = Mediator(fn, self.info)
-        
-        self.tracer.model._interleaver.current.iter(mediator, self.iteration)
+                
+        self.interleaver.current.iter(mediator, self.iteration)
     
     
     
