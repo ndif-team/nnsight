@@ -7,7 +7,6 @@ from diffusers import DiffusionPipeline
 from transformers import BatchEncoding
 from typing_extensions import Self
 from transformers import PreTrainedTokenizerBase
-from ..intervention.contexts import InterventionTracer
 
 from .. import util
 from .mixins import RemoteableMixin
@@ -22,6 +21,9 @@ class Diffuser(util.WrapperModule):
         for key, value in self.pipeline.__dict__.items():
             if isinstance(value, torch.nn.Module) or isinstance(value, PreTrainedTokenizerBase):
                 setattr(self, key, value)
+                
+    def generate(self, *args, **kwargs):
+        return self.pipeline.generate(*args, **kwargs)
 
 
 class DiffusionModel(RemoteableMixin):
@@ -61,21 +63,21 @@ class DiffusionModel(RemoteableMixin):
         if isinstance(inputs, str):
             inputs = [inputs]
 
-        return ((inputs,), {}), len(inputs)
+        return ((inputs,), {})
 
     def _batch(
         self,
         batched_inputs: Optional[Dict[str, Any]],
         prepared_inputs: BatchEncoding,
     ) -> torch.Tensor:
-
+        breakpoint()
         if batched_inputs is None:
 
             return ((prepared_inputs, ), {})
 
         return (batched_inputs + prepared_inputs, )
 
-    def _execute(self, prepared_inputs: Any, *args, **kwargs):
+    def __call__(self, prepared_inputs: Any, *args, **kwargs):
 
         return self._model.unet(
             prepared_inputs,
@@ -83,13 +85,13 @@ class DiffusionModel(RemoteableMixin):
             **kwargs,
         )
 
-    def _generate(
+    def __nnsight_generate__(
         self, prepared_inputs: Any, *args, seed: int = None, **kwargs
     ):
-
-        if self._scanning():
-
-            kwargs["num_inference_steps"] = 1
+        
+        steps = kwargs.get("num_inference_steps")
+        if self._interleaver is not None:
+            self._interleaver.default_all = steps
 
         generator = torch.Generator(self.device)
 
@@ -103,16 +105,19 @@ class DiffusionModel(RemoteableMixin):
         output = self._model.pipeline(
             prepared_inputs, *args, generator=generator, **kwargs
         )
+        
+        if self._interleaver is not None:
+            self._interleaver.default_all = None
 
         output = self._model(output)
 
         return output
+    
 
 
 if TYPE_CHECKING:
 
     class DiffusionModel(DiffusionModel, DiffusionPipeline):
 
-        def generate(self, *args, **kwargs) -> InterventionTracer:
+        def generate(self, *args, **kwargs):
             return self._model.pipeline(*args, **kwargs)
-

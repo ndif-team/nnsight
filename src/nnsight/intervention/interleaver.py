@@ -1,132 +1,823 @@
 from __future__ import annotations
 
+import ctypes
+import inspect
+import threading
+import time
 from collections import defaultdict
-from contextlib import AbstractContextManager
+from enum import Enum
+from functools import wraps
+from queue import Queue
+from threading import Thread
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-from torch.utils.hooks import RemovableHandle
 
-from .. import util
-from .graph import InterventionGraph
-from .protocols import InterventionProtocol
+from ..util import Patch, Patcher
+from .batching import Batcher
+from .tracing.base import WithBlockNotFoundError
+from .tracing.util import wrap_exception
 
-class Interleaver(AbstractContextManager):
+if TYPE_CHECKING:
+    from .tracing.tracer import Cache, Tracer
+
+
+class Events(Enum):
+    """Enum for different types of events in the interleaving process."""
+
+    VALUE = "value"  # Request for a value
+    SWAP = "swap"  # Request for a swap
+    END = "end"  # Signal to end the execution
+    EXCEPTION = "exception"  # Signal that an exception occurred
+    REGISTER = "register"  # Signal that a mediator has been registered
+    SKIP = "skip"  # Signal that an operation should be skipped
+    CONTINUE = "continue"  # Signal that an operation should continue
+
+
+class Cancelation(Exception):
+    """Exception raised when a request is canceled."""
+
+    pass
+
+
+class EarlyStopException(Exception):
+    """
+    Exception raised to stop the execution of the model.
+    """
+
+    pass
+
+class SkipException(Exception):
+    """
+    Exception raised to skip the execution of the model.
+    """
+    def __init__(self, value: Any):
+        self.value = value
+
+
+class Interleaver:
+    """
+    Manages the interleaving of model execution and interventions.
+
+    This class coordinates the flow between the model's forward pass and
+    user-defined intervention functions, allowing for inspection and
+    modification of intermediate values.
+    """
+
+    def __init__(self, invokers: List[Mediator], batcher: Batcher = None) -> None:
+        """
+        Initialize an Interleaver with mediators.
+
+        Args:
+            mediators: A list of Mediator objects that define intervention logic
+        """
+
+        self.invokers = invokers
+        self.batcher = batcher
+
+        self.mediators = {}
+
+        self.patcher = None
+
+        self.state = dict()
+        self.iteration_tracker = defaultdict(int)
+        
+        #TODO legacy?
+        self.default_all = None
+        
+    def iterate(self, provider:str):
+        
+        iteration = self.iteration_tracker[provider]
+
+        self.iteration_tracker[provider] += 1
+
+        return f"{provider}.i{iteration}"
+
+
+    def wrap(self, fn: Callable):
+        """
+        Wrap a function to intercept inputs and outputs for intervention.
+
+        Args:
+            fn: The function to wrap
+
+        Returns:
+            A wrapped version of the function
+        """
+
+        @wraps(fn)
+        def inner(module: torch.nn.Module, *args, **kwargs):
+
+            if not hasattr(module, "__path__"):
+                return fn(module, *args, **kwargs)
+
+            provider = module.__path__
+            
+            # Call our hook before the original __call__
+            
+            try:
+                inputs = self.handle(self.iterate(f"{provider}.input"), (args, kwargs))
+            except SkipException as e:
+                value = e.value
+            else:
+                args, kwargs = inputs
+                value = fn(module, *args, **kwargs)
+            
+            value = self.handle(self.iterate(f"{provider}.output"), value)
     
-    """The Interleaver is responsible for executing a function involving a PyTorch model alongside a user's custom functionality
-    (represented by an `InterventionGraph`). This is called interleaving.
-    
-    The `InterventionGraph` has information about which components (modules) of the model the user's custom logic will interact with.
-    As the `Interleaver` is a context, entering it adds the appropriate hooks to these components which act as a bridge between the model's
-    original computation graph and the `InterventionGraph`. Exiting the `Interleaver` removes these hooks.
-    
-    Attributes:
-        graph (InterventionGraph): The computation graph representing the user's custom intervention logic.
-        batch_groups (Optional[List[Tuple[int, int]]]): A batch group is a section of tensor values related to a given intervention. 
-            They are a tuple of (batch_start, batch_length). So if batch group 0 was (0, 4) it means it starts at index 0 and goes until index 3.
-            The batch index is assumed to be the first dimension of all Tensors.
-            InterventionProtocol Nodes know which batch group they are a part of in their arguments. That value is the index into the batch_groups.
-        input_hook (Optional[Callable]). Function to hook onto the inputs of modules for interleaving. Defaults to None and therefore `InterventionProtocol.intervene`.
-        output_hook (Optional[Callable]). Function to hook onto the outputs of modules for interleaving. Defaults to None and therefore `InterventionProtocol.intervene`.
-        batch_size (Optional[int]). Total batch size. Used to determine which Tensors need to be narrowed to their batch group.
-            i.e If a Tensor's first dimension isn't batch_size, we dont need to narrow it to convert it for its batch_group.
-            Defaults to None and therefore the sum of the last batch_group.
+            return value
+
+        return inner
+
+    def wrap_operation(self, fn: Callable, name: str):
+        """
+        Wrap an operation to intercept inputs and outputs for intervention.
+
+        Args:
+            fn: The function to wrap
+            name: The name of the operation
+
+        Returns:
+            A wrapped version of the function
+        """
+
+        @wraps(fn)
+        def inner(*args, **kwargs):
+
+            nonlocal fn
+
+            fn = self.handle(f"{name}.fn", fn)
+
+            args, kwargs = self.handle(f"{name}.input", (args, kwargs))
+
+            value = fn(*args, **kwargs)
+
+            value = self.handle(f"{name}.output", value)
+
+            return value
+
+        return inner
+
+    def wrap_grad(self):
+        """
+        Create a hook for gradient intervention.
+
+        Returns:
+            A function that can be used to intercept gradients
+        """
+
+        def wrap(tensor: torch.Tensor):
+
+            # Only wrap the tensor once
+            if tensor._backward_hooks:
+                return
+
+            # We are providing the grad of the tensor
+            provider = id(tensor)
+
+            # Well need to remove the hook
+            hook = None
+
+            # On backwards for this tensor
+            def inner(grad: torch.Tensor):
+
+                hook.remove()
+                # Inject the grad value
+                # Possibly editing it in the process
+                grad = self.handle(f"{provider}.grad", grad)
+
+                return grad
+
+            # Register the hook
+            hook = tensor.register_hook(inner)
+
+        def getter(tensor: torch.Tensor):
+
+            wrap(tensor)
+
+            requester = id(tensor)
+
+            return self.current.request(f"{requester}.grad")
+
+        def setter(tensor: torch.Tensor, value: torch.Tensor):
+
+            wrap(tensor)
+
+            requester = id(tensor)
+
+            return self.current.swap(f"{requester}.grad", value)
+
+        return property(getter, setter)
+
+    def wrap_backward(self, fn: Callable):
+        """
+        Wrap the backward method to intercept backpropagation.
+
+        Returns:
+            A wrapped version of the backward method
+        """
+        from .tracing.backwards import BackwardsTracer
+
+        def inner(tensor: torch.Tensor, *args, **kwargs):
+
+            try:
+
+                tracer = BackwardsTracer(tensor, fn, self, *args, **kwargs)
+
+            except WithBlockNotFoundError:
+
+                return fn(tensor, *args, **kwargs)
+
+            return tracer
+
+        return inner
+
+    def __enter__(self):
+        """
+        Context manager entry point. Replaces torch.nn.Module.__call__ with wrapped version.
+
+        Returns:
+            The Interleaver instance
+        """
+
+        self.patcher = Patcher(
+            [
+                Patch(torch.nn.Module, self.wrap(torch.nn.Module.__call__), "__call__"),
+                Patch(torch.Tensor, self.wrap_grad(), "grad"),
+                Patch(
+                    torch.Tensor, self.wrap_backward(torch.Tensor.backward), "backward"
+                ),
+            ]
+        )
+
+        self.patcher.__enter__()
+
+        # torch.Tensor.backward = self.wrap_backward()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Context manager exit point. Restores original torch.nn.Module.__call__.
+
+        Args:
+            exc_type: Exception type if an exception was raised
+            exc_val: Exception value if an exception was raised
+            exc_tb: Exception traceback if an exception was raised
+        """
+        self.cancel()
+
+        self.patcher.__exit__(None, None, None)
+
+    def __call__(self, fn: Callable, *args, **kwargs):
+        """
+        Execute a function with interventions.
+
+        Args:
+            fn: The function to execute
+            *args: Arguments to pass to the function
+            **kwargs: Keyword arguments to pass to the function
+        """
+
+        try:
+
+            for invoker in self.invokers:
+                invoker.start(self)
+
+            fn(*args, **kwargs)
+
+        except EarlyStopException:
+            pass
+
+        # TODO check all mediator events
+
+        # TODO
+        # for mediator in self.mediators:
+        #     if mediator.has_pending_event():
+        #         requested_event, requester = mediator.get_event()
+        #         print(requested_event, requester)
+        #         raise ValueError(f"Execution complete but {requester} was not provided. Did you call an Envoy out of order? Investigate why this module was not called.")
+
+    ### Provider Methods ###
+
+    def handle(
+        self,
+        provider: Optional[Any] = None,
+        value: Optional[Any] = None,
+    ):
+        """
+        Handle a provider's value, allowing mediators to consume and modify it.
+
+        Args:
+            provider: The identifier of the provider
+            value: The value being provided
+
+        Returns:
+            The original or modified value
+        """
+
+                    
+        old = self.batcher.current_value
+                    
+        self.batcher.current_value = value
+        
+        for mediator in self.invokers:
+            
+            mediator.handle(provider)
+            
+        value = self.batcher.current_value
+        
+        self.batcher.current_value = old
+            
+        return value
+
+    def cancel(self):
+        """Cancel all intervention threads."""
+        for mediator in list(self.mediators.values()):
+            mediator.cancel()
+
+    ### Requester Methods ###
+
+    @property
+    def current(self) -> Mediator:
+        """Get the current mediator."""
+        return self.mediators[threading.current_thread().name]
+
+
+
+class Mediator:
+    """
+    Mediates between the model execution and intervention functions.
+
+    This class handles the communication between the model's forward pass and
+    user-defined intervention functions, allowing for inspection and
+    modification of intermediate values.
     """
 
     def __init__(
         self,
-        graph: InterventionGraph,
-        batch_groups: Optional[List[Tuple[int, int]]] = None,
-        input_hook: Optional[Callable] = None,
-        output_hook: Optional[Callable] = None,
-        batch_size: Optional[int] = None,
+        intervention: Callable,
+        info: "Tracer.Info",
+        name: Optional[str] = None,
+        batch_group: Optional[int] = 0,
     ) -> None:
+        """
+        Initialize a Mediator with an intervention function.
 
-        self.graph = graph
+        Args:
+            intervention: The intervention function
+            info: Information about the tracing context
+            name: Optional name for the mediator
+        """
+        self.intervention = intervention
+        self.name = name if name else f"Mediator{id(self)}"
+        self.info = info
+        self.batch_group = batch_group
+        self.event_queue = Queue()
+        self.response_queue = Queue()
 
-        self.batch_groups = [] if batch_groups is None else batch_groups
+        self.thread = None
+        self.interleaver = None
+        self.child: Mediator = None
+        self.history = set()
+        self.user_cache: "Cache" = None
+        self.iteration = 0
 
-        if input_hook is None:
-            input_hook = (
-                lambda activations, module_path, module: InterventionProtocol.intervene(
-                    activations, module_path, module, "input", self
-                )
-            )
+        self._frame = None
 
-        if output_hook is None:
-            output_hook = (
-                lambda activations, module_path, module: InterventionProtocol.intervene(
-                    activations, module_path, module, "output", self
-                )
-            )
+    def start(self, interleaver: Interleaver):
+        """
+        Start the mediator's intervention thread.
 
-        self.input_hook = input_hook
-        self.output_hook = output_hook
+        Args:
+            interleaver: The interleaver managing this mediator
+        """
+        self.interleaver = interleaver
 
-        self.handles: List[RemovableHandle] = []
-        
-        if batch_size is None and len(self.batch_groups) != 0:
-            
-            self.batch_size = (
-                sum(self.batch_groups[-1]) if batch_size is None else batch_size
-            )
-        else:
-            self.batch_size = batch_size
+        self.interleaver.mediators[self.name] = self
 
-    def __enter__(self) -> Interleaver:
-        """Registers input and output hooks to modules involved in the `InterventionGraph`.
+        self.thread = Thread(
+            target=self.intervention,
+            args=(self, self.info),
+            daemon=True,
+            name=self.name,
+        )
+        self.thread.start()
+
+        self.wait()
+
+        self.handle()
+
+    ### Provider Methods ###
+
+    def wait(self):
+        """Wait for the next event to be set in the event queue."""
+        while self.event_queue.empty() and self.thread.is_alive():
+            # Keep checking until there's an event in the queue
+            time.sleep(0.001)  # Small sleep to prevent CPU spinning
+
+    def cancel(self):
+        """Cancel the intervention thread and clear caches."""
+        # TODO custom canceled error
+
+        self.interleaver.mediators.pop(self.name)
+
+        self.history.clear()
+
+        self.thread = None
+
+        self._frame = None
+
+        if self.thread is not None and self.thread.is_alive():
+            self.response_queue.put(Cancelation())
+
+    def handle(self, provider: Optional[Any] = None):
+        """
+        Handle events in the event queue and process provider values.
+
+        Args:
+            provider: The identifier of the provider
+            value: The value being provided
 
         Returns:
-            Interleaver: Interleaver
+            The original or modified value
+
         """
 
-        # Keys of `InterventionGraph.interventions` are the module paths + if they are for input or output.
-        # e.x 'transformer.h.0.mlp.output'
-        for module_key in self.graph.interventions.keys():
+        if self.child is not None:
 
-            module_atoms = module_key.split(".")
+            self.child.handle(provider)
 
-            # Get just the hook type i.e input/output
-            *module_atoms, hook_type = module_atoms
+            # If the child was canceled
+            if self.child.thread is None:
 
-            # Get just the module path 
-            module_path = ".".join(module_atoms)
+                # Tell the parent (current mediator) to continue
+                self.response_queue.put(None)
 
-            # Get the torch module using the module_path
-            module: torch.nn.Module = util.fetch_attr(self.graph.model, module_path)
+                # Wait until the parent has an event
+                self.wait()
 
-            if hook_type == "input":
+                # Then wipe the child
+                self.child = None
 
-                # Input hook activations are a tuple of (positional args, key-word arguments)
-                # Include the module_path not the module
-                def input_hook(module, input, kwargs, module_path=module_path):
-                    return self.input_hook((input, kwargs), module_path, module)
+                # Continue to handle parent event
 
-                self.handles.append(
-                    module.register_forward_pre_hook(
-                        input_hook, with_kwargs=True, prepend=True
+        process = not self.event_queue.empty()
+
+        event = None
+        
+        while process:
+            
+            value = self.interleaver.batcher.current_value
+
+            event, data = self.event_queue.get()
+    
+            if event == Events.VALUE:
+                process = self.handle_value_event(data, provider, value)
+            elif event == Events.SWAP:
+                process = self.handle_swap_event(provider, *data)
+            elif event == Events.REGISTER:
+                process = self.handle_register_event(*data)
+            elif event == Events.EXCEPTION:
+                process = self.handle_exception_event(data)
+            elif event == Events.SKIP:
+                process = self.handle_skip_event(provider, *data)
+            elif event == Events.END:
+                process = False
+            elif event == Events.CONTINUE:
+                process = False
+
+        if event == Events.END:
+            self.handle_end_event()
+
+        # TODO maybe move this to the interleaver to cache the pre-iteration provider
+        if self.user_cache is not None and provider is not None:
+
+            self.user_cache.add(provider, self.interleaver.batcher.current_value)
+                        
+    def handle_end_event(self):
+        """
+        Handle an end event by stopping the mediator.
+        """
+        self.cancel()
+
+    def handle_value_event(self, requester: Any, provider: Any, value: Any):
+        """
+        Handle a value event by providing the requested value or recording a missed provider.
+
+        Args:
+            requester: The identifier of the requester
+            provider: The identifier of the provider
+            value: The value being provided
+
+        Returns:
+            Boolean indicating whether to continue processing events
+        """
+
+        if provider == requester:
+
+            value = self.interleaver.batcher.narrow(self.batch_group, value)
+
+            self.respond(value)
+        else:
+            if requester in self.history:
+                # TODO needs tests
+                self.respond(
+                    ValueError(
+                        f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
+            else:
+                self.history.add(provider)
+                self.event_queue.put((Events.VALUE, requester))
 
-            elif hook_type == "output":
+                return False
 
-                def output_hook(module, input, output, module_path=module_path):
-                    return self.output_hook(output, module_path, module)
+        return True
 
-                self.handles.append(
-                    module.register_forward_hook(output_hook, prepend=True)
+    def handle_swap_event(self, provider: Any, requester: Any,  swap_value: Any):
+        """
+        Handle a swap event by swapping the value if the provider matches the requester.
+
+        Args:
+            requester: The identifier of the requester
+            provider: The identifier of the provider
+            swap_value: The value to swap in
+
+        Returns:
+            Boolean indicating whether to continue processing events
+        """
+        if provider == requester:
+            
+            self.interleaver.batcher.swap(self.batch_group, swap_value)
+     
+            self.respond()
+
+            return True
+
+        else:
+            if requester in self.history:
+                # TODO needs tests
+                self.respond(
+                    ValueError(
+                        f"Setting {requester} is out of scope for scope {provider}. Did you call an Envoy out of order?"
+                    )
                 )
+            else:
+                self.history.add(provider)
+                self.event_queue.put((Events.SWAP, (requester, swap_value)))
 
-        return self
+                return False
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        return True
 
-        # Remove all hooks
-        for handle in self.handles:
-            handle.remove()
+    def handle_exception_event(self, exception: Exception):
+        """
+        Handle an exception event by raising the exception.
 
-        if isinstance(exc_val, Exception):
-            raise exc_val
+        Args:
+            exception: The exception to raise
 
+        Returns:
+            Boolean indicating whether to continue processing events
+        """
 
+        if not isinstance(exception, Cancelation):
 
+            exception = wrap_exception(exception, self.info)
+
+            raise exception
+
+        return False
+    
+    def handle_skip_event(self, provider:Any, requester: Any, value: Any):
+        
+        if provider == requester:
+            
+            self.respond()
+            
+            raise SkipException(value)
+
+    def handle_register_event(self, mediator: Mediator, fn: Optional[Callable] = None):
+        """
+        Handle a register event by registering a new mediator.
+
+        Args:
+            mediator: The mediator to register
+
+        Returns:
+            Boolean indicating whether to continue processing events
+        """
+
+        self.child = mediator
+
+        self.child.info.start_line += self.info.start_line - 1
+
+        mediator.start(self.interleaver)
+
+        self.response_queue.put(None)
+
+        if fn is not None:
+
+            fn()
+
+            self.response_queue.put(None)
+
+            self.wait()
+
+            self.handle()
+
+        return False
+
+    def respond(self, value: Optional[Any] = None):
+        """
+        Set the value for a pending value request.
+
+        Args:
+            value: The value to provide
+        """
+
+        self.response_queue.put(value)
+
+        self.wait()
+
+    ### Requester Methods ###
+
+    @property
+    def frame(self):
+        """
+        Get the frame of the intervention function.
+
+        Returns:
+            The frame of the intervention function
+        """
+
+        if self._frame is None:
+
+            frame = inspect.currentframe()
+
+            while frame:
+                frame = frame.f_back
+                if frame and frame.f_code.co_filename.startswith("<nnsight"):
+                    break
+            self._frame = frame
+
+        return self._frame
+    
+    def iterate(self, requester: Any):
+        
+        return f"{requester}.i{self.iteration}"
+
+    def push(self):
+        """Push local variables to the interleaver state."""
+
+        self.interleaver.state.update(self.frame.f_locals)
+
+    def pull(self):
+        """Pull variables from the interleaver state to the frame globals."""
+
+        for key in list(self.interleaver.state.keys()):
+            if key.startswith("__nnsight"):
+                self.interleaver.state.pop(key)
+
+        self.frame.f_globals.update(self.interleaver.state)
+        self.frame.f_locals.update(self.interleaver.state)
+
+        ctypes.pythonapi.PyFrame_LocalsToFast(
+            ctypes.py_object(self.frame), ctypes.c_int(0)
+        )
+
+    def send(self, event: Events, requester: Any):
+        """
+        Send an event to the event queue and wait for a response.
+
+        Args:
+            event: The event to send
+            requester: The identifier of the requester
+
+        Returns:
+            The response from the provider
+        """
+        self.push()
+
+        self.event_queue.put((event, requester))
+
+        response = self.response_queue.get()
+
+        self.pull()
+
+        if isinstance(response, Exception):
+            raise response
+
+        return response
+
+    def request(self, requester: Any):
+        """
+        Request a value from a specific provider.
+
+        Args:
+            requester: The identifier of the provider to request a value from
+
+        Returns:
+            The requested value
+        """
+
+    
+        value = self.send(Events.VALUE, requester)
+
+        return value
+
+    def register(self, mediator: Mediator, fn: Optional[Callable] = None):
+
+        self.send(Events.REGISTER, (mediator, fn))
+
+        self.response_queue.get()
+
+        if fn is not None:
+            self.event_queue.put((Events.CONTINUE, None))
+
+            self.response_queue.get()
+
+        self.pull()
+
+    def swap(self, requester: Any, value: Any):
+        """
+        Set a value to swap during execution.
+
+        Args:
+            requester: The identifier of the requester
+            value: The value to swap in
+        """
+
+        self.send(Events.SWAP, (requester, value))
+
+    def iter(self, mediator: Mediator, iteration: Union[int, slice]):
+        """
+        Iterate a mediator a specified number of times.
+
+        Args:
+            mediator: The mediator to iterate
+            iteration: The number of iterations
+        """
+
+        if isinstance(iteration, slice):            
+
+            i = iteration.start if iteration.start is not None else self.iteration
+            
+            stop = iteration.stop
+
+            while True:
+                
+                if self.interleaver.default_all is not None and stop is None:
+                    stop = self.interleaver.default_all
+
+                mediator.iteration = i
+
+                self.register(mediator)
+
+                i += 1
+
+                if stop is not None and i >= stop:
+                    break
+                
+        elif isinstance(iteration, int):
+
+            mediator.iteration = iteration
+
+            self.register(mediator)
+            
+    def stop(self):
+        """Stop the execution of the model by raising an EarlyStopException."""
+
+        self.push()
+
+        raise EarlyStopException()
+    
+    def skip(self, requester: Any, value: Any):
+        
+        self.send(Events.SKIP, (requester, value))
+
+    def end(self):
+        """Signal that execution should continue without further intervention."""
+
+        self.push()
+
+        self.event_queue.put((Events.END, None))
+
+    def exception(self, exception: Exception):
+        """
+        Signal that an exception occurred during intervention.
+
+        Args:
+            exception: The exception that occurred
+        """
+        self.event_queue.put((Events.EXCEPTION, exception))
+
+    def set_user_cache(self, cache: "Cache"):
+        """
+        Set the user cache for this mediator.
+
+        Args:
+            cache: The cache to set
+        """
+
+        self.user_cache = cache
