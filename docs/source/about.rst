@@ -96,7 +96,11 @@ And with NNsight, you can use these methods on large models like Llama-3.1-70b o
 
 The NNsight library also provides full access to gradients and optimization methods, out of order module applications, cross prompt interventions, and many more features.
 
+Next Steps
+----------
+
 See the :doc:`start` and :doc:`features` pages for more information on NNsight's functionality.
 
-Join the `NDIF Discord <https://discord.gg/6uFJmCSwW7>`_ for updates, feature requests, bug reports, and opportunities to help with our efforts. 
-If you'd like to report an issue or give our project a star, check out our GitHub: https://github.com/ndif-team/nnsight.
+Join our forum https://discuss.ndif.us/ for updates, feature requests, bug reports, and opportunities to help with our efforts. 
+If you'd like to report an issue or give our project a star, check out our GitHub: https://github.com/ndif-team/nnsight. 
+We also welcome you to join the `NDIF Discord <https://discord.gg/6uFJmCSwW7>`_ for real-time discussions and community support.
