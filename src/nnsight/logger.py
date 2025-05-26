@@ -2,7 +2,14 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 
-PATH = os.path.dirname(os.path.abspath(__file__))
+# Work out the log directory:
+# – Look for an environment variable called NNSIGHT_LOG_PATH (stripped of whitespace);
+# – if it’s unset or empty, fall back to the default.
+# Then make sure that directory actually exists, creating it if necessary.
+_DEFAULT_PATH = os.path.dirname(os.path.abspath(__file__))
+_env_path = os.getenv("NNSIGHT_LOG_PATH", "").strip()
+PATH = _env_path or _DEFAULT_PATH
+os.makedirs(PATH, exist_ok=True)
 
 logging_handler = RotatingFileHandler(
     os.path.join(PATH, f"nnsight.log"),
