@@ -8,4 +8,23 @@ else:
 class Backend:
     
     def __call__(self, tracer: Tracer):
-        raise NotImplementedError("Subclasses must implement this method")
+        
+        
+        tracer.compile()
+
+        source = "".join(tracer.info.source)
+        
+        code_obj = compile(source, tracer.info.filename, "exec")
+        
+        local_namespace = {}
+
+        # Execute the function definition in the local namespace
+        exec(
+            code_obj,
+            {**tracer.info.frame.f_globals, **tracer.info.frame.f_locals},
+            local_namespace,
+        )
+
+        fn = list(local_namespace.values())[-1]
+        
+        return fn

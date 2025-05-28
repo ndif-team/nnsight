@@ -86,13 +86,18 @@ class InterleavingTracer(Tracer):
         self.fn = fn
         self.model = model
         
-        self.invokers:List[Mediator] = []
+        self.mediators:List[Mediator] = []
        
         self.batcher = Batcher(**kwargs)
         
         self._cache = None
                         
         super().__init__(*args, backend=backend)
+        
+        if not hasattr(self, 'model_var_name'):
+            self.model_var_name = self.info.node.items[0].context_expr.func.value.id
+        if not hasattr(self, 'tracer_var_name'):
+            self.tracer_var_name = self.info.node.items[0].optional_vars.id if self.info.node.items[0].optional_vars is not None else "__nnsight_tracer__"
         
    
     def compile(self) -> Callable:
@@ -103,16 +108,14 @@ class InterleavingTracer(Tracer):
             A callable function that executes the captured code block
         """
 
-        # If Envoy has a default invoker ( created via Envoy.edit() ), add it
-        if self.model._default_source:
-            
-            for source in self.model._default_source:
+        # If Envoy has a default mediators ( created via Envoy.edit() ), add them
+        if self.model._default_mediators:
+                        
+            for mediators in self.model._default_mediators:
                 
-                invoker = self.invoke()
+                self.mediators.append(mediators)
+                self.batcher.batch_groups.append((-1,-1))
                 
-                invoker.info = Tracer.Info(source, self.info.frame, self.info.start_line, self.info.filename)
-                
-                invoker.__exit__(ExitTracingException, None, None)
             
         #If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
@@ -124,9 +127,9 @@ class InterleavingTracer(Tracer):
             self.info.source = ['    pass\n']
                     
         self.info.source = [
-            f"def __nnsight_tracer_{id(self)}__(__nnsight_model__, __nnsight_tracer__, __nnsight_tracing_info__):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__, {self.model_var_name},{self.tracer_var_name}):\n",
             *self.info.source,
-            "    __nnsight_tracer__.push()\n"
+            f"    {self.tracer_var_name}.push()\n"
         ]
         
         self.args = tuple()
@@ -144,7 +147,7 @@ class InterleavingTracer(Tracer):
             fn: The compiled function to execute
         """
         
-        fn(self.model, self, self.info)
+        fn(self.info, self.model, self)
         
         args = self.batcher.batched_args
         kwargs = self.batcher.batched_kwargs
@@ -152,7 +155,7 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        interleaver = Interleaver(self.invokers, batcher=self.batcher)
+        interleaver = Interleaver(self.mediators, self, batcher=self.batcher)
         self.model.interleave(interleaver, self.fn, *args, **kwargs)
         
         self.push(interleaver.state)
@@ -204,3 +207,42 @@ class InterleavingTracer(Tracer):
            self.model._interleaver.current.set_user_cache(self._cache)
            
         return self._cache.cache
+    
+    ### Serialization ###
+    
+    def __getstate__(self):
+        """Get the state of the tracer for serialization."""
+        state = super().__getstate__()
+        state['fn'] = self.fn.__name__
+        state['model_var_name'] = self.model_var_name
+        state['tracer_var_name'] = self.tracer_var_name
+        state['batcher'] = self.batcher
+        state['mediators'] = self.mediators
+        
+        return state
+    
+    def __setstate__(self, state):
+        """Set the state of the tracer for deserialization."""
+        super().__setstate__(state)
+        
+        self.fn = state['fn']
+        self.model_var_name = state['model_var_name']
+        self.tracer_var_name = state['tracer_var_name']
+        self.mediators = state['mediators']
+        self.batcher =  state['batcher']
+
+        self._cache = None
+        
+    def __setmodel__(self, model:Envoy):
+        
+        self.model = model
+        self.fn = getattr(self.model, self.fn)
+        
+    def __setframe__(self, frame):
+        
+        super().__setframe__(frame)
+        
+        self.info.start_line = 0
+        
+        for mediator in self.mediators:
+            mediator.info.frame = frame

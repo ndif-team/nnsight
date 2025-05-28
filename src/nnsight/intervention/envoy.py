@@ -56,7 +56,7 @@ class Envoy(Batchable):
 
         self._interleaver = interleaver
 
-        self._default_source: List[List[str]] = []
+        self._default_mediators: List[List[str]] = []
 
         self._children: List[Envoy] = []
 
@@ -252,14 +252,14 @@ class Envoy(Batchable):
         Returns:
             An InterleavingTracer for this module
         """
-        return InterleavingTracer(self._module, self, *args, **kwargs)
+        return InterleavingTracer(self.__call__, self, *args, hook=True,**kwargs)
 
     def edit(self, *, inplace: bool = False):
 
-        return EditingTracer(self._module, self, inplace=inplace)
+        return EditingTracer(self.__call__, self, inplace=inplace)
 
     def clear_edits(self):
-        self._default_source = []
+        self._default_mediators = []
 
     # TODO legacy
     def session(self, *args, **kwargs):

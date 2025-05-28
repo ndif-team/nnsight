@@ -190,7 +190,7 @@ class ExceptionWrapper(Exception):
                 start_line = start_lines[filename]
                 co_name = co_names[filename] if '__nnsight_tracing_info__' in frame.f_locals else frame.f_code.co_name
                 source = source_lines[filename]
-                
+                                
                 line_number = lineno - 1 + start_line
 
                 tb_frames.append(f'  File "{fname}", line {line_number+1 + co_first_line}, in {co_name}')

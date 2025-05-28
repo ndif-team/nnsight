@@ -19,7 +19,8 @@ from .tracing.base import WithBlockNotFoundError
 from .tracing.util import wrap_exception
 
 if TYPE_CHECKING:
-    from .tracing.tracer import Cache, Tracer
+    from .tracing.tracer import Cache, Tracer, InterleavingTracer
+    
 
 
 class Events(Enum):
@@ -64,7 +65,7 @@ class Interleaver:
     modification of intermediate values.
     """
 
-    def __init__(self, invokers: List[Mediator], batcher: Batcher = None) -> None:
+    def __init__(self, invokers: List[Mediator], tracer: InterleavingTracer, batcher: Batcher = None) -> None:
         """
         Initialize an Interleaver with mediators.
 
@@ -74,7 +75,7 @@ class Interleaver:
 
         self.invokers = invokers
         self.batcher = batcher
-
+        self.tracer = tracer
         self.mediators = {}
 
         self.patcher = None
@@ -332,6 +333,7 @@ class Interleaver:
 
     def cancel(self):
         """Cancel all intervention threads."""
+        self.tracer = None
         for mediator in list(self.mediators.values()):
             mediator.cancel()
 
@@ -397,7 +399,7 @@ class Mediator:
 
         self.thread = Thread(
             target=self.intervention,
-            args=(self, self.info),
+            args=(self, self.info, self.interleaver.tracer.model, self.interleaver.tracer),
             daemon=True,
             name=self.name,
         )
@@ -821,3 +823,34 @@ class Mediator:
         """
 
         self.user_cache = cache
+
+    ### Serialization ###
+
+    def __getstate__(self):
+        """Get the state of the mediator for serialization."""
+        
+        return {
+            "name": self.name,
+            "info": self.info,
+            "batch_group": self.batch_group,
+            "intervention": self.intervention,
+        }
+        
+    def __setstate__(self, state):
+        """Set the state of the mediator for deserialization."""
+        self.name = state["name"]
+        self.info = state["info"]
+        self.batch_group = state["batch_group"]
+        self.intervention = state["intervention"]
+        
+        self.event_queue = Queue()
+        self.response_queue = Queue()
+
+        self.thread = None
+        self.interleaver = None
+        self.child: Mediator = None
+        self.history = set()
+        self.user_cache: "Cache" = None
+        self.iteration = 0
+
+        self._frame = None

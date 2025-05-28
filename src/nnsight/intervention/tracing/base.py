@@ -77,6 +77,24 @@ class Tracer:
             
         def copy(self):
             return Tracer.Info(self.source, self.frame, self.start_line, self.node, self.filename)
+        
+        def __getstate__(self):
+            """Get the state of the info for serialization."""
+            return {
+                "source": self.source,
+                "start_line": self.start_line,
+                "filename": self.filename,
+                "frame": None,
+            }
+        
+        def __setstate__(self, state):
+            """Set the state of the info for deserialization."""
+            self.source = state["source"]
+            self.start_line = state["start_line"]
+            self.filename = state["filename"]
+            self.frame = state["frame"]
+            
+            self.node = None
 
     def __init__(self, *args, backend: Backend = None, _info:Info = None, **kwargs):
         """
@@ -109,7 +127,7 @@ class Tracer:
         """
         # Find the frame outside of nnsight by walking up the call stack
         frame = inspect.currentframe()
-
+        
         while frame:
             frame = frame.f_back
             if frame and (
@@ -352,3 +370,24 @@ class Tracer:
             self.backend(self)
 
             return True
+        
+    ### Serialization ###
+    
+    def __getstate__(self):
+        """Get the state of the tracer for serialization."""
+        return {
+            "args": self.args,
+            "kwargs": self.kwargs,
+            "info": self.info,
+        }
+        
+    def __setstate__(self, state):
+        """Set the state of the tracer for deserialization."""
+        self.args = state["args"]
+        self.kwargs = state["kwargs"]
+        self.info = state["info"]
+        self.backend = ExecutionBackend()
+        
+        
+    def __setframe__(self, frame:FrameType):
+        self.info.frame = frame

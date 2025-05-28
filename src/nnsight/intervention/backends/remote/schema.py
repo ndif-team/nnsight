@@ -1,34 +1,31 @@
-from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
-from enum import Enum
+from typing import Callable, TYPE_CHECKING
+from typing import Any  
+from .unpickler import RemoteUnpickler
+from .utils import Protector, WHITELISTED_MODULES_DESERIALIZATION
+import dill
 
-
-class TracerTypes(Enum):
-    SESSION = "SESSION"
-    TRACER = "TRACER"
-
+if TYPE_CHECKING:
+    from ...tracing.tracer import Tracer
+    from ...envoy import Envoy
+    
+    
+else:
+    Tracer = Any
 
 class Request(BaseModel):
-
-    model_var_name: str
-    fn: str
-    source: List[str]
-    args: Tuple[Tuple[Any], Dict[str, Any]]
-    variables: Dict[str, bytes]
-    tracer_type: TracerTypes
-
-
-class Import(BaseModel):
-    name: str
-
-    alias: Optional[str] = None
-    attributes: Optional[str] = None
-
-
-class RemoteFunction(BaseModel):
-
-    name: str
-    args: List[str]
-    source_lines: List[str]
-    variables: Dict[str, Any]
-    imports: List[Import]
+    model_key: str
+    intervention:Callable | None = None
+    tracer:Tracer
+    
+    @classmethod
+    def from_pickle(cls, file):
+        
+        dill.settings['trace'] = True
+        dill.settings['recurse'] = True
+        
+            
+        with Protector(WHITELISTED_MODULES_DESERIALIZATION):
+            request = RemoteUnpickler(file).load()
+            
+        return request

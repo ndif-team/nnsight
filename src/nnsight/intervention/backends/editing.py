@@ -1,5 +1,6 @@
 from .base import Backend
 from typing import TYPE_CHECKING, Any
+from ..interleaver import Mediator
 if TYPE_CHECKING:
     from ..tracing.tracer import InterleavingTracer
 else:
@@ -9,5 +10,12 @@ class EditingBackend(Backend):
     
     
     def __call__(self, tracer: InterleavingTracer):
-                
-        tracer.model._default_source = tracer.model._default_source + [tracer.info.source]
+        
+        invoker = tracer.invoke()
+        invoker.info = tracer.info.copy()
+        
+        fn = super().__call__(invoker)
+        
+        mediator = Mediator(fn, invoker.info, batch_group=len(tracer.model._default_mediators))
+            
+        tracer.model._default_mediators = tracer.model._default_mediators + [mediator]

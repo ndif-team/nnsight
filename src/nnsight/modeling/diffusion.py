@@ -28,8 +28,6 @@ class Diffuser(util.WrapperModule):
 
 class DiffusionModel(RemoteableMixin):
     
-    __methods__ = {"generate": "_generate"}
-
     def __init__(self, *args, **kwargs) -> None:
 
         self._model: Diffuser = None

@@ -1,77 +1,72 @@
 import inspect
-from ..base import Backend
+from typing import TYPE_CHECKING, Any, Callable
+
+import dill
+
 from .. import ExecutionBackend
-from typing import TYPE_CHECKING, Any
-from .schema import Request, TracerTypes
-from .utils import Protector, ProtectorEscape, whitelisted_modules
+from ..base import Backend
+from .schema import Request
+from .utils import (
+    WHITELISTED_MODULES_DESERIALIZATION,
+    Protector,
+    WHITELISTED_MODULES,
+    ProtectorEscape,
+)
+from .sandbox import run
+from ...tracing.globals import Globals
+
 if TYPE_CHECKING:
     from ...tracing.tracer import Tracer
 else:
     Tracer = Any
-    
-class RemoteBackend(Backend):
-    
-    def __init__(self, model:Any):
-        self.model = model
-    
-    def __call__(self, tracer: Tracer):
-        
-        request = Request(
-            model_var_name = tracer.info.node.items[0].context_expr.func.value.id,
-            source = tracer.info.source,
-            args=(tracer.args, tracer.kwargs),
-            variables = {},
-            tracer_type = TracerTypes.TRACER,
-            fn=tracer.fn.__name__
-        )
-        
-        # from .DependencyCollector import DependencyCollector
-        
-        # collector = DependencyCollector()
-        
-        # variables, functions = collector.collect_dependencies_from_with_block(tracer.info.node)
 
-        from ...tracing.tracer import InterleavingTracer, Tracer
-        
-        info = Tracer.Info(
-            source = request.source,
-            frame = None,
-            node = None,
-            start_line = 0,
-        )
-        
-        fn = getattr(self.model, request.fn)
-        
-        args, kwargs = request.args
-        
-        tracer = InterleavingTracer(fn, self.model, *args, **kwargs, _info=info)
-        
-        RemoteExecutionBackend(self.model, request.model_var_name)(tracer)
-        
-        
-class RemoteExecutionBackend(Backend):
-    
-    def __init__(self, model:Any, model_var_name:str):
-        self.model = model
-        self.model_var_name = model_var_name
-        
+
+class RemoteBackend(Backend):
+
     def __call__(self, tracer: Tracer):
-        
-        
-        protector = Protector(whitelisted_modules)
+
+        fn = super().__call__(tracer)
+
+        request = Request(
+            model_key=tracer.model.to_model_key(), intervention=fn, tracer=tracer
+        )
+
+        dill.settings["recurse"] = True
+
+        with open("request.pkl", "wb") as f:
+            dill.dump(request, f)
+
+
+class RemoteExecutionBackend(Backend):
+
+    def __init__(self, model: Any, fn: Callable):
+        self.model = model
+        self.fn = fn
+
+    def __call__(self, tracer: Tracer):
+
+        tracer.__setmodel__(self.model)
+
+        protector = Protector(WHITELISTED_MODULES)
         escape = ProtectorEscape(protector)
 
-        def execute():
-            
-            frame = inspect.currentframe()
-            
-            frame.f_locals[self.model_var_name] = self.model
-            
-            tracer.info.frame = frame
-          
-            with protector:
-                with escape:    
-                    
-                    ExecutionBackend()(tracer)
-                
-        execute()
+        Globals.enter()
+
+        with protector:
+            with escape:
+                run(tracer, self.fn)
+
+        Globals.exit()
+
+        return {
+            key: value
+            for key, value in tracer.info.frame.f_locals.items()
+            if not key
+            in {
+                "__nnsight_tracer__",
+                "__nnsight_model__",
+                "tracer",
+                "fn",
+                "__nnsight_tracing_info__",
+            }
+        }

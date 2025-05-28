@@ -79,7 +79,7 @@ class LanguageModel(RemoteableMixin):
 
         self.config = config
         self.tokenizer = tokenizer
-        self.repo_id: str = None
+        self.repo_id: str = args[0] if isinstance(args[0], str) else None
 
         super().__init__(*args, **kwargs)
 
