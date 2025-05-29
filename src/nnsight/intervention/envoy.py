@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import inspect
 from types import MethodType
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional,
-                    Tuple, Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -12,9 +11,9 @@ from .batching import Batchable
 from .inject import convert as inject
 from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
-from .tracing.tracer import InterleavingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
+from .tracing.tracer import InterleavingTracer
 
 if TYPE_CHECKING:
     from .interleaver import Interleaver
@@ -30,6 +29,16 @@ class Envoy(Batchable):
     and allows for modification of these values through an interleaving mechanism.
     It serves as the primary interface for inspecting and modifying the behavior
     of neural network modules during execution.
+
+    Attributes:
+        path (str): The module's location in the model hierarchy.
+            Example: "model.encoder.layer1" indicates this module is the first layer of the encoder in the model.
+        _module (torch.nn.Module): The underlying PyTorch module
+        _source (Optional[EnvoySource]): Source code representation of the module
+        _interleaver (Optional[Interleaver]): Interleaver for managing execution flow
+        _default_mediators (List[List[str]]): List of default mediators created with .edit
+        _children (List[Envoy]): List of child Envoys
+        _alias (Dict[str, str]): Dictionary mapping aliases to actual names
     """
 
     def __init__(
@@ -38,14 +47,19 @@ class Envoy(Batchable):
         interleaver: Optional[Interleaver] = None,
         path: Optional[str] = "",
         rename: Optional[Dict[str, str]] = None,
+        alias: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Initialize an Envoy for a PyTorch module.
 
         Args:
-            module: The PyTorch module to wrap
-            interleaver: Optional interleaver for managing execution flow
-            path: Optional path string representing the module's location in the model hierarchy
+            module (torch.nn.Module): The PyTorch module to wrap
+            interleaver (Optional[Interleaver]): Optional interleaver for managing execution flow
+            path (Optional[str]): Optional path string representing the module's location in the model hierarchy
+            rename (Optional[Dict[str, str]]): Optional dictionary mapping module names to alias names.
+                Example: {"layer1": "first_layer", "layer2": "second_layer"}
+            alias (Optional[Dict[str, str]]): Optional dictionary mapping alias names to actual names.
+                Example: {"first_layer": "layer1", "second_layer": "layer2"}
         """
         self.path = path
 
@@ -60,12 +74,20 @@ class Envoy(Batchable):
 
         self._children: List[Envoy] = []
 
+        if alias is None:
+            alias = {}
+
+        if rename is not None:
+            alias.update({value: key for key, value in rename.items()})
+
+        self._alias = alias
+
         for name, module in list(self._module.named_children()):
             setattr(self, name, module)
 
     def __getitem__(self, key: str) -> Envoy:
         """
-        Access a child Envoy by index.
+        Access a child Envoy by index for Module Lists.
 
         Args:
             key: The index of the child Envoy to retrieve
@@ -78,7 +100,7 @@ class Envoy(Batchable):
     @property
     def interleaving(self) -> bool:
         """
-        Check if the Envoy is currently participating in an interleaving session.
+        Check if the Envoy is currentlyi nterleaving.
 
         Returns:
             True if the Envoy is interleaving, False otherwise
@@ -94,6 +116,12 @@ class Envoy(Batchable):
 
         This property allows access to the return values produced by the module
         during the forward pass.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     attn = model.transformer.h[0].attn.output[0].save()
+            >>> print(attn)
 
         Returns:
             The module's output values
@@ -110,6 +138,11 @@ class Envoy(Batchable):
 
         This allows for intervention by replacing the module's output with
         custom values during execution.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     model.transformer.h[0].attn.output[0] *= 2
 
         Args:
             value: The new output value to use.
@@ -118,18 +151,6 @@ class Envoy(Batchable):
             self._interleaver.current.iterate(f"{self.path}.output"), value
         )
 
-    @output.deleter
-    def output(self):
-        """
-        Clear the cached output value.
-
-        This removes any stored output values, forcing them to be recomputed
-        on the next access.
-        """
-        self._output = None
-
-        # TODO
-
     @property
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, torch.Tensor]]:
         """
@@ -137,9 +158,15 @@ class Envoy(Batchable):
 
         This property provides access to all input values passed to the module
         during the forward pass.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     args, kwargs = model.transformer.h[0].attn.inputs
 
         Returns:
-            The module's input values as a tuple of positional and keyword arguments
+            The module's input values as a tuple of positional and keyword arguments. i.e (args, kwargs)
+            
         """
         return self._interleaver.current.request(
             self._interleaver.current.iterate(f"{self.path}.input")
@@ -152,6 +179,11 @@ class Envoy(Batchable):
 
         This allows for intervention by replacing the module's inputs with
         custom values during execution.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     model.transformer.h[0].attn.inputs = (torch.randn(1, 1024, 1024), {})
 
         Args:
             value: The new input value(s) to use, structured as a tuple of (args, kwargs)
@@ -160,23 +192,19 @@ class Envoy(Batchable):
             self._interleaver.current.iterate(f"{self.path}.input"), value
         )
 
-    @inputs.deleter
-    def inputs(self):
-        """
-        Clear the cached input value.
-
-        This removes any stored input values, forcing them to be recomputed
-        on the next access.
-        """
-        self._input = None
-
     @property
     def input(self) -> Object:
         """
         Get the first input to the module's forward pass.
 
         This is a convenience property that returns just the first input value
-        from all inputs passed to the module.
+        from all inputs passed to the module. So first positional argument, or first keyword argumetn if there are no positional arguments.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     hidden_states = model.transformer.h[0].attn.input.save()
+            >>> print(hidden_states)
 
         Returns:
             The first input value
@@ -193,6 +221,11 @@ class Envoy(Batchable):
 
         This is a convenience method that replaces just the first input value
         while preserving all other inputs.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     model.transformer.h[0].attn.input = torch.randn(1, 1024, 1024)
 
         Args:
             value: The new value for the first input
@@ -210,6 +243,67 @@ class Envoy(Batchable):
 
         This property provides access to the module's source code with operations
         highlighted, allowing for inspection and intervention at specific points.
+        
+        Example:
+            
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            
+            >>> # We can print to see the formward method of the module and names associated with the operations within.
+            >>> print(model.transformer.h[0].attn.source)
+            
+                                                   60 
+                                                   61     if using_eager and self.reorder_and_upcast_attn:
+              self__upcast_and_reordered_attn_0 -> 62         attn_output, attn_weights = self._upcast_and_reordered_attn(
+                                                   63             query_states, key_states, value_states, attention_mask, head_mask
+                                                   64         )
+                                                   65     else:
+              attention_interface_0             -> 66         attn_output, attn_weights = attention_interface(
+                                                   67             self,
+                                                   68             query_states,
+                                                   69             key_states,
+                                                   70             value_states,
+                                                   71             attention_mask,
+                                                   72             head_mask=head_mask,
+                                                   73             dropout=self.attn_dropout.p if self.training else 0.0,
+                                                   74             is_causal=is_causal,
+                                                   75             **kwargs,
+                                                   76         )
+                                                   77 
+              attn_output_reshape_0             -> 78     attn_output = attn_output.reshape(*attn_output.shape[:-2], -1).contiguous()
+              contiguous_0                      ->  +     ...
+              self_c_proj_0                     -> 79     attn_output = self.c_proj(attn_output)
+              self_resid_dropout_0              -> 80     attn_output = self.resid_dropout(attn_output)
+                                                   81 
+                                                   82     return attn_output, attn_weights
+                                                   83 
+                                                   
+            >>> # We can print out one of these to see the only the operation and a few operations before and after.
+            >>> print(model.transformer.h[0].attn.source.attention_interface_0)
+            
+            .transformer.h.0.attn.attention_interface_0:
+
+                 ....
+               
+                     if using_eager and self.reorder_and_upcast_attn:
+                         attn_output, attn_weights = self._upcast_and_reordered_attn(
+                             query_states, key_states, value_states, attention_mask, head_mask
+                         )
+                     else:
+                 -->     attn_output, attn_weights = attention_interface( <--
+                             self,
+                             query_states,
+                             key_states,
+                             value_states,
+                             attention_mask,
+                             head_mask=head_mask,
+                 ....
+                 
+            >>> with model.trace("Hello World"):
+            >>>     # Now we can access it like we would any other Envoy with .input or .output to grab the intermediate value.
+            >>>     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
+
+            >>> print(attn)
+
 
         Returns:
             An EnvoySource object containing the module's source code and operations
@@ -217,7 +311,10 @@ class Envoy(Batchable):
         if self._source is None:
 
             def wrap(fn: Callable, **kwargs):
-                return self._interleaver.wrap_operation(fn, **kwargs)
+                if self.interleaving:
+                    return self._interleaver.wrap_operation(fn, **kwargs)
+                else:
+                    return fn
 
             source, line_numbers, forward = inject(
                 self._module.forward, wrap, self._module.__path__
@@ -226,7 +323,7 @@ class Envoy(Batchable):
 
             self._source = EnvoySource(self._module.__path__, source, line_numbers)
             self._source._set_interleaver(self._interleaver)
-
+        
         return self._source
 
     def __call__(self, *args, hook: bool = False, **kwargs):
@@ -244,6 +341,14 @@ class Envoy(Batchable):
 
         This method returns a tracer that can be used to capture and modify
         the execution of the module.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     model.transformer.h[0].attn.output[0][:] = 0
+            
+            >>>     output = model.output.save()
+            >>> print(output)
 
         Args:
             *args: Arguments to pass to the tracer
@@ -252,38 +357,95 @@ class Envoy(Batchable):
         Returns:
             An InterleavingTracer for this module
         """
-        return InterleavingTracer(self.__call__, self, *args, hook=True,**kwargs)
+        return InterleavingTracer(self.__call__, self, *args, hook=True, **kwargs)
 
     def edit(self, *, inplace: bool = False):
+        """
+        Create an editing tracer for this module. Allows for setting default interventions.
+        This means this tracer won't execute the module, but will instead set default interventions that are applied on all future executions.
+        
+        Edits can be cleared with `Envoy.clear_edits()`.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> # Now the first layer attention output will always be 0.
+            >>> with model.edit() as edited_model:
+            >>>     edited_model.transformer.h[0].attn.output[:] = 0
 
+            
+            >>> with model.trace("Hello World"):
+            >>>     output = model.output.save()
+            >>> # The orignal model will have the default output.
+            >>> print(output)
+            
+            >>> with edited_model.trace("Hello World"):
+            >>>     edited_output = edited_model.output.save()
+            >>> # The edited model will have the output after our intervention.
+            >>> print(edited_output)
+
+        
+        Args:
+            inplace (bool, optional): Whether to edit in place. Defaults to False.
+
+        Returns:
+            (EditingTracer): An EditingTracer for this module
+        """
+        
         return EditingTracer(self.__call__, self, inplace=inplace)
 
     def clear_edits(self):
+        """
+        Clear all edits for this Envoy.
+        """
         self._default_mediators = []
 
     # TODO legacy
     def session(self, *args, **kwargs):
         return Tracer()
+
     # TODO legacy
     @property
     def iter(self):
         return IteratorProxy(self._interleaver)
+
     # TODO legacy
     def all(self):
         return self.iter[:]
 
     def skip(self, replacement: Optional[Any] = inspect._empty):
+        """Skips the execution of this module duting execution / interleaving.
+        Behavior is the module will not be executed and will return a replacement value instead.
+        By default, the replacement value is the first input to the module. Otherwise this value can be specified.
+
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.trace("Hello World"):
+            >>>     # Skip the first layer and replace it with the input to the layer.
+            >>>     model.transformer.h[0].skip((model.transformer.h[0].input, None))
+            >>>     output = model.output.save()
+            >>> print(output)
+
+        Args:
+            replacement (Optional[Any], optional): The replacement value to replace the module's output with. If not specified, the first input to the module will be used.
+        """
 
         if replacement is inspect._empty:
             replacement = self.input
-            
+
         requester = self._interleaver.current.iterate(f"{self.path}.input")
 
         self._interleaver.current.skip(requester, replacement)
 
-    def wait(self):
-
+    def wait_for_input(self):
+        """
+        Wait for the input to the module to be available.
+        """
         self.inputs
+
+    def wait_for_output(self):
+        """
+        Wait for the output to the module to be available.
+        """
         self.output
 
     def to(self, device: torch.device):
@@ -302,17 +464,25 @@ class Envoy(Batchable):
 
         return self
 
-
     def cpu(self, *args, **kwargs):
+        """
+        Move the module to the CPU.
+        """
         self._module.cpu(*args, **kwargs)
         return self
 
     def cuda(self, *args, **kwargs):
+        """
+        Move the module to the GPU.
+        """
         self._module.cuda(*args, **kwargs)
         return self
+
     @property
     def device(self) -> Optional[torch.device]:
-
+        """
+        Get the device the module is on. Finds the first parameter and return its device.
+        """
         try:
             return next(self._module.parameters()).device
         except:
@@ -371,17 +541,20 @@ class Envoy(Batchable):
 
         self._set_interleaver(interleaver)
 
-        device = self.device
+        try:
+            device = self.device
 
-        (args, kwargs) = apply(
-            (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
-        )
+            (args, kwargs) = apply(
+                (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
+            )
 
-        with interleaver:
-
-            interleaver(fn, *args, **kwargs)
             
-        self._set_interleaver(None)
+            with interleaver:
+
+                interleaver(fn, *args, **kwargs)
+                
+        finally:
+            self._set_interleaver(None)
 
     #### Private methods ####
 
@@ -396,16 +569,12 @@ class Envoy(Batchable):
             module: Module to create Envoy for.
             name: Name of envoy/attribute.
         """
-        alias_path = None
         module_path = f"{self.path}.{name}"
 
-        # if self._rename is not None and name in self._rename:
-        #     name = self._rename[name]
-        #     alias_path = f"{self.path}.{name}"
-
-        envoy = Envoy(module, path=module_path)
+        envoy = Envoy(module, path=module_path, alias=self._alias)
 
         self._children.append(envoy)
+
         setattr(self._module, name, module)
 
         # If the module already has a sub-module named 'input' or 'output',
@@ -433,6 +602,15 @@ class Envoy(Batchable):
 
         self._module = module
         self._module.__path__ = self.path
+
+    def _update_alias(self, alias: Dict[str, str]):
+        """
+        Update the alias for this Envoy and its children.
+        """
+        self._alias = alias
+
+        for envoy in self._children:
+            envoy._update_alias(alias)
 
     def _set_interleaver(self, interleaver: Interleaver):
         """
@@ -513,7 +691,10 @@ class Envoy(Batchable):
         Raises:
             AttributeError: If the attribute doesn't exist
         """
-        
+
+        if self._alias is not None and name in self._alias:
+            return getattr(self, self._alias[name])
+
         if hasattr(self._module, name):
             value = getattr(self._module, name)
 
@@ -522,7 +703,8 @@ class Envoy(Batchable):
 
                 # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
                 value = getattr(self, f"__nnsight_{name}__", value)
-                #TODO trace=False, maybe not here  Legacy
+
+                # TODO trace=False, maybe not here  Legacy
                 def trace(*args, **kwargs):
                     try:
                         return InterleavingTracer(value, self, *args, **kwargs)

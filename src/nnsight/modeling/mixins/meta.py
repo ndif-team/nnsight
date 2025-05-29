@@ -16,7 +16,7 @@ else:
 class MetaMixin(LoadableMixin):
 
     def __init__(
-        self, *args, dispatch: bool = False, meta_buffers: bool = True, rename: Optional[Dict[str,str]] = None, **kwargs
+        self, *args, dispatch: bool = False, meta_buffers: bool = True, rename: Optional[Dict[str,str]] = None, alias: Optional[Dict[str,str]] = None, **kwargs
     ) -> None:
 
         self.dispatched = False
@@ -25,7 +25,7 @@ class MetaMixin(LoadableMixin):
             
             self.dispatched = True
 
-            super().__init__(*args, **kwargs)
+            super().__init__(*args, rename=rename, alias=alias, **kwargs)
 
         else:
 
@@ -33,7 +33,7 @@ class MetaMixin(LoadableMixin):
 
                 model = self._load_meta(*args, **kwargs)
 
-            NNsight.__init__(self, model, rename=rename)
+            NNsight.__init__(self, model, rename=rename, alias=alias)
 
         self.args = args
         self.kwargs = kwargs

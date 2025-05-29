@@ -7,7 +7,7 @@ from ..base import NNsight
 
 class LoadableMixin(NNsight):
 
-    def __init__(self, *args, rename: Optional[Dict[str,str]] = None, **kwargs) -> None:
+    def __init__(self, *args, rename: Optional[Dict[str,str]] = None, alias: Optional[Dict[str,str]] = None, **kwargs) -> None:
 
         if not isinstance(args[0], torch.nn.Module):
 
@@ -16,8 +16,8 @@ class LoadableMixin(NNsight):
         else:
 
             model = args[0]
-
-        super().__init__(model, rename=rename)
+            
+        super().__init__(model, rename=rename, alias=alias)
 
     def _load(self, *args, **kwargs) -> torch.nn.Module:
 

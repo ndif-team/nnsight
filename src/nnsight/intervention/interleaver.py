@@ -598,7 +598,13 @@ class Mediator:
             self.respond()
             
             raise SkipException(value)
-
+        
+        else:
+            self.history.add(provider)
+            self.event_queue.put((Events.SKIP, (requester, value)))
+            
+            return False
+        
     def handle_register_event(self, mediator: Mediator, fn: Optional[Callable] = None):
         """
         Handle a register event by registering a new mediator.
