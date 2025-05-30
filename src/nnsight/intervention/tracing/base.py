@@ -304,6 +304,9 @@ class Tracer:
                 ctypes.pythonapi.PyFrame_LocalsToFast(
                     ctypes.py_object(frame), ctypes.c_int(0)
                 )
+                
+        state.clear()
+                
 
     def __enter__(self):
         """

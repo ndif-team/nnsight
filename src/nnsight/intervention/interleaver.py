@@ -333,9 +333,13 @@ class Interleaver:
 
     def cancel(self):
         """Cancel all intervention threads."""
-        self.tracer = None
+        
         for mediator in list(self.mediators.values()):
             mediator.cancel()
+
+        self.mediators = None
+        self.tracer = None
+        self.batcher = None
 
     ### Requester Methods ###
 
@@ -428,6 +432,8 @@ class Mediator:
         self.thread = None
 
         self._frame = None
+        
+        self.state = None
 
         if self.thread is not None and self.thread.is_alive():
             self.response_queue.put(Cancelation())

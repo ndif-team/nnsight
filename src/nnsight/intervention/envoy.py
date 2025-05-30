@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import inspect
 from types import MethodType
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 
+from .. import util
 from ..util import apply
 from .batching import Batchable
 from .inject import convert as inject
@@ -152,7 +154,7 @@ class Envoy(Batchable):
         )
 
     @property
-    def inputs(self) -> Tuple[Tuple[Object], Dict[str, torch.Tensor]]:
+    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
         """
         Get the inputs to the module's forward pass.
 
@@ -335,7 +337,7 @@ class Envoy(Batchable):
 
     #### Public methods ####
 
-    def trace(self, *args, fn:Optional[Callable] = None, **kwargs):
+    def trace(self, *args, fn:Optional[Callable] = None, trace:bool = None, **kwargs):
         """
         Create a tracer for this module.
 
@@ -357,6 +359,9 @@ class Envoy(Batchable):
         Returns:
             An InterleavingTracer for this module
         """
+        
+        #TODO trace= is Legacy
+        
         if fn is None:
             fn = self.__call__
             kwargs['hook'] = True
@@ -540,6 +545,25 @@ class Envoy(Batchable):
         """
 
         return self.modules(*args, **kwargs, names=True)
+    
+    def get(self, path:str) -> Object:
+        """Gets the Envoy/Proxy via its path.
+        
+        e.x:
+            model = nnsight.LanguageModel("openai-community/gpt2")
+            
+            module = model.get('transformer.h.0.mlp')
+            
+            with model.trace("Hello"):
+                value = model.get('transformer.h.0.mlp.output').save()
+
+        Args:
+            path (str): '.' separated path.
+
+        Returns:
+            Union[Envoy, InterventionProxyType]: Fetched Envoy/Proxy
+        """
+        return util.fetch_attr(self, path)
 
     def interleave(self, interleaver: Interleaver, fn: Callable, *args, **kwargs):
 
@@ -708,7 +732,6 @@ class Envoy(Batchable):
                 # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
                 value = getattr(self, f"__nnsight_{name}__", value)
 
-                # TODO trace=False, maybe not here  Legacy
                 def trace(*args, **kwargs):
                     try:
                         return self.trace(*args, fn=value, **kwargs)

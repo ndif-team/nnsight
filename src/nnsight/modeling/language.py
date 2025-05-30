@@ -27,6 +27,7 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
 )
+from transformers.generation.utils import GenerationMixin
 from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
@@ -312,6 +313,6 @@ class LanguageModel(RemoteableMixin):
 
 if TYPE_CHECKING:
 
-    class LanguageModel(LanguageModel, PreTrainedModel):
+    class LanguageModel(GenerationMixin, LanguageModel, PreTrainedModel):
 
         pass

@@ -24,18 +24,18 @@ class RequestModel(BaseModel):
     
     def serialize(self, _zlib:bool) -> bytes:
                 
-        data = io.BytesIO()
+        with io.BytesIO() as data:
+        
+            dill.dump(self, data, recurse=True)
 
-        dill.dump(self, data, recurse=True)
+            data.seek(0)
 
-        data.seek(0)
-
-        data = data.read()
-            
+            data = data.read()
+                
         if _zlib:
 
             data = zlib.compress(data)
-            
+                
         return data
 
     @staticmethod
@@ -45,11 +45,11 @@ class RequestModel(BaseModel):
 
             request = zlib.decompress(request)
 
-        data = io.BytesIO(request)
+        with io.BytesIO(request) as data:
 
-        data.seek(0)
+            data.seek(0)
 
-        request:RequestModel = dill.load(data)
+            request:RequestModel = dill.load(data)
         
         request.tracer.__setmodel__(model)
 

@@ -155,10 +155,15 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        interleaver = Interleaver(self.mediators, self, batcher=self.batcher)
-        self.model.interleave(interleaver, self.fn, *args, **kwargs)
         
-        self.push(interleaver.state)
+        interleaver = Interleaver(self.mediators, self, batcher=self.batcher)
+        
+        try:
+            self.model.interleave(interleaver, self.fn, *args, **kwargs)
+            
+            self.push(interleaver.state)
+        finally:
+            interleaver.state.clear()
 
     ### Public API ####
         
