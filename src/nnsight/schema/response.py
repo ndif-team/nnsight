@@ -9,8 +9,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from .result import RESULT
-
+RESULT = Dict[str, Any]
 
 class ResponseModel(BaseModel):
 
@@ -27,7 +26,7 @@ class ResponseModel(BaseModel):
         NNSIGHT_ERROR = "NNSIGHT_ERROR"
 
     id: str
-    status: JobStatus
+    status: ResponseModel.JobStatus
 
     description: Optional[str] = ""
     data: Optional[Union[RESULT, Any]] = None
@@ -75,3 +74,5 @@ class ResponseModel(BaseModel):
             return ResponseModel(
                 **torch.load(file, map_location="cpu", weights_only=False)
             )
+            
+ResponseModel.update_forward_refs()

@@ -62,6 +62,57 @@ def apply(
 
     return data
 
+
+def applyn(
+    data: C, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
+) -> C:
+    """Applies some function to all members of a collection of a give type (or types)
+
+    Args:
+        data (Any): Collection of data to apply function to.
+        fn (Callable): Function to apply.
+        cls (type): Type or Types to apply function to.
+        inplace (bool): If to apply the fn inplace. (For lists and dicts)
+
+    Returns:
+        Any: Same kind of collection as data, after then fn has been applied to members of given type.
+    """
+
+    if isinstance(data[0], cls):
+        return fn(*data)
+
+    data_type = type(data[0])
+
+    if data_type == list:
+        # if inplace:
+        #     for idx, _data in enumerate(data):
+        #         data[idx] = apply(_data, fn, cls, inplace=inplace)
+        #     return data
+        
+        return [applyn([_data[i] for _data in data], fn, cls, inplace=inplace) for i in range(len(data[0]))]
+
+    elif data_type == tuple:
+        return tuple([applyn([_data[i] for _data in data], fn, cls, inplace=inplace) for i in range(len(data[0]))])
+
+    elif data_type == dict:
+        # if inplace:
+        #     for key, value in data.items():
+        #         data[key] = apply(value, fn, cls, inplace=inplace)
+        #     return data
+        return {
+            key: applyn([_data[key] for _data in data], fn, cls, inplace=inplace)
+            for key in data[0].keys()
+        }
+
+    # elif data_type == slice:
+    #     return slice(
+    #         apply(data.start, fn, cls, inplace=inplace),
+    #         apply(data.stop, fn, cls, inplace=inplace),
+    #         apply(data.step, fn, cls, inplace=inplace),
+    #     )
+
+    return data[0]
+
 def fetch_attr(object: object, target: str) -> Any:
     """Retrieves an attribute from an object hierarchy given an attribute path. Levels are separated by '.' e.x (transformer.h.1)
 
@@ -108,20 +159,39 @@ class Patch:
         parent (Any): Module or class to replace attribute.
     """
 
-    def __init__(self, parent: Any, replacement: Any, key: str) -> None:
+    def __init__(self, parent: Any, replacement: Any=None, key: str=None, as_dict:bool=False) -> None:
         self.parent = parent
         self.replacement = replacement
         self.key = key
-        self.orig = getattr(self.parent, key)
+        
+
+        self.as_dict = as_dict
+        
+        if self.as_dict:
+            self.orig = self.parent[key]
+        else:
+            self.orig = getattr(self.parent, key)
 
     def patch(self) -> None:
         """Carries out the replacement of an object in a module/class."""
-        setattr(self.parent, self.key, self.replacement)
+        if self.replacement is None:
+            if self.as_dict:
+                del self.parent[self.key]
+            else:
+                delattr(self.parent, self.key)
+        else:
+            if self.as_dict:
+                self.parent[self.key] = self.replacement
+            else:
+                setattr(self.parent, self.key, self.replacement)
 
     def restore(self) -> None:
         """Carries out the restoration of the original object on the objects module/class."""
 
-        setattr(self.parent, self.key, self.orig)
+        if self.as_dict:
+            self.parent[self.key] = self.orig
+        else:
+            setattr(self.parent, self.key, self.orig)
 
 class Patcher(AbstractContextManager):
     """Context manager that patches from a list of Patches on __enter__ and restores the patch on __exit__.
@@ -152,56 +222,28 @@ class Patcher(AbstractContextManager):
         Returns:
             Patcher: Patcher
         """
-        
-        self.entered = True
-        
-        for patch in self.patches:
-            patch.patch()
+        if not self.entered:
+            self.entered = True
+            
+            for patch in self.patches:
+                patch.patch()
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Calls `.restore()` on all patches."""
-        self.entered = False
-        for patch in self.patches:
-            patch.restore()
+        
+        if self.entered:
+            self.entered = False
+            for patch in self.patches:
+                patch.restore()
 
 
 class WrapperModule(torch.nn.Module):
-    """Simple torch module which passes it's input through. Useful for hooking.
-    If there is only one argument, returns the first element.
-    """
-
-    def forward(self, *args, **kwargs):
-        if len(args) == 1:
-            args = args[0]
-
-        return args
-
-class NNsightError(Exception):
-    """NNsight Execption class for raising error during execution.
     
-    Attributes:
-        - message (str): error message.
-        - node_id (int): node id.
-        - traceback_content (Optional[str]): traceback of the original exception being raised.
-    """
-
-    def __init__(self, message: str, node_id: int, traceback_content: Optional[str] = None):
-        self.message = message
-        self.node_id = node_id
-        self.traceback_content = traceback_content
-        super().__init__(self.message)
-
-
-    def _render_traceback_(self) -> List[str]:
-        """
-        This function allows custom rendering of traceback in IPython
+    def forward(self, *args, **kwargs):
         
-        Returns:
-            - List of string lines.
-        """
-        traceback_list = self.traceback_content.split("\n")
-        traceback_list.append(f"{str(self.__class__.__name__)}: {self.message}")
-
-        return traceback_list
+        if len(args) == 1:
+            return args[0]
+        
+        return args, kwargs

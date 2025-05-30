@@ -1,7 +1,11 @@
 [build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+requires = [
+    "setuptools>=45",
+    "setuptools_scm[toml]>=6.2",
+    "wheel",
+    "setuptools_scm_git_archive",
+]
 build-backend = "setuptools.build_meta"
-
 [tool.setuptools_scm]
 
 [project]
@@ -23,17 +27,11 @@ classifiers = [
 
 dependencies = [
     "transformers",
-    "protobuf", 
+    "astor", 
     "python-socketio[client]",
-    "tokenizers>=0.13.0",
     "pydantic>=2.9.0",
     "torch>=2.4.0",
-    "sentencepiece",
-    "torchvision",
     "accelerate",
-    "diffusers",
-    "einops",
-    "msgspec",
     "toml",
     "ipython",
     ]
@@ -56,4 +54,4 @@ include-package-data = true
 license-files = ["LICENSE"]
 
 [tool.setuptools.package-data]
-nnsight = ["config.yaml", "nnsight.log"]
+nnsight = ["config.yaml"]

@@ -1,3 +1,2 @@
-from .editing import EditingBackend
-from .remote import RemoteBackend
-from .noop import NoopBackend
+from .base import Backend
+from .execution import ExecutionBackend
