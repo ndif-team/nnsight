@@ -335,7 +335,7 @@ class Envoy(Batchable):
 
     #### Public methods ####
 
-    def trace(self, *args, **kwargs):
+    def trace(self, *args, fn:Optional[Callable] = None, **kwargs):
         """
         Create a tracer for this module.
 
@@ -357,7 +357,11 @@ class Envoy(Batchable):
         Returns:
             An InterleavingTracer for this module
         """
-        return InterleavingTracer(self.__call__, self, *args, hook=True, **kwargs)
+        if fn is None:
+            fn = self.__call__
+            kwargs['hook'] = True
+        
+        return InterleavingTracer(fn, self, *args, **kwargs)
 
     def edit(self, *, inplace: bool = False):
         """
@@ -707,8 +711,10 @@ class Envoy(Batchable):
                 # TODO trace=False, maybe not here  Legacy
                 def trace(*args, **kwargs):
                     try:
-                        return InterleavingTracer(value, self, *args, **kwargs)
+                        return self.trace(*args, fn=value, **kwargs)
+                    
                     except WithBlockNotFoundError as e:
+                       
                         return value(*args, **kwargs)
 
                 return trace
