@@ -582,6 +582,7 @@ class Envoy(Batchable):
                 interleaver(fn, *args, **kwargs)
                 
         finally:
+            interleaver.cancel()
             self._set_interleaver(None)
 
     #### Private methods ####
@@ -840,7 +841,7 @@ class OperationEnvoy:
             The operation's output value(s)
         """
 
-        return self._interleaver.current.request(f"{self.name}.output")
+        return self._interleaver.current.request(self._interleaver.current.iterate(f"{self.name}.output"))
 
     @output.setter
     def output(self, value: Any) -> None:
@@ -853,7 +854,7 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
-        self._interleaver.current.swap(f"{self.name}.output", value)
+        self._interleaver.current.swap(self._interleaver.current.iterate(f"{self.name}.output"), value)
 
     @property
     def inputs(
@@ -868,7 +869,7 @@ class OperationEnvoy:
         Returns:
             The operation's input value(s)
         """
-        return self._interleaver.current.request(f"{self.name}.input")
+        return self._interleaver.current.request(self._interleaver.current.iterate(f"{self.name}.input"))
 
     @inputs.setter
     def inputs(self, value: Any) -> None:
@@ -881,7 +882,7 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        self._interleaver.current.swap(f"{self.name}.input", value)
+        self._interleaver.current.swap(self._interleaver.current.iterate(f"{self.name}.input"), value)
 
     @inputs.deleter
     def inputs(self):

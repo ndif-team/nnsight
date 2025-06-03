@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import io
 import zlib
-from typing import TYPE_CHECKING, Any, Dict, List, Union
-from typing import Callable
-import torch
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Union
+
 import dill
 from pydantic import BaseModel, ConfigDict
 

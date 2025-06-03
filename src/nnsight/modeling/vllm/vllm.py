@@ -8,26 +8,26 @@ from .workers.GPUWorker import NNsightGPUWorker
 from .sampling import NNsightSamplingParams
 from dataclasses import fields
 from ...intervention.interleaver import Interleaver
-from ...intervention import Envoy
+from ...intervention.envoy import Envoy
 
 if TYPE_CHECKING:
     from torch.nn import Module
     from vllm.transformers_utils.tokenizer import AnyTokenizer
     from vllm.config import ModelConfig, SchedulerConfig, ParallelConfig, LoRAConfig
 
-try:
-    from vllm.distributed import (destroy_distributed_environment,
-                                  destroy_model_parallel,
-                                  init_distributed_environment,
-                                  initialize_model_parallel)
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.entrypoints.llm import LLM
-    from vllm.model_executor.model_loader.loader import _initialize_model
-except Exception as e:
-    raise type(e)(
-        "Install vllm in your environment to use it with NNsight. "
-        + "https://docs.vllm.ai/en/latest/getting_started/installation.html"
-    ) from e
+
+from vllm.distributed import (destroy_distributed_environment,
+                                destroy_model_parallel,
+                                init_distributed_environment,
+                                initialize_model_parallel)
+from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.llm import LLM
+# from vllm.model_executor.model_loader.loader import _initialize_model
+# except Exception as e:
+#     raise type(e)(
+#         "Install vllm in your environment to use it with NNsight. "
+#         + "https://docs.vllm.ai/en/latest/getting_started/installation.html"
+#     ) from e
 
 
 
@@ -55,8 +55,6 @@ class VLLM(RemoteableMixin):
 
         print(model.tokenizer.decode(output.value.argmax(dim=-1)[-1]))
     """
-
-    __methods__ = {"generate": "_execute"}
 
     def __init__(self, *args, **kwargs) -> None:
 
@@ -110,20 +108,6 @@ class VLLM(RemoteableMixin):
         )
 
         return model
-    
-    def _load_tokenizer(
-        self, 
-        model_config: "ModelConfig", 
-        scheduler_config: "SchedulerConfig", 
-        parallel_config: "ParallelConfig", 
-        lora_config: "LoRAConfig") -> "AnyTokenizer":
-        
-        return init_tokenizer_from_configs(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            parallel_config=parallel_config,
-            lora_config=lora_config,
-        ).tokenizer
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
 
@@ -132,24 +116,19 @@ class VLLM(RemoteableMixin):
         
         llm = LLM(
             repo_id,
-            worker_cls=NNsightGPUWorker,
+            # worker_cls=NNsightGPUWorker,
             **kwargs,
         )
 
         self.vllm_entrypoint = llm
 
         # load the tokenizer
-        self.tokenizer = self._load_tokenizer(
-            model_config=llm.llm_engine.model_config,
-            scheduler_config=llm.llm_engine.scheduler_config,
-            parallel_config=llm.llm_engine.parallel_config,
-            lora_config=llm.llm_engine.lora_config,
-        )
-
-        if kwargs.get("tensor_parallel_size", 1) > 1:
-            return llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-        else:
-            return llm.llm_engine.model_executor.driver_worker.model_runner.model
+        self.tokenizer = llm.llm_engine.tokenizer.tokenizer
+        breakpoint()
+        # if kwargs.get("tensor_parallel_size", 1) > 1:
+        #     return llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        # else:
+        #     return llm.llm_engine.model_executor.driver_worker.model_runner.model
 
     def _prepare_input(
         self, *args, **kwargs
@@ -208,41 +187,6 @@ class VLLM(RemoteableMixin):
 
         return (bprompts, bparams), kwargs
 
-    def interleave(
-        self,
-        interleaver: Interleaver,
-        *args,
-        fn: Optional[Union[Callable, str]] = None,
-        **kwargs,
-    ) -> Any:
-
-        """ if not self.dispatched:
-            self.dispatch()
-
-        for param in params:
-
-            param.intervention_graph = intervention_graph
-
-        fn(prompts, params, **kwargs)
-
-        intervention_graph.alive = False """
-        
-        
-        if not self.dispatched:
-            self.dispatch()
-
-        for param in args[1]:
-
-            param.intervention_graph = interleaver.graph
-            param.nns_batch_groups = interleaver.batch_groups
-
-        if fn is None:
-            fn = self._execute
-        elif isinstance(fn, str):
-            fn = getattr(self, fn)            
-    
-        return fn(*args, interleaver=interleaver, **kwargs)
-
     def __call__(
         self,
         prompts: List[str],
@@ -250,6 +194,8 @@ class VLLM(RemoteableMixin):
         interleaver: Interleaver,
         **kwargs,
     ) -> Any:
+        
+        breakpoint()
 
         kwargs.pop('invoker_group')
 

@@ -1,5 +1,5 @@
 import copy
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -13,6 +13,7 @@ from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import async_tensor_h2d
 
 from ...intervention.interleaver import Mediator
+from ...intervention.tracing.tracer import Tracer
 
 
 class NNsightSamplingParams(SamplingParams):
@@ -44,14 +45,16 @@ class NNsightSamplingParams(SamplingParams):
 
 class NNsightSamplingMetadata(SamplingMetadata):
 
-    intervention_graph: Optional[InterventionGraph] = None
+    nnsight_tracer: Optional[Tracer] = None
+    nnsight_internvetions: Optional[Callable] = None
     nns_batch_groups: Optional[List[Tuple[int, int]]] = None
     batch_groups: Optional[List[Tuple[int, int]]] = None
 
     def __init__(
         self,
         *args,
-        intervention_graph: InterventionGraph = None,
+        nnsight_tracer: Tracer = None,
+        nnsight_internvetions: Callable = None,
         nns_batch_groups: List[Tuple[int, int]] = None,
         batch_groups: Dict[int, Tuple[int, int]] = None,
         **kwargs,
@@ -59,7 +62,8 @@ class NNsightSamplingMetadata(SamplingMetadata):
 
         super().__init__(*args, **kwargs)
 
-        self.intervention_graph = intervention_graph
+        self.nnsight_tracer = nnsight_tracer
+        self.nnsight_internvetions = nnsight_internvetions
         self.nns_batch_groups = nns_batch_groups
         self.batch_groups = batch_groups
 
