@@ -51,9 +51,9 @@ class Cache:
         self.dtype = dtype
         self.detach = detach
         self.modules = modules
-        
+                
         if self.modules is not None:
-            self.modules = {m.path if isinstance(m, Envoy) else m for m in self.modules}
+            self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
         
         self.cache = {}
         
@@ -76,7 +76,7 @@ class Cache:
       
         module_path, key, iteration = match.groups()
             
-        if key not in ('inputs', 'output'):
+        if key not in ('input', 'output'):
             return
         
         if '.source.' in module_path:
