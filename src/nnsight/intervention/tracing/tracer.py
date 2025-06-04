@@ -1,5 +1,5 @@
-import ast
-from typing import TYPE_CHECKING, Any, Optional, Callable, List
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional, Callable, List, Dict, Tuple, Union
 
 import torch
 
@@ -10,8 +10,9 @@ from ..batching import Batcher
 
 from .iterator import IteratorProxy
 from ..backends.base import Backend
+from ... import util
 if TYPE_CHECKING:
-    from ..interleaver import Mediator, BATCH_GROUP
+    from ..interleaver import Mediator
     from ..envoy import Envoy
 else:
     Envoy = Any
@@ -25,8 +26,19 @@ class Cache:
     transformations such as detaching from computation graph, moving to a
     specific device, or converting to a specific dtype.
     """
+  
+    @dataclass
+    class Entry:
+        output: Optional[Any] = None
+        inputs: Optional[Tuple[Tuple[Any, ...], Dict[str, Any]]] = None
+        
+        @property
+        def input(self):
+            return [*self.inputs[0], *self.inputs[1].values()][0]
+
+   
     
-    def __init__(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, detach: Optional[bool] = False):
+    def __init__(self, modules: Optional[List[Union[Envoy, str]]] = None, device: Optional[torch.device] = torch.device('cpu'), dtype: Optional[torch.dtype] = None, detach: Optional[bool] = True):
         """
         Initialize a Cache with optional transformation parameters.
         
@@ -38,6 +50,10 @@ class Cache:
         self.device = device
         self.dtype = dtype
         self.detach = detach
+        self.modules = modules
+        
+        if self.modules is not None:
+            self.modules = {m.path if isinstance(m, Envoy) else m for m in self.modules}
         
         self.cache = {}
         
@@ -49,19 +65,51 @@ class Cache:
             provider: The key to store the value under
             value: The tensor value to store
         """
-        # TODO: util .apply
+        
+        import re
+        
+        # Match pattern like "x.y.z.key.i1" into groups
+        match = re.match(r"^(.+)\.([^.]+)\.i(\d+)$", provider)
+        
+        if match is None:
+            return
+      
+        module_path, key, iteration = match.groups()
+            
+        if key not in ('inputs', 'output'):
+            return
+        
+        if '.source.' in module_path:
+            return
+          
+        if self.modules is not None:
+            if module_path not in self.modules:
+                return
         
         if self.detach:
-            value = value.detach()
+            value = util.apply(value, lambda x: x.detach(), torch.Tensor)
         
         if self.device is not None:
-            value = value.to(self.device)
+            value = util.apply(value, lambda x: x.to(self.device), torch.Tensor)
                 
         if self.dtype is not None:
-            value = value.to(self.dtype)
+            value = util.apply(value, lambda x: x.to(self.dtype), torch.Tensor)
             
-        self.cache[provider] = value
+        if module_path not in self.cache:
+            self.cache[module_path] = Cache.Entry(inputs=value)
+        else:
+            
+            if isinstance(self.cache[module_path], Cache.Entry):
                 
+                if key == 'output':
+                    self.cache[module_path].output = value
+                else:
+                    self.cache[module_path] = [self.cache[module_path], Cache.Entry(inputs=value)]
+            else:        
+                if key == 'output':
+                    self.cache[module_path][-1].output = value
+                else:
+                    self.cache[module_path].append(Cache.Entry(inputs=value))
 
 
 class InterleavingTracer(Tracer):
@@ -89,9 +137,7 @@ class InterleavingTracer(Tracer):
         self.mediators:List[Mediator] = []
        
         self.batcher = Batcher(**kwargs)
-        
-        self._cache = None
-                        
+                                
         super().__init__(*args, backend=backend)
         
         if not hasattr(self, 'model_var_name'):
@@ -195,23 +241,23 @@ class InterleavingTracer(Tracer):
     def all(self):
         return self.iter[:]
 
-    def cache(self, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, detach: Optional[bool] = False):
+    def cache(self, modules: Optional[List[Union[Envoy, str]]] = None, device: Optional[torch.device] = torch.device('cpu'), dtype: Optional[torch.dtype] = None, detach: Optional[bool] = True):
         """
         Get or create a cache for storing intermediate values during tracing.
         
         Args:
-            device: Optional device to move tensors to
-            dtype: Optional dtype to convert tensors to
-            detach: Whether to detach tensors from computation graph
+            modules: Optional list of modules to cache, defaults to all modules
+            device: Optional device to move tensors to, defaults to cpu
+            dtype: Optional dtype to convert tensors to, defaults to None
+            detach: Whether to detach tensors from computation graph, defaults to True  
             
         Returns:
             A dictionary containing the cached values
         """
-        if self._cache is None:
-           self._cache = Cache(device, dtype, detach)
-           self.model._interleaver.current.set_user_cache(self._cache)
+        if self.model._interleaver.current.user_cache is None:
+           self.model._interleaver.current.set_user_cache(Cache(modules, device, dtype, detach))
            
-        return self._cache.cache
+        return self.model._interleaver.current.user_cache.cache
     
     ### Serialization ###
     

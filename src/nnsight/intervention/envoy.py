@@ -47,7 +47,7 @@ class Envoy(Batchable):
         self,
         module: torch.nn.Module,
         interleaver: Optional[Interleaver] = None,
-        path: Optional[str] = "",
+        path: Optional[str] = "model",
         rename: Optional[Dict[str, str]] = None,
         alias: Optional[Dict[str, str]] = None,
     ) -> None:
