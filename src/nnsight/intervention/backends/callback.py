@@ -11,7 +11,7 @@ from ...tracing.graph import Graph
 from ...util import NNsightError
 from .remote import RemoteBackend
 
-class InterfaceBackend(RemoteBackend):
+class CallbackBackend(RemoteBackend):
 
     def __init__(self, callback_url: str, *args, **kwargs):
         self.callback_url = callback_url
