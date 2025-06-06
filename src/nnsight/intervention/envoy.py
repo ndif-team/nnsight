@@ -8,7 +8,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
 import torch
 
 from .. import util
-from ..util import apply
+from ..util import apply, fetch_attr
 from .batching import Batchable
 from .inject import convert as inject
 from .tracing.base import Tracer, WithBlockNotFoundError
@@ -691,7 +691,7 @@ class Envoy(Batchable):
         Returns:
             A string representation of the Envoy showing its path
         """
-        # TODO custom
+        # TODO custom using renaming
         return str(self._module)
 
     def __repr__(self):
@@ -721,7 +721,7 @@ class Envoy(Batchable):
         """
 
         if self._alias is not None and name in self._alias:
-            return getattr(self, self._alias[name])
+            return fetch_attr(self, self._alias[name])
 
         if hasattr(self._module, name):
             value = getattr(self._module, name)
