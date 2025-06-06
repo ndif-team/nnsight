@@ -1,7 +1,6 @@
 import copy
 from typing import Dict, List, Optional, Tuple
 
-from nnsight.intervention.graph import InterventionGraph
 import torch
 
 from vllm.model_executor.sampling_metadata import (
@@ -13,10 +12,12 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceGroupMetadata
 from vllm.utils import async_tensor_h2d
 
+from ...intervention.interleaver import Mediator
+
 
 class NNsightSamplingParams(SamplingParams):
 
-    intervention_graph: Optional[InterventionGraph] = None
+    mediator: Optional[Mediator] = None
     nns_batch_groups: Optional[List[Tuple[int, int]]] = None
     invoker_group: Optional[int] = None
     is_default_param: bool = True

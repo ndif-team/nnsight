@@ -3,24 +3,23 @@ from __future__ import annotations
 import io
 import sys
 import time
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
-import msgspec
 import requests
 import socketio
 import torch
 from tqdm.auto import tqdm
 
-from ... import __IPYTHON__, __version__, CONFIG, remote_logger
-from ...schema.request import RequestModel, StreamValueModel
-from ...schema.response import ResponseModel
-from ...schema.result import RESULT, ResultModel
-from ...tracing.backends import Backend
-from ...tracing.backends.base import frame_injection
-from ...tracing.graph import Graph
-from ...util import NNsightError
-from ..contexts.local import LocalContext, RemoteContext
+from ... import __IPYTHON__, CONFIG, __version__
+from ...log import remote_logger
+from ...schema.request import RequestModel
+from ...schema.response import RESULT, ResponseModel
+from .base import Backend
+
+if TYPE_CHECKING:
+    from ..tracing.tracer import Tracer
+else:
+    Tracer = Any
 
 
 class RemoteBackend(Backend):
@@ -48,7 +47,6 @@ class RemoteBackend(Backend):
         self.job_id = job_id or CONFIG.API.JOB_ID
         self.ssl = CONFIG.API.SSL if ssl is None else ssl
         self.zlib = CONFIG.API.ZLIB
-        self.format = CONFIG.API.FORMAT
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
 
@@ -56,42 +54,41 @@ class RemoteBackend(Backend):
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
 
-    def request(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
+    def request(self, tracer: Tracer) -> Tuple[bytes, Dict[str, str]]:
 
-        data = RequestModel.serialize(graph, self.format, self.zlib)
+        interventions = super().__call__(tracer)
+
+        data = RequestModel(interventions=interventions, tracer=tracer).serialize(
+            self.zlib
+        )
 
         headers = {
-            "model_key": self.model_key,
-            "format": self.format,
-            "zlib": str(self.zlib),
-            "ndif-api-key": self.api_key,
-            "sent-timestamp": str(time.time()),
+            "nnsight-model-key": self.model_key,
+            "nnsight-zlib": str(self.zlib),
             "nnsight-version": __version__,
+            "ndif-api-key": self.api_key,
+            "ndif-timestamp": str(time.time()),
         }
 
         return data, headers
 
-    def __call__(self, graph: Graph):
+    def __call__(self, tracer):
 
         if self.blocking:
 
             # Do blocking request.
-            result = self.blocking_request(graph)
+            result = self.blocking_request(tracer)
 
         else:
 
             # Otherwise we are getting the status / result of the existing job.
-            result = self.non_blocking_request(graph)
+            result = self.non_blocking_request(tracer)
 
         if result is not None:
-            ResultModel.inject(graph, result)
-            
-            if CONFIG.APP.FRAME_INJECTION:
-                        
-                frame_injection()
+            tracer.push(result)
 
     def handle_response(
-        self, response: ResponseModel, graph: Optional[Graph] = None
+        self, response: ResponseModel, tracer: Optional[Tracer] = None
     ) -> Optional[RESULT]:
         """Handles incoming response data.
 
@@ -109,7 +106,7 @@ class RemoteBackend(Backend):
         Returns:
             ResponseModel: ResponseModel.
         """
-        
+
         if response.status == ResponseModel.JobStatus.ERROR:
             raise SystemExit(f"{response.description}\nRemote exception.")
 
@@ -130,18 +127,18 @@ class RemoteBackend(Backend):
             return result
 
         # If were receiving a streamed value:
-        elif response.status == ResponseModel.JobStatus.STREAM:
+        # elif response.status == ResponseModel.JobStatus.STREAM:
 
-            # Second item is index of LocalContext node.
-            # First item is the streamed value from the remote service.
+        #     # Second item is index of LocalContext node.
+        #     # First item is the streamed value from the remote service.
 
-            index, dependencies = response.data
+        #     index, dependencies = response.data
 
-            ResultModel.inject(graph, dependencies)
+        #     ResultModel.inject(graph, dependencies)
 
-            node = graph.nodes[index]
+        #     node = graph.nodes[index]
 
-            node.execute()
+        #     node.execute()
 
         elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
             if graph.debug:
@@ -269,14 +266,12 @@ class RemoteBackend(Backend):
         # Decode bytes with pickle and then into pydantic object.
         result = torch.load(result_bytes, map_location="cpu", weights_only=False)
 
-        result = ResultModel(**result).result
-
         # Close bytes
         result_bytes.close()
 
         return result
 
-    def blocking_request(self, graph: Graph) -> Optional[RESULT]:
+    def blocking_request(self, tracer: Tracer) -> Optional[RESULT]:
         """Send intervention request to the remote service while waiting for updates via websocket.
 
         Args:
@@ -296,18 +291,12 @@ class RemoteBackend(Backend):
                 wait_timeout=10,
             )
 
-            remote_graph = preprocess(graph)
+            data, headers = self.request(tracer)
 
-            data, headers = self.request(remote_graph)
-
-            headers["session_id"] = sio.sid
+            headers["ndif-session_id"] = sio.sid
 
             # Submit request via
             response = self.submit_request(data, headers)
-
-            LocalContext.set(
-                lambda *args: self.stream_send(*args, job_id=response.id, sio=sio)
-            )
 
             try:
                 # Loop until
@@ -318,7 +307,7 @@ class RemoteBackend(Backend):
                     # Convert to pydantic object.
                     response = ResponseModel.unpickle(response)
                     # Handle the response.
-                    result = self.handle_response(response, graph=graph)
+                    result = self.handle_response(response, tracer=tracer)
                     # Break when completed.
                     if result is not None:
                         return result
@@ -327,78 +316,62 @@ class RemoteBackend(Backend):
 
                 raise e
 
-            finally:
-                LocalContext.set(None)
+    # def stream_send(
+    #     self, values: Dict[int, Any], job_id: str, sio: socketio.SimpleClient
+    # ):
+    #     """Upload some value to the remote service for some job id.
 
-    def stream_send(
-        self, values: Dict[int, Any], job_id: str, sio: socketio.SimpleClient
-    ):
-        """Upload some value to the remote service for some job id.
+    #     Args:
+    #         value (Any): Value to upload
+    #         job_id (str): Job id.
+    #         sio (socketio.SimpleClient): Connected websocket client.
+    #     """
 
-        Args:
-            value (Any): Value to upload
-            job_id (str): Job id.
-            sio (socketio.SimpleClient): Connected websocket client.
-        """
+    #     sio.emit(
+    #         "stream_upload",
+    #         data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id),
+    #     )
 
-        sio.emit(
-            "stream_upload",
-            data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id),
-        )
+    # def non_blocking_request(self, graph: Graph):
+    #     """Send intervention request to the remote service if request provided. Otherwise get job status.
 
-    def non_blocking_request(self, graph: Graph):
-        """Send intervention request to the remote service if request provided. Otherwise get job status.
+    #     Sets CONFIG.API.JOB_ID on initial request as to later get the status of said job.
 
-        Sets CONFIG.API.JOB_ID on initial request as to later get the status of said job.
+    #     When job is completed, clear CONFIG.API.JOB_ID to request a new job.
 
-        When job is completed, clear CONFIG.API.JOB_ID to request a new job.
+    #     Args:
+    #         request (RequestModel): Request if submitting a new request. Defaults to None
+    #     """
 
-        Args:
-            request (RequestModel): Request if submitting a new request. Defaults to None
-        """
+    #     if self.job_id is None:
 
-        if self.job_id is None:
+    #         data, headers = self.request(graph)
 
-            data, headers = self.request(graph)
+    #         # Submit request via
+    #         response = self.submit_request(data, headers)
 
-            # Submit request via
-            response = self.submit_request(data, headers)
+    #         CONFIG.API.JOB_ID = response.id
 
-            CONFIG.API.JOB_ID = response.id
+    #         CONFIG.save()
 
-            CONFIG.save()
+    #     else:
 
-        else:
+    #         try:
 
-            try:
+    #             result = self.get_response()
 
-                result = self.get_response()
+    #             if result is not None:
 
-                if result is not None:
+    #                 CONFIG.API.JOB_ID = None
 
-                    CONFIG.API.JOB_ID = None
+    #                 CONFIG.save()
 
-                    CONFIG.save()
+    #                 return result
 
-                    return result
+    #         except Exception as e:
 
-            except Exception as e:
+    #             CONFIG.API.JOB_ID = None
 
-                CONFIG.API.JOB_ID = None
+    #             CONFIG.save()
 
-                CONFIG.save()
-
-                raise e
-
-
-def preprocess(graph: Graph):
-
-    new_graph = graph.copy()
-
-    for node in new_graph.nodes:
-
-        if node.target is LocalContext:
-
-            graph.nodes[node.index].kwargs["uploads"] = RemoteContext.from_local(node)
-
-    return new_graph
+    #             raise e
