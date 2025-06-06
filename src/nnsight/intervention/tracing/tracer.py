@@ -1,19 +1,21 @@
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Callable, List, Dict, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from ... import util
+from ..backends.base import Backend
+from ..batching import Batcher
 from ..interleaver import Interleaver
 from .base import ExitTracingException, Tracer
 from .invoker import Invoker
-from ..batching import Batcher
-
 from .iterator import IteratorProxy
-from ..backends.base import Backend
-from ... import util
+from .globals import Object
+
 if TYPE_CHECKING:
-    from ..interleaver import Mediator
     from ..envoy import Envoy
+    from ..interleaver import Mediator
 else:
     Envoy = Any
 
@@ -21,27 +23,31 @@ else:
 class Cache:
     """
     A cache for storing and transforming tensor values during tracing.
-    
+
     This class provides functionality to store tensor values with optional
     transformations such as detaching from computation graph, moving to a
     specific device, or converting to a specific dtype.
     """
-  
+
     @dataclass
     class Entry:
         output: Optional[Any] = None
         inputs: Optional[Tuple[Tuple[Any, ...], Dict[str, Any]]] = None
-        
+
         @property
         def input(self):
             return [*self.inputs[0], *self.inputs[1].values()][0]
 
-   
-    
-    def __init__(self, modules: Optional[List[Union[Envoy, str]]] = None, device: Optional[torch.device] = torch.device('cpu'), dtype: Optional[torch.dtype] = None, detach: Optional[bool] = True):
+    def __init__(
+        self,
+        modules: Optional[List[Union[Envoy, str]]] = None,
+        device: Optional[torch.device] = torch.device("cpu"),
+        dtype: Optional[torch.dtype] = None,
+        detach: Optional[bool] = True,
+    ):
         """
         Initialize a Cache with optional transformation parameters.
-        
+
         Args:
             device: Optional device to move tensors to
             dtype: Optional dtype to convert tensors to
@@ -51,62 +57,63 @@ class Cache:
         self.dtype = dtype
         self.detach = detach
         self.modules = modules
-                
+
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
-        
+
         self.cache = {}
-        
+
     def add(self, provider: str, value: Any):
         """
         Add a value to the cache with optional transformations.
-        
+
         Args:
             provider: The key to store the value under
             value: The tensor value to store
         """
-        
-        import re
-        
+
         # Match pattern like "x.y.z.key.i1" into groups
         match = re.match(r"^(.+)\.([^.]+)\.i(\d+)$", provider)
-        
+
         if match is None:
             return
-      
+
         module_path, key, iteration = match.groups()
-            
-        if key not in ('input', 'output'):
+
+        if key not in ("input", "output"):
             return
-        
-        if '.source.' in module_path:
+
+        if ".source." in module_path:
             return
-          
+
         if self.modules is not None:
             if module_path not in self.modules:
                 return
-        
+
         if self.detach:
             value = util.apply(value, lambda x: x.detach(), torch.Tensor)
-        
+
         if self.device is not None:
             value = util.apply(value, lambda x: x.to(self.device), torch.Tensor)
-                
+
         if self.dtype is not None:
             value = util.apply(value, lambda x: x.to(self.dtype), torch.Tensor)
-            
+
         if module_path not in self.cache:
             self.cache[module_path] = Cache.Entry(inputs=value)
         else:
-            
+
             if isinstance(self.cache[module_path], Cache.Entry):
-                
-                if key == 'output':
+
+                if key == "output":
                     self.cache[module_path].output = value
                 else:
-                    self.cache[module_path] = [self.cache[module_path], Cache.Entry(inputs=value)]
-            else:        
-                if key == 'output':
+                    self.cache[module_path] = [
+                        self.cache[module_path],
+                        Cache.Entry(inputs=value),
+                    ]
+            else:
+                if key == "output":
                     self.cache[module_path][-1].output = value
                 else:
                     self.cache[module_path].append(Cache.Entry(inputs=value))
@@ -115,185 +122,193 @@ class Cache:
 class InterleavingTracer(Tracer):
     """
     Tracer that manages the interleaving of model execution and interventions.
-    
+
     This class coordinates the execution of the model's forward pass and
     user-defined intervention functions through the Interleaver.
     """
 
-    def __init__(self, fn: Callable, model: Envoy, *args, backend: Backend = None, **kwargs):
+    def __init__(
+        self, fn: Callable, model: Envoy, *args, backend: Backend = None, **kwargs
+    ):
         """
         Initialize an InterleavingTracer with a function and model.
-        
+
         Args:
             fn: The function to execute (typically the model's forward pass)
             model: The model envoy to intervene on
             *args: Additional arguments to pass to the function
             **kwargs: Additional keyword arguments to pass to the function
         """
-        
+
         self.fn = fn
         self.model = model
-        
-        self.mediators:List[Mediator] = []
-       
+
+        self.mediators: List[Mediator] = []
+
         self.batcher = Batcher(**kwargs)
-                                
+
         super().__init__(*args, backend=backend)
-        
-        if not hasattr(self, 'model_var_name'):
+
+        if not hasattr(self, "model_var_name"):
             self.model_var_name = self.info.node.items[0].context_expr.func.value.id
-        if not hasattr(self, 'tracer_var_name'):
-            self.tracer_var_name = self.info.node.items[0].optional_vars.id if self.info.node.items[0].optional_vars is not None else "__nnsight_tracer__"
-        
-   
+        if not hasattr(self, "tracer_var_name"):
+            self.tracer_var_name = (
+                self.info.node.items[0].optional_vars.id
+                if self.info.node.items[0].optional_vars is not None
+                else "__nnsight_tracer__"
+            )
+
     def compile(self) -> Callable:
         """
         Compile the captured code block into a callable function.
-        
+
         Returns:
             A callable function that executes the captured code block
         """
 
         # If Envoy has a default mediators ( created via Envoy.edit() ), add them
         if self.model._default_mediators:
-                        
+
             for mediators in self.model._default_mediators:
-                
+
                 self.mediators.append(mediators)
-                self.batcher.batch_groups.append((-1,-1))
-                
-            
-        #If positional arguments were passed directly to a tracer, assume one invoker
+                self.batcher.batch_groups.append((-1, -1))
+
+        # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
             invoker = self.invoke(*self.args, **self.kwargs)
             invoker.info = self.info.copy()
-                        
+
             invoker.__exit__(ExitTracingException, None, None)
-            
-            self.info.source = ['    pass\n']
-                    
+
+            self.info.source = ["    pass\n"]
+
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__, {self.model_var_name},{self.tracer_var_name}):\n",
             *self.info.source,
-            f"    {self.tracer_var_name}.push()\n"
+            f"    {self.tracer_var_name}.push()\n",
         ]
-        
+
         self.args = tuple()
-                        
-    
 
     def execute(self, fn: Callable):
         """
         Execute the compiled function with interventions.
-        
+
         First executes the parent Tracer's execute method to set up the context,
         then creates an Interleaver to manage the interventions during model execution.
-        
+
         Args:
             fn: The compiled function to execute
         """
-        
+
         fn(self.info, self.model, self)
-        
+
         args = self.batcher.batched_args
         kwargs = self.batcher.batched_kwargs
-        
+
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        
         interleaver = Interleaver(self.mediators, self, batcher=self.batcher)
-        
+
         try:
             self.model.interleave(interleaver, self.fn, *args, **kwargs)
-            
+
             self.push(interleaver.state)
         finally:
             interleaver.state.clear()
 
     ### Public API ####
-        
+
     def invoke(self, *args, **kwargs):
         """
         Create an Invoker to capture and execute an intervention function.
-        
+
         Args:
             *args: Additional arguments to pass to the intervention function
             **kwargs: Additional keyword arguments to pass to the intervention function
-            
+
         Returns:
             An Invoker instance
         """
-        #TODO make sure not already executing
+        # TODO make sure not already executing
         return Invoker(self, *args, **kwargs)
-    
+
     def stop(self):
         """
         Raise an EarlyStopException to stop the execution of the model.
         """
         self.model._interleaver.current.stop()
-    
 
     @property
     def iter(self):
         return IteratorProxy(self.model._interleaver)
-    
+
     def all(self):
         return self.iter[:]
 
-    def cache(self, modules: Optional[List[Union[Envoy, str]]] = None, device: Optional[torch.device] = torch.device('cpu'), dtype: Optional[torch.dtype] = None, detach: Optional[bool] = True):
+    def cache(
+        self,
+        modules: Optional[List[Union[Envoy, str]]] = None,
+        device: Optional[torch.device] = torch.device("cpu"),
+        dtype: Optional[torch.dtype] = None,
+        detach: Optional[bool] = True,
+    ) -> Union[Dict, Object]:
         """
         Get or create a cache for storing intermediate values during tracing.
-        
+
         Args:
             modules: Optional list of modules to cache, defaults to all modules
             device: Optional device to move tensors to, defaults to cpu
             dtype: Optional dtype to convert tensors to, defaults to None
-            detach: Whether to detach tensors from computation graph, defaults to True  
-            
+            detach: Whether to detach tensors from computation graph, defaults to True
+
         Returns:
             A dictionary containing the cached values
         """
         if self.model._interleaver.current.user_cache is None:
-           self.model._interleaver.current.set_user_cache(Cache(modules, device, dtype, detach))
-           
+            self.model._interleaver.current.set_user_cache(
+                Cache(modules, device, dtype, detach)
+            )
+
         return self.model._interleaver.current.user_cache.cache
-    
+
     ### Serialization ###
-    
+
     def __getstate__(self):
         """Get the state of the tracer for serialization."""
         state = super().__getstate__()
-        state['fn'] = self.fn.__name__
-        state['model_var_name'] = self.model_var_name
-        state['tracer_var_name'] = self.tracer_var_name
-        state['batcher'] = self.batcher
-        state['mediators'] = self.mediators
-        
+        state["fn"] = self.fn.__name__
+        state["model_var_name"] = self.model_var_name
+        state["tracer_var_name"] = self.tracer_var_name
+        state["batcher"] = self.batcher
+        state["mediators"] = self.mediators
+
         return state
-    
+
     def __setstate__(self, state):
         """Set the state of the tracer for deserialization."""
         super().__setstate__(state)
-        
-        self.fn = state['fn']
-        self.model_var_name = state['model_var_name']
-        self.tracer_var_name = state['tracer_var_name']
-        self.mediators = state['mediators']
-        self.batcher =  state['batcher']
+
+        self.fn = state["fn"]
+        self.model_var_name = state["model_var_name"]
+        self.tracer_var_name = state["tracer_var_name"]
+        self.mediators = state["mediators"]
+        self.batcher = state["batcher"]
 
         self._cache = None
-        
-    def __setmodel__(self, model:Envoy):
-        
+
+    def __setmodel__(self, model: Envoy):
+
         self.model = model
         self.fn = getattr(self.model, self.fn)
-        
+
     def __setframe__(self, frame):
-        
+
         super().__setframe__(frame)
-        
+
         self.info.start_line = 0
-        
+
         for mediator in self.mediators:
             mediator.info.frame = frame

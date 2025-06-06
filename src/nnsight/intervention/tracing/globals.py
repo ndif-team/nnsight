@@ -8,11 +8,21 @@ from ..._c.py_mount import mount, unmount
 
 class Object(torch.Tensor):
 
-    def save(obj: Any) -> Self:
+    def save(self):
+        """
+        Save an object to be accessable after the trace context is exited.
+        
+        Example:
+        
+        >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+        >>> with model.trace("Hello World"):
+        >>>     attn_0 = model.transformer.h[0].attn.output.save()
+        >>> print(attn_0)
+        """
 
-        Globals.saves.add(id(obj))
+        Globals.saves.add(id(self))
 
-        return obj
+        return self
     
     def __getattr__(self, name: str) -> Self:
 
