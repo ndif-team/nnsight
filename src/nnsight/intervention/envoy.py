@@ -719,7 +719,7 @@ class Envoy(Batchable):
         Raises:
             AttributeError: If the attribute doesn't exist
         """
-
+        
         if self._alias is not None and name in self._alias:
             return fetch_attr(self, self._alias[name])
 
@@ -761,6 +761,27 @@ class Envoy(Batchable):
             self._add_envoy(value, key)
         else:
             super().__setattr__(key, value)
+            
+    #### Serialization ####
+    
+    def __getstate__(self):
+        return {
+            "module": self._module,
+            "path": self.path,
+            "alias": self._alias,
+            "children": self._children,
+        }
+    
+    def __setstate__(self, state):
+        
+        self._module = state["module"]
+        self.path = state["path"]
+        self._alias = state["alias"]
+        self._children = state["children"]
+        
+        self._source = None
+        self._interleaver = None
+        self._default_mediators = []
 
 
 # TODO extend Envoy

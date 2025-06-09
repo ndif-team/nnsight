@@ -66,3 +66,15 @@ class MetaMixin(LoadableMixin):
                 fn = fn.__func__.__get__(new_self, type(new_self))
 
         return super().interleave(interleaver, fn, *args, **kwargs)
+    
+    
+    #### Serialization ####
+    
+    def __getstate__(self):
+        state = super().__getstate__()
+        state['dispatched'] = self.dispatched
+        return state
+    
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self.dispatched = state['dispatched']
