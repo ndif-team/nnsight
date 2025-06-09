@@ -938,18 +938,20 @@ class OperationEnvoy:
             An EnvoySource object containing the operation's source code and nested operations
         """
 
-        fn = self._interleaver.current.request(f"{self.name}.fn")
 
-        def wrap(fn: Callable, **kwargs):
-            return self._interleaver.wrap_operation(fn, **kwargs)
+        if self._source is None:
+            fn = self._interleaver.current.request(f"{self.name}.fn")
 
-        source, line_numbers, fn = inject(fn, wrap, self.name)
+            def wrap(fn: Callable, **kwargs):
+                return self._interleaver.wrap_operation(fn, **kwargs)
 
-        self._source = EnvoySource(
-            self.name, source, line_numbers, interleaver=self._interleaver
-        )
+            source, line_numbers, fn = inject(fn, wrap, self.name)
 
-        self._interleaver.current.swap(f"{self.name}.fn", fn)
+            self._source = EnvoySource(
+                self.name, source, line_numbers, interleaver=self._interleaver
+            )
+
+            self._interleaver.current.swap(f"{self.name}.fn", fn)
 
         return self._source
 

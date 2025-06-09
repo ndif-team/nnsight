@@ -388,6 +388,8 @@ class Mediator:
         self.user_cache: "Cache" = None
         self.iteration = 0
 
+        self.args = list()
+
         self._frame = None
 
     def start(self, interleaver: Interleaver):
@@ -403,7 +405,7 @@ class Mediator:
 
         self.thread = Thread(
             target=self.intervention,
-            args=(self, self.info, self.interleaver.tracer.model, self.interleaver.tracer),
+            args=(self, self.info, self.interleaver.tracer.model, self.interleaver.tracer, *self.args),
             daemon=True,
             name=self.name,
         )
@@ -444,11 +446,9 @@ class Mediator:
 
         Args:
             provider: The identifier of the provider
-            value: The value being provided
 
         Returns:
             The original or modified value
-
         """
 
         if self.child is not None:
@@ -785,6 +785,7 @@ class Mediator:
                     stop = self.interleaver.default_all
 
                 mediator.iteration = i
+                mediator.args = list([mediator.iteration])
 
                 self.register(mediator)
 
@@ -796,6 +797,7 @@ class Mediator:
         elif isinstance(iteration, int):
 
             mediator.iteration = iteration
+            mediator.args = list([mediator.iteration])
 
             self.register(mediator)
             
