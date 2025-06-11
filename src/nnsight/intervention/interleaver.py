@@ -630,10 +630,19 @@ class Mediator:
             raise SkipException(value)
         
         else:
-            self.history.add(provider)
-            self.event_queue.put((Events.SKIP, (requester, value)))
-            
-            return False
+            if requester in self.history:
+                self.respond(
+                    ValueError(
+                        f"Value was missed for {requester}. Did you call an Envoy out of order?"
+                    )
+                )
+
+                return True
+            else:
+                self.history.add(provider)
+                self.event_queue.put((Events.SKIP, (requester, value)))
+                
+                return False
         
     def handle_register_event(self, mediator: Mediator, fn: Optional[Callable] = None):
         """

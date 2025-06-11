@@ -457,6 +457,17 @@ def test_out_of_order_skip(gpt2: nnsight.LanguageModel):
             gpt2.transformer.h[1].input[:] = 0
 
 
+@pytest.mark.order
+@pytest.mark.skips
+def test_out_of_order_skip_2(gpt2: nnsight.LanguageModel):
+    with pytest.raises(ValueError):
+        with gpt2.trace("_"):
+
+            inp = gpt2.transformer.h[0].output.save()
+            gpt2.transformer.h[1].skip(inp)
+            gpt2.transformer.h[0].skip(inp)
+
+
 # TODO - FIX THIS?
 # def test_cleanup(gpt2: nnsight.LanguageModel):
 #     with gpt2.trace("_", max_new_tokens=2) as tracer:
