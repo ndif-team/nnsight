@@ -259,6 +259,25 @@ def test_tracer_stop(tiny_model: NNsight, tiny_input: torch.Tensor):
         l1_out.value
 
 
+def test_stop_forward_pass_in_loop(tiny_model: NNsight):
+
+    inp_1 = torch.rand((1, input_size))
+    inp_2 = torch.rand((1, input_size))
+    inp_3 = torch.rand((1, input_size))
+    
+    with tiny_model.session(validate=True) as session:
+        res_list = session.apply(list).save()
+        dataloader = torch.utils.data.DataLoader([inp_1, inp_2, inp_3], batch_size=1)
+
+        with session.iter(dataloader) as batch:
+            with tiny_model.trace(batch) as tracer:
+                hs = tiny_model.layer1.output
+                tiny_model.layer1.output.stop()
+            res_list.append(hs)
+
+    assert len(res_list) == 3       
+
+
 def test_bridged_node_cleanup(tiny_model: NNsight):
     with tiny_model.session(validate=True, backend=AssertSavedLenBackend(0)) as session:
         l = session.apply(list)

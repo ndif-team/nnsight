@@ -14,6 +14,7 @@ from .graph import (InterventionGraph, InterventionNode, InterventionProxy,
                     InterventionProxyType)
 from .graph.proxy import Proxy
 from .interleaver import Interleaver
+from ..tracing.protocols import StopProtocol
 from .. import CONFIG
 
 
@@ -338,8 +339,11 @@ class NNsight:
 
         interleaver.graph.execute()
 
-        with interleaver:
-            return fn(*args, **kwargs)
+        try:
+            with interleaver:
+                return fn(*args, **kwargs)
+        except StopProtocol.StopException as e:
+            pass
 
     def to(self, *args, **kwargs) -> Self:
         """Override torch.nn.Module.to so this returns the NNSight model, not the underlying module when doing: model = model.to(...)
