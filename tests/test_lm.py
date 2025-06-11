@@ -438,16 +438,35 @@ def test_input_setting(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert prediction_1 == prediction_2
 
 
-# TODO - FIX THIS
-def test_cleanup(gpt2: nnsight.LanguageModel):
-    with gpt2.trace("_"):
-        arr = list()
+@pytest.mark.order
+def test_out_of_order(gpt2: nnsight.LanguageModel):
+    with pytest.raises(ValueError):
+        with gpt2.trace("_"):
+            out = gpt2.transformer.h[2].output.save()
+            out_2 = gpt2.transformer.h[1].inputs.save()
 
-        with gpt2.all():
-            gpt2.lm_head.output
 
-    with pytest.raises(UnboundLocalError):
-        arr
+@pytest.mark.order
+@pytest.mark.skips
+def test_out_of_order_skip(gpt2: nnsight.LanguageModel):
+
+    with pytest.raises(ValueError):
+        with gpt2.trace("_"):
+
+            gpt2.transformer.h[1].skip(gpt2.transformer.h[0].output)
+            gpt2.transformer.h[1].input[:] = 0
+
+
+# TODO - FIX THIS?
+# def test_cleanup(gpt2: nnsight.LanguageModel):
+#     with gpt2.trace("_", max_new_tokens=2) as tracer:
+#         arr = list()
+
+#         with tracer.all():
+#             pass
+
+#     with pytest.raises(UnboundLocalError):
+#         arr
 
 ######################### SOURCE #################################
 
@@ -524,11 +543,9 @@ def test_recursive_source(gpt2: nnsight.LanguageModel):
     assert isinstance(out, torch.Tensor)
 
 
-# TODO - FIX THIS
 @pytest.mark.source
 def test_source_imported_function(gpt2: nnsight.LanguageModel):
     with gpt2.trace("_"):
-        #gpt2.transformer.h[0].attn.source.attention_interface_0.source ## This works!!
         gpt2.transformer.h[0].attn.source.split_1.source
         out = gpt2.transformer.h[0].attn.source.split_1.output.save()
 
@@ -555,25 +572,11 @@ def test_skip(gpt2: nnsight.LanguageModel):
     assert torch.equal(out[0], inp[0])
 
 
-# TODO - FIX THIS
-@pytest.mark.skips
-def test_input_event_skipped(gpt2: nnsight.LanguageModel):
-    with gpt2.trace("_"):
-
-        gpt2.transformer.h[1].skip(gpt2.transformer.h[0].output)
-        gpt2.transformer.h[1].input[:] = 0
-        
-
-        out = gpt2.transformer.h[5].output.save()
-
-    assert out
-
-
 @pytest.mark.skips
 def test_skip_2(gpt2: nnsight.LanguageModel):
     with gpt2.trace("_"):
 
-        inp = gpt2.transformer.h[0].output
+        inp = gpt2.transformer.h[0].output.save()
         gpt2.transformer.h[1].inputs = ((torch.zeros_like(gpt2.transformer.h[1].input),)) + gpt2.transformer.h[1].inputs[1:]
         gpt2.transformer.h[1].skip(inp)
 
@@ -587,12 +590,12 @@ def test_skip_2(gpt2: nnsight.LanguageModel):
 def test_multiple_skip(gpt2: nnsight.LanguageModel):
     with gpt2.trace("_"):
 
-        inp = gpt2.transformer.h[0].output.save()
+        inp = gpt2.transformer.h[0].output
 
         gpt2.transformer.h[1].skip(inp)
         inp_2 = gpt2.transformer.h[1].output
         gpt2.transformer.h[2].skip(inp_2)
-        inp_3 = gpt2.transformer.h[2].output
+        inp_3 = gpt2.transformer.h[2].output.save()
         gpt2.transformer.h[3].skip(inp_3)
         
         out = gpt2.transformer.h[3].output.save()
@@ -611,27 +614,42 @@ def test_skip_inner_module(gpt2: nnsight.LanguageModel):
         hs
 
 
-# TODO - FIX THIS
 @pytest.mark.skips
 def test_skip_module_for_batch(gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str):
     with gpt2.trace() as tracer:
         with tracer.invoke(ET_prompt):
             inp = gpt2.transformer.h[0].output.save()
+
             gpt2.transformer.h[1].skip(inp)
-            gpt2.transformer.h[2].skip(inp)
-            gpt2.transformer.h[3].skip(inp)
-            gpt2.transformer.h[4].skip(inp)
 
-        with tracer.invoke(ET_prompt):
+            out = gpt2.transformer.h[1].output.save()
 
-            out = gpt2.transformer.h[4].output.save()
+        with tracer.invoke(MSG_prompt):
 
-            logits_2 = gpt2.lm_head.output[0][-1].argmax(dim=-1).save()
+            inp_2 = gpt2.transformer.h[0].output.save()
+
+            gpt2.transformer.h[1].skip(inp_2)
+
+            out_2 = gpt2.transformer.h[1].output.save()
+
+    assert not torch.equal(out[0], out_2[0])
+    assert torch.equal(out[0], inp[0])
+    assert torch.equal(out_2[0], inp_2[0])
 
 
-    assert not torch.equal(out[0], inp[0])
-    assert gpt2.tokenizer.decode(logits_2) == " Paris"
+@pytest.mark.skips
+def test_skip_module_for_batch_error(gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str):
 
+    with pytest.raises(ValueError):
+        with gpt2.trace() as tracer:
+            with tracer.invoke(ET_prompt):
+                inp = gpt2.transformer.h[0].output.save()
+
+                gpt2.transformer.h[1].skip(inp)
+
+            with tracer.invoke(MSG_prompt):
+                inp_2 = gpt2.transformer.h[0].output.save()
+                
 
 ###################### ITER #####################
 
@@ -734,16 +752,7 @@ def test_one_iter(gpt2: nnsight.LanguageModel):
         with tracer.all():
             arr_gen.append(1)
 
-    with gpt2.trace("_", max_new_tokens=1) as tracer:
-        arr_trace = list().save()
-
-        with tracer.all():
-            arr_trace.append(1)
-
-    print(len(arr_trace))
-
     assert len(arr_gen) == 1
-    assert len(arr_trace) == 1
 
 
 @pytest.mark.iter

@@ -313,8 +313,11 @@ class Envoy(Batchable):
         if self._source is None:
 
             def wrap(fn: Callable, **kwargs):
+
+                bound_obj = fn.__self__ if inspect.ismethod(fn) and fn.__name__ != "forward" else None
+
                 if self.interleaving:
-                    return self._interleaver.wrap_operation(fn, **kwargs)
+                    return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
                 else:
                     return fn
 
@@ -943,7 +946,10 @@ class OperationEnvoy:
             fn = self._interleaver.current.request(f"{self.name}.fn")
 
             def wrap(fn: Callable, **kwargs):
-                return self._interleaver.wrap_operation(fn, **kwargs)
+
+                bound_obj = fn.__self__ if fn.__name__ is not "forward" and inspect.ismethod(fn) else None
+
+                return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
 
             source, line_numbers, fn = inject(fn, wrap, self.name)
 

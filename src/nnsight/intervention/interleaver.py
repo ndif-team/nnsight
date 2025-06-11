@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 
 import torch
 
-from ..util import Patch, Patcher
+from ..util import Patch, Patcher, applyn
 from .batching import Batcher
 from .tracing.base import WithBlockNotFoundError
 from .tracing.util import wrap_exception
@@ -130,13 +130,14 @@ class Interleaver:
 
         return inner
 
-    def wrap_operation(self, fn: Callable, name: str):
+    def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
         Wrap an operation to intercept inputs and outputs for intervention.
 
         Args:
             fn: The function to wrap
             name: The name of the operation
+            bound_obj: The object fn is bound to if it is a method
 
         Returns:
             A wrapped version of the function
@@ -151,7 +152,10 @@ class Interleaver:
 
             args, kwargs = self.handle(f"{name}.input", (args, kwargs))
 
-            value = fn(*args, **kwargs)
+            if not inspect.ismethod(fn) and bound_obj is not None:
+                value = fn(bound_obj, *args, **kwargs)
+            else:
+                value = fn(*args, **kwargs)
 
             value = self.handle(f"{name}.output", value)
 
@@ -320,10 +324,27 @@ class Interleaver:
         old = self.batcher.current_value
                     
         self.batcher.current_value = value
+
+        batch_size = len(self.batcher.batch_groups)
+        skip_count = 0
+        skip_values = []
         
         for mediator in self.invokers:
-            
-            mediator.handle(provider)
+
+            try:
+                mediator.handle(provider)
+            except SkipException as e:
+                skip_count += 1
+                skip_values.append(e.value)
+
+        if skip_count == batch_size:
+            def _swap(*args):
+                return torch.cat(args, dim=0)
+
+            skip_value = applyn(skip_values, _swap, torch.Tensor)
+            raise SkipException(skip_value)
+        elif skip_count > 0 and skip_count < batch_size:
+            raise ValueError(f"A module skip must be applied to all the invokers defined in the tracer!")
             
         value = self.batcher.current_value
         
@@ -438,6 +459,7 @@ class Mediator:
         self.state = None
 
         if self.thread is not None and self.thread.is_alive():
+            # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
 
     def handle(self, provider: Optional[Any] = None):
@@ -602,6 +624,8 @@ class Mediator:
         if provider == requester:
             
             self.respond()
+
+            self.history.add(provider)
             
             raise SkipException(value)
         
@@ -780,14 +804,14 @@ class Mediator:
             stop = iteration.stop
 
             while True:
-                
-                if self.interleaver.default_all is not None and stop is None:
-                    stop = self.interleaver.default_all
 
                 mediator.iteration = i
                 mediator.args = list([mediator.iteration])
 
                 self.register(mediator)
+
+                if self.interleaver.default_all is not None and stop is None:
+                    stop = self.interleaver.default_all
 
                 i += 1
 
