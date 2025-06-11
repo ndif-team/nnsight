@@ -4,7 +4,7 @@ from typing import Optional
 import yaml
 from pydantic import BaseModel
 
-from ..logger import remote_logger
+from ..log import remote_logger
 
 
 class ApiConfigModel(BaseModel):
