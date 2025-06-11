@@ -1,17 +1,21 @@
+import copy
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
+from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from ... import util
 from ..backends.base import Backend
 from ..batching import Batcher
 from ..interleaver import Interleaver
 from .base import ExitTracingException, Tracer
+from .globals import Object
 from .invoker import Invoker
 from .iterator import IteratorProxy
-from .globals import Object
 
 if TYPE_CHECKING:
     from ..envoy import Envoy
@@ -312,3 +316,65 @@ class InterleavingTracer(Tracer):
 
         for mediator in self.mediators:
             mediator.info.frame = frame
+
+
+class ScanningTracer(InterleavingTracer):
+    """
+    A tracer that runs the model in fake tensor mode to validate operations and inspect tensor shapes.
+    
+    This tracer uses PyTorch's FakeTensorMode to run the model without actual computation,
+    allowing for shape validation and operation checking. It populates the _fake_inputs and 
+    _fake_output attributes on each Envoy to store the shapes and types of tensors that would
+    flow through the model during a real forward pass.
+    """
+    
+    def execute(self, fn: Callable):
+        """
+        Execute the model in fake tensor mode.
+        
+        This method:
+        1. Registers forward hooks on all modules to capture fake input/output
+        2. Runs the model in fake tensor mode to validate operations
+        3. Stores the fake inputs/outputs on each Envoy for later inspection
+        
+        Args:
+            fn: The function to execute (typically the model's forward pass)
+        """
+        # Get all Envoys in the model
+        envoys = self.model.modules()
+                        
+        hooks = []
+        
+        # Register hooks on each module to capture shapes
+        for envoy in envoys:
+            def _hook(
+                module: torch.nn.Module,
+                input: Any,
+                input_kwargs: Dict,
+                output: Any,
+                envoy=envoy
+            ):
+                # Store the shapes/types of inputs and outputs on the Envoy
+                envoy._fake_inputs = (input, input_kwargs)
+                envoy._fake_output = output
+                
+            hooks.append(envoy._module.register_forward_hook(
+                _hook, with_kwargs=True
+            ))
+        
+        # Run the model in fake tensor mode
+        with FakeTensorMode(
+            allow_non_fake_inputs=True,  # Allow real tensors as input
+            shape_env=ShapeEnv(assume_static_by_default=True),  # Assume static shapes
+        ) as fake_mode:
+            with FakeCopyMode(fake_mode):
+                # Deep copy batched args/kwargs to avoid modifying originals
+                self.batcher.batched_args = copy.deepcopy(self.batcher.batched_args)
+                self.batcher.batched_kwargs = copy.deepcopy(self.batcher.batched_kwargs)
+        
+                # Execute the model in fake mode
+                super().execute(fn)
+                        
+        # Clean up hooks
+        for hook in hooks:
+            hook.remove()

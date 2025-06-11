@@ -1,10 +1,10 @@
 from types import MethodType
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Optional,
-                    Tuple, Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from accelerate import init_empty_weights
 
+from ...intervention.tracing.tracer import ScanningTracer
 from .. import NNsight
 from .loadable import LoadableMixin
 
@@ -13,16 +13,23 @@ if TYPE_CHECKING:
 else:
     Interleaver = Any
 
+
 class MetaMixin(LoadableMixin):
 
     def __init__(
-        self, *args, dispatch: bool = False, meta_buffers: bool = True, rename: Optional[Dict[str,str]] = None, alias: Optional[Dict[str,str]] = None, **kwargs
+        self,
+        *args,
+        dispatch: bool = False,
+        meta_buffers: bool = True,
+        rename: Optional[Dict[str, str]] = None,
+        alias: Optional[Dict[str, str]] = None,
+        **kwargs,
     ) -> None:
 
         self.dispatched = False
-        
+
         if isinstance(args[0], torch.nn.Module) or dispatch:
-            
+
             self.dispatched = True
 
             super().__init__(*args, rename=rename, alias=alias, **kwargs)
@@ -47,13 +54,13 @@ class MetaMixin(LoadableMixin):
         model = self._load(*self.args, **self.kwargs)
         self._update(model)
         # TODO legacy
-        self.__dict__['_model'] = self._module
+        self.__dict__["_model"] = self._module
 
         self.dispatched = True
 
     def interleave(self, interleaver: Interleaver, fn: Callable, *args, **kwargs):
 
-        if not self.dispatched:
+        if not self.dispatched and not isinstance(interleaver.tracer, ScanningTracer):
             self.dispatch()
 
             if isinstance(fn, torch.nn.Module):
@@ -61,20 +68,21 @@ class MetaMixin(LoadableMixin):
             elif isinstance(fn, MethodType) and fn.__self__ is not None:
                 # Unbind using __func__, then bind to new_instance using __get__
 
-                new_self = self._module if isinstance(fn.__self__, torch.nn.Module) else self
-                
+                new_self = (
+                    self._module if isinstance(fn.__self__, torch.nn.Module) else self
+                )
+
                 fn = fn.__func__.__get__(new_self, type(new_self))
 
         return super().interleave(interleaver, fn, *args, **kwargs)
-    
-    
+
     #### Serialization ####
-    
+
     def __getstate__(self):
         state = super().__getstate__()
-        state['dispatched'] = self.dispatched
+        state["dispatched"] = self.dispatched
         return state
-    
+
     def __setstate__(self, state):
         super().__setstate__(state)
-        self.dispatched = state['dispatched']
+        self.dispatched = state["dispatched"]

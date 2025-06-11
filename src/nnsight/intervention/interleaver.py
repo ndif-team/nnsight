@@ -244,7 +244,6 @@ class Interleaver:
         self.patcher = Patcher(
             [
                 Patch(torch.nn.Module, self.wrap(torch.nn.Module.__call__), "__call__"),
-                Patch(torch.Tensor, self.wrap_grad(), "grad"),
                 Patch(
                     torch.Tensor, self.wrap_backward(torch.Tensor.backward), "backward"
                 ),

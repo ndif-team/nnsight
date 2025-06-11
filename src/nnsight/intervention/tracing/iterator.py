@@ -28,7 +28,8 @@ class IteratorTracer(Invoker):
     def execute(self, fn: Callable):
                 
         mediator = Mediator(fn, self.info)
-                
+        mediator.name = "Iterator" + mediator.name
+        
         self.interleaver.current.iter(mediator, self.iteration)
     
     

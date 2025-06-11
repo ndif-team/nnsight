@@ -8,7 +8,7 @@ from ..._c.py_mount import mount, unmount
 
 class Object(torch.Tensor):
 
-    def save(self):
+    def save(self, _=0):
         """
         Save an object to be accessable after the trace context is exited.
         
