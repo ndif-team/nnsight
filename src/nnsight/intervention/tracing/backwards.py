@@ -27,13 +27,12 @@ class BackwardsTracer(Invoker):
         
         grad_patch = Patch(torch.Tensor, self.interleaver.wrap_grad(), "grad")
         
+        self.interleaver.patcher.add(grad_patch)
+        
         def inner():
-            
-            self.interleaver.patcher.add(grad_patch)
-            
+                        
             self.fn(self.tensor, *self.args, **self.kwargs)
-            
+                        
             grad_patch.restore()
-            
                  
         self.interleaver.current.register(mediator, inner)
