@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import json
-from ..util import WrapperModule
 from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
-    Generic,
     List,
     Optional,
-    Protocol,
     Tuple,
     Type,
     Union,
@@ -32,8 +29,11 @@ from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
 from typing_extensions import Self
 
-from .mixins import RemoteableMixin
 from ..intervention.envoy import Envoy
+from ..intervention.tracing.tracer import InterleavingTracer
+from ..util import WrapperModule
+from .mixins import RemoteableMixin
+
 
 class LanguageModel(RemoteableMixin):
     """LanguageModels are NNsight wrappers around transformers language models.
@@ -58,10 +58,7 @@ class LanguageModel(RemoteableMixin):
 
     """
 
-
     tokenizer: PreTrainedTokenizer
-
-    
 
     def __init__(
         self,
@@ -84,23 +81,20 @@ class LanguageModel(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-        self.generator:Envoy = (
-            WrapperModule()
-        )
-        
-        
+        self.generator: Envoy = WrapperModule()
+
     def __nnsight_generate__(self, *args, **kwargs):
-        
+
         max_new_tokens = kwargs.get("max_new_tokens", None)
-        
+
         if max_new_tokens is not None and self._interleaver is not None:
             self._interleaver.default_all = max_new_tokens
-        
+
         output = self._model.generate(*args, **kwargs)
-        
+
         if self._interleaver is not None:
             self._interleaver.default_all = None
-        
+
         output = self.generator._module(output)
 
         return output
@@ -256,13 +250,13 @@ class LanguageModel(RemoteableMixin):
 
         if batched_inputs is None:
             return (tuple(), prepared_kwargs), len(prepared_kwargs["input_ids"])
-        
+
         batched_inputs = batched_inputs[1]
 
         batched_labels = batched_inputs["labels"]
 
         attention_mask = batched_inputs["attention_mask"]
-        
+
         batched_ids = [
             {"input_ids": ids}
             for ids in [
@@ -271,7 +265,7 @@ class LanguageModel(RemoteableMixin):
             ]
         ]
         new_batched_inputs = self.tokenizer.pad(batched_ids, return_tensors="pt")
-        
+
         labels = prepared_kwargs.get("labels", None)
 
         if labels is not None:
@@ -289,12 +283,14 @@ class LanguageModel(RemoteableMixin):
             new_batched_inputs["attention_mask"][
                 : attention_mask.shape[0], : attention_mask.shape[1]
             ] = attention_mask
-            
-        batched_inputs.pop('input_ids', None)
-        batched_inputs.pop('attention_mask', None)
 
-        return (tuple(), {**new_batched_inputs, **batched_inputs, "labels": batched_labels}), len(prepared_kwargs["input_ids"])
+        batched_inputs.pop("input_ids", None)
+        batched_inputs.pop("attention_mask", None)
 
+        return (
+            tuple(),
+            {**new_batched_inputs, **batched_inputs, "labels": batched_labels},
+        ), len(prepared_kwargs["input_ids"])
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
@@ -315,4 +311,5 @@ if TYPE_CHECKING:
 
     class LanguageModel(GenerationMixin, LanguageModel, PreTrainedModel):
 
-        pass
+        def generate(self, *args, **kwargs) -> Union[InterleavingTracer, Any]:
+            return super().generate(*args, **kwargs)

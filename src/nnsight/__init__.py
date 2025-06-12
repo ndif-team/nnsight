@@ -30,4 +30,21 @@ from .intervention.tracing.base import Tracer
 def session(*args, **kwargs):
     return Tracer(*args, **kwargs)
 
+from .util import Patcher, Patch
+
 #TODO legacy stuff like nnsight.list
+
+DEFAULT_PATCHER = Patcher()
+
+# Tensor creation operations
+from torch._subclasses.fake_tensor import FakeTensor
+
+
+def fake_bool(self):
+    return True
+
+
+DEFAULT_PATCHER.add(Patch(FakeTensor, fake_bool, "__bool__"))
+
+
+DEFAULT_PATCHER.__enter__()

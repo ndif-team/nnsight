@@ -1,9 +1,8 @@
-import ast
 from typing import Callable, TYPE_CHECKING, Any
 import torch
 from .invoker import Invoker
 
-from .util import try_catch
+from ...util import Patch
 from ..interleaver import Mediator
 
 if TYPE_CHECKING:
@@ -24,5 +23,16 @@ class BackwardsTracer(Invoker):
     def execute(self, fn: Callable):
                 
         mediator = Mediator(fn, self.info) 
+        mediator.name = "Backwards" + mediator.name
+        
+        grad_patch = Patch(torch.Tensor, self.interleaver.wrap_grad(), "grad")
+        
+        self.interleaver.patcher.add(grad_patch)
+        
+        def inner():
+                        
+            self.fn(self.tensor, *self.args, **self.kwargs)
+                        
+            grad_patch.restore()
                  
-        self.interleaver.current.register(mediator, lambda: self.fn(self.tensor, *self.args, **self.kwargs))
+        self.interleaver.current.register(mediator, inner)

@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
     "transformers",
     "astor", 
+    "dill",
     "python-socketio[client]",
     "pydantic>=2.9.0",
     "torch>=2.4.0",

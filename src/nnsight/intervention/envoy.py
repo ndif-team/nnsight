@@ -8,14 +8,14 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
 import torch
 
 from .. import util
-from ..util import apply
+from ..util import apply, fetch_attr
 from .batching import Batchable
 from .inject import convert as inject
 from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
-from .tracing.tracer import InterleavingTracer
+from .tracing.tracer import InterleavingTracer, ScanningTracer
 
 if TYPE_CHECKING:
     from .interleaver import Interleaver
@@ -47,7 +47,7 @@ class Envoy(Batchable):
         self,
         module: torch.nn.Module,
         interleaver: Optional[Interleaver] = None,
-        path: Optional[str] = "",
+        path: Optional[str] = "model",
         rename: Optional[Dict[str, str]] = None,
         alias: Optional[Dict[str, str]] = None,
     ) -> None:
@@ -75,6 +75,9 @@ class Envoy(Batchable):
         self._default_mediators: List[List[str]] = []
 
         self._children: List[Envoy] = []
+        
+        self._fake_inputs = inspect._empty
+        self._fake_output = inspect._empty
 
         if alias is None:
             alias = {}
@@ -102,7 +105,7 @@ class Envoy(Batchable):
     @property
     def interleaving(self) -> bool:
         """
-        Check if the Envoy is currentlyi nterleaving.
+        Check if the Envoy is currently nterleaving.
 
         Returns:
             True if the Envoy is interleaving, False otherwise
@@ -128,10 +131,16 @@ class Envoy(Batchable):
         Returns:
             The module's output values
         """
+        
+        if self.interleaving:
 
-        return self._interleaver.current.request(
-            self._interleaver.current.iterate(f"{self.path}.output")
-        )
+            return self._interleaver.current.request(
+                self._interleaver.current.iterate(f"{self.path}.output")
+            )
+        elif self._fake_output is not inspect._empty:
+            return self._fake_output
+        else:
+            raise ValueError("Cannot return output of Envoy that is not interleaving nor has a fake output set.")
 
     @output.setter
     def output(self, value: Any):
@@ -149,9 +158,13 @@ class Envoy(Batchable):
         Args:
             value: The new output value to use.
         """
-        self._interleaver.current.swap(
-            self._interleaver.current.iterate(f"{self.path}.output"), value
-        )
+        if self.interleaving:
+            self._interleaver.current.swap(
+                self._interleaver.current.iterate(f"{self.path}.output"), value
+            )
+
+        else:
+            raise ValueError("Cannot set output of Envoy that is not interleaving.")
 
     @property
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
@@ -170,9 +183,14 @@ class Envoy(Batchable):
             The module's input values as a tuple of positional and keyword arguments. i.e (args, kwargs)
             
         """
-        return self._interleaver.current.request(
-            self._interleaver.current.iterate(f"{self.path}.input")
-        )
+        if self.interleaving:
+            return self._interleaver.current.request(
+                self._interleaver.current.iterate(f"{self.path}.input")
+            )
+        elif self._fake_inputs is not inspect._empty:
+            return self._fake_inputs
+        else:
+            raise ValueError("Cannot return inputs of Envoy that is not interleaving nor has a fake inputs set.")
 
     @inputs.setter
     def inputs(self, value: Any):
@@ -190,9 +208,12 @@ class Envoy(Batchable):
         Args:
             value: The new input value(s) to use, structured as a tuple of (args, kwargs)
         """
-        self._interleaver.current.swap(
-            self._interleaver.current.iterate(f"{self.path}.input"), value
-        )
+        if self.interleaving:
+            self._interleaver.current.swap(
+                self._interleaver.current.iterate(f"{self.path}.input"), value
+            )
+        else:
+            raise ValueError("Cannot set inputs of Envoy that is not interleaving.")
 
     @property
     def input(self) -> Object:
@@ -370,7 +391,41 @@ class Envoy(Batchable):
             kwargs['hook'] = True
         
         return InterleavingTracer(fn, self, *args, **kwargs)
+    
+    def scan(self, *args, **kwargs):
+        """
+        Just like .trace() but runs the model in fake tensor mode to validate operations and inspect tensor shapes.
 
+        This method returns a tracer that runs the model in fake tensor mode to validate operations 
+        and inspect tensor shapes without performing actual computation. This is useful for:
+        - Validating that operations will work with given input shapes
+        - Inspecting the shapes and types of tensors that would flow through the model
+        - Debugging shape mismatches or other tensor-related issues.
+        
+        Note this will not dispatch the model if not dispatched.
+        
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> # Value error as the fake inputs and outputs have not been scanned in. 
+            >>> print(model.transformer.h[0].mlp.output.shape)
+            >>> # Scan the model to validate operations and inspect shapes
+            >>> with model.scan("Hello World"):
+            >>>     # Access fake inputs/outputs to inspect shapes
+            >>>     attn_input = model.transformer.h[0].attn.input.save()
+            >>>     attn_output = model.transformer.h[0].attn.output[0].save()
+            >>> print(f"Attention input shape: {attn_input.shape}")
+            >>> print(f"Attention output shape: {attn_output.shape}")
+            >>> print(model.transformer.h[0].mlp.output.shape)
+
+        Args:
+            *args: Arguments to pass to the tracer
+            **kwargs: Keyword arguments to pass to the tracer
+
+        Returns:
+            A ScanningTracer for this module
+        """
+        return ScanningTracer(self.__call__, self, *args, hook=True, **kwargs)
+    
     def edit(self, *, inplace: bool = False):
         """
         Create an editing tracer for this module. Allows for setting default interventions.
@@ -694,7 +749,7 @@ class Envoy(Batchable):
         Returns:
             A string representation of the Envoy showing its path
         """
-        # TODO custom
+        # TODO custom using renaming
         return str(self._module)
 
     def __repr__(self):
@@ -722,9 +777,9 @@ class Envoy(Batchable):
         Raises:
             AttributeError: If the attribute doesn't exist
         """
-
+        
         if self._alias is not None and name in self._alias:
-            return getattr(self, self._alias[name])
+            return fetch_attr(self, self._alias[name])
 
         if hasattr(self._module, name):
             value = getattr(self._module, name)
@@ -764,6 +819,30 @@ class Envoy(Batchable):
             self._add_envoy(value, key)
         else:
             super().__setattr__(key, value)
+            
+    #### Serialization ####
+    
+    def __getstate__(self):
+        return {
+            "module": self._module,
+            "path": self.path,
+            "alias": self._alias,
+            "children": self._children,
+        }
+    
+    def __setstate__(self, state):
+        
+        self._module = state["module"]
+        self.path = state["path"]
+        self._alias = state["alias"]
+        self._children = state["children"]
+        
+        self._source = None
+        self._interleaver = None
+        self._default_mediators = []
+        
+        self._fake_inputs = inspect._empty
+        self._fake_output = inspect._empty
 
 
 # TODO extend Envoy
