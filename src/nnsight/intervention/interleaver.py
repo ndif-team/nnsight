@@ -65,7 +65,7 @@ class Interleaver:
     modification of intermediate values.
     """
 
-    def __init__(self, invokers: List[Mediator], tracer: InterleavingTracer, batcher: Batcher = None) -> None:
+    def __init__(self, invokers: List[Mediator], tracer: InterleavingTracer, batcher: Batcher = None, user_cache: Optional[Cache] = None) -> None:
         """
         Initialize an Interleaver with mediators.
 
@@ -82,6 +82,8 @@ class Interleaver:
 
         self.state = dict()
         self.iteration_tracker = defaultdict(int)
+
+        self.user_cache: Optional[Cache] = user_cache
         
         #TODO legacy?
         self.default_all = None
@@ -348,6 +350,9 @@ class Interleaver:
         value = self.batcher.current_value
         
         self.batcher.current_value = old
+
+        if self.user_cache is not None:
+            self.user_cache.add(provider, value)
             
         return value
 
@@ -509,7 +514,12 @@ class Mediator:
             elif event == Events.EXCEPTION:
                 process = self.handle_exception_event(data)
             elif event == Events.SKIP:
-                process = self.handle_skip_event(provider, *data)
+                try:
+                    process = self.handle_skip_event(provider, *data)
+                except SkipException as e:
+                    if self.user_cache is not None:
+                        self.user_cache.add(provider, e.value)
+                    raise e
             elif event == Events.END:
                 process = False
             elif event == Events.CONTINUE:
@@ -521,7 +531,7 @@ class Mediator:
         # TODO maybe move this to the interleaver to cache the pre-iteration provider
         if self.user_cache is not None and provider is not None:
 
-            self.user_cache.add(provider, self.interleaver.batcher.current_value)
+            self.user_cache.add(provider, self.interleaver.batcher.narrow(self.batch_group, self.interleaver.batcher.current_value))
                         
     def handle_end_event(self):
         """
