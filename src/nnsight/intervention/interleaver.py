@@ -130,13 +130,14 @@ class Interleaver:
 
         return inner
 
-    def wrap_operation(self, fn: Callable, name: str):
+    def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
         Wrap an operation to intercept inputs and outputs for intervention.
 
         Args:
             fn: The function to wrap
             name: The name of the operation
+            bound_obj: The object fn is bound to if it is a method
 
         Returns:
             A wrapped version of the function
@@ -151,7 +152,10 @@ class Interleaver:
 
             args, kwargs = self.handle(f"{name}.input", (args, kwargs))
 
-            value = fn(*args, **kwargs)
+            if not inspect.ismethod(fn) and bound_obj is not None:
+                value = fn(bound_obj, *args, **kwargs)
+            else:
+                value = fn(*args, **kwargs)
 
             value = self.handle(f"{name}.output", value)
 
@@ -435,6 +439,7 @@ class Mediator:
         self.state = None
 
         if self.thread is not None and self.thread.is_alive():
+            # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
 
     def handle(self, provider: Optional[Any] = None):

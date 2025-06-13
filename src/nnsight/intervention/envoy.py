@@ -334,8 +334,11 @@ class Envoy(Batchable):
         if self._source is None:
 
             def wrap(fn: Callable, **kwargs):
+
+                bound_obj = fn.__self__ if inspect.ismethod(fn) and fn.__name__ != "forward" else None
+
                 if self.interleaving:
-                    return self._interleaver.wrap_operation(fn, **kwargs)
+                    return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
                 else:
                     return fn
 
@@ -850,7 +853,7 @@ class OperationEnvoy:
 
         self._interleaver = interleaver
 
-        self._source = None
+        self._source:EnvoySource = None
 
     def __str__(self):
         """
@@ -993,18 +996,23 @@ class OperationEnvoy:
             An EnvoySource object containing the operation's source code and nested operations
         """
 
-        fn = self._interleaver.current.request(f"{self.name}.fn")
 
-        def wrap(fn: Callable, **kwargs):
-            return self._interleaver.wrap_operation(fn, **kwargs)
+        if self._source is None:
+            fn = self._interleaver.current.request(f"{self.name}.fn")
 
-        source, line_numbers, fn = inject(fn, wrap, self.name)
+            def wrap(fn: Callable, **kwargs):
 
-        self._source = EnvoySource(
-            self.name, source, line_numbers, interleaver=self._interleaver
-        )
+                bound_obj = fn.__self__ if fn.__name__ != "forward" and inspect.ismethod(fn) else None
 
-        self._interleaver.current.swap(f"{self.name}.fn", fn)
+                return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
+
+            source, line_numbers, fn = inject(fn, wrap, self.name)
+
+            self._source = EnvoySource(
+                self.name, source, line_numbers, interleaver=self._interleaver
+            )
+
+            self._interleaver.current.swap(f"{self.name}.fn", fn)
 
         return self._source
 
@@ -1027,6 +1035,9 @@ class OperationEnvoy:
             interleaver: The interleaver to use for managing execution flow
         """
         self._interleaver = interleaver
+        
+        if self._source is not None:
+            self._source._set_interleaver(interleaver)
 
     def _clear(self):
         """
@@ -1067,7 +1078,7 @@ class EnvoySource:
         self.source = source
         self.line_numbers = line_numbers
 
-        self.operations = []
+        self.operations:List[OperationEnvoy] = []
 
         for _name, line_number in line_numbers.items():
             operation = OperationEnvoy(
