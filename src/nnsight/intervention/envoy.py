@@ -70,6 +70,7 @@ class Envoy(Batchable):
 
         self._source = None
 
+        #TODO interleaver by reference
         self._interleaver = interleaver
 
         self._default_mediators: List[List[str]] = []
