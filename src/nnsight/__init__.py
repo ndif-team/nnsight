@@ -83,12 +83,17 @@ def autoamp_init_wrapper(fn):
     
     @wraps(fn)
     def inner(self, device_type, dtype=None, **kwargs):
-        
+
+        _final_kwargs = kwargs.copy()
         if device_type == "meta":
-            dtype = torch.get_autocast_cpu_dtype()
-            
-        return fn(self, device_type, dtype, **kwargs)
-    
+            _final_kwargs['dtype'] = torch.get_autocast_dtype('cpu')
+        # Include dtype in _final_kwargs if it's not None
+        elif dtype is not None:
+            _final_kwargs['dtype'] = dtype
+
+        # Maintain compatibility with torch.autocast.__init__() signature.
+        return fn(self, device_type, **_final_kwargs)
+
     return inner
 
 DEFAULT_PATCHER.add(
