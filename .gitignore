@@ -3,7 +3,13 @@ dist/
 public/
 *.egg-info/
 .installed.cfg
+
+# IDEs and Editors
+## VSCode
 .vscode
+# JetBrains IDEs
+.idea
+
 __pycache__/
 .DS_Store
 **/.DS_Store
