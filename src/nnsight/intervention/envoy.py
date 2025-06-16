@@ -70,6 +70,7 @@ class Envoy(Batchable):
 
         self._source = None
 
+        #TODO interleaver by reference
         self._interleaver = interleaver
 
         self._default_mediators: List[List[str]] = []
@@ -819,30 +820,6 @@ class Envoy(Batchable):
             self._add_envoy(value, key)
         else:
             super().__setattr__(key, value)
-            
-    #### Serialization ####
-    
-    def __getstate__(self):
-        return {
-            "module": self._module,
-            "path": self.path,
-            "alias": self._alias,
-            "children": self._children,
-        }
-    
-    def __setstate__(self, state):
-        
-        self._module = state["module"]
-        self.path = state["path"]
-        self._alias = state["alias"]
-        self._children = state["children"]
-        
-        self._source = None
-        self._interleaver = None
-        self._default_mediators = []
-        
-        self._fake_inputs = inspect._empty
-        self._fake_output = inspect._empty
 
 
 # TODO extend Envoy
@@ -877,7 +854,7 @@ class OperationEnvoy:
 
         self._interleaver = interleaver
 
-        self._source = None
+        self._source:EnvoySource = None
 
     def __str__(self):
         """
@@ -1026,7 +1003,7 @@ class OperationEnvoy:
 
             def wrap(fn: Callable, **kwargs):
 
-                bound_obj = fn.__self__ if fn.__name__ is not "forward" and inspect.ismethod(fn) else None
+                bound_obj = fn.__self__ if fn.__name__ != "forward" and inspect.ismethod(fn) else None
 
                 return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
 
@@ -1059,6 +1036,9 @@ class OperationEnvoy:
             interleaver: The interleaver to use for managing execution flow
         """
         self._interleaver = interleaver
+        
+        if self._source is not None:
+            self._source._set_interleaver(interleaver)
 
     def _clear(self):
         """
@@ -1099,7 +1079,7 @@ class EnvoySource:
         self.source = source
         self.line_numbers = line_numbers
 
-        self.operations = []
+        self.operations:List[OperationEnvoy] = []
 
         for _name, line_number in line_numbers.items():
             operation = OperationEnvoy(
