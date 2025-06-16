@@ -859,7 +859,7 @@ def test_iter_and_skip(gpt2: nnsight.LanguageModel):
 @pytest.mark.cache
 def test_cache(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.trace(MSG_prompt) as tracer:
-        cache = tracer.cache().save()
+        cache = tracer.cache()
 
     assert torch.equal(cache['model.transformer.h.0'].output[0], cache['model.transformer.h.1'].inputs[0][0])
 
@@ -868,7 +868,7 @@ def test_cache(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 @pytest.mark.cache
 def test_cache_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
-        cache = tracer.cache().save()
+        cache = tracer.cache()
 
     assert len(cache['model.transformer.h.0.attn.c_attn']) == 3
 
@@ -877,7 +877,7 @@ def test_cache_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 @pytest.mark.cache
 def test_cache_with_intervention(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.trace(MSG_prompt) as tracer:
-        cache = tracer.cache().save() # the cache needs to be called first
+        cache = tracer.cache() # the cache needs to be called first
         gpt2.transformer.h[0].attn.c_attn.output = torch.zeros_like(gpt2.transformer.h[0].attn.c_attn.output)
 
     assert torch.all(cache['model.transformer.h.0.attn.c_attn'].output == 0)
@@ -887,7 +887,7 @@ def test_cache_with_intervention(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 @pytest.mark.cache
 def test_cache_all_invokers_outside(gpt2: nnsight.LanguageModel, MSG_prompt: str, ET_prompt: str):
     with gpt2.trace() as tracer:
-        cache = tracer.cache().save()
+        cache = tracer.cache()
         with tracer.invoke(MSG_prompt):
             attn_out = gpt2.transformer.h[0].attn.c_attn.output.cpu().save()
 
@@ -902,13 +902,13 @@ def test_cache_all_invokers_outside(gpt2: nnsight.LanguageModel, MSG_prompt: str
 @pytest.mark.cache
 def test_cache_all_invokers(gpt2: nnsight.LanguageModel, MSG_prompt: str, ET_prompt: str):
     with gpt2.trace() as tracer:
-        cache = tracer.cache().save()
+        cache = tracer.cache()
         with tracer.invoke(MSG_prompt):
-            cache_MSG = tracer.cache().save()
+            cache_MSG = tracer.cache()
             attn_out = gpt2.transformer.h[0].attn.c_attn.output.cpu().save()
 
         with tracer.invoke(ET_prompt):
-            cache_ET = tracer.cache().save()
+            cache_ET = tracer.cache()
             attn_out_2 = gpt2.transformer.h[0].attn.c_attn.output.cpu().save()
 
     assert not torch.equal(attn_out, attn_out_2)
@@ -927,7 +927,7 @@ def test_cache_single_invoker(gpt2: nnsight.LanguageModel, MSG_prompt: str, ET_p
             pass
 
         with tracer.invoke(ET_prompt):
-            cache = tracer.cache().save()
+            cache = tracer.cache()
             attn_out = gpt2.transformer.h[0].attn.c_attn.output.cpu().save()
 
     assert torch.equal(cache['model.transformer.h.0.attn.c_attn'].output[0], attn_out[0])
@@ -938,7 +938,7 @@ def test_cache_single_invoker(gpt2: nnsight.LanguageModel, MSG_prompt: str, ET_p
 def test_cache_after_some_point(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.trace(MSG_prompt) as tracer:
         gpt2.transformer.h[1].attn.c_attn.output = torch.zeros_like(gpt2.transformer.h[1].attn.c_attn.output)
-        cache = tracer.cache().save()
+        cache = tracer.cache()
 
     assert 'model.transformer.h.0' not in cache
     assert cache['model.transformer'].inputs is None
@@ -950,7 +950,7 @@ def test_cache_after_some_point(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 @pytest.mark.cache
 def test_cache_skip(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.trace(MSG_prompt) as tracer:
-        cache = tracer.cache().save()
+        cache = tracer.cache()
         out = gpt2.transformer.h[0].output.save()
         gpt2.transformer.h[1].skip(gpt2.transformer.h[0].output)
 
@@ -961,7 +961,7 @@ def test_cache_skip(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 @pytest.mark.cache
 def test_cache_some_modules(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.trace(MSG_prompt) as tracer:
-        cache = tracer.cache(modules=['model.transformer.h.0', 'model.transformer.h.1', 'model.transformer.h.2']).save()
+        cache = tracer.cache(modules=['model.transformer.h.0', 'model.transformer.h.1', 'model.transformer.h.2'])
 
     assert len(cache.keys()) == 3
     assert torch.equal(cache['model.transformer.h.0'].output[0], cache['model.transformer.h.1'].inputs[0][0])
@@ -971,7 +971,7 @@ def test_cache_some_modules(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 @pytest.mark.cache
 def test_cache_some_modules_2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.trace(MSG_prompt) as tracer:
-        cache = tracer.cache(modules=[module for module in gpt2.transformer.h]).save()
+        cache = tracer.cache(modules=[module for module in gpt2.transformer.h])
 
     assert len(cache.keys()) == 12
     assert torch.equal(cache['model.transformer.h.0'].output[0], cache['model.transformer.h.1'].inputs[0][0])
@@ -981,10 +981,13 @@ def test_cache_some_modules_2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 @pytest.mark.cache
 def test_cache_some_modules_generation(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(MSG_prompt, max_new_tokens=2) as tracer:
-        cache = tracer.cache(modules=['model.transformer.h.0', 'model.transformer.h.1', 'model.transformer.h.2']).save()
+        cache = tracer.cache(modules=['model.transformer.h.0', 'model.transformer.h.1', 'model.transformer.h.2'])
 
     assert len(cache.keys()) == 3
     assert len(cache['model.transformer.h.0']) == 2
+
+
+######################### RENAME #################################
 
 
 @pytest.mark.rename

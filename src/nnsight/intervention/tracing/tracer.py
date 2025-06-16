@@ -65,7 +65,7 @@ class Cache:
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
 
-        self.cache = {}
+        self.cache = dict().save()
 
     def add(self, provider: str, value: Any):
         """
