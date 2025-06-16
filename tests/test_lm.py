@@ -438,6 +438,48 @@ def test_input_setting(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert prediction_1 == prediction_2
 
 
+######################### SCAN #################################
+
+
+@pytest.mark.scan
+@torch.no_grad()
+def test_scan(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.scan(MSG_prompt):
+        attn_input = gpt2.transformer.h[0].attn.input.save()
+        attn_output = gpt2.transformer.h[0].attn.output[0].save()
+
+
+    assert isinstance(attn_input, torch._subclasses.fake_tensor.FakeTensor)
+    assert isinstance(attn_output, torch._subclasses.fake_tensor.FakeTensor)
+    assert attn_input.shape == (1, 9, 768)
+    assert attn_output.shape == (1, 9, 768)
+    assert gpt2.transformer.h[1].output[0].shape == (1, 9, 768)
+
+
+@pytest.mark.scan
+@torch.no_grad()
+def test_scan_error(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.scan(MSG_prompt):
+        gpt2.transformer.h[0].mlp.c_proj.output = torch.ones(1, 1, 768).to(gpt2.device)
+        out = gpt2.transformer.h[0].mlp.c_proj.output.save()
+
+    assert out.shape == (1, 1, 768)
+    assert gpt2.transformer.h[1].output[0].shape == (1, 9, 768)
+
+
+@pytest.mark.scan
+@torch.no_grad()
+def test_scan_undispatched(MSG_prompt: str):
+
+    gpt2_undispatched = nnsight.LanguageModel("openai-community/gpt2")
+
+    with gpt2_undispatched.scan(MSG_prompt):
+        pass
+
+    assert gpt2_undispatched.dispatched == False
+    assert gpt2_undispatched.transformer.h[1].output[0].shape == (1, 9, 768)
+
+
 ######################### ORDER #################################
 
 
@@ -945,12 +987,60 @@ def test_cache_some_modules_generation(gpt2: nnsight.LanguageModel, MSG_prompt: 
     assert len(cache['model.transformer.h.0']) == 2
 
 
-# # TODO - test this
-# @torch.no_grad()
-# @pytest.mark.cache
-# def test_cache_with_renaming(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-#     with gpt2.generate(MSG_prompt, max_new_tokens=2) as tracer:
-#         cache = tracer.cache(modules=['model.transformer.h.0', 'model.transformer.h.1', 'model.transformer.h.2']).save()
+@pytest.mark.rename
+@torch.no_grad()
+def test_rename_module(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={"mlp": "my_mlp"})
+
+    with gpt2.trace(MSG_prompt):
+        mlp_out_0 = gpt2.transformer.h[0].mlp.output.save()
+        mlp_out_1 = gpt2.transformer.h[1].my_mlp.output.save()
+
+    assert mlp_out_0 is not None
+    assert mlp_out_1 is not None
+
+
+@pytest.mark.rename
+@torch.no_grad()
+def test_rename_path(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={"transformer.h.3.mlp": "my_mlp"})
+
+    with gpt2.trace(MSG_prompt):
+        mlp_out_0 = gpt2.transformer.h[0].mlp.output.save()
+        mlp_out_3 = gpt2.transformer.h[3].mlp.output.save()
+        my_mlp_out_3 = gpt2.my_mlp.output.save()
+        mlp_out_5 = gpt2.transformer.h[5].mlp.output.save()
+
+    assert mlp_out_0 is not None
+    assert mlp_out_3 is not None
+    assert my_mlp_out_3 is not None and torch.equal(mlp_out_3, my_mlp_out_3)
+    assert mlp_out_5 is not None
+
+
+@pytest.mark.rename
+@torch.no_grad()
+def test_rename_module_list(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={".h": "layers"})
+
+    with gpt2.trace(MSG_prompt):
+        mlp_out_0 = gpt2.transformer.layers[0].mlp.output.save()
+        mlp_out_1 = gpt2.transformer.layers[1].mlp.output.save()
+
+    assert mlp_out_0 is not None
+    assert mlp_out_1 is not None
+
+
+@pytest.mark.rename
+@torch.no_grad()
+def test_rename_module_list_path(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={"transformer.h": "layers"})
+
+    with gpt2.trace(MSG_prompt):
+        mlp_out_0 = gpt2.layers[0].mlp.output.save()
+        mlp_out_1 = gpt2.layers[1].mlp.output.save()
+
+    assert mlp_out_0 is not None
+    assert mlp_out_1 is not None
 
 
 ######################### PARAMETER #################################
