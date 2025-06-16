@@ -3,17 +3,18 @@ import nnsight
 import torch
 from typing import TYPE_CHECKING
 
-pytest.skip("Skipping VLLM tests", allow_module_level=True)
+try:
+    from nnsight.modeling.vllm import VLLM
+except:
+    pytest.skip("Skipping VLLM tests", allow_module_level=True)
 
-from nnsight.tracing.backends import Backend
-from nnsight.tracing.protocols import StopProtocol
+pytest.skip("Skipping VLLM tests", allow_module_level=True)
 
 if TYPE_CHECKING:
     from nnsight.tracing.graph import Graph
 
-# try:
-#     from nnsight.modeling.vllm import VLLM
-# except:
+from nnsight.tracing.backends import Backend
+from nnsight.tracing.protocols import StopProtocol
 
 class AssertSavedLenBackend(Backend):
     
