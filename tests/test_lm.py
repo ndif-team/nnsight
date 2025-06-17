@@ -1041,6 +1041,29 @@ def test_multiple_caches_with_multiple_invokers(gpt2: nnsight.LanguageModel, MSG
     assert 'model.transformer.h.0.mlp' in mlp_cache and 'model.transformer.h.0.attn' not in mlp_cache
 
 
+@torch.no_grad()
+@pytest.mark.cache
+def test_cache_attribute_access(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(MSG_prompt) as tracer:
+        modules = [layer for layer in gpt2.transformer.h] + [gpt2.lm_head]
+        cache = tracer.cache(modules=modules)
+
+    assert len(cache) == 13
+    assert cache['model.transformer.h.0'].output is not None
+    assert cache.model.transformer.h[0].output is not None
+    assert torch.equal(cache['model.transformer.h.0'].output[0], cache.model.transformer.h[0].output[0])
+    assert cache.model.lm_head.output is not None
+
+    with pytest.raises(IndexError):
+        cache.model.transformer.h[12]
+
+    with pytest.raises(AttributeError):
+        cache.model.transformer.h[0].mlp
+
+    with pytest.raises(KeyError):
+        cache.model.transformer[0]
+
+
 ######################### RENAME #################################
 
 
