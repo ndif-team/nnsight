@@ -172,7 +172,7 @@ class InterleavingTracer(Tracer):
 
         self.batcher = Batcher(**kwargs)
 
-        self.user_cache: Optional[Cache] = None
+        self.user_cache: List[Cache] = list()
 
         super().__init__(*args, backend=backend)
 
@@ -300,18 +300,15 @@ class InterleavingTracer(Tracer):
         """
 
         if self.model._interleaver is None:
-            if self.user_cache is None:
-                self.user_cache = Cache(modules, device, dtype, detach, include_output, include_inputs)
+            self.user_cache.append(Cache(modules, device, dtype, detach, include_output, include_inputs))
 
-            return self.user_cache.cache
-            
+            return self.user_cache[-1].cache
 
-        if self.model._interleaver.current.user_cache is None:
-            self.model._interleaver.current.set_user_cache(
-                Cache(modules, device, dtype, detach, include_output, include_inputs)
-            )
+        self.model._interleaver.current.set_user_cache(
+            Cache(modules, device, dtype, detach, include_output, include_inputs)
+        )
 
-        return self.model._interleaver.current.user_cache.cache
+        return self.model._interleaver.current.user_cache[-1].cache
 
     ### Serialization ###
 
