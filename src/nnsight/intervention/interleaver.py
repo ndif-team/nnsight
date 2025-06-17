@@ -351,8 +351,9 @@ class Interleaver:
         
         self.batcher.current_value = old
 
-        if self.user_cache is not None:
-            self.user_cache.add(provider, value)
+        if len(self.user_cache) > 0:
+            for cache in self.user_cache:
+                cache.add(provider, value)
             
         return value
 
@@ -410,7 +411,7 @@ class Mediator:
         self.interleaver = None
         self.child: Mediator = None
         self.history = set()
-        self.user_cache: "Cache" = None
+        self.user_cache: List["Cache"] = list()
         self.iteration = 0
 
         self.args = list()
@@ -517,8 +518,9 @@ class Mediator:
                 try:
                     process = self.handle_skip_event(provider, *data)
                 except SkipException as e:
-                    if self.user_cache is not None:
-                        self.user_cache.add(provider, e.value)
+                    if len(self.user_cache) > 0:
+                        for cache in self.user_cache:
+                            cache.add(provider, e.value)
                     raise e
             elif event == Events.END:
                 process = False
@@ -529,9 +531,10 @@ class Mediator:
             self.handle_end_event()
 
         # TODO maybe move this to the interleaver to cache the pre-iteration provider
-        if self.user_cache is not None and provider is not None:
+        if len(self.user_cache) > 0 and provider is not None:
 
-            self.user_cache.add(provider, self.interleaver.batcher.narrow(self.batch_group, self.interleaver.batcher.current_value))
+            for cache in self.user_cache:
+                cache.add(provider, self.interleaver.batcher.narrow(self.batch_group, self.interleaver.batcher.current_value))
                         
     def handle_end_event(self):
         """
@@ -878,7 +881,7 @@ class Mediator:
             cache: The cache to set
         """
 
-        self.user_cache = cache
+        self.user_cache.append(cache)
 
     ### Serialization ###
 

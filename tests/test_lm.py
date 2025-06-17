@@ -1009,6 +1009,38 @@ def test_cache_some_modules_generation(gpt2: nnsight.LanguageModel, MSG_prompt: 
     assert len(cache['model.transformer.h.0']) == 2
 
 
+@torch.no_grad()
+@pytest.mark.cache
+def test_multiple_caches(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(MSG_prompt) as tracer:
+        attn_cache = tracer.cache(modules=[layer.attn for layer in gpt2.transformer.h])
+        mlp_cache = tracer.cache(modules=[layer.mlp for layer in gpt2.transformer.h])
+
+    assert len(attn_cache.keys()) == 12
+    assert len(mlp_cache.keys()) == 12
+    assert 'model.transformer.h.0.attn' in attn_cache and 'model.transformer.h.0.mlp' not in attn_cache
+    assert 'model.transformer.h.0.mlp' in mlp_cache and 'model.transformer.h.0.attn' not in mlp_cache
+
+
+@torch.no_grad()
+@pytest.mark.cache
+def test_multiple_caches_with_multiple_invokers(gpt2: nnsight.LanguageModel, MSG_prompt: str, ET_prompt: str):
+    with gpt2.trace() as tracer:
+        attn_cache = tracer.cache(modules=[layer.attn for layer in gpt2.transformer.h])
+        mlp_cache = tracer.cache(modules=[layer.mlp for layer in gpt2.transformer.h])
+
+        with tracer.invoke(MSG_prompt):
+            pass
+
+        with tracer.invoke(ET_prompt):
+            pass
+
+    assert len(attn_cache.keys()) == 12
+    assert len(mlp_cache.keys()) == 12
+    assert 'model.transformer.h.0.attn' in attn_cache and 'model.transformer.h.0.mlp' not in attn_cache
+    assert 'model.transformer.h.0.mlp' in mlp_cache and 'model.transformer.h.0.attn' not in mlp_cache
+
+
 ######################### RENAME #################################
 
 
