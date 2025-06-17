@@ -241,6 +241,7 @@ def wrap_exception(exception:Exception, info:"Tracer.Info"):
         
     Returns:
         A wrapped exception with enhanced traceback information
+
     """
 
     if isinstance(exception, ExceptionWrapper):

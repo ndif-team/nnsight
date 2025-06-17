@@ -1,6 +1,7 @@
 from typing import Callable, TYPE_CHECKING, Any, Union
 from .invoker import Invoker
 from ..interleaver import Mediator
+from .util import try_catch
 
 if TYPE_CHECKING:
     from .tracer import InterleavingTracer
@@ -24,6 +25,28 @@ class IteratorTracer(Invoker):
         
         self.iteration = iteration
         
+    def compile(self):
+        """
+        Compile the captured source code as a callable function.
+
+        Wraps the captured code in a function definition that accepts the
+        necessary context parameters for execution.
+
+        Returns:
+            A callable function that executes the captured code block
+        """
+
+        iteration_var_name = self.info.node.items[0].optional_vars.id if self.info.node.items[0].optional_vars is not None else "__nnsight_iteration__"
+
+        # Wrap the captured code in a function definition with appropriate parameters
+        self.info.source = [
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {self.tracer.model_var_name if self.tracer is not None else '__nnsight_model__'}, {self.tracer.tracer_var_name if self.tracer is not None else '__nnsight_tracer__'}, {iteration_var_name}):\n",
+            *try_catch(
+                self.info.source,
+                exception_source=["__nnsight_mediator__.exception(exception)\n"],
+                else_source=["__nnsight_mediator__.end()\n"],
+            ),
+        ]
         
     def execute(self, fn: Callable):
                 

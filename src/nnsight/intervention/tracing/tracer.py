@@ -87,6 +87,8 @@ class Cache:
         if key not in ("input", "output"):
             return
 
+        key = "inputs" if key == "input" else key
+
         if ".source." in module_path:
             return
 
@@ -104,7 +106,7 @@ class Cache:
             value = util.apply(value, lambda x: x.to(self.dtype), torch.Tensor)
 
         if module_path not in self.cache:
-            self.cache[module_path] = Cache.Entry(inputs=value)
+            self.cache[module_path] = Cache.Entry(**{key: value})
         else:
 
             if isinstance(self.cache[module_path], Cache.Entry):
@@ -150,6 +152,8 @@ class InterleavingTracer(Tracer):
         self.mediators: List[Mediator] = []
 
         self.batcher = Batcher(**kwargs)
+
+        self.user_cache: Optional[Cache] = None
 
         super().__init__(*args, backend=backend)
 
@@ -214,7 +218,7 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        interleaver = Interleaver(self.mediators, self, batcher=self.batcher)
+        interleaver = Interleaver(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
 
         try:
             self.model.interleave(interleaver, self.fn, *args, **kwargs)
@@ -271,6 +275,14 @@ class InterleavingTracer(Tracer):
         Returns:
             A dictionary containing the cached values
         """
+
+        if self.model._interleaver is None:
+            if self.user_cache is None:
+                self.user_cache = Cache(modules, device, dtype, detach)
+
+            return self.user_cache.cache
+            
+
         if self.model._interleaver.current.user_cache is None:
             self.model._interleaver.current.set_user_cache(
                 Cache(modules, device, dtype, detach)
