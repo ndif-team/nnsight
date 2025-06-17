@@ -268,12 +268,15 @@ class Envoy(Batchable):
         This property provides access to the module's source code with operations
         highlighted, allowing for inspection and intervention at specific points.
         
+        Note: This will only work during tracing.
+        
         Example:
             
             >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             
             >>> # We can print to see the formward method of the module and names associated with the operations within.
-            >>> print(model.transformer.h[0].attn.source)
+            >>> with model.trace("_"):
+            >>>     print(model.transformer.h[0].attn.source)
             
                                                    60 
                                                    61     if using_eager and self.reorder_and_upcast_attn:
@@ -302,7 +305,7 @@ class Envoy(Batchable):
                                                    83 
                                                    
             >>> # We can print out one of these to see the only the operation and a few operations before and after.
-            >>> print(model.transformer.h[0].attn.source.attention_interface_0)
+            >>>     print(model.transformer.h[0].attn.source.attention_interface_0)
             
             .transformer.h.0.attn.attention_interface_0:
 
@@ -332,26 +335,31 @@ class Envoy(Batchable):
         Returns:
             An EnvoySource object containing the module's source code and operations
         """
-        if self._source is None:
 
-            def wrap(fn: Callable, **kwargs):
+        if self.interleaving:
 
-                bound_obj = fn.__self__ if inspect.ismethod(fn) and fn.__name__ != "forward" else None
+            if self._source is None:
+                
+                def wrap(fn: Callable, **kwargs):
+          
+                    bound_obj = fn.__self__ if inspect.ismethod(fn) and fn.__name__ != "forward" else None
 
-                if self.interleaving:
-                    return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
-                else:
-                    return fn
+                    if self.interleaving:
+                        return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
+                    else:
+                        return fn
 
-            source, line_numbers, forward = inject(
-                self._module.forward, wrap, self._module.__path__
-            )
-            self._module.forward = MethodType(forward, self._module)
+                source, line_numbers, forward = inject(
+                    self._module.forward, wrap, self._module.__path__
+                )
+                self._module.forward = MethodType(forward, self._module)
 
-            self._source = EnvoySource(self._module.__path__, source, line_numbers)
-            self._source._set_interleaver(self._interleaver)
+                self._source = EnvoySource(self._module.__path__, source, line_numbers)
+                self._source._set_interleaver(self._interleaver)
+            
+            return self._source
         
-        return self._source
+        raise ValueError("Cannot access the source of a module outside of tracing.")
 
     def __call__(self, *args, hook: bool = False, **kwargs):
         return (
