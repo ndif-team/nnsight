@@ -48,6 +48,8 @@ class Cache:
         device: Optional[torch.device] = torch.device("cpu"),
         dtype: Optional[torch.dtype] = None,
         detach: Optional[bool] = True,
+        include_output: bool = True,
+        include_inputs: bool = False
     ):
         """
         Initialize a Cache with optional transformation parameters.
@@ -56,11 +58,15 @@ class Cache:
             device: Optional device to move tensors to
             dtype: Optional dtype to convert tensors to
             detach: Whether to detach tensors from computation graph
+            include_output: Whether to include output in the cached activations
+            include_inputs: Whether to include inputs in the cached activations
         """
         self.device = device
         self.dtype = dtype
         self.detach = detach
         self.modules = modules
+        self.include_output = include_output
+        self.include_inputs = include_inputs
 
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
@@ -95,6 +101,9 @@ class Cache:
         if self.modules is not None:
             if module_path not in self.modules:
                 return
+            
+        if (key == "output" and not self.include_output) or (key == "inputs" and not self.include_inputs):
+            return
 
         if self.detach:
             value = util.apply(value, lambda x: x.detach(), torch.Tensor)
@@ -112,15 +121,25 @@ class Cache:
             if isinstance(self.cache[module_path], Cache.Entry):
 
                 if key == "output":
-                    self.cache[module_path].output = value
+                    if self.cache[module_path].output is None:
+                        self.cache[module_path].output = value
+                    else:
+                        self.cache[module_path] = [
+                            self.cache[module_path],
+                            Cache.Entry(output=value),
+                        ]
                 else:
+                    # if the entry exists and the key is input always create a new entry
                     self.cache[module_path] = [
                         self.cache[module_path],
                         Cache.Entry(inputs=value),
                     ]
             else:
                 if key == "output":
-                    self.cache[module_path][-1].output = value
+                    if self.cache[module_path][-1].output is None:
+                        self.cache[module_path][-1].output = value
+                    else:
+                        self.cache[module_path].append(Cache.Entry(output=value))
                 else:
                     self.cache[module_path].append(Cache.Entry(inputs=value))
 
@@ -262,6 +281,8 @@ class InterleavingTracer(Tracer):
         device: Optional[torch.device] = torch.device("cpu"),
         dtype: Optional[torch.dtype] = None,
         detach: Optional[bool] = True,
+        include_output: bool = True,
+        include_inputs: bool = False
     ) -> Union[Dict, Object]:
         """
         Get or create a cache for storing intermediate values during tracing.
@@ -271,6 +292,8 @@ class InterleavingTracer(Tracer):
             device: Optional device to move tensors to, defaults to cpu
             dtype: Optional dtype to convert tensors to, defaults to None
             detach: Whether to detach tensors from computation graph, defaults to True
+            include_output: Whether to include output in the cached activations
+            include_inputs: Whether to include inputs in the cached activations
 
         Returns:
             A dictionary containing the cached values
@@ -278,14 +301,14 @@ class InterleavingTracer(Tracer):
 
         if self.model._interleaver is None:
             if self.user_cache is None:
-                self.user_cache = Cache(modules, device, dtype, detach)
+                self.user_cache = Cache(modules, device, dtype, detach, include_output, include_inputs)
 
             return self.user_cache.cache
             
 
         if self.model._interleaver.current.user_cache is None:
             self.model._interleaver.current.set_user_cache(
-                Cache(modules, device, dtype, detach)
+                Cache(modules, device, dtype, detach, include_output, include_inputs)
             )
 
         return self.model._interleaver.current.user_cache.cache
