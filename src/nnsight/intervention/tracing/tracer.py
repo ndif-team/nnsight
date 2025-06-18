@@ -245,6 +245,8 @@ class InterleavingTracer(Tracer):
             self.push(interleaver.state)
         finally:
             interleaver.state.clear()
+            interleaver.check_cache_full()
+                    
 
     ### Public API ####
 
