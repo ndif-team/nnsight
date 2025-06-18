@@ -52,6 +52,7 @@ class RemoteBackend(Backend):
         self.format = CONFIG.API.FORMAT
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
+        self.callback = callback
 
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
