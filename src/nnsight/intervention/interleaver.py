@@ -385,7 +385,7 @@ class Mediator:
     modification of intermediate values.
     """
 
-    class OutOfOrderException(Exception):
+    class OutOfOrderError(Exception):
         """
         Exception raised when interventions are defined out of order.
         """
@@ -570,7 +570,7 @@ class Mediator:
             if requester in self.history:
                 # TODO needs tests
                 self.respond(
-                    Mediator.OutOfOrderException(
+                    Mediator.OutOfOrderError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
@@ -650,7 +650,7 @@ class Mediator:
         else:
             if requester in self.history:
                 self.respond(
-                    Mediator.OutOfOrderException(
+                    Mediator.OutOfOrderError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
