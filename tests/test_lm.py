@@ -486,7 +486,7 @@ def test_scan_undispatched(MSG_prompt: str):
 @torch.no_grad()
 @pytest.mark.order
 def test_out_of_order(gpt2: nnsight.LanguageModel):
-    with pytest.raises(ValueError):
+    with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderException):
         with gpt2.trace("_"):
             out = gpt2.transformer.h[2].output.save()
             out_2 = gpt2.transformer.h[1].inputs.save()
@@ -497,7 +497,7 @@ def test_out_of_order(gpt2: nnsight.LanguageModel):
 @pytest.mark.skips
 def test_out_of_order_skip(gpt2: nnsight.LanguageModel):
 
-    with pytest.raises(ValueError):
+    with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderException):
         with gpt2.trace("_"):
 
             gpt2.transformer.h[1].skip(gpt2.transformer.h[0].output)
@@ -508,7 +508,7 @@ def test_out_of_order_skip(gpt2: nnsight.LanguageModel):
 @pytest.mark.order
 @pytest.mark.skips
 def test_out_of_order_skip_2(gpt2: nnsight.LanguageModel):
-    with pytest.raises(ValueError):
+    with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderException):
         with gpt2.trace("_"):
 
             inp = gpt2.transformer.h[0].output.save()
