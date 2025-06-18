@@ -41,6 +41,7 @@ class RemoteBackend(Backend):
         job_id: str = None,
         ssl: bool = None,
         api_key: str = "",
+        callback: str = "",
     ) -> None:
 
         self.model_key = model_key
@@ -51,6 +52,7 @@ class RemoteBackend(Backend):
         self.format = CONFIG.API.FORMAT
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
+        self.callback = callback
 
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
@@ -67,6 +69,7 @@ class RemoteBackend(Backend):
             "ndif-api-key": self.api_key,
             "sent-timestamp": str(time.time()),
             "nnsight-version": __version__,
+            "callback": self.callback,
         }
 
         return data, headers
