@@ -41,6 +41,7 @@ class RemoteBackend(Backend):
         job_id: str = None,
         ssl: bool = None,
         api_key: str = "",
+        callback: str = "",
     ) -> None:
 
         self.model_key = model_key
@@ -67,6 +68,7 @@ class RemoteBackend(Backend):
             "ndif-api-key": self.api_key,
             "sent-timestamp": str(time.time()),
             "nnsight-version": __version__,
+            "callback": self.callback,
         }
 
         return data, headers
