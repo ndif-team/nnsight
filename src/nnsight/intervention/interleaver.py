@@ -385,6 +385,12 @@ class Mediator:
     modification of intermediate values.
     """
 
+    class OutOfOrderError(Exception):
+        """
+        Exception raised when interventions are defined out of order.
+        """
+        pass
+
     def __init__(
         self,
         intervention: Callable,
@@ -564,7 +570,7 @@ class Mediator:
             if requester in self.history:
                 # TODO needs tests
                 self.respond(
-                    ValueError(
+                    Mediator.OutOfOrderError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
@@ -644,7 +650,7 @@ class Mediator:
         else:
             if requester in self.history:
                 self.respond(
-                    ValueError(
+                    Mediator.OutOfOrderError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
