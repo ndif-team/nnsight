@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from posixpath import join
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -11,7 +13,10 @@ from typing import (
     Type,
     Union,
 )
+from huggingface_hub import constants
+from huggingface_hub.file_download import repo_folder_name
 
+from nnsight import CONFIG
 import torch
 from torch.nn.modules import Module
 from transformers import (
@@ -66,6 +71,7 @@ class LanguageModel(RemoteableMixin):
         config: Optional[PretrainedConfig] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
         automodel: Type[AutoModel] = AutoModelForCausalLM,
+        import_edits:Union[bool, str] = False,
         **kwargs,
     ) -> None:
 
@@ -80,8 +86,55 @@ class LanguageModel(RemoteableMixin):
         self.repo_id: str = args[0] if isinstance(args[0], str) else None
 
         super().__init__(*args, **kwargs)
+        
+        if import_edits:
+            
+            if isinstance(import_edits, str):
+                
+                self.import_edits(variant=import_edits)
+                
+            else:
+            
+                self.import_edits()
+            
 
         self.generator: Envoy = WrapperModule()
+        
+    def export_edits(self, name:Optional[str] = None, export_dir: Optional[str] = None, variant: str = '__default__'):
+        """TODO
+
+        Args:
+            name (Optional[str], optional): _description_. Defaults to None.
+            export_dir (Optional[str], optional): _description_. Defaults to None.
+            variant (str, optional): _description_. Defaults to '__default__'.
+        """
+        
+        if name is None:
+            name = repo_folder_name(repo_id=self.repo_id, repo_type='model')
+                
+            if export_dir is None:
+                export_dir = os.path.join(constants.HF_HUB_CACHE, name, 'nnsight', 'exports')
+                name = ""       
+            
+        super().export_edits(name, export_dir=export_dir, variant=variant)
+        
+    def import_edits(self, name:Optional[str] = None, export_dir: Optional[str] = None, variant: str = '__default__'):
+        """TODO
+
+        Args:
+            name (Optional[str], optional): _description_. Defaults to None.
+            export_dir (Optional[str], optional): _description_. Defaults to None.
+            variant (str, optional): _description_. Defaults to '__default__'.
+        """
+        
+        if name is None:
+            name = repo_folder_name(repo_id=self.repo_id, repo_type='model')
+                
+            if export_dir is None:
+                export_dir = os.path.join(constants.HF_HUB_CACHE, name, 'nnsight', 'exports')
+                name = ""       
+            
+        super().import_edits(name, export_dir=export_dir, variant=variant)
 
     def __nnsight_generate__(self, *args, **kwargs):
 
