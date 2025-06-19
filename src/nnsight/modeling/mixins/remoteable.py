@@ -33,6 +33,30 @@ class RemoteableMixin(MetaMixin):
             backend=backend,
             **kwargs,
         )
+        
+    def session(
+        self,
+        *inputs: Any,
+        backend: Union[Backend, str, None] = None,
+        remote: bool = False,
+        blocking: bool = True,
+        **kwargs: Dict[str, Any],
+    ):
+
+        if backend is not None:
+            pass
+        elif remote:
+            backend = RemoteBackend(self.to_model_key(), blocking=blocking)
+        # If backend is a string, assume RemoteBackend url.
+        elif isinstance(backend, str):
+            backend = RemoteBackend(
+                self.to_model_key(), host=backend, blocking=blocking
+            )
+        return super().session(
+            *inputs,
+            backend=backend,
+            **kwargs,
+        )
 
     def _remoteable_model_key(self) -> str:
 
