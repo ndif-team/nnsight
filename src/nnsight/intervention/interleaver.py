@@ -933,7 +933,8 @@ class Mediator:
         self.interleaver = None
         self.child: Mediator = None
         self.history = set()
-        self.user_cache: "Cache" = None
+        self.user_cache: "Cache" = list()
         self.iteration = 0
+        self.args = list()
 
         self._frame = None

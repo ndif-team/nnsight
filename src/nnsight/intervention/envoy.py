@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import inspect
-from types import MethodType, FunctionType, BuiltinFunctionType, BuiltinMethodType
+import os
+from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
+                   MethodType)
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 
+import dill
 import torch
 
-from .. import util
+from .. import CONFIG, util
 from ..util import apply, fetch_attr
 from .batching import Batchable
 from .inject import convert as inject
@@ -50,6 +53,7 @@ class Envoy(Batchable):
         path: Optional[str] = "model",
         rename: Optional[Dict[str, str]] = None,
         alias: Optional[Dict[str, str]] = None,
+        
     ) -> None:
         """
         Initialize an Envoy for a PyTorch module.
@@ -466,7 +470,55 @@ class Envoy(Batchable):
         Clear all edits for this Envoy.
         """
         self._default_mediators = []
+        
+    def export_edits(self, name:str, export_dir: Optional[str] = None, variant:str = '__default__'):
+        """TODO
 
+        Args:
+            name (str): _description_
+            export_dir (Optional[str], optional): _description_. Defaults to None.
+            variant (str, optional): _description_. Defaults to '__default__'.
+
+        Raises:
+            ValueError: _description_
+        """
+        
+        if len(self._default_mediators) == 0:
+            raise ValueError("Cannot export an Envoy before calling .edit().")
+        
+        if export_dir is None:
+            
+            export_dir = os.path.join(CONFIG.APP.CACHE_DIR, 'exports')
+            
+        export_dir = os.path.expanduser(os.path.join(export_dir, name))
+              
+        os.makedirs(export_dir, exist_ok=True)
+        
+        with open(os.path.join(export_dir, f"{variant}.dill"), 'wb') as file:
+        
+            dill.dump(self._default_mediators, file, recurse=True)
+            
+    def import_edits(self, name:str, export_dir: Optional[str] = None, variant:str = '__default__'):
+        """TODO
+
+        Args:
+            name (str): _description_
+            export_dir (Optional[str], optional): _description_. Defaults to None.
+            variant (str, optional): _description_. Defaults to '__default__'.
+        """
+        
+        if export_dir is None:
+            
+            export_dir = os.path.join(CONFIG.APP.CACHE_DIR, 'exports')
+            
+        export_dir = os.path.expanduser(os.path.join(export_dir, name))
+        
+        with open(os.path.join(export_dir, f"{variant}.dill"), 'rb') as file:
+            
+            imported_mediators = dill.load(file)
+            
+        self._default_mediators.extend(imported_mediators)
+        
     # TODO legacy
     def session(self, *args, **kwargs):
         return Tracer(*args, **kwargs)
