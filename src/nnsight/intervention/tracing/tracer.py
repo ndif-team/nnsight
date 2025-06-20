@@ -74,7 +74,8 @@ class Cache:
 
         def __getitem__(self, key):
             if isinstance(key, str):
-                return dict.__getitem__(self, key)
+                path = self._path + "." + key if self._path != "" else key
+                return dict.__getitem__(self, path)
             
             if isinstance(key, int):
                 path = self._path + "." f"{key}"
@@ -89,7 +90,7 @@ class Cache:
         def __getattr__(self, attr: str):
 
             if attr == "output" or attr == "inputs" or attr == "input":
-                return self[self._path].__getattribute__(attr)
+                return dict.__getitem__(self, self._path).__getattribute__(attr)
 
             path = self._path + "." + attr if self._path != "" else attr
 

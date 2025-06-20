@@ -1051,7 +1051,9 @@ def test_cache_attribute_access(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert len(cache) == 13
     assert cache['model.transformer.h.0'].output is not None
     assert cache.model.transformer.h[0].output is not None
-    assert torch.equal(cache['model.transformer.h.0'].output[0], cache.model.transformer.h[0].output[0])
+    assert cache.model.transformer["h.0"].output is not None
+    assert torch.equal(cache['model.transformer.h.0'].output[0], cache.model.transformer.h[0].output[0]) 
+    assert torch.equal(cache['model.transformer.h.0'].output[0], cache.model.transformer["h.0"].output[0])
     assert cache.model.lm_head.output is not None
 
     with pytest.raises(IndexError):
