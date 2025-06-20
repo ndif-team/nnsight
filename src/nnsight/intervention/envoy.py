@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import inspect
-import io
 import os
-from types import MethodType
+from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
+                   MethodType)
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 
 import dill
 import torch
 
-from .. import util
+from .. import CONFIG, util
 from ..util import apply, fetch_attr
 from .batching import Batchable
 from .inject import convert as inject
@@ -19,7 +19,6 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .. import CONFIG
 
 if TYPE_CHECKING:
     from .interleaver import Interleaver
@@ -839,7 +838,7 @@ class Envoy(Batchable):
             value = getattr(self._module, name)
 
             # It's a method bound to the module, create an interleaver for it
-            if callable(value):
+            if isinstance(value, (FunctionType, MethodType, BuiltinFunctionType, BuiltinMethodType)):
 
                 # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
                 value = getattr(self, f"__nnsight_{name}__", value)
