@@ -64,7 +64,7 @@ FUNCTIONS_WHITELIST.update(
 FUNCTIONS_WHITELIST.update(
     {
         get_function_name(value): value
-        for key, value in getmembers(torch._C._nn, isfunction)
+        for key, value in getmembers(torch._C._nn, isbuiltin)
     }
 )
 FUNCTIONS_WHITELIST.update(
