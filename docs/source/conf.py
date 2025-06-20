@@ -58,6 +58,11 @@ html_theme_options = {
             "icon": "fa-brands fa-github",
         },
         {
+            "name": "Forum",
+            "url": "https://discuss.ndif.us/",
+            "icon": "fa-brands fa-discourse",
+        },
+        {
             "name": "Discord",
             "url": "https://forms.gle/1Y6myaXYzSh3oHf56",
             "icon": "fa-brands fa-discord",

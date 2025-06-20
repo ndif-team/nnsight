@@ -49,7 +49,7 @@ This notebook will walk you through the following steps:
 Next Steps
 -----------
 
-.. grid:: 2 2 2 2
+.. grid:: 2 2 2 2 
    :gutter: 2
 
    .. grid-item-card:: Walkthrough
@@ -73,6 +73,11 @@ Next Steps
       :link-type: doc
 
       See :bdg-primary:`nnsight` implementations of common interpretability techniques.
+
+   .. grid-item-card:: Forum
+      :link: https://discuss.ndif.us/
+
+      Discuss :bdg-primary:`nnsight`, NDIF, and more!
 
 
 

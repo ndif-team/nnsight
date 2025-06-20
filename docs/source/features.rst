@@ -350,6 +350,11 @@ Features
          </div>
    
 
+Report Issues
+-------------
+
+NNsight and NDIF are open-source and you can report issues, read, and clone the full source at https://github.com/ndif-team/nnsight. 
+Also check out https://discuss.ndif.us/ to ask questions about our features or suggest new ones.
 
 .. toctree::
    :glob:

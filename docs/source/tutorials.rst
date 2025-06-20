@@ -110,7 +110,7 @@ Tutorials
             </div> 
             <div>
                <h5 class="card-title">Boundless DAS</h5>
-               <p class="card-text">Identifying Causal Mechanisms in Alpaca</p>
+               <p class="card-text">Identifying causal mechanisms</p>
             </div>
          </div>
 
@@ -128,6 +128,40 @@ Tutorials
             <div>
                <h5 class="card-title">Dictionary Learning</h5>
                <p class="card-text">Sparse autoencoders</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/diffusion_lens.ipynb
+      :class-card: surface
+      :class-body: surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-camera-retro fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Diffusion Lens</h5>
+               <p class="card-text">Explore diffusion model text embedding</p>
+            </div>
+         </div>
+
+   .. grid-item-card:: 
+      :link: notebooks/tutorials/function_vectors.ipynb
+      :class-card: surface
+      :class-body: surface
+
+      .. raw:: html
+
+         <div class="d-flex align-items-center">
+            <div class="d-flex justify-content-center" style="min-width: 50px; margin-right: 15px; height: 100%;">
+               <i class="fa-solid fa-dharmachakra fa-2x"></i>
+            </div> 
+            <div>
+               <h5 class="card-title">Function Vectors</h5>
+               <p class="card-text">Steer model behavior</p>
             </div>
          </div>
 
@@ -163,7 +197,13 @@ Tutorials
                <h5 class="card-title">LoRA</h5>
                <p class="card-text">Fine tuning for sentiment analysis</p>
             </div>
-         </div>         
+         </div>      
+
+Report Issues
+-------------
+
+NNsight and NDIF are open-source and you can report issues, read, and clone the full source at https://github.com/ndif-team/nnsight. 
+Also check out https://discuss.ndif.us/ to ask questions about our tutorials, share your projects in NNsight, or request new tutorials.
 
 .. toctree::
    :glob:
