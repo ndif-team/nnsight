@@ -1,3 +1,4 @@
+from functools import wraps
 import os, yaml
 from .schema.config import ConfigModel
 
@@ -45,6 +46,23 @@ def fake_bool(self):
 
 
 DEFAULT_PATCHER.add(Patch(FakeTensor, fake_bool, "__bool__"))
+
+from torch.amp.autocast_mode import autocast
+
+def wrap_autocast(func):
+    
+    @wraps(func)
+    def inner(self, device_type:str, *args, **kwargs):
+        
+        if device_type == "meta":
+            device_type = "cpu"
+            
+        return func(self, device_type, *args, **kwargs)
+        
+    return inner
+
+
+DEFAULT_PATCHER.add(Patch(autocast, wrap_autocast(autocast.__init__), "__init__"))
 
 
 DEFAULT_PATCHER.__enter__()

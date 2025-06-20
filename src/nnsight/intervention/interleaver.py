@@ -238,6 +238,24 @@ class Interleaver:
             return tracer
 
         return inner
+    
+    def check_cache_full(self):
+        """
+        Print a warning if a module to be cached was missed.
+        """
+        for invoker in self.invokers:
+            for cache in invoker.user_cache:
+                if cache.modules:
+                    if cache.include_inputs and cache.include_output:
+                        for module in cache.modules:
+                            if module not in cache.cache or cache.cache[module].inputs is None:
+                                print('\033[33m' + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called." + '\033[0m')
+                                return
+                    else:
+                        if any(module not in cache.cache for module in cache.modules):
+                            print('\033[33m' + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called." + '\033[0m')
+                            return
+
 
     def __enter__(self):
         """
@@ -384,6 +402,12 @@ class Mediator:
     user-defined intervention functions, allowing for inspection and
     modification of intermediate values.
     """
+
+    class OutOfOrderError(Exception):
+        """
+        Exception raised when interventions are defined out of order.
+        """
+        pass
 
     def __init__(
         self,
@@ -564,7 +588,7 @@ class Mediator:
             if requester in self.history:
                 # TODO needs tests
                 self.respond(
-                    ValueError(
+                    Mediator.OutOfOrderError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
@@ -644,7 +668,7 @@ class Mediator:
         else:
             if requester in self.history:
                 self.respond(
-                    ValueError(
+                    Mediator.OutOfOrderError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
