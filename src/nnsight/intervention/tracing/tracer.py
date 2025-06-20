@@ -42,6 +42,63 @@ class Cache:
         def input(self):
             return [*self.inputs[0], *self.inputs[1].values()][0]
 
+    class CacheDict(Dict):
+
+        """
+        A dictionary subclass that provides convenient access to cached module activations.
+
+        This class extends the standard dictionary to provide both dictionary-style access
+        and attribute-style access to cached activations. It supports hierarchical access
+        to nested modules using dot notation and indexing for module lists.
+
+        Examples:
+            Access cached activations using dictionary keys:
+            >>> cache['model.transformer.h.0.attn']
+
+            Access using attribute notation:
+            >>> cache.model.transformer.h[0].attn
+
+            Access module outputs and inputs:
+            >>> cache.model.transformer.h[0].output
+            >>> cache.model.transformer.h[0].inputs
+            >>> cache.model.transformer.h[0].input  # First input argument
+
+        The class maintains an internal path that tracks the current location in the
+        module hierarchy, allowing for intuitive navigation through nested modules.
+        """
+
+        def __init__(self, data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", path: Optional[str] = ""):
+            self._path = path
+
+            super().__init__(data)
+
+        def __getitem__(self, key):
+            if isinstance(key, str):
+                path = self._path + "." + key if self._path != "" else key
+                return dict.__getitem__(self, path)
+            
+            if isinstance(key, int):
+                path = self._path + "." f"{key}"
+                
+                if any(key.startswith(path) for key in self):
+                    return Cache.CacheDict(self, path)
+                elif any(key.startswith(self._path + ".") and len(key) >= len(self._path) + 1 and key[len(self._path) + 1].isdigit() for key in self):
+                    raise IndexError(f"Index {key} is out of bounds for the list")
+                
+            return dict.__getitem__(self, key)
+        
+        def __getattr__(self, attr: str):
+
+            if attr == "output" or attr == "inputs" or attr == "input":
+                return dict.__getitem__(self, self._path).__getattribute__(attr)
+
+            path = self._path + "." + attr if self._path != "" else attr
+
+            if any(key.startswith(path) for key in self):
+                return Cache.CacheDict(self, path)
+            else:
+                raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{path}'")
+
     def __init__(
         self,
         modules: Optional[List[Union[Envoy, str]]] = None,
@@ -71,7 +128,7 @@ class Cache:
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
 
-        self.cache = dict().save()
+        self.cache = Cache.CacheDict({}).save()
 
     def add(self, provider: str, value: Any):
         """
