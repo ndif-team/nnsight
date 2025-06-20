@@ -522,7 +522,7 @@ class Envoy(Batchable):
         
     # TODO legacy
     def session(self, *args, **kwargs):
-        return Tracer()
+        return Tracer(*args, **kwargs)
 
     # TODO legacy
     @property

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from posixpath import join
 from typing import (
     TYPE_CHECKING,
     Any,
