@@ -555,8 +555,8 @@ def test_source_safe_intervention(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     logits_0 = gpt2(**input)['logits']
 
-    gpt2.transformer.h[0].attn.source
     with gpt2.trace("_"):
+        gpt2.transformer.h[0].attn.source
         gpt2.transformer.h[0].attn.c_attn.output = torch.zeros_like(gpt2.transformer.h[0].attn.c_attn.output)
         out = gpt2.transformer.h[0].attn.source.split_1.output.save()
 
@@ -624,6 +624,21 @@ def test_source_operation_not_found(gpt2: nnsight.LanguageModel):
     with pytest.raises(AttributeError):
         with gpt2.trace("_"):
             out = gpt2.transformer.h[0].attn.source.my_func.output.save()
+
+
+@torch.no_grad()
+@pytest.mark.source
+def test_source_outside(gpt2: nnsight.LanguageModel):
+    with pytest.raises(ValueError):
+        gpt2.transformer.h[0].attn.source
+
+    with gpt2.trace("_"):
+        out = gpt2.transformer.h[0].attn.source.split_1.output.save()
+
+    assert isinstance(out, tuple)
+
+    with pytest.raises(ValueError):
+        gpt2.transformer.h[0].attn.source
 
 
 ######################### SKIP #################################
@@ -1039,6 +1054,29 @@ def test_multiple_caches_with_multiple_invokers(gpt2: nnsight.LanguageModel, MSG
     assert len(mlp_cache.keys()) == 12
     assert 'model.transformer.h.0.attn' in attn_cache and 'model.transformer.h.0.mlp' not in attn_cache
     assert 'model.transformer.h.0.mlp' in mlp_cache and 'model.transformer.h.0.attn' not in mlp_cache
+
+
+@torch.no_grad()
+@pytest.mark.cache
+def test_cache_attribute_access(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(MSG_prompt) as tracer:
+        modules = [layer for layer in gpt2.transformer.h] + [gpt2.lm_head]
+        cache = tracer.cache(modules=modules)
+
+    assert len(cache) == 13
+    assert cache['model.transformer.h.0'].output is not None
+    assert cache.model.transformer.h[0].output is not None
+    assert torch.equal(cache['model.transformer.h.0'].output[0], cache.model.transformer.h[0].output[0])
+    assert cache.model.lm_head.output is not None
+
+    with pytest.raises(IndexError):
+        cache.model.transformer.h[12]
+
+    with pytest.raises(AttributeError):
+        cache.model.transformer.h[0].mlp
+
+    with pytest.raises(KeyError):
+        cache.model.transformer[0]
 
 
 ######################### RENAME #################################
