@@ -539,10 +539,9 @@ class Envoy(Batchable):
     def all(self):
         return self.iter[:]
 
-    def skip(self, replacement: Optional[Any] = inspect._empty):
+    def skip(self, replacement: Any):
         """Skips the execution of this module duting execution / interleaving.
         Behavior is the module will not be executed and will return a replacement value instead.
-        By default, the replacement value is the first input to the module. Otherwise this value can be specified.
 
         Example:
             >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
@@ -553,11 +552,8 @@ class Envoy(Batchable):
             >>> print(output)
 
         Args:
-            replacement (Optional[Any], optional): The replacement value to replace the module's output with. If not specified, the first input to the module will be used.
+            replacement (Any): The replacement value to replace the module's output with.
         """
-
-        if replacement is inspect._empty:
-            replacement = self.input
 
         requester = self._interleaver.current.iterate(f"{self.path}.input")
 
