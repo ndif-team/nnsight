@@ -40,6 +40,11 @@ class Cache:
 
         @property
         def input(self):
+            """
+            Gets the first positional argument of the inputs value to the cached module. Returns None if no inputs were cached.
+            """
+            if self.inputs is None:
+                return None
             return [*self.inputs[0], *self.inputs[1].values()][0]
 
     class CacheDict(Dict):

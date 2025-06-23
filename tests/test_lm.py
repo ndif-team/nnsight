@@ -1066,6 +1066,15 @@ def test_cache_attribute_access(gpt2: nnsight.LanguageModel, MSG_prompt: str):
         cache.model.transformer[0]
 
 
+@torch.no_grad()
+@pytest.mark.cache
+def test_cache_no_entry_input(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(MSG_prompt) as tracer:
+        cache = tracer.cache(modules=[gpt2.transformer.h[0]])
+
+    assert cache['model.transformer.h.0'].input is None
+
+
 ######################### RENAME #################################
 
 
