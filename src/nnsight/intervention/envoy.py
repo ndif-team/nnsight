@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import warnings
 from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
                    MethodType)
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
@@ -10,7 +11,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
 import dill
 import torch
 
-from .. import CONFIG, util
+from .. import CONFIG, base_deprecation_message, deprecated, util
 from ..util import apply, fetch_attr
 from .batching import Batchable
 from .inject import convert as inject
@@ -390,6 +391,9 @@ class Envoy(Batchable):
         """
         
         #TODO trace= is Legacy
+        if trace is not None:
+            deprecation_message = f"The `trace` argument {base_deprecation_message}\nJust call the method without a with context instead."
+            warnings.warn(deprecation_message)
         
         if fn is None:
             fn = self.__call__
@@ -525,10 +529,12 @@ class Envoy(Batchable):
 
     # TODO legacy
     @property
+    @deprecated(message="Use `tracer.iter` instead.")
     def iter(self):
         return IteratorProxy(self._interleaver)
 
     # TODO legacy
+    @deprecated(message="Use `tracer.all()` instead.")
     def all(self):
         return self.iter[:]
 
@@ -794,6 +800,13 @@ class Envoy(Batchable):
         return copy
 
     #### Dunder methods ####
+    
+    
+    def __len__(self):
+        """
+        Get the length of the Envoy.
+        """
+        return len(self._module)
 
     def __str__(self):
         """

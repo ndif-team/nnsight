@@ -22,6 +22,8 @@ try:
 except NameError:
     __IPYTHON__ = False
     
+base_deprecation_message = "is deprecated as of v0.5.0 and will be removed in a future version."
+    
 def deprecated(message:Optional[str]=None, error:bool=False):
     
     def decorator(func):
@@ -30,7 +32,7 @@ def deprecated(message:Optional[str]=None, error:bool=False):
         def inner(*args, **kwargs):
             
             deprecation_message = (
-                f"{func.__module__}.{func.__name__} is deprecated as of v0.5.0 and will be removed in a future version."
+                f"{func.__module__}.{func.__name__} {base_deprecation_message}"
                 + (f"\n{message}" if message is not None else "")
             )
             
@@ -59,8 +61,6 @@ def session(*args, **kwargs):
     return Tracer(*args, **kwargs)
 
 from .util import Patcher, Patch
-
-#TODO legacy stuff like nnsight.list
 
 DEFAULT_PATCHER = Patcher()
 
