@@ -88,7 +88,7 @@ class Cache:
                 if any(key.startswith(path) for key in self):
                     return Cache.CacheDict(self, path)
                 elif any(key.startswith(self._path + ".") and len(key) >= len(self._path) + 1 and key[len(self._path) + 1].isdigit() for key in self):
-                    raise IndexError(f"Index {key} is out of bounds for the list")
+                    raise IndexError(f"Index {key} is out of bounds for modulelist or module does not allow indexing.")
                 
             return dict.__getitem__(self, key)
         
@@ -102,7 +102,7 @@ class Cache:
             if any(key.startswith(path) for key in self):
                 return Cache.CacheDict(self, path)
             else:
-                raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{path}'")
+                raise AttributeError(f"'{path}' module path was never cached. '{self.__class__.__name__}' has no matching attribute.")
 
     def __init__(
         self,
