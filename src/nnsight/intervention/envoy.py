@@ -8,7 +8,6 @@ from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 
-import dill
 import torch
 from torch.nn.modules.module import _addindent
 
@@ -90,8 +89,15 @@ class Envoy(Batchable):
             alias = {}
 
         if rename is not None:
-            alias.update({value: key for key, value in rename.items()})
-
+            for key, value in rename.items():
+                if value in alias:
+                    if isinstance(alias[value], str):
+                        alias[value] = {alias[value], key}
+                    else:
+                        alias[value].add(key)
+                else:
+                    alias[value] = key
+                    
         self._alias = alias
 
         for name, module in list(self._module.named_children()):
@@ -922,7 +928,16 @@ class Envoy(Batchable):
         """
 
         if self._alias is not None and name in self._alias:
-            return fetch_attr(self, self._alias[name])
+            if isinstance(self._alias[name], str):
+                return fetch_attr(self, self._alias[name])
+            else:
+                
+                for alias in self._alias[name]:
+                    try:
+                        return fetch_attr(self, alias)
+                    except AttributeError:
+                        continue
+                raise AttributeError(f"{self} has no attribute {name}")
 
         if hasattr(self._module, name):
             value = getattr(self._module, name)
