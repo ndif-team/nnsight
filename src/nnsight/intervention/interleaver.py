@@ -453,7 +453,7 @@ class Mediator:
 
         self.thread = Thread(
             target=self.intervention,
-            args=(self, self.info, self.interleaver.tracer.model, self.interleaver.tracer, *self.args),
+            args=(self, self.info,  *self.args),
             daemon=True,
             name=self.name,
         )

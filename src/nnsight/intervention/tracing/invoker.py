@@ -47,7 +47,7 @@ class Invoker(Tracer):
             A callable intervention function
         """
         self.info.source = [
-            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {self.tracer.model_var_name if self.tracer is not None else '__nnsight_model__'}, {self.tracer.tracer_var_name if self.tracer is not None else '__nnsight_tracer__'}):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
             *try_catch(
                 self.info.source,
                 exception_source=["__nnsight_mediator__.exception(exception)\n"],
