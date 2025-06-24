@@ -626,6 +626,19 @@ def test_source_operation_not_found(gpt2: nnsight.LanguageModel):
             out = gpt2.transformer.h[0].attn.source.my_func.output.save()
 
 
+@torch.no_grad()
+@pytest.mark.source
+def test_operation_envoy_update(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2")
+
+    fn = gpt2.transformer.h[0].attn.source.split_1
+
+    with gpt2.trace(MSG_prompt) as tracer:
+        out = fn.output.save()
+    
+    assert isinstance(out, tuple)
+
+
 ######################### SKIP #################################
 
 @torch.no_grad()

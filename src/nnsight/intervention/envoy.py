@@ -745,6 +745,21 @@ class Envoy(Batchable):
         self._module = module
         self._module.__path__ = self.path
 
+        if self._source is not None:
+            def wrap(fn: Callable, **kwargs):
+
+                bound_obj = fn.__self__ if inspect.ismethod(fn) and fn.__name__ != "forward" else None
+
+                if self.interleaving:
+                    return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
+                else:
+                    return fn
+
+            source, line_numbers, forward = inject(
+                self._module.forward, wrap, self._module.__path__
+            )
+            self._module.forward = MethodType(forward, self._module)
+
     def _update_alias(self, alias: Dict[str, str]):
         """
         Update the alias for this Envoy and its children.
