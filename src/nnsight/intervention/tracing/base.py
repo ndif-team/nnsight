@@ -84,7 +84,7 @@ class Tracer:
                 "source": self.source,
                 "start_line": self.start_line,
                 "filename": self.filename,
-                "frame": None,
+                "frame": self.frame,
             }
         
         def __setstate__(self, state):
@@ -403,8 +403,6 @@ class Tracer:
         self.args = state["args"]
         self.kwargs = state["kwargs"]
         self.info = state["info"]
+        self.info.start_line = 0
         self.backend = ExecutionBackend()
         
-        
-    def __setframe__(self, frame:FrameType):
-        self.info.frame = frame

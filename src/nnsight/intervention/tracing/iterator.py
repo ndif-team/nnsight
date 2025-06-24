@@ -40,7 +40,7 @@ class IteratorTracer(Invoker):
 
         # Wrap the captured code in a function definition with appropriate parameters
         self.info.source = [
-            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {self.tracer.model_var_name if self.tracer is not None else '__nnsight_model__'}, {self.tracer.tracer_var_name if self.tracer is not None else '__nnsight_tracer__'}, {iteration_var_name}):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {iteration_var_name}):\n",
             *try_catch(
                 self.info.source,
                 exception_source=["__nnsight_mediator__.exception(exception)\n"],

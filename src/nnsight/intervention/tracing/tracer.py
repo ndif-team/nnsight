@@ -243,8 +243,12 @@ class InterleavingTracer(Tracer):
 
         super().__init__(*args, backend=backend)
 
-        if not hasattr(self, "model_var_name"):
-            self.model_var_name = self.info.node.items[0].context_expr.func.value.id
+        if not hasattr(self, "obj_var_name"):
+            try:
+                self.obj_var_name = self.info.node.items[0].context_expr.func.value.id
+            except:
+                self.obj_var_name = None
+
         if not hasattr(self, "tracer_var_name"):
             self.tracer_var_name = (
                 self.info.node.items[0].optional_vars.id
@@ -278,7 +282,7 @@ class InterleavingTracer(Tracer):
             self.info.source = ["    pass\n"]
 
         self.info.source = [
-            f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__, {self.model_var_name},{self.tracer_var_name}):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
             *self.info.source,
             f"    {self.tracer_var_name}.push()\n",
         ]
@@ -296,7 +300,7 @@ class InterleavingTracer(Tracer):
             fn: The compiled function to execute
         """
 
-        fn(self.info, self.model, self)
+        fn(self.info, self)
 
         args = self.batcher.batched_args
         kwargs = self.batcher.batched_kwargs
@@ -385,7 +389,7 @@ class InterleavingTracer(Tracer):
         """Get the state of the tracer for serialization."""
         state = super().__getstate__()
         state["fn"] = self.fn.__name__
-        state["model_var_name"] = self.model_var_name
+        state["model"] = self.model
         state["tracer_var_name"] = self.tracer_var_name
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
@@ -397,27 +401,13 @@ class InterleavingTracer(Tracer):
         super().__setstate__(state)
 
         self.fn = state["fn"]
-        self.model_var_name = state["model_var_name"]
+        self.model = state["model"]
         self.tracer_var_name = state["tracer_var_name"]
         self.mediators = state["mediators"]
         self.batcher = state["batcher"]
 
+        self.obj_var_name = None
         self._cache = None
-
-    def __setmodel__(self, model: Envoy):
-
-        self.model = model
-        self.fn = getattr(self.model, self.fn)
-
-    def __setframe__(self, frame):
-
-        super().__setframe__(frame)
-
-        self.info.start_line = 0
-
-        for mediator in self.mediators:
-            mediator.info.frame = frame
-
 
 class ScanningTracer(InterleavingTracer):
     """
