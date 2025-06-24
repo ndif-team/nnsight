@@ -72,21 +72,23 @@ class Cache:
         module hierarchy, allowing for intuitive navigation through nested modules.
         """
 
-        def __init__(self, data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", path: Optional[str] = ""):
+        def __init__(self, data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", path: Optional[str] = "", alias: Optional[str] = None):
             self._path = path
+            self._alias = alias
 
             super().__init__(data)
 
         def __getitem__(self, key):
+            name = self._alias[key] if self._alias is not None and key in self._alias else key
             if isinstance(key, str):
-                path = self._path + "." + key if self._path != "" else key
+                path = self._path + "." + name if self._path != "" else name
                 return dict.__getitem__(self, path)
             
-            if isinstance(key, int):
-                path = self._path + "." f"{key}"
+            if isinstance(name, int):
+                path = self._path + "." + f"{name}"
                 
                 if any(key.startswith(path) for key in self):
-                    return Cache.CacheDict(self, path)
+                    return Cache.CacheDict(self, path, self._alias)
                 elif any(key.startswith(self._path + ".") and len(key) >= len(self._path) + 1 and key[len(self._path) + 1].isdigit() for key in self):
                     raise IndexError(f"Index {key} is out of bounds for modulelist or module does not allow indexing.")
                 
@@ -100,9 +102,11 @@ class Cache:
             path = self._path + "." + attr if self._path != "" else attr
 
             if any(key.startswith(path) for key in self):
-                return Cache.CacheDict(self, path)
+                return Cache.CacheDict(self, path, self._alias)
+            elif self._alias is not None and attr in self._alias:
+                return self.__getattr__(self._alias[attr])
             else:
-                raise AttributeError(f"'{path}' module path was never cached. '{self.__class__.__name__}' has no matching attribute.")
+                raise AttributeError(f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute.")
 
     def __init__(
         self,
@@ -111,7 +115,8 @@ class Cache:
         dtype: Optional[torch.dtype] = None,
         detach: Optional[bool] = True,
         include_output: bool = True,
-        include_inputs: bool = False
+        include_inputs: bool = False,
+        alias: Optional[str] = None
     ):
         """
         Initialize a Cache with optional transformation parameters.
@@ -133,7 +138,7 @@ class Cache:
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
 
-        self.cache = Cache.CacheDict({}).save()
+        self.cache = Cache.CacheDict({}, alias=alias).save()
 
     def add(self, provider: str, value: Any):
         """
@@ -364,12 +369,12 @@ class InterleavingTracer(Tracer):
         """
 
         if self.model._interleaver is None:
-            self.user_cache.append(Cache(modules, device, dtype, detach, include_output, include_inputs))
+            self.user_cache.append(Cache(modules, device, dtype, detach, include_output, include_inputs, self.model._alias))
 
             return self.user_cache[-1].cache
 
         self.model._interleaver.current.set_user_cache(
-            Cache(modules, device, dtype, detach, include_output, include_inputs)
+            Cache(modules, device, dtype, detach, include_output, include_inputs, self.model._alias)
         )
 
         return self.model._interleaver.current.user_cache[-1].cache
