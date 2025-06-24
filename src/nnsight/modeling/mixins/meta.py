@@ -19,7 +19,7 @@ class MetaMixin(LoadableMixin):
             
             self.dispatched = True
 
-            super().__init__(*args, **kwargs)
+            super().__init__(*args, rename=rename, **kwargs)
 
         else:
 

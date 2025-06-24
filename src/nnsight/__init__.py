@@ -59,41 +59,22 @@ def fake_bool(self):
 DEFAULT_PATCHER.add(Patch(FakeTensor, fake_bool, "__bool__"))
 
 
-def fake_tensor_new_wrapper(fn):
+from torch.amp.autocast_mode import autocast
 
-    @wraps(fn)
-    def inner(cls, fake_mode, elem, device, constant=None):
-
-        if isinstance(elem, FakeTensor):
-
-            return elem
-
-        else:
-
-            return fn(cls, fake_mode, elem, device, constant=constant)
-
-    return inner
-
-
-DEFAULT_PATCHER.add(
-    Patch(FakeTensor, fake_tensor_new_wrapper(FakeTensor.__new__), "__new__")
-)
-
-def autoamp_init_wrapper(fn):
+def wrap_autocast(func):
     
-    @wraps(fn)
-    def inner(self, device_type, dtype=None, **kwargs):
+    @wraps(func)
+    def inner(self, device_type:str, *args, **kwargs):
         
         if device_type == "meta":
-            dtype = torch.get_autocast_cpu_dtype()
+            device_type = "cpu"
             
-        return fn(self, device_type, dtype, **kwargs)
-    
+        return func(self, device_type, *args, **kwargs)
+        
     return inner
 
-DEFAULT_PATCHER.add(
-    Patch(torch.autocast, autoamp_init_wrapper(torch.autocast.__init__), "__init__")
-)
+
+DEFAULT_PATCHER.add(Patch(autocast, wrap_autocast(autocast.__init__), "__init__"))
 
 DEFAULT_PATCHER.__enter__()
 
