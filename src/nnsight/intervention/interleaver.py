@@ -440,8 +440,6 @@ class Mediator:
 
         self.args = list()
 
-        self._frame = None
-
     def start(self, interleaver: Interleaver):
         """
         Start the mediator's intervention thread.
@@ -482,8 +480,6 @@ class Mediator:
         self.history.clear()
 
         self.thread = None
-
-        self._frame = None
         
         self.state = None
 
@@ -734,17 +730,13 @@ class Mediator:
             The frame of the intervention function
         """
 
-        if self._frame is None:
+        frame = inspect.currentframe()
 
-            frame = inspect.currentframe()
-
-            while frame:
-                frame = frame.f_back
-                if frame and frame.f_code.co_filename.startswith("<nnsight"):
-                    break
-            self._frame = frame
-
-        return self._frame
+        while frame:
+            frame = frame.f_back
+            if frame and frame.f_code.co_filename.startswith("<nnsight"):
+                break
+        return frame
     
     def iterate(self, requester: Any):
         
@@ -752,7 +744,6 @@ class Mediator:
 
     def push(self):
         """Push local variables to the interleaver state."""
-
         self.interleaver.state.update(self.frame.f_locals)
 
     def pull(self):
@@ -936,5 +927,3 @@ class Mediator:
         self.user_cache: "Cache" = list()
         self.iteration = 0
         self.args = list()
-
-        self._frame = None
