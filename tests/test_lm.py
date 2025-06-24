@@ -555,8 +555,8 @@ def test_source_safe_intervention(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     logits_0 = gpt2(**input)['logits']
 
-    gpt2.transformer.h[0].attn.source
     with gpt2.trace("_"):
+        gpt2.transformer.h[0].attn.source
         gpt2.transformer.h[0].attn.c_attn.output = torch.zeros_like(gpt2.transformer.h[0].attn.c_attn.output)
         out = gpt2.transformer.h[0].attn.source.split_1.output.save()
 
@@ -624,6 +624,21 @@ def test_source_operation_not_found(gpt2: nnsight.LanguageModel):
     with pytest.raises(AttributeError):
         with gpt2.trace("_"):
             out = gpt2.transformer.h[0].attn.source.my_func.output.save()
+
+
+@torch.no_grad()
+@pytest.mark.source
+def test_source_outside(gpt2: nnsight.LanguageModel):
+    with pytest.raises(ValueError):
+        gpt2.transformer.h[0].attn.source
+
+    with gpt2.trace("_"):
+        out = gpt2.transformer.h[0].attn.source.split_1.output.save()
+
+    assert isinstance(out, tuple)
+
+    with pytest.raises(ValueError):
+        gpt2.transformer.h[0].attn.source
 
 
 ######################### SKIP #################################
