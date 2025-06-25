@@ -1101,6 +1101,7 @@ def test_cache_alias(MSG_prompt: str):
 
     assert torch.equal(cache.model.transformer.h[0].output[0], cache.model.model.first_layer.output[0])
     assert torch.equal(cache.model.transformer.h[1].output[0], cache.model.model.h["second_layer"].output[0])
+    
 
 ######################### RENAME #################################
 

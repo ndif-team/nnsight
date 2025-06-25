@@ -72,12 +72,33 @@ class Cache:
         module hierarchy, allowing for intuitive navigation through nested modules.
         """
 
-        def __init__(self, data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", path: Optional[str] = "", alias: Optional[str] = None):
+        def __init__(self, data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", path: Optional[str] = "", alias: Optional[Dict[str, str]] = None):
             self._path = path
             self._alias = alias
 
             super().__init__(data)
+        
+        @property
+        def output(self):
+            """
+            Returns the output attribute from the Cache.Entry at the current path.
+            """
+            return dict.__getitem__(self, self._path).output
 
+        @property
+        def inputs(self):
+            """
+            Returns the inputs attribute from the Cache.Entry at the current path.
+            """
+            return dict.__getitem__(self, self._path).inputs
+
+        @property
+        def input(self):
+            """
+            Returns the input property from the Cache.Entry at the current path.
+            """
+            return dict.__getitem__(self, self._path).input
+        
         def __getitem__(self, key):
             name = self._alias[key] if self._alias is not None and key in self._alias else key
             if isinstance(key, str):
@@ -93,12 +114,8 @@ class Cache:
                     raise IndexError(f"Index {key} is out of bounds for modulelist or module does not allow indexing.")
                 
             return dict.__getitem__(self, key)
-        
+
         def __getattr__(self, attr: str):
-
-            if attr == "output" or attr == "inputs" or attr == "input":
-                return dict.__getitem__(self, self._path).__getattribute__(attr)
-
             path = self._path + "." + attr if self._path != "" else attr
 
             if any(key.startswith(path) for key in self):
@@ -116,7 +133,7 @@ class Cache:
         detach: Optional[bool] = True,
         include_output: bool = True,
         include_inputs: bool = False,
-        alias: Optional[str] = None
+        alias: Optional[Dict[str, str]] = None
     ):
         """
         Initialize a Cache with optional transformation parameters.
@@ -372,13 +389,15 @@ class InterleavingTracer(Tracer):
             A dictionary containing the cached values
         """
 
+        alias_dict = {value: key for key, value in self.model._alias.rename.items()} if self.model._alias is not None else None
+
         if self.model._interleaver is None:
-            self.user_cache.append(Cache(modules, device, dtype, detach, include_output, include_inputs, self.model._alias))
+            self.user_cache.append(Cache(modules, device, dtype, detach, include_output, include_inputs, alias_dict))
 
             return self.user_cache[-1].cache
 
         self.model._interleaver.current.set_user_cache(
-            Cache(modules, device, dtype, detach, include_output, include_inputs, self.model._alias)
+            Cache(modules, device, dtype, detach, include_output, include_inputs, alias_dict)
         )
 
         return self.model._interleaver.current.user_cache[-1].cache
