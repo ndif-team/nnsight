@@ -10,19 +10,16 @@ from ..log import remote_logger
 class ApiConfigModel(BaseModel):
     HOST: str = "ndif.dev"
     SSL: bool = True
-    FORMAT: str = "json"
     ZLIB: bool = True
     APIKEY: Optional[str] = None
     JOB_ID: Optional[str] = None
 
 
 class AppConfigModel(BaseModel):
-    LOGGING: bool = False
     REMOTE_LOGGING: bool = True
     DEBUG: bool = True
-    CONTROL_FLOW_HANDLING: bool = True
-    FRAME_INJECTION: bool = True
-    GLOBAL_TRACING: bool = True
+    CACHE_DIR:str = '~/.cache/nnsight/'
+
 
     def __setattr__(self, name, value):
         if name == "REMOTE_LOGGING":

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Un
 
 import torch
 
-from ..util import Patch, Patcher
+from ..util import Patch, Patcher, applyn
 from .batching import Batcher
 from .tracing.base import WithBlockNotFoundError
 from .tracing.util import wrap_exception
@@ -65,7 +65,7 @@ class Interleaver:
     modification of intermediate values.
     """
 
-    def __init__(self, invokers: List[Mediator], tracer: InterleavingTracer, batcher: Batcher = None) -> None:
+    def __init__(self, invokers: List[Mediator], tracer: InterleavingTracer, batcher: Batcher = None, user_cache: Optional[Cache] = None) -> None:
         """
         Initialize an Interleaver with mediators.
 
@@ -82,6 +82,8 @@ class Interleaver:
 
         self.state = dict()
         
+        self.iteration_tracker = defaultdict(int)
+
         #TODO legacy?
         self.default_all = None
         
@@ -121,13 +123,14 @@ class Interleaver:
 
         return inner
 
-    def wrap_operation(self, fn: Callable, name: str):
+    def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
         Wrap an operation to intercept inputs and outputs for intervention.
 
         Args:
             fn: The function to wrap
             name: The name of the operation
+            bound_obj: The object fn is bound to if it is a method
 
         Returns:
             A wrapped version of the function
@@ -142,7 +145,10 @@ class Interleaver:
 
             args, kwargs = self.handle(f"{name}.input", (args, kwargs))
 
-            value = fn(*args, **kwargs)
+            if not inspect.ismethod(fn) and bound_obj is not None:
+                value = fn(bound_obj, *args, **kwargs)
+            else:
+                value = fn(*args, **kwargs)
 
             value = self.handle(f"{name}.output", value)
 
@@ -223,6 +229,24 @@ class Interleaver:
             return tracer
 
         return inner
+    
+    def check_cache_full(self):
+        """
+        Print a warning if a module to be cached was missed.
+        """
+        for invoker in self.invokers:
+            for cache in invoker.user_cache:
+                if cache.modules:
+                    if cache.include_inputs and cache.include_output:
+                        for module in cache.modules:
+                            if module not in cache.cache or cache.cache[module].inputs is None:
+                                print('\033[33m' + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called." + '\033[0m')
+                                return
+                    else:
+                        if any(module not in cache.cache for module in cache.modules):
+                            print('\033[33m' + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called." + '\033[0m')
+                            return
+
 
     def __enter__(self):
         """
@@ -235,7 +259,6 @@ class Interleaver:
         self.patcher = Patcher(
             [
                 Patch(torch.nn.Module, self.wrap(torch.nn.Module.__call__), "__call__"),
-                Patch(torch.Tensor, self.wrap_grad(), "grad"),
                 Patch(
                     torch.Tensor, self.wrap_backward(torch.Tensor.backward), "backward"
                 ),
@@ -310,14 +333,35 @@ class Interleaver:
         old = self.batcher.current_value
                     
         self.batcher.current_value = value
+
+        batch_size = len(self.batcher.batch_groups)
+        skip_count = 0
+        skip_values = []
         
         for mediator in self.invokers:
-            
-            mediator.handle(provider)
+
+            try:
+                mediator.handle(provider)
+            except SkipException as e:
+                skip_count += 1
+                skip_values.append(e.value)
+
+        if skip_count == batch_size:
+            def _swap(*args):
+                return torch.cat(args, dim=0)
+
+            skip_value = applyn(skip_values, _swap, torch.Tensor)
+            raise SkipException(skip_value)
+        elif skip_count > 0 and skip_count < batch_size:
+            raise ValueError(f"A module skip must be applied to all the invokers defined in the tracer!")
             
         value = self.batcher.current_value
         
         self.batcher.current_value = old
+
+        if len(self.user_cache) > 0:
+            for cache in self.user_cache:
+                cache.add(provider, value)
             
         return value
 
@@ -349,6 +393,12 @@ class Mediator:
     modification of intermediate values.
     """
 
+    class OutOfOrderError(Exception):
+        """
+        Exception raised when interventions are defined out of order.
+        """
+        pass
+
     def __init__(
         self,
         intervention: Callable,
@@ -375,11 +425,11 @@ class Mediator:
         self.interleaver = None
         self.child: Mediator = None
         self.history = set()
-        self.user_cache: "Cache" = None
+        self.user_cache: List["Cache"] = list()
         self.iteration = 0
         self.iteration_tracker = defaultdict(int)
 
-        self._frame = None
+        self.args = list()
 
     def start(self, interleaver: Interleaver):
         """
@@ -424,12 +474,11 @@ class Mediator:
         self.iteration_tracker.clear()
 
         self.thread = None
-
-        self._frame = None
         
         self.state = None
 
         if self.thread is not None and self.thread.is_alive():
+            # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
 
     def handle(self, provider: Optional[Any] = None):
@@ -438,11 +487,9 @@ class Mediator:
 
         Args:
             provider: The identifier of the provider
-            value: The value being provided
 
         Returns:
             The original or modified value
-
         """
         
         print('provider', provider)
@@ -487,7 +534,13 @@ class Mediator:
             elif event == Events.EXCEPTION:
                 process = self.handle_exception_event(data)
             elif event == Events.SKIP:
-                process = self.handle_skip_event(provider, *data)
+                try:
+                    process = self.handle_skip_event(provider, *data)
+                except SkipException as e:
+                    if len(self.user_cache) > 0:
+                        for cache in self.user_cache:
+                            cache.add(provider, e.value)
+                    raise e
             elif event == Events.END:
                 process = False
             elif event == Events.CONTINUE:
@@ -497,9 +550,10 @@ class Mediator:
             self.handle_end_event()
 
         # TODO maybe move this to the interleaver to cache the pre-iteration provider
-        if self.user_cache is not None and provider is not None:
+        if len(self.user_cache) > 0 and provider is not None:
 
-            self.user_cache.add(provider, self.interleaver.batcher.current_value)
+            for cache in self.user_cache:
+                cache.add(provider, self.interleaver.batcher.narrow(self.batch_group, self.interleaver.batcher.current_value))
                         
     def handle_end_event(self):
         """
@@ -531,7 +585,7 @@ class Mediator:
             if requester in self.history:
                 # TODO needs tests
                 self.respond(
-                    ValueError(
+                    Mediator.OutOfOrderError(
                         f"Value was missed for {requester}. Did you call an Envoy out of order?"
                     )
                 )
@@ -603,14 +657,25 @@ class Mediator:
         if provider == requester:
             
             self.respond()
+
+            self.history.add(provider)
             
             raise SkipException(value)
         
         else:
-            self.history.add(provider)
-            self.event_queue.put((Events.SKIP, (requester, value)))
-            
-            return False
+            if requester in self.history:
+                self.respond(
+                    Mediator.OutOfOrderError(
+                        f"Value was missed for {requester}. Did you call an Envoy out of order?"
+                    )
+                )
+
+                return True
+            else:
+                self.history.add(provider)
+                self.event_queue.put((Events.SKIP, (requester, value)))
+                
+                return False
         
     def handle_register_event(self, mediator: Mediator, fn: Optional[Callable] = None):
         """
@@ -676,17 +741,13 @@ class Mediator:
             The frame of the intervention function
         """
 
-        if self._frame is None:
+        frame = inspect.currentframe()
 
-            frame = inspect.currentframe()
-
-            while frame:
-                frame = frame.f_back
-                if frame and frame.f_code.co_filename.startswith("<nnsight"):
-                    break
-            self._frame = frame
-
-        return self._frame
+        while frame:
+            frame = frame.f_back
+            if frame and frame.f_code.co_filename.startswith("<nnsight"):
+                break
+        return frame
     
     def iterate(self, requester: Any):
         
@@ -694,7 +755,6 @@ class Mediator:
 
     def push(self):
         """Push local variables to the interleaver state."""
-
         self.interleaver.state.update(self.frame.f_locals)
 
     def pull(self):
@@ -791,13 +851,14 @@ class Mediator:
             stop = iteration.stop
 
             while True:
-                
-                if self.interleaver.default_all is not None and stop is None:
-                    stop = self.interleaver.default_all
 
                 mediator.iteration = i
+                mediator.args = list([mediator.iteration])
 
                 self.register(mediator)
+
+                if self.interleaver.default_all is not None and stop is None:
+                    stop = self.interleaver.default_all
 
                 i += 1
 
@@ -807,6 +868,7 @@ class Mediator:
         elif isinstance(iteration, int):
 
             mediator.iteration = iteration
+            mediator.args = list([mediator.iteration])
 
             self.register(mediator)
             
@@ -845,7 +907,7 @@ class Mediator:
             cache: The cache to set
         """
 
-        self.user_cache = cache
+        self.user_cache.append(cache)
 
     ### Serialization ###
 
@@ -873,7 +935,6 @@ class Mediator:
         self.interleaver = None
         self.child: Mediator = None
         self.history = set()
-        self.user_cache: "Cache" = None
+        self.user_cache: "Cache" = list()
         self.iteration = 0
-
-        self._frame = None
+        self.args = list()

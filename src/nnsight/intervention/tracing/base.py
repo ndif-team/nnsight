@@ -84,7 +84,7 @@ class Tracer:
                 "source": self.source,
                 "start_line": self.start_line,
                 "filename": self.filename,
-                "frame": None,
+                "frame": self.frame,
             }
         
         def __setstate__(self, state):
@@ -161,26 +161,39 @@ class Tracer:
         else:
             raise ValueError("No source code found")
 
-        # Calculate indentation level of the Tracer creation line.
-        stripped = source_lines[start_line - 1].lstrip(
+        # Calculate indentation level of the source code itself
+        stripped = source_lines[0].lstrip(
             "\t "
-        )  # removes leading tabs/spaces
-        indent = len(source_lines[start_line - 1]) - len(stripped)
+        )  # indent for removing leading tabs/spaces
+        indent = len(source_lines[0]) - len(stripped)
+        
+        # If theres an indent, we need to remove it. This handles the case of say a trace in an indented function. E.x. a trace inside a method on a class.
+        if indent > 0:
+                
+            source_lines = [
+                line[indent:] if line.strip() else line for line in source_lines
+            ]
 
         # Extract the code using AST parsing
         start_line, source_lines, node = self.parse(source_lines, start_line)
 
-        # Remove the indentation from each line to prepare for compilation
-        source_lines = [
-            line[indent:] if line.strip() else line for line in source_lines
-        ]
+        # Calculate indentation level of the Tracer creation line.
+        stripped = source_lines[0].lstrip(
+            "\t "
+        )  # removes leading tabs/spaces
+        indent = len(source_lines[0]) - len(stripped) - 4
+        
+         # If theres an indent (more than just the indentation of the with block), we need to remove it. This handles the case of say a trace in an indented block. E.x. a trace inside a for loop or another with block.
+        if indent > 0:
+        
+            source_lines = [
+                line[indent:] if line.strip() else line for line in source_lines
+            ]
 
         # Store the captured information for later use
         self.info = Tracer.Info(
             source_lines, frame, start_line, node
         )
-
-        # The trace function will be set up in __enter__
 
     def parse(self, source_lines, start_line):
         """
@@ -197,6 +210,7 @@ class Tracer:
             List of source code lines.
         """
         # Parse the entire source into an AST
+
         tree = ast.parse("".join(source_lines))
 
         class Visitor(ast.NodeVisitor):
@@ -389,8 +403,6 @@ class Tracer:
         self.args = state["args"]
         self.kwargs = state["kwargs"]
         self.info = state["info"]
+        self.info.start_line = 0
         self.backend = ExecutionBackend()
         
-        
-    def __setframe__(self, frame:FrameType):
-        self.info.frame = frame
