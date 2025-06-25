@@ -1,34 +1,40 @@
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union, Optional
+from dataclasses import fields
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+import torch
 
+from ...intervention.envoy import Envoy
+from ...intervention.interleaver import Interleaver
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
-from .workers.GPUWorker import NNsightGPUWorker
 from .sampling import NNsightSamplingParams
-from dataclasses import fields
-from ...intervention.interleaver import Interleaver
-from ...intervention.envoy import Envoy
+from .workers.GPUWorker import NNsightGPUWorker
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 if TYPE_CHECKING:
     from torch.nn import Module
     from vllm.transformers_utils.tokenizer import AnyTokenizer
     from vllm.config import ModelConfig, SchedulerConfig, ParallelConfig, LoRAConfig
 
-
-from vllm.distributed import (destroy_distributed_environment,
-                                destroy_model_parallel,
-                                init_distributed_environment,
-                                initialize_model_parallel)
+from vllm.distributed import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+    get_world_group,
+    init_distributed_environment,
+    init_model_parallel_group,
+    initialize_model_parallel,
+    parallel_state,
+)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
+from vllm.model_executor.model_loader.utils import initialize_model
+
 # from vllm.model_executor.model_loader.loader import _initialize_model
 # except Exception as e:
 #     raise type(e)(
 #         "Install vllm in your environment to use it with NNsight. "
 #         + "https://docs.vllm.ai/en/latest/getting_started/installation.html"
 #     ) from e
-
 
 
 class VLLM(RemoteableMixin):
@@ -81,7 +87,10 @@ class VLLM(RemoteableMixin):
 
         # creating the vllm engine configuration
         vllm_config = engine_args.create_engine_config()
-        vllm_config_dict = {field.name: getattr(vllm_config, field.name) for field in fields(type(vllm_config))}
+        vllm_config_dict = {
+            field.name: getattr(vllm_config, field.name)
+            for field in fields(type(vllm_config))
+        }
 
         # starting the distributed environment
         init_distributed_environment(
@@ -92,28 +101,33 @@ class VLLM(RemoteableMixin):
             backend="gloo",
         )
 
-        # start tensor parallel group
-        initialize_model_parallel(backend="gloo")
-
+        # message queue broadcaster is only used in tensor model parallel group
+        parallel_state._TP = parallel_state._PP = parallel_state._DP = (
+            init_model_parallel_group(
+                [[0]],
+                get_world_group().local_rank,
+                "gloo",
+                use_message_queue_broadcaster=True,
+                group_name="tp",
+            )
+        )
         # initialize the model
 
-        model = _initialize_model(vllm_config)
-
-        # load the tokenzier
-        self.tokenizer = self._load_tokenizer(
-            model_config=vllm_config_dict["model_config"],
-            scheduler_config=vllm_config_dict["scheduler_config"],
-            parallel_config=vllm_config_dict["parallel_config"],
-            enable_lora=bool(vllm_config_dict["lora_config"]),
-        )
+        model = initialize_model(vllm_config)
+      
+        self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config,
+                                vllm_config.scheduler_config,
+                                vllm_config.lora_config)
 
         return model
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
+        
+        model = self._load_meta(repo_id, **kwargs)
 
         destroy_model_parallel()
         destroy_distributed_environment()
-        
+
         llm = LLM(
             repo_id,
             # worker_cls=NNsightGPUWorker,
@@ -124,11 +138,9 @@ class VLLM(RemoteableMixin):
 
         # load the tokenizer
         self.tokenizer = llm.llm_engine.tokenizer.tokenizer
-        breakpoint()
-        # if kwargs.get("tensor_parallel_size", 1) > 1:
-        #     return llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-        # else:
-        #     return llm.llm_engine.model_executor.driver_worker.model_runner.model
+        
+        
+        return model
 
     def _prepare_input(
         self, *args, **kwargs
@@ -194,10 +206,10 @@ class VLLM(RemoteableMixin):
         interleaver: Interleaver,
         **kwargs,
     ) -> Any:
-        
+
         breakpoint()
 
-        kwargs.pop('invoker_group')
+        kwargs.pop("invoker_group")
 
         for param in params:
             if param.is_default_param:
@@ -206,11 +218,12 @@ class VLLM(RemoteableMixin):
                         setattr(param, attr, value)
 
         out = self.vllm_entrypoint.generate(prompts, sampling_params=params)
-        
+
         with interleaver:
             self.generator(out)
 
+
 if TYPE_CHECKING:
-    
-    class VLLM(VLLM,LLM):
+
+    class VLLM(VLLM, LLM):
         pass
