@@ -549,10 +549,9 @@ class Envoy(Batchable):
     def all(self):
         return self.iter[:]
 
-    def skip(self, replacement: Optional[Any] = inspect._empty):
+    def skip(self, replacement: Any):
         """Skips the execution of this module duting execution / interleaving.
         Behavior is the module will not be executed and will return a replacement value instead.
-        By default, the replacement value is the first input to the module. Otherwise this value can be specified.
 
         Example:
             >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
@@ -563,11 +562,8 @@ class Envoy(Batchable):
             >>> print(output)
 
         Args:
-            replacement (Optional[Any], optional): The replacement value to replace the module's output with. If not specified, the first input to the module will be used.
+            replacement (Any): The replacement value to replace the module's output with.
         """
-
-        if replacement is inspect._empty:
-            replacement = self.input
 
         requester = self._interleaver.current.iterate(f"{self.path}.input")
 
@@ -761,6 +757,21 @@ class Envoy(Batchable):
 
         self._module = module
         self._module.__path__ = self.path
+
+        if self._source is not None:
+            def wrap(fn: Callable, **kwargs):
+
+                bound_obj = fn.__self__ if inspect.ismethod(fn) and fn.__name__ != "forward" else None
+
+                if self.interleaving:
+                    return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
+                else:
+                    return fn
+
+            source, line_numbers, forward = inject(
+                self._module.forward, wrap, self._module.__path__
+            )
+            self._module.forward = MethodType(forward, self._module)
 
     def _update_alias(self, alias: Dict[str, str]):
         """
