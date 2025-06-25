@@ -12,7 +12,7 @@ import torch
 from torch.nn.modules.module import _addindent
 
 from .. import CONFIG, base_deprecation_message, deprecated, util
-from ..util import apply, fetch_attr
+from ..util import apply
 from . import serialization
 from .batching import Batchable
 from .inject import convert as inject
@@ -45,7 +45,7 @@ class Envoy(Batchable):
         _interleaver (Optional[Interleaver]): Interleaver for managing execution flow
         _default_mediators (List[List[str]]): List of default mediators created with .edit
         _children (List[Envoy]): List of child Envoys
-        _alias (Dict[str, str]): Dictionary mapping aliases to actual names
+        _alias (Aliaser): Aliaser object for managing aliases
     """
 
     def __init__(
@@ -53,8 +53,7 @@ class Envoy(Batchable):
         module: torch.nn.Module,
         interleaver: Optional[Interleaver] = None,
         path: Optional[str] = "model",
-        rename: Optional[Dict[str, str]] = None,
-        alias: Optional[Dict[str, str]] = None,
+        rename: Optional[Dict[str, Union[str, List[str]]]] = None,
     ) -> None:
         """
         Initialize an Envoy for a PyTorch module.
@@ -63,10 +62,11 @@ class Envoy(Batchable):
             module (torch.nn.Module): The PyTorch module to wrap
             interleaver (Optional[Interleaver]): Optional interleaver for managing execution flow
             path (Optional[str]): Optional path string representing the module's location in the model hierarchy
-            rename (Optional[Dict[str, str]]): Optional dictionary mapping module names to alias names.
+            rename (Optional[Dict[str, Union[str, List[str]]]]): Optional dictionary mapping module names to alias names.
                 Example: {"layer1": "first_layer", "layer2": "second_layer"}
-            alias (Optional[Dict[str, str]]): Optional dictionary mapping alias names to actual names.
-                Example: {"first_layer": "layer1", "second_layer": "layer2"}
+                Example: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
+                Example: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
+
         """
         self.path = path
 
@@ -75,7 +75,6 @@ class Envoy(Batchable):
 
         self._source = None
 
-        # TODO interleaver by reference
         self._interleaver = interleaver
 
         self._default_mediators: List[List[str]] = []
@@ -85,23 +84,16 @@ class Envoy(Batchable):
         self._fake_inputs = inspect._empty
         self._fake_output = inspect._empty
 
-        if alias is None:
-            alias = {}
-
         if rename is not None:
-            for key, value in rename.items():
-                if value in alias:
-                    if isinstance(alias[value], str):
-                        alias[value] = {alias[value], key}
-                    else:
-                        alias[value].add(key)
-                else:
-                    alias[value] = key
+            self._alias = Aliaser(rename)
+        else:
+            self._alias = None
                     
-        self._alias = alias
-
         for name, module in list(self._module.named_children()):
             setattr(self, name, module)
+            
+        if rename is not None:
+            self._alias.build(self)
 
     def __getitem__(self, key: str) -> Envoy:
         """
@@ -736,7 +728,7 @@ class Envoy(Batchable):
         """
         module_path = f"{self.path}.{name}"
 
-        envoy = Envoy(module, path=module_path, alias=self._alias)
+        envoy = Envoy(module, path=module_path, rename=self._alias.rename if self._alias is not None else None)
 
         self._children.append(envoy)
 
@@ -896,7 +888,18 @@ class Envoy(Batchable):
             key = envoy.path.split(".")[-1]
             mod_str = repr(envoy)
             mod_str = _addindent(mod_str, 2)
+            if key in self._alias.name_to_aliases:
+                key = '/'.join([*self._alias.name_to_aliases[key], key])
             child_lines.append("(" + key + "): " + mod_str)
+            
+        for extra in self._alias.extras:
+            
+            key = '/'.join(self._alias.name_to_aliases[extra])
+            envoy = self.get(extra)
+            mod_str = repr(envoy)
+            mod_str = _addindent(mod_str, 2)
+            child_lines.append("(" + key + "): " + mod_str)
+        
         lines = extra_lines + child_lines
 
         main_str = self._module._get_name() + "("
@@ -927,17 +930,8 @@ class Envoy(Batchable):
             AttributeError: If the attribute doesn't exist
         """
 
-        if self._alias is not None and name in self._alias:
-            if isinstance(self._alias[name], str):
-                return fetch_attr(self, self._alias[name])
-            else:
-                
-                for alias in self._alias[name]:
-                    try:
-                        return fetch_attr(self, alias)
-                    except AttributeError:
-                        continue
-                raise AttributeError(f"{self} has no attribute {name}")
+        if self._alias is not None and name in self._alias.alias_to_name:
+            return util.fetch_attr(self, self._alias.alias_to_name[name])
 
         if hasattr(self._module, name):
             value = getattr(self._module, name)
@@ -1341,3 +1335,61 @@ class EnvoySource:
     def __getattr__(self, name: str) -> Union[OperationEnvoy]:
 
         return super().__getattr__(name)
+
+
+class Aliaser:
+    
+    def __init__(self, rename: Dict[str, Union[str, List[str]]]):
+        """
+        Initialize an Aliaser.
+
+        Args:
+            rename (Dict[str, Union[str, List[str]]]): Dictionary mapping module names to alias names.
+                Example: {"layer1": "first_layer", "layer2": "second_layer"}
+                Example: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
+                Example: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
+                
+        Attributes:
+            rename (Dict[str, Union[str, List[str]]]): Dictionary mapping module names to alias names.
+            alias_to_name (Dict[str, str]): Dictionary mapping alias names to module names.
+            name_to_aliases (Dict[str, List[str]]): Dictionary mapping module names to list of alias names.
+            extras (Dict[str, List[str]]): Dictionary mapping attribute paths (.transformer.h) to list of alias names.
+                Used to show dot seperated attributes in the string representation of the Envoy.
+                
+
+        """
+        
+        self.rename = rename
+        
+        self.alias_to_name = {}
+        self.name_to_aliases = {}
+        self.extras = {}
+        
+    def build(self, envoy:Envoy):
+        
+        for name, aliases in self.rename.items():
+            
+            try:
+                util.fetch_attr(envoy, name)
+            except:
+                continue
+            
+            if isinstance(aliases, str):
+                aliases = [aliases]
+                
+            if name.startswith("."):
+                    
+                # If the attribute path is not directly on this Envoy, but on a child Envoy, its an extra.
+                if '.' in name[1:]:
+                    self.extras[name] = aliases
+                    
+                # If the attribute path is directly on this Envoy, its a normal attribute and we want to remove the leading dot.
+                else:  
+                    name = name[1:]
+                    
+            self.name_to_aliases[name] = aliases
+            
+            for alias in aliases:
+                self.alias_to_name[alias] = name
+                
+                
