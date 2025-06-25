@@ -3,10 +3,8 @@ from __future__ import annotations
 import inspect
 import os
 import warnings
-from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
-                   MethodType)
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.nn.modules.module import _addindent
@@ -88,10 +86,10 @@ class Envoy(Batchable):
             self._alias = Aliaser(rename)
         else:
             self._alias = None
-                    
+
         for name, module in list(self._module.named_children()):
             setattr(self, name, module)
-            
+
         if rename is not None:
             self._alias.build(self)
 
@@ -728,7 +726,11 @@ class Envoy(Batchable):
         """
         module_path = f"{self.path}.{name}"
 
-        envoy = Envoy(module, path=module_path, rename=self._alias.rename if self._alias is not None else None)
+        envoy = Envoy(
+            module,
+            path=module_path,
+            rename=self._alias.rename if self._alias is not None else None,
+        )
 
         self._children.append(envoy)
 
@@ -889,17 +891,17 @@ class Envoy(Batchable):
             mod_str = repr(envoy)
             mod_str = _addindent(mod_str, 2)
             if key in self._alias.name_to_aliases:
-                key = '/'.join([*self._alias.name_to_aliases[key], key])
+                key = "/".join([*self._alias.name_to_aliases[key], key])
             child_lines.append("(" + key + "): " + mod_str)
-            
+
         for extra in self._alias.extras:
-            
-            key = '/'.join(self._alias.name_to_aliases[extra])
+
+            key = "/".join(self._alias.name_to_aliases[extra])
             envoy = self.get(extra)
             mod_str = repr(envoy)
             mod_str = _addindent(mod_str, 2)
             child_lines.append("(" + key + "): " + mod_str)
-        
+
         lines = extra_lines + child_lines
 
         main_str = self._module._get_name() + "("
@@ -1338,7 +1340,7 @@ class EnvoySource:
 
 
 class Aliaser:
-    
+
     def __init__(self, rename: Dict[str, Union[str, List[str]]]):
         """
         Initialize an Aliaser.
@@ -1348,48 +1350,42 @@ class Aliaser:
                 Example: {"layer1": "first_layer", "layer2": "second_layer"}
                 Example: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
                 Example: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
-                
+
         Attributes:
             rename (Dict[str, Union[str, List[str]]]): Dictionary mapping module names to alias names.
             alias_to_name (Dict[str, str]): Dictionary mapping alias names to module names.
             name_to_aliases (Dict[str, List[str]]): Dictionary mapping module names to list of alias names.
             extras (Dict[str, List[str]]): Dictionary mapping attribute paths (.transformer.h) to list of alias names.
                 Used to show dot seperated attributes in the string representation of the Envoy.
-                
+
 
         """
-        
+
         self.rename = rename
-        
+
         self.alias_to_name = {}
         self.name_to_aliases = {}
         self.extras = {}
-        
-    def build(self, envoy:Envoy):
-        
+
+    def build(self, envoy: Envoy):
+
         for name, aliases in self.rename.items():
-            
+
             try:
                 util.fetch_attr(envoy, name)
             except:
                 continue
-            
+
             if isinstance(aliases, str):
                 aliases = [aliases]
-                
-            if name.startswith("."):
-                    
-                # If the attribute path is not directly on this Envoy, but on a child Envoy, its an extra.
-                if '.' in name[1:]:
-                    self.extras[name] = aliases
-                    
-                # If the attribute path is directly on this Envoy, its a normal attribute and we want to remove the leading dot.
-                else:  
-                    name = name[1:]
-                    
+
+            name = name.removeprefix(".")
+
+            if "." in name:
+
+                self.extras[name] = aliases
+
             self.name_to_aliases[name] = aliases
-            
+
             for alias in aliases:
                 self.alias_to_name[alias] = name
-                
-                
