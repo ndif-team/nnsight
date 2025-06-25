@@ -426,7 +426,7 @@ class InterleavingTracer(Tracer):
         self.batcher = state["batcher"]
 
         self.obj_var_name = None
-        self._cache = None
+        self.user_cache = list()
 
 class ScanningTracer(InterleavingTracer):
     """

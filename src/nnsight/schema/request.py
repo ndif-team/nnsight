@@ -7,7 +7,7 @@ from typing import Callable
 import torch
 import dill
 from pydantic import BaseModel, ConfigDict
-
+from ..intervention.serialization import CustomDillPickler, CustomDillUnpickler
 if TYPE_CHECKING:
     from .. import NNsight
     from ..intervention.tracing.tracer import Tracer
@@ -26,7 +26,7 @@ class RequestModel(BaseModel):
                 
         with io.BytesIO() as data:
         
-            dill.dump(self, data, recurse=True)
+            CustomDillPickler(data).dump(self)
 
             data.seek(0)
 
@@ -49,10 +49,8 @@ class RequestModel(BaseModel):
 
             data.seek(0)
 
-            request:RequestModel = dill.load(data)
+            request:RequestModel = CustomDillUnpickler(data, model, None).load()
         
-        request.tracer.__setmodel__(model)
-
         return request
 
-RequestModel.update_forward_refs()
+RequestModel.model_rebuild()
