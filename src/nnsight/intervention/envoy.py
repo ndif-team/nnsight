@@ -901,17 +901,18 @@ class Envoy(Batchable):
             key = envoy.path.split(".")[-1]
             mod_str = repr(envoy)
             mod_str = _addindent(mod_str, 2)
-            if key in self._alias.name_to_aliases:
+            if self._alias is not None and key in self._alias.name_to_aliases:
                 key = "/".join([*self._alias.name_to_aliases[key], key])
             child_lines.append("(" + key + "): " + mod_str)
 
-        for extra in self._alias.extras:
+        if self._alias is not None:
+            for extra in self._alias.extras:
 
-            key = "/".join(self._alias.name_to_aliases[extra])
-            envoy = self.get(extra)
-            mod_str = repr(envoy)
-            mod_str = _addindent(mod_str, 2)
-            child_lines.append("(" + key + "): " + mod_str)
+                key = "/".join(self._alias.name_to_aliases[extra])
+                envoy = self.get(extra)
+                mod_str = repr(envoy)
+                mod_str = _addindent(mod_str, 2)
+                child_lines.append("(" + key + "): " + mod_str)
 
         lines = extra_lines + child_lines
 
