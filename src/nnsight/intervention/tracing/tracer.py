@@ -419,8 +419,9 @@ class InterleavingTracer(Tracer):
         """Set the state of the tracer for deserialization."""
         super().__setstate__(state)
 
-        self.fn = state["fn"]
+        
         self.model = state["model"]
+        self.fn = getattr(self.model, state["fn"])
         self.tracer_var_name = state["tracer_var_name"]
         self.mediators = state["mediators"]
         self.batcher = state["batcher"]

@@ -223,9 +223,11 @@ class Interleaver:
         Returns:
             A wrapped version of the backward method
         """
-        from .tracing.backwards import BackwardsTracer
+        
 
         def inner(tensor: torch.Tensor, *args, **kwargs):
+            
+            from .tracing.backwards import BackwardsTracer
 
             try:
 
