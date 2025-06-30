@@ -143,7 +143,11 @@ tuple = deprecated(message="Use the standard `tuple()` instead.")(tuple)
 bytearray = deprecated(message="Use the standard `bytearray()` instead.")(bytearray)
 
 
+from .intervention.tracing.globals import Globals
+def save(obj):
+    Globals.saves.add(id(obj))
 
+    return obj
 
 
 
