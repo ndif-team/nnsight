@@ -1023,6 +1023,7 @@ class OperationEnvoy:
         self._interleaver = interleaver
 
         self._source: EnvoySource = None
+        self._fn: Callable = None
 
     def __str__(self):
         """
@@ -1186,7 +1187,9 @@ class OperationEnvoy:
                 self.name, source, line_numbers, interleaver=self._interleaver
             )
 
-            self._interleaver.current.swap(f"{self.name}.fn", fn)
+            self._fn = fn
+
+        self._interleaver.current.swap(f"{self.name}.fn", self._fn)
 
         return self._source
 
