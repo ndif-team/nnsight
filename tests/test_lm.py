@@ -625,6 +625,15 @@ def test_source_operation_not_found(gpt2: nnsight.LanguageModel):
         with gpt2.trace("_"):
             out = gpt2.transformer.h[0].attn.source.my_func.output.save()
 
+    
+@torch.no_grad()
+@pytest.mark.source
+def test_source_decorated_function(gpt2: nnsight.LanguageModel):
+    with gpt2.trace("_"):
+        out = gpt2.transformer.source.input_ids_size_0.output.save()
+
+    assert isinstance(out, torch.Size)
+
 
 ######################### SKIP #################################
 
