@@ -335,6 +335,9 @@ class Tracer:
 
         if self.info is None:
             self.capture()
+            
+        if isinstance(self.info.node.body[0], ast.Pass):
+            return self
 
         def skip(new_frame, event, arg):
             """
@@ -387,6 +390,8 @@ class Tracer:
             self.backend(self)
 
             return True
+        
+        self.backend(self)
         
     ### Serialization ###
     
