@@ -13,6 +13,15 @@ static MountedFunction* mounted_functions = NULL;
 static int num_mounted_functions = 0;
 static int mounted_functions_capacity = 0;
 
+static PyObject* get_dict(PyTypeObject* type) {
+#if PY_VERSION_HEX < 0x030C0000
+    PyObject* dict = type->tp_dict;
+#else
+    PyObject* dict = PyType_GetDict(type);
+#endif
+    return dict;
+}
+
 // Function to mount a new function
 static PyObject* mount_function(PyObject* self, PyObject* args) {
     PyObject* func;
@@ -45,36 +54,11 @@ static PyObject* mount_function(PyObject* self, PyObject* args) {
     mounted_functions[num_mounted_functions].func = func;
     mounted_functions[num_mounted_functions].name = strdup(mount_point);
     num_mounted_functions++;
-        // Inject into all currently loaded types
-    // PyObject* modules = PyImport_GetModuleDict();
-    // PyObject* key, *value;
-    // Py_ssize_t pos = 0;
-    
-    // while (PyDict_Next(modules, &pos, &key, &value)) {
-    //     if (!PyModule_Check(value)) continue;
-        
-    //     PyObject* module_dict = PyModule_GetDict(value);
-    //     if (!module_dict) continue;
-        
-    //     PyObject* item_key, *item_value;
-    //     Py_ssize_t item_pos = 0;
-    //     while (PyDict_Next(module_dict, &item_pos, &item_key, &item_value)) {
-    //         if (PyType_Check(item_value)) {
-    //             PyTypeObject* type = (PyTypeObject*)item_value;
-                
-    //             // Create an instance method
-    //             PyObject* method = PyInstanceMethod_New(func);
-    //             if (method) {
-    //                 PyDict_SetItemString(type->tp_dict, mount_point, method);
-    //                 Py_DECREF(method);
-    //                 PyType_Modified(type);
-    //             }
-    //         }
-    //     }
-    // Mount only on the base object type
+
     PyObject* method = PyInstanceMethod_New(func);
     if (method) {
-        PyDict_SetItemString(PyBaseObject_Type.tp_dict, mount_point, method);
+        PyObject *dict = get_dict(&PyBaseObject_Type);
+        PyDict_SetItemString(dict, mount_point, method);
         Py_DECREF(method);
         PyType_Modified(&PyBaseObject_Type);
     }
@@ -91,7 +75,8 @@ static PyObject* unmount_function(PyObject* self, PyObject* args) {
     }
     
     // Remove from base object type
-    PyDict_DelItemString(PyBaseObject_Type.tp_dict, mount_point);
+    PyObject *dict = get_dict(&PyBaseObject_Type);
+    PyDict_DelItemString(dict, mount_point);
     PyType_Modified(&PyBaseObject_Type);
     
     // Find and remove from our array
