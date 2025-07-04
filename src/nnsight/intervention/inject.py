@@ -55,9 +55,11 @@ class FunctionCallWrapper(ast.NodeTransformer):
 def convert(fn:Callable, wrap:Callable, name:str):
     
     #TODO what about exceptions?
-    
- 
+
     source = textwrap.dedent(inspect.getsource(fn))
+    source = source.split("\n")
+    source = [line for line in source if not line.startswith("@")]
+    source = "\n".join(source)
     
     # Get the module where the forward method is defined
     module_globals = inspect.getmodule(fn).__dict__
