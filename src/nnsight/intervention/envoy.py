@@ -188,6 +188,7 @@ class Envoy(Batchable):
             The module's input values as a tuple of positional and keyword arguments. i.e (args, kwargs)
 
         """
+
         if self.interleaving:
             return self._interleaver.current.request(
                 self._interleaver.current.iterate(f"{self.path}.input")
@@ -734,10 +735,59 @@ class Envoy(Batchable):
 
         # If the module already has a sub-module named 'input' or 'output',
         # mount the proxy access to 'nns_input' or 'nns_output instead.
+
         if hasattr(Envoy, name):
             self._handle_overloaded_mount(envoy, name)
         else:
             super().__setattr__(name, envoy)
+
+    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
+        """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
+
+        Directly edits the underlying class to accomplish this.
+
+        Args:
+            envoy (Envoy): Envoy to handle.
+            mount_point (str): Overloaded attribute name.
+        """
+
+        warnings.warn(
+            f"Module `{self.path}` of type `{type(self._module)}` has pre-defined a `{mount_point}` attribute. nnsight access for `{mount_point}` will be mounted at `.nns_{mount_point}` instead of `.{mount_point}` for this module only."
+        )
+
+        # If we already shifted a mount point dont create another new class.
+        if "Preserved" in self.__class__.__name__:
+
+            new_cls = self.__class__
+
+        else:
+
+            new_cls = type(
+                f"{self.__class__.__name__}.Preserved",
+                (self.__class__,),
+                {},
+            )
+
+            self.__class__ = new_cls
+
+        # Get the normal proxy mount point
+        mount = getattr(Envoy, mount_point)
+
+        setattr(new_cls, f"nns_{mount_point}", mount)
+
+        if isinstance(mount, property):
+
+            mount = property(
+                lambda slf: slf.__dict__[mount_point],
+                mount.fset,
+                mount.fdel,
+                mount.__doc__,
+            )
+
+            setattr(new_cls, mount_point, mount)
+
+        # Move it to nns_<mount point>
+        self.__dict__[mount_point] = envoy
 
     def _update(self, module: torch.nn.Module) -> None:
         """Updates the ._model attribute using a new model of the same architecture.
@@ -759,12 +809,19 @@ class Envoy(Batchable):
         self._module.__path__ = self.path
 
         if self._source is not None:
+
             def wrap(fn: Callable, **kwargs):
 
-                bound_obj = fn.__self__ if inspect.ismethod(fn) and fn.__name__ != "forward" else None
+                bound_obj = (
+                    fn.__self__
+                    if inspect.ismethod(fn) and fn.__name__ != "forward"
+                    else None
+                )
 
                 if self.interleaving:
-                    return self._interleaver.wrap_operation(fn, **kwargs, bound_obj=bound_obj)
+                    return self._interleaver.wrap_operation(
+                        fn, **kwargs, bound_obj=bound_obj
+                    )
                 else:
                     return fn
 
