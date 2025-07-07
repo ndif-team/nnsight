@@ -3,8 +3,11 @@ from __future__ import annotations
 import inspect
 import os
 import warnings
-from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from functools import wraps
+from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
+                   MethodType)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from torch.nn.modules.module import _addindent
@@ -25,6 +28,20 @@ if TYPE_CHECKING:
 else:
     Interleaver = Any
 
+
+def trace_only(fn: Callable):
+    
+    @wraps(fn)
+    def wrapper(self: Envoy, *args, **kwargs):
+        
+        if self._interleaver is None:
+            raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
+        
+        return fn(self, *args, **kwargs)
+    
+    return wrapper
+        
+        
 
 class Envoy(Batchable):
     """
@@ -542,14 +559,17 @@ class Envoy(Batchable):
     # TODO legacy
     @property
     @deprecated(message="Use `tracer.iter` instead.")
+    @trace_only
     def iter(self):
         return IteratorProxy(self._interleaver)
 
     # TODO legacy
     @deprecated(message="Use `tracer.all()` instead.")
+    @trace_only
     def all(self):
         return self.iter[:]
 
+    @trace_only
     def skip(self, replacement: Any):
         """Skips the execution of this module duting execution / interleaving.
         Behavior is the module will not be executed and will return a replacement value instead.
@@ -565,17 +585,20 @@ class Envoy(Batchable):
         Args:
             replacement (Any): The replacement value to replace the module's output with.
         """
+        
 
         requester = self._interleaver.current.iterate(f"{self.path}.input")
 
         self._interleaver.current.skip(requester, replacement)
 
+    @trace_only
     def wait_for_input(self):
         """
         Wait for the input to the module to be available.
         """
         self.inputs
 
+    @trace_only
     def wait_for_output(self):
         """
         Wait for the output to the module to be available.
