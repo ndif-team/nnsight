@@ -98,17 +98,7 @@ static PyObject* unmount_function(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// Cleanup function for mounted functions
-static void cleanup_mounted_functions(void) {
-    for (int i = 0; i < num_mounted_functions; i++) {
-        Py_XDECREF(mounted_functions[i].func);
-        free(mounted_functions[i].name);
-    }
-    PyMem_Free(mounted_functions);
-    mounted_functions = NULL;
-    num_mounted_functions = 0;
-    mounted_functions_capacity = 0;
-}
+
 
 // Method definitions
 static PyMethodDef module_methods[] = {
@@ -134,10 +124,6 @@ PyMODINIT_FUNC PyInit_py_mount(void) {
     };
     
     PyObject* module = PyModule_Create(&def);
-    if (module) {
-        // Register cleanup function
-        Py_AtExit(cleanup_mounted_functions);
-    }
     
     return module;
 }
