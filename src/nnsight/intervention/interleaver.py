@@ -110,6 +110,9 @@ class Interleaver:
 
         @wraps(fn)
         def inner(module: torch.nn.Module, *args, **kwargs):
+                      
+            if torch.compiler.is_compiling():
+                return fn(module, *args, **kwargs)
 
             if not hasattr(module, "__path__"):
                 return fn(module, *args, **kwargs)
