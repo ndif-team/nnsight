@@ -1252,7 +1252,9 @@ class OperationEnvoy:
 
             self._fn = fn
 
-        self._interleaver.current.swap(f"{self.name}.fn", self._fn)
+
+        if f"{self.name}.fn" not in self._interleaver.current.history:
+            self._interleaver.current.swap(f"{self.name}.fn", self._fn)
 
         return self._source
 
