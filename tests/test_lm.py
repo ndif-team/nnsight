@@ -689,13 +689,12 @@ def test_multiple_skip(gpt2: nnsight.LanguageModel):
 @torch.no_grad()
 @pytest.mark.skips
 def test_skip_inner_module(gpt2: nnsight.LanguageModel):
-    with gpt2.trace("Hello World"):
-        inp = gpt2.transformer.h[0].output
-        gpt2.transformer.h[1].skip(inp)
-        hs = gpt2.transformer.h[1].attn.output.save()
+    with pytest.raises(ValueError):
+        with gpt2.trace("Hello World"):
+            inp = gpt2.transformer.h[0].output
+            gpt2.transformer.h[1].skip(inp)
+            hs = gpt2.transformer.h[1].attn.output.save()
 
-    with pytest.raises(UnboundLocalError):
-        hs
 
 
 @torch.no_grad()
