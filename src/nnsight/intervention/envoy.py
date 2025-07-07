@@ -1225,15 +1225,21 @@ class OperationEnvoy:
 
         if self._source is None:
             fn = self._interleaver.current.request(f"{self.name}.fn")
+            
+            #TODO maybe do something else here
+            if isinstance(fn, torch.nn.Module):
+                
+                msg = f"Don't call .source on a module ({getattr(fn, '__path__', '')}) from within another .source. Call it directly with: {getattr(fn, '__path__', '')}.source"
+                raise ValueError(msg)
 
             def wrap(fn: Callable, **kwargs):
-
+                
                 bound_obj = (
                     fn.__self__
-                    if fn.__name__ != "forward" and inspect.ismethod(fn)
+                    if getattr(fn, "__name__", None) != "forward" and inspect.ismethod(fn)
                     else None
                 )
-
+                    
                 return self._interleaver.wrap_operation(
                     fn, **kwargs, bound_obj=bound_obj
                 )
