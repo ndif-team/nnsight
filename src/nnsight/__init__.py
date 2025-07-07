@@ -1,5 +1,6 @@
 from functools import wraps
-import os, yaml
+import inspect
+import os, yaml, sys
 import warnings
 from typing import Optional
 from .schema.config import ConfigModel
@@ -22,6 +23,8 @@ try:
 except NameError:
     __IPYTHON__ = False
     
+__INTERACTIVE__ = (sys.flags.interactive or not sys.argv[0]) and not __IPYTHON__
+
 base_deprecation_message = "is deprecated as of v0.5.0 and will be removed in a future version."
     
 def deprecated(message:Optional[str]=None, error:bool=False):
@@ -142,9 +145,29 @@ str = deprecated(message="Use the standard `str()` instead.")(str)
 tuple = deprecated(message="Use the standard `tuple()` instead.")(tuple)
 bytearray = deprecated(message="Use the standard `bytearray()` instead.")(bytearray)
 
+if __INTERACTIVE__:
+    from code import InteractiveConsole
+    import readline
+    
+    # We need to use our own console so when we trace, we can get the source code from the buffer of our custom console.
+    class NNsightConsole(InteractiveConsole):
+        pass
+    
+    # We want the new console to have the locals of the interactive frame the user is already in.
+    frame = inspect.currentframe()
 
+    while frame.f_back:
+        frame = frame.f_back
 
+    # This was kicked off by importing nnsight, but upon entering the new console, we wont actually have the import in the new locals.
+    # So we need to get the last command from the history and execute it in the new locals.
+    length = readline.get_current_history_length()
+    l1 = readline.get_history_item(length)
+    ilocals = {**frame.f_locals}
+    exec(l1, frame.f_globals, ilocals)
+    
+    __INTERACTIVE_CONSOLE__ = NNsightConsole(filename="<nnsight-console>", locals=ilocals)
+    __INTERACTIVE_CONSOLE__.interact(banner="")
 
-
-
-
+else:
+    __INTERACTIVE_CONSOLE__ = None

@@ -58,7 +58,12 @@ class Tracer:
         """
 
         def __init__(
-            self, source: List[str], frame: FrameType, start_line: int, node:ast.With, filename: str = None
+            self,
+            source: List[str],
+            frame: FrameType,
+            start_line: int,
+            node: ast.With,
+            filename: str = None,
         ):
             """
             Initialize Info with source code and frame information.
@@ -73,11 +78,15 @@ class Tracer:
             self.frame = frame
             self.start_line = start_line
             self.node = node
-            self.filename = filename if filename is not None else f"<nnsight {id(self)}>"
-            
+            self.filename = (
+                filename if filename is not None else f"<nnsight {id(self)}>"
+            )
+
         def copy(self):
-            return Tracer.Info(self.source, self.frame, self.start_line, self.node, self.filename)
-        
+            return Tracer.Info(
+                self.source, self.frame, self.start_line, self.node, self.filename
+            )
+
         def __getstate__(self):
             """Get the state of the info for serialization."""
             return {
@@ -86,17 +95,17 @@ class Tracer:
                 "filename": self.filename,
                 "frame": self.frame,
             }
-        
+
         def __setstate__(self, state):
             """Set the state of the info for deserialization."""
             self.source = state["source"]
             self.start_line = state["start_line"]
             self.filename = state["filename"]
             self.frame = state["frame"]
-            
+
             self.node = None
 
-    def __init__(self, *args, backend: Backend = None, _info:Info = None, **kwargs):
+    def __init__(self, *args, backend: Backend = None, _info: Info = None, **kwargs):
         """
         Initialize a Tracer instance.
 
@@ -113,7 +122,7 @@ class Tracer:
 
         self.info = _info if _info is not None else None
 
-        if self.info is None:   
+        if self.info is None:
             self.capture()
 
     def capture(self):
@@ -127,7 +136,7 @@ class Tracer:
         """
         # Find the frame outside of nnsight by walking up the call stack
         frame = inspect.currentframe()
-        
+
         while frame:
             frame = frame.f_back
             if frame and (
@@ -139,10 +148,12 @@ class Tracer:
         # Get source code lines from the appropriate location
         start_line = frame.f_lineno
 
+        # CASE 1: Were already inside of another nnsight trace.
         if "__nnsight_tracing_info__" in frame.f_locals:
             # For dynamically generated code, get source from tracing info
             source_lines = frame.f_locals["__nnsight_tracing_info__"].source
 
+        # CASE 2: We're in an IPython console.
         elif "_ih" in frame.f_locals:
             import IPython
 
@@ -152,11 +163,23 @@ class Tracer:
             if not source_lines[-1].endswith("\n"):
                 source_lines[-1] += "\n"
 
+        # CASE 3: We're in a regular Python file.
         elif not frame.f_code.co_filename.startswith("<nnsight"):
             # For regular files, get source lines using inspect
             source_lines, offset = inspect.getsourcelines(frame)
 
             start_line = start_line if offset == 0 else start_line - offset + 1
+
+        # CASE 4: We're in a regular Python interactive console.
+        elif frame.f_code.co_filename == "<nnsight-console>":
+            from ... import __INTERACTIVE_CONSOLE__
+
+            source_lines = __INTERACTIVE_CONSOLE__.buffer
+            # Add newline to each source line if it doesn't end with one
+            source_lines = [
+                line if line.endswith("\n") else line + "\n" for line in source_lines
+            ]
+            
 
         else:
             raise ValueError("No source code found")
@@ -166,10 +189,10 @@ class Tracer:
             "\t "
         )  # indent for removing leading tabs/spaces
         indent = len(source_lines[0]) - len(stripped)
-        
+
         # If theres an indent, we need to remove it. This handles the case of say a trace in an indented function. E.x. a trace inside a method on a class.
         if indent > 0:
-                
+
             source_lines = [
                 line[indent:] if line.strip() else line for line in source_lines
             ]
@@ -178,22 +201,18 @@ class Tracer:
         start_line, source_lines, node = self.parse(source_lines, start_line)
 
         # Calculate indentation level of the Tracer creation line.
-        stripped = source_lines[0].lstrip(
-            "\t "
-        )  # removes leading tabs/spaces
+        stripped = source_lines[0].lstrip("\t ")  # removes leading tabs/spaces
         indent = len(source_lines[0]) - len(stripped) - 4
-        
-         # If theres an indent (more than just the indentation of the with block), we need to remove it. This handles the case of say a trace in an indented block. E.x. a trace inside a for loop or another with block.
+
+        # If theres an indent (more than just the indentation of the with block), we need to remove it. This handles the case of say a trace in an indented block. E.x. a trace inside a for loop or another with block.
         if indent > 0:
-        
+
             source_lines = [
                 line[indent:] if line.strip() else line for line in source_lines
             ]
 
         # Store the captured information for later use
-        self.info = Tracer.Info(
-            source_lines, frame, start_line, node
-        )
+        self.info = Tracer.Info(source_lines, frame, start_line, node)
 
     def parse(self, source_lines, start_line):
         """
@@ -233,7 +252,7 @@ class Tracer:
             raise WithBlockNotFoundError(f"With block not found at line {start_line}")
 
         end_line = visitor.target.end_lineno
-        
+
         start_line = visitor.target.body[0].lineno - 1
 
         return start_line, source_lines[start_line:end_line], visitor.target
@@ -318,9 +337,8 @@ class Tracer:
                 ctypes.pythonapi.PyFrame_LocalsToFast(
                     ctypes.py_object(frame), ctypes.c_int(0)
                 )
-                
+
         state.clear()
-                
 
     def __enter__(self):
         """
@@ -335,6 +353,9 @@ class Tracer:
 
         if self.info is None:
             self.capture()
+
+        if isinstance(self.info.node.body[0], ast.Pass):
+            return self
 
         def skip(new_frame, event, arg):
             """
@@ -387,9 +408,11 @@ class Tracer:
             self.backend(self)
 
             return True
-        
+
+        self.backend(self)
+
     ### Serialization ###
-    
+
     def __getstate__(self):
         """Get the state of the tracer for serialization."""
         return {
@@ -397,7 +420,7 @@ class Tracer:
             "kwargs": self.kwargs,
             "info": self.info,
         }
-        
+
     def __setstate__(self, state):
         """Set the state of the tracer for deserialization."""
         self.args = state["args"]
@@ -405,4 +428,3 @@ class Tracer:
         self.info = state["info"]
         self.info.start_line = 0
         self.backend = ExecutionBackend()
-        

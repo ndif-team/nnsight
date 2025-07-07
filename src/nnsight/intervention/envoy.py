@@ -3,8 +3,11 @@ from __future__ import annotations
 import inspect
 import os
 import warnings
-from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from functools import wraps
+from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
+                   MethodType)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 from torch.nn.modules.module import _addindent
@@ -25,6 +28,20 @@ if TYPE_CHECKING:
 else:
     Interleaver = Any
 
+
+def trace_only(fn: Callable):
+    
+    @wraps(fn)
+    def wrapper(self: Envoy, *args, **kwargs):
+        
+        if self._interleaver is None:
+            raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
+        
+        return fn(self, *args, **kwargs)
+    
+    return wrapper
+        
+        
 
 class Envoy(Batchable):
     """
@@ -188,6 +205,7 @@ class Envoy(Batchable):
             The module's input values as a tuple of positional and keyword arguments. i.e (args, kwargs)
 
         """
+
         if self.interleaving:
             return self._interleaver.current.request(
                 self._interleaver.current.iterate(f"{self.path}.input")
@@ -541,18 +559,20 @@ class Envoy(Batchable):
     # TODO legacy
     @property
     @deprecated(message="Use `tracer.iter` instead.")
+    @trace_only
     def iter(self):
         return IteratorProxy(self._interleaver)
 
     # TODO legacy
     @deprecated(message="Use `tracer.all()` instead.")
+    @trace_only
     def all(self):
         return self.iter[:]
 
-    def skip(self, replacement: Optional[Any] = inspect._empty):
+    @trace_only
+    def skip(self, replacement: Any):
         """Skips the execution of this module duting execution / interleaving.
         Behavior is the module will not be executed and will return a replacement value instead.
-        By default, the replacement value is the first input to the module. Otherwise this value can be specified.
 
         Example:
             >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
@@ -563,22 +583,22 @@ class Envoy(Batchable):
             >>> print(output)
 
         Args:
-            replacement (Optional[Any], optional): The replacement value to replace the module's output with. If not specified, the first input to the module will be used.
+            replacement (Any): The replacement value to replace the module's output with.
         """
-
-        if replacement is inspect._empty:
-            replacement = self.input
+        
 
         requester = self._interleaver.current.iterate(f"{self.path}.input")
 
         self._interleaver.current.skip(requester, replacement)
 
+    @trace_only
     def wait_for_input(self):
         """
         Wait for the input to the module to be available.
         """
         self.inputs
 
+    @trace_only
     def wait_for_output(self):
         """
         Wait for the output to the module to be available.
@@ -739,10 +759,59 @@ class Envoy(Batchable):
 
         # If the module already has a sub-module named 'input' or 'output',
         # mount the proxy access to 'nns_input' or 'nns_output instead.
+
         if hasattr(Envoy, name):
             self._handle_overloaded_mount(envoy, name)
         else:
             super().__setattr__(name, envoy)
+
+    def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
+        """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
+
+        Directly edits the underlying class to accomplish this.
+
+        Args:
+            envoy (Envoy): Envoy to handle.
+            mount_point (str): Overloaded attribute name.
+        """
+
+        warnings.warn(
+            f"Module `{self.path}` of type `{type(self._module)}` has pre-defined a `{mount_point}` attribute. nnsight access for `{mount_point}` will be mounted at `.nns_{mount_point}` instead of `.{mount_point}` for this module only."
+        )
+
+        # If we already shifted a mount point dont create another new class.
+        if "Preserved" in self.__class__.__name__:
+
+            new_cls = self.__class__
+
+        else:
+
+            new_cls = type(
+                f"{self.__class__.__name__}.Preserved",
+                (self.__class__,),
+                {},
+            )
+
+            self.__class__ = new_cls
+
+        # Get the normal proxy mount point
+        mount = getattr(Envoy, mount_point)
+
+        setattr(new_cls, f"nns_{mount_point}", mount)
+
+        if isinstance(mount, property):
+
+            mount = property(
+                lambda slf: slf.__dict__[mount_point],
+                mount.fset,
+                mount.fdel,
+                mount.__doc__,
+            )
+
+            setattr(new_cls, mount_point, mount)
+
+        # Move it to nns_<mount point>
+        self.__dict__[mount_point] = envoy
 
     def _update(self, module: torch.nn.Module) -> None:
         """Updates the ._model attribute using a new model of the same architecture.
@@ -762,6 +831,28 @@ class Envoy(Batchable):
 
         self._module = module
         self._module.__path__ = self.path
+
+        if self._source is not None:
+
+            def wrap(fn: Callable, **kwargs):
+
+                bound_obj = (
+                    fn.__self__
+                    if inspect.ismethod(fn) and fn.__name__ != "forward"
+                    else None
+                )
+
+                if self.interleaving:
+                    return self._interleaver.wrap_operation(
+                        fn, **kwargs, bound_obj=bound_obj
+                    )
+                else:
+                    return fn
+
+            source, line_numbers, forward = inject(
+                self._module.forward, wrap, self._module.__path__
+            )
+            self._module.forward = MethodType(forward, self._module)
 
     def _update_alias(self, alias: Dict[str, str]):
         """
@@ -1013,6 +1104,7 @@ class OperationEnvoy:
         self._interleaver = interleaver
 
         self._source: EnvoySource = None
+        self._fn: Callable = None
 
     def __str__(self):
         """
@@ -1157,15 +1249,21 @@ class OperationEnvoy:
 
         if self._source is None:
             fn = self._interleaver.current.request(f"{self.name}.fn")
+            
+            #TODO maybe do something else here
+            if isinstance(fn, torch.nn.Module):
+                
+                msg = f"Don't call .source on a module ({getattr(fn, '__path__', '')}) from within another .source. Call it directly with: {getattr(fn, '__path__', '')}.source"
+                raise ValueError(msg)
 
             def wrap(fn: Callable, **kwargs):
-
+                
                 bound_obj = (
                     fn.__self__
-                    if fn.__name__ != "forward" and inspect.ismethod(fn)
+                    if getattr(fn, "__name__", None) != "forward" and inspect.ismethod(fn)
                     else None
                 )
-
+                    
                 return self._interleaver.wrap_operation(
                     fn, **kwargs, bound_obj=bound_obj
                 )
@@ -1176,7 +1274,11 @@ class OperationEnvoy:
                 self.name, source, line_numbers, interleaver=self._interleaver
             )
 
-            self._interleaver.current.swap(f"{self.name}.fn", fn)
+            self._fn = fn
+
+
+        if f"{self.name}.fn" not in self._interleaver.current.history:
+            self._interleaver.current.swap(f"{self.name}.fn", self._fn)
 
         return self._source
 

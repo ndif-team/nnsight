@@ -1,8 +1,0 @@
-nnsight
-pydata_sphinx_theme
-sphinx
-sphinx-copybutton
-sphinx-design
-nbsphinx
-plotly
-ipython

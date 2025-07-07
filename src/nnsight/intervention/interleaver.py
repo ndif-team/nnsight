@@ -4,12 +4,14 @@ import ctypes
 import inspect
 import threading
 import time
+import warnings
 from collections import defaultdict
 from enum import Enum
 from functools import wraps
 from queue import Queue
 from threading import Thread
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 
@@ -19,7 +21,7 @@ from .tracing.base import WithBlockNotFoundError
 from .tracing.util import wrap_exception
 
 if TYPE_CHECKING:
-    from .tracing.tracer import Cache, Tracer, InterleavingTracer
+    from .tracing.tracer import Cache, InterleavingTracer, Tracer
     
 
 
@@ -76,7 +78,7 @@ class Interleaver:
         self.invokers = invokers
         self.batcher = batcher
         self.tracer = tracer
-        self.mediators = {}
+        self.mediators: Dict[str, Mediator] = {}
 
         self.patcher = None
 
@@ -101,6 +103,9 @@ class Interleaver:
 
         @wraps(fn)
         def inner(module: torch.nn.Module, *args, **kwargs):
+                      
+            if torch.compiler.is_compiling():
+                return fn(module, *args, **kwargs)
 
             if not hasattr(module, "__path__"):
                 return fn(module, *args, **kwargs)
@@ -214,9 +219,11 @@ class Interleaver:
         Returns:
             A wrapped version of the backward method
         """
-        from .tracing.backwards import BackwardsTracer
+        
 
         def inner(tensor: torch.Tensor, *args, **kwargs):
+            
+            from .tracing.backwards import BackwardsTracer
 
             try:
 
@@ -302,14 +309,32 @@ class Interleaver:
         except EarlyStopException:
             pass
 
-        # TODO check all mediator events
+        # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
+        # Or their Envoy was not called.
+        for mediator in self.mediators.values():
+            
+            if mediator.child is not None:
+                mediator = mediator.child
+            
+            if not mediator.event_queue.empty():
+                requested_event, requester = mediator.event_queue.get()
+                
+                if isinstance(requester, tuple):
+                    requester = requester[0]
+                    
+                    
 
-        # TODO
-        # for mediator in self.mediators:
-        #     if mediator.has_pending_event():
-        #         requested_event, requester = mediator.get_event()
-        #         print(requested_event, requester)
-        #         raise ValueError(f"Execution complete but {requester} was not provided. Did you call an Envoy out of order? Investigate why this module was not called.")
+                mediator.respond(ValueError(f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called?")) 
+                mediator.wait()
+                
+                if mediator.name.startswith("Iterator"):
+                    try:
+                        mediator.handle()
+                    except ValueError as e:  
+                        msg = f"Execution complete but `{requester}` was not provided. This was in an Iterator at iteration {mediator.iteration} so likely this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
+                        warnings.warn(msg)
+                else:
+                    mediator.handle()
 
     ### Provider Methods ###
 

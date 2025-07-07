@@ -626,6 +626,19 @@ def test_source_operation_not_found(gpt2: nnsight.LanguageModel):
             out = gpt2.transformer.h[0].attn.source.my_func.output.save()
 
 
+@torch.no_grad()
+@pytest.mark.source
+def test_operation_envoy_update(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2")
+
+    fn = gpt2.transformer.h[0].attn.source.split_1
+
+    with gpt2.trace(MSG_prompt) as tracer:
+        out = fn.output.save()
+    
+    assert isinstance(out, tuple)
+
+
 ######################### SKIP #################################
 
 @torch.no_grad()
@@ -676,13 +689,12 @@ def test_multiple_skip(gpt2: nnsight.LanguageModel):
 @torch.no_grad()
 @pytest.mark.skips
 def test_skip_inner_module(gpt2: nnsight.LanguageModel):
-    with gpt2.trace("Hello World"):
-        inp = gpt2.transformer.h[0].output
-        gpt2.transformer.h[1].skip(inp)
-        hs = gpt2.transformer.h[1].attn.output.save()
+    with pytest.raises(ValueError):
+        with gpt2.trace("Hello World"):
+            inp = gpt2.transformer.h[0].output
+            gpt2.transformer.h[1].skip(inp)
+            hs = gpt2.transformer.h[1].attn.output.save()
 
-    with pytest.raises(UnboundLocalError):
-        hs
 
 
 @torch.no_grad()
@@ -1065,6 +1077,30 @@ def test_cache_attribute_access(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with pytest.raises(KeyError):
         cache.model.transformer[0]
 
+
+@torch.no_grad()
+@pytest.mark.cache
+def test_cache_no_entry_input(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    with gpt2.trace(MSG_prompt) as tracer:
+        cache = tracer.cache(modules=[gpt2.transformer.h[0]])
+
+    assert cache['model.transformer.h.0'].input is None
+
+
+@torch.no_grad()
+@pytest.mark.cache
+def test_cache_alias(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={"transformer": "model", "h.0": "first_layer", "1": "second_layer"})
+
+    with gpt2.trace(MSG_prompt) as tracer:
+        cache = tracer.cache()
+
+    assert torch.equal(cache['model.transformer.h.0'].output[0], cache.model.model.first_layer.output[0])
+    assert torch.equal(cache['model.transformer.h.1'].output[0], cache.model.model.h["second_layer"].output[0])
+
+    assert torch.equal(cache.model.transformer.h[0].output[0], cache.model.model.first_layer.output[0])
+    assert torch.equal(cache.model.transformer.h[1].output[0], cache.model.model.h["second_layer"].output[0])
+    
 
 ######################### RENAME #################################
 

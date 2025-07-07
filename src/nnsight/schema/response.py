@@ -75,4 +75,4 @@ class ResponseModel(BaseModel):
                 **torch.load(file, map_location="cpu", weights_only=False)
             )
             
-ResponseModel.update_forward_refs()
+ResponseModel.model_rebuild()
