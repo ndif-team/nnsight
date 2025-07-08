@@ -27,8 +27,10 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
-from vllm.model_executor.model_loader.utils import initialize_model
+from vllm.model_executor.model_loader.utils import initialize_model, get_model_architecture
+from vllm import envs
 
+envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
 # from vllm.model_executor.model_loader.loader import _initialize_model
 # except Exception as e:
 #     raise type(e)(
@@ -74,7 +76,7 @@ class VLLM(RemoteableMixin):
         self.generator: Envoy = WrapperModule()
 
     def _load_meta(self, repo_id: str, **kwargs) -> "Module":
-
+        
         # no parallelism during initialization
         kwargs["tensor_parallel_size"] = 1
         kwargs["pipeline_parallel_size"] = 1
@@ -112,8 +114,10 @@ class VLLM(RemoteableMixin):
             )
         )
         # initialize the model
-
-        model = initialize_model(vllm_config)
+        vllm_config.compilation_config.level = 1
+        model_class, _ = get_model_architecture(vllm_config.model_config)
+        model =  model_class(vllm_config=vllm_config, prefix="")
+        #model = initialize_model(vllm_config)
       
         self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config,
                                 vllm_config.scheduler_config,
@@ -123,31 +127,26 @@ class VLLM(RemoteableMixin):
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
         
-        model = self._load_meta(repo_id, **kwargs)
-
-        destroy_model_parallel()
-        destroy_distributed_environment()
-
         llm = LLM(
             repo_id,
-            # worker_cls=NNsightGPUWorker,
+            #worker_cls='nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker',
             **kwargs,
         )
-
+                
         self.vllm_entrypoint = llm
 
         # load the tokenizer
         self.tokenizer = llm.llm_engine.tokenizer.tokenizer
         
         
-        return model
+        return llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model
 
     def _prepare_input(
         self, *args, **kwargs
     ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
 
         if "processed" in kwargs:
-            return (args, kwargs), len(args[0])
+            return args, kwargs
 
         prompts = []
         params = []
@@ -169,7 +168,7 @@ class VLLM(RemoteableMixin):
                 prompts.append(prompt)
                 params.append(param)
 
-        return ((prompts, params), {"processed": True}), len(prompts)
+        return (prompts, params), {"processed": True}
 
     def _batch(
         self,
@@ -180,7 +179,7 @@ class VLLM(RemoteableMixin):
     ) -> Tuple[Union[Tuple[Any], Dict[str, Any]]]:
 
         if batched_inputs is None:
-            batched_inputs = ([], []), {"invoker_group": 0}
+            batched_inputs = (([], []), {"invoker_group": 0}), len(prompts)
 
         (bprompts, bparams), kwargs = batched_inputs
 
@@ -197,30 +196,24 @@ class VLLM(RemoteableMixin):
 
         kwargs["invoker_group"] += 1
 
-        return (bprompts, bparams), kwargs
+        return ((bprompts, bparams), kwargs), len(prompts)
 
     def __call__(
         self,
         prompts: List[str],
         params: List[NNsightSamplingParams],
-        interleaver: Interleaver,
         **kwargs,
     ) -> Any:
-
-        breakpoint()
-
-        kwargs.pop("invoker_group")
-
-        for param in params:
-            if param.is_default_param:
-                for attr, value in kwargs.items():
-                    if hasattr(NNsightSamplingParams, attr):
-                        setattr(param, attr, value)
+        
+        # for param in params:
+        #     if param.is_default_param:
+        #         for attr, value in kwargs.items():
+        #             if hasattr(NNsightSamplingParams, attr):
+        #                 setattr(param, attr, value)
 
         out = self.vllm_entrypoint.generate(prompts, sampling_params=params)
-
-        with interleaver:
-            self.generator(out)
+        breakpoint()
+        self.generator(out, hook=True)
 
 
 if TYPE_CHECKING:

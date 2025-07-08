@@ -83,12 +83,21 @@ class Interleaver:
         self.patcher = None
 
         self.state = dict()
-        
         self.iteration_tracker = defaultdict(int)
 
+        self.user_cache: Optional[Cache] = user_cache
+        
         #TODO legacy?
         self.default_all = None
         
+    def iterate(self, provider:str):
+        
+        iteration = self.iteration_tracker[provider]
+
+        self.iteration_tracker[provider] += 1
+
+        return f"{provider}.i{iteration}"
+
 
     def wrap(self, fn: Callable):
         """
@@ -112,19 +121,23 @@ class Interleaver:
 
             provider = module.__path__
             
+            print(provider)
+            
             # Call our hook before the original __call__
             
             try:
-                inputs = self.handle(f"{provider}.input", (args, kwargs))
+                inputs = self.handle(self.iterate(f"{provider}.input"), (args, kwargs))
             except SkipException as e:
                 value = e.value
             else:
                 args, kwargs = inputs
                 value = fn(module, *args, **kwargs)
             
-            value = self.handle(f"{provider}.output", value)
+            value = self.handle(self.iterate(f"{provider}.output"), value)
     
             return value
+        
+        setattr(inner, "__interleave__", True)
 
         return inner
 
@@ -200,7 +213,7 @@ class Interleaver:
 
             requester = id(tensor)
 
-            return self.current.request(self.current.iterate(f"{requester}.grad"))
+            return self.current.request(f"{requester}.grad")
 
         def setter(tensor: torch.Tensor, value: torch.Tensor):
 
@@ -208,7 +221,7 @@ class Interleaver:
 
             requester = id(tensor)
 
-            return self.current.swap(self.current.iterate(f"{requester}.grad"), value)
+            return self.current.swap(f"{requester}.grad", value)
 
         return property(getter, setter)
 
@@ -286,6 +299,7 @@ class Interleaver:
             exc_val: Exception value if an exception was raised
             exc_tb: Exception traceback if an exception was raised
         """
+        self.cancel()
 
         self.patcher.__exit__(None, None, None)
 
@@ -452,7 +466,6 @@ class Mediator:
         self.history = set()
         self.user_cache: List["Cache"] = list()
         self.iteration = 0
-        self.iteration_tracker = defaultdict(int)
 
         self.args = list()
 
@@ -466,20 +479,18 @@ class Mediator:
         self.interleaver = interleaver
 
         self.interleaver.mediators[self.name] = self
-        
-        if self.thread is None:
 
-            self.thread = Thread(
-                target=self.intervention,
-                args=(self, self.info, self.interleaver.tracer.model, self.interleaver.tracer),
-                daemon=True,
-                name=self.name,
-            )
-            self.thread.start()
+        self.thread = Thread(
+            target=self.intervention,
+            args=(self, self.info,  *self.args),
+            daemon=True,
+            name=self.name,
+        )
+        self.thread.start()
 
-            self.wait()
+        self.wait()
 
-            self.handle()
+        self.handle()
 
     ### Provider Methods ###
 
@@ -496,7 +507,6 @@ class Mediator:
         self.interleaver.mediators.pop(self.name)
 
         self.history.clear()
-        self.iteration_tracker.clear()
 
         self.thread = None
         
@@ -516,9 +526,7 @@ class Mediator:
         Returns:
             The original or modified value
         """
-        
-        print('provider', provider)
-                
+
         if self.child is not None:
 
             self.child.handle(provider)
@@ -536,9 +544,6 @@ class Mediator:
                 self.child = None
 
                 # Continue to handle parent event
-                
-        if provider is not None:
-            provider = self.update_iteration(provider)
 
         process = not self.event_queue.empty()
 
@@ -598,8 +603,6 @@ class Mediator:
         Returns:
             Boolean indicating whether to continue processing events
         """
-        
-        print('requester', requester)
 
         if provider == requester:
 
@@ -744,16 +747,6 @@ class Mediator:
         self.response_queue.put(value)
 
         self.wait()
-        
-    def update_iteration(self, provider:str):
-        
-        iteration = self.iteration_tracker[provider]
-
-        self.iteration_tracker[provider] += 1
-
-        return f"{provider}.i{iteration}"
-
-
 
     ### Requester Methods ###
 

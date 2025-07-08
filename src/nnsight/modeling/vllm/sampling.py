@@ -17,30 +17,30 @@ from ...intervention.tracing.tracer import Tracer
 
 
 class NNsightSamplingParams(SamplingParams):
+    pass
+    # mediator: Optional[Mediator] = None
+    # nns_batch_groups: Optional[List[Tuple[int, int]]] = None
+    # invoker_group: Optional[int] = None
+    # is_default_param: bool = True
 
-    mediator: Optional[Mediator] = None
-    nns_batch_groups: Optional[List[Tuple[int, int]]] = None
-    invoker_group: Optional[int] = None
-    is_default_param: bool = True
+    # def clone(self) -> "SamplingParams":
+    #     """Deep copy excluding LogitsProcessor objects.
 
-    def clone(self) -> "SamplingParams":
-        """Deep copy excluding LogitsProcessor objects.
+    #     LogitsProcessor objects are excluded because they may contain an
+    #     arbitrary, nontrivial amount of data.
+    #     See https://github.com/vllm-project/vllm/issues/3087
+    #     """
 
-        LogitsProcessor objects are excluded because they may contain an
-        arbitrary, nontrivial amount of data.
-        See https://github.com/vllm-project/vllm/issues/3087
-        """
+    #     memo = {}
 
-        memo = {}
+    #     if self.logits_processors is not None:
+    #         for lp in self.logits_processors:
+    #             memo[id(lp)] = lp
 
-        if self.logits_processors is not None:
-            for lp in self.logits_processors:
-                memo[id(lp)] = lp
+    #     if self.intervention_graph is not None:
+    #         memo[id(self.intervention_graph)] = self.intervention_graph
 
-        if self.intervention_graph is not None:
-            memo[id(self.intervention_graph)] = self.intervention_graph
-
-        return copy.deepcopy(self, memo=memo)
+    #     return copy.deepcopy(self, memo=memo)
 
 
 class NNsightSamplingMetadata(SamplingMetadata):

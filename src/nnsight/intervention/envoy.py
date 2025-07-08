@@ -13,7 +13,7 @@ import torch
 from torch.nn.modules.module import _addindent
 
 from .. import CONFIG, base_deprecation_message, deprecated, util
-from ..util import apply
+from ..util import apply, Patch
 from . import serialization
 from .batching import Batchable
 from .inject import convert as inject
@@ -715,8 +715,6 @@ class Envoy(Batchable):
 
     def interleave(self, interleaver: Interleaver, fn: Callable, *args, **kwargs):
 
-        self._set_interleaver(interleaver)
-
         try:
             device = self.device
 
@@ -725,11 +723,12 @@ class Envoy(Batchable):
             )
 
             with interleaver:
+                
+                self._set_interleaver(interleaver)
 
                 interleaver(fn, *args, **kwargs)
 
         finally:
-            interleaver.cancel()
             self._set_interleaver(None)
 
     #### Private methods ####
@@ -874,6 +873,9 @@ class Envoy(Batchable):
             interleaver: The interleaver to set
         """
         self._interleaver = interleaver
+        
+        if interleaver is not None and not getattr(self._module.__class__.__call__, "__interleave__", False):
+            interleaver.patcher.add(Patch(self._module.__class__, interleaver.wrap(self._module.__class__.__call__), "__call__"))
 
         for envoy in self._children:
             envoy._set_interleaver(interleaver)
@@ -1149,7 +1151,7 @@ class OperationEnvoy:
             The operation's output value(s)
         """
 
-        return self._interleaver.current.request(self._interleaver.current.iterate(f"{self.name}.output"))
+        return self._interleaver.current.request(f"{self.name}.output")
 
     @output.setter
     def output(self, value: Any) -> None:
@@ -1162,7 +1164,7 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
-        self._interleaver.current.swap(self._interleaver.current.iterate(f"{self.name}.output"), value)
+        self._interleaver.current.swap(f"{self.name}.output", value)
 
     @property
     def inputs(
@@ -1177,7 +1179,7 @@ class OperationEnvoy:
         Returns:
             The operation's input value(s)
         """
-        return self._interleaver.current.request(self._interleaver.current.iterate(f"{self.name}.input"))
+        return self._interleaver.current.request(f"{self.name}.input")
 
     @inputs.setter
     def inputs(self, value: Any) -> None:
@@ -1190,7 +1192,7 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        self._interleaver.current.swap(self._interleaver.current.iterate(f"{self.name}.input"), value)
+        self._interleaver.current.swap(f"{self.name}.input", value)
 
     @inputs.deleter
     def inputs(self):

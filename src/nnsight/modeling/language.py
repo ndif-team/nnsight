@@ -86,6 +86,10 @@ class LanguageModel(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
         
+        breakpoint()
+        
+        self._load_tokenizer(self.repo_id)
+        
         if import_edits:
             
             if isinstance(import_edits, str):
@@ -194,6 +198,8 @@ class LanguageModel(RemoteableMixin):
             self.config.rope_scaling["rope_type"] = "default"
 
         model = self.automodel.from_config(self.config, trust_remote_code=True)
+        
+        self.config = model.config
 
         return model
 
@@ -218,6 +224,8 @@ class LanguageModel(RemoteableMixin):
             self.config.rope_scaling["rope_type"] = "llama3"
 
         model = self.automodel.from_pretrained(repo_id, config=self.config, **kwargs)
+        
+        self.config = model.config
 
         return model
 

@@ -7,12 +7,13 @@ from ..sampling import NNsightSamplingMetadata, NNsightSamplingParams
 
 class NNsightInputBatch(InputBatch):
     
+    
+    
     def add_request(self, request: CachedRequestState, req_index: Optional[int] = None) -> None:
-        super().add_request(request, req_index)
-        
-        sampling_params: NNsightSamplingParams = request.sampling_params
-        
+        print("add_request")
+        super().add_request(request, req_index)        
     def _make_sampling_metadata(self) -> NNsightSamplingMetadata:
+        print("make_sampling_metadata")
         return super()._make_sampling_metadata()
         
         
