@@ -234,6 +234,9 @@ class LanguageModel(RemoteableMixin):
         ],
         **kwargs,
     ):
+        
+        if self.tokenizer is None:
+            raise AttributeError("Tokenizer not found. If you passed a pre-loaded model to `LanguageModel`, you need to provide a tokenizer when initializing: `LanguageModel(model, tokenizer=tokenizer)`.")
 
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
