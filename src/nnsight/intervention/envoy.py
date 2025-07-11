@@ -4,10 +4,8 @@ import inspect
 import os
 import warnings
 from functools import wraps
-from types import (BuiltinFunctionType, BuiltinMethodType, FunctionType,
-                   MethodType)
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.nn.modules.module import _addindent
@@ -30,18 +28,17 @@ else:
 
 
 def trace_only(fn: Callable):
-    
+
     @wraps(fn)
     def wrapper(self: Envoy, *args, **kwargs):
-        
+
         if self._interleaver is None:
             raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
-        
+
         return fn(self, *args, **kwargs)
-    
+
     return wrapper
-        
-        
+
 
 class Envoy(Batchable):
     """
@@ -585,7 +582,6 @@ class Envoy(Batchable):
         Args:
             replacement (Any): The replacement value to replace the module's output with.
         """
-        
 
         requester = self._interleaver.current.iterate(f"{self.path}.input")
 
@@ -733,7 +729,7 @@ class Envoy(Batchable):
 
     #### Private methods ####
 
-    def _add_envoy(self, module: torch.nn.Module, name: str) -> None:
+    def _add_envoy(self, module: torch.nn.Module, name: str) -> Envoy:
         """
         Adds a new Envoy for a given torch module under this Envoy.
 
@@ -763,6 +759,8 @@ class Envoy(Batchable):
             self._handle_overloaded_mount(envoy, name)
         else:
             super().__setattr__(name, envoy)
+
+        return envoy
 
     def _handle_overloaded_mount(self, envoy: Envoy, mount_point: str) -> None:
         """If a given module already has an attribute of the same name as something nnsight wants to add, we need to rename it.
@@ -1051,6 +1049,15 @@ class Envoy(Batchable):
                         return value(*args, **kwargs)
 
                 return trace
+
+            elif isinstance(value, torch.nn.Module):
+                # If the _module has a module in its __dict__ but wasn't picked up when creating the Envoy,
+                # Hopefully it is alrady an Envoy somewhere in the tree.
+                # https://github.com/ndif-team/nnsight/issues/479
+                # This happened because some transformers models set this class attr: _checkpoint_conversion_mapping
+                if hasattr(value, "__path__"):
+                    return util.fetch_attr(self, value.__path__[len(self.path) :])
+                return self._add_envoy(value, name)
             else:
                 return value
         else:
@@ -1251,21 +1258,22 @@ class OperationEnvoy:
 
         if self._source is None:
             fn = self._interleaver.current.request(f"{self.name}.fn")
-            
-            #TODO maybe do something else here
+
+            # TODO maybe do something else here
             if isinstance(fn, torch.nn.Module):
-                
+
                 msg = f"Don't call .source on a module ({getattr(fn, '__path__', '')}) from within another .source. Call it directly with: {getattr(fn, '__path__', '')}.source"
                 raise ValueError(msg)
 
             def wrap(fn: Callable, **kwargs):
-                
+
                 bound_obj = (
                     fn.__self__
-                    if getattr(fn, "__name__", None) != "forward" and inspect.ismethod(fn)
+                    if getattr(fn, "__name__", None) != "forward"
+                    and inspect.ismethod(fn)
                     else None
                 )
-                    
+
                 return self._interleaver.wrap_operation(
                     fn, **kwargs, bound_obj=bound_obj
                 )
@@ -1277,7 +1285,6 @@ class OperationEnvoy:
             )
 
             self._fn = fn
-
 
         if f"{self.name}.fn" not in self._interleaver.current.history:
             self._interleaver.current.swap(f"{self.name}.fn", self._fn)
