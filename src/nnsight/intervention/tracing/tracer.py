@@ -324,16 +324,16 @@ class InterleavingTracer(Tracer):
 
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
-
-        interleaver = Interleaver(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
+        
+        interleaver = self.model._interleaver
+        interleaver.initilaize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
 
         try:
-            self.model.interleave(interleaver, self.fn, *args, **kwargs)
+            self.model.interleave(self.fn, *args, **kwargs)
 
             self.push(interleaver.state)
         finally:
             interleaver.state.clear()
-            interleaver.check_cache_full()
                     
 
     ### Public API ####
@@ -391,7 +391,7 @@ class InterleavingTracer(Tracer):
 
         alias_dict = {value: key for key, value in self.model._alias.rename.items()} if self.model._alias is not None else None
 
-        if self.model._interleaver is None:
+        if not self.model.interleaving:
             self.user_cache.append(Cache(modules, device, dtype, detach, include_output, include_inputs, alias_dict))
 
             return self.user_cache[-1].cache

@@ -85,11 +85,7 @@ class LanguageModel(RemoteableMixin):
         self.repo_id: str = args[0] if isinstance(args[0], str) else None
 
         super().__init__(*args, **kwargs)
-        
-        breakpoint()
-        
-        self._load_tokenizer(self.repo_id)
-        
+    
         if import_edits:
             
             if isinstance(import_edits, str):
@@ -100,8 +96,27 @@ class LanguageModel(RemoteableMixin):
             
                 self.import_edits()
             
-
         self.generator: Envoy = WrapperModule()
+    
+    # Some transformer models compile on first generation. As of 0.5.0.dev7 this not not work with nnsight if fullgraph is True
+    def _patch_generation_config(self, model:torch.nn.Module):
+        
+        if hasattr(model, "generation_config"):
+            
+            generation_config = model.generation_config
+            
+            compile_config = generation_config.compile_config
+            
+            if compile_config is None:
+                
+                from transformers.generation.configuration_utils import CompileConfig
+                
+                compile_config = CompileConfig()
+                
+            compile_config.fullgraph = False
+            compile_config.dynamic = True
+            
+            generation_config.compile_config = compile_config
         
     def export_edits(self, name:Optional[str] = None, export_dir: Optional[str] = None, variant: str = '__default__'):
         """TODO
@@ -200,6 +215,8 @@ class LanguageModel(RemoteableMixin):
         model = self.automodel.from_config(self.config, trust_remote_code=True)
         
         self.config = model.config
+        
+        self._patch_generation_config(model)
 
         return model
 
@@ -226,7 +243,9 @@ class LanguageModel(RemoteableMixin):
         model = self.automodel.from_pretrained(repo_id, config=self.config, **kwargs)
         
         self.config = model.config
-
+        
+        self._patch_generation_config(model)
+        
         return model
 
     def _tokenize(

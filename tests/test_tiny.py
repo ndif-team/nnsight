@@ -25,13 +25,6 @@ def tiny_model(device: str):
     return NNsight(net).to(device)
 
 
-@pytest.fixture(autouse=True)
-def model_clear(tiny_model: NNsight):
-    # clear the model before each test
-    tiny_model._clear()
-    return tiny_model
-
-
 @pytest.fixture
 def tiny_input():
     return torch.rand((1, input_size))

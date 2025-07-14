@@ -20,11 +20,8 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
+from .interleaver import Interleaver
 
-if TYPE_CHECKING:
-    from .interleaver import Interleaver
-else:
-    Interleaver = Any
 
 
 def trace_only(fn: Callable):
@@ -87,7 +84,8 @@ class Envoy(Batchable):
 
         self._source = None
 
-        self._interleaver = interleaver
+        self._interleaver = interleaver if interleaver is not None else Interleaver()
+        self._interleaver.wrap_module(module)
 
         self._default_mediators: List[List[str]] = []
 
@@ -127,7 +125,7 @@ class Envoy(Batchable):
         Returns:
             True if the Envoy is interleaving, False otherwise
         """
-        return self._interleaver is not None
+        return self._interleaver is not None and self._interleaver.interleaving
 
     #### Properties ####
 
@@ -375,8 +373,7 @@ class Envoy(Batchable):
             )
             self._module.forward = MethodType(forward, self._module)
 
-            self._source = EnvoySource(self._module.__path__, source, line_numbers)
-            self._source._set_interleaver(self._interleaver)
+            self._source = EnvoySource(self._module.__path__, source, line_numbers, interleaver=self._interleaver)
 
         return self._source
 
@@ -709,23 +706,17 @@ class Envoy(Batchable):
         """
         return util.fetch_attr(self, path)
 
-    def interleave(self, interleaver: Interleaver, fn: Callable, *args, **kwargs):
+    def interleave(self,  fn: Callable, *args, **kwargs):
 
-        try:
-            device = self.device
+        device = self.device
 
-            (args, kwargs) = apply(
-                (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
-            )
+        (args, kwargs) = apply(
+            (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
+        )
 
-            with interleaver:
-                
-                self._set_interleaver(interleaver)
-
-                interleaver(fn, *args, **kwargs)
-
-        finally:
-            self._set_interleaver(None)
+        with self._interleaver:
+            
+            self._interleaver(fn, *args, **kwargs)
 
     #### Private methods ####
 
@@ -746,6 +737,7 @@ class Envoy(Batchable):
             module,
             path=module_path,
             rename=self._alias.rename if self._alias is not None else None,
+            interleaver=self._interleaver
         )
 
         self._children.append(envoy)
@@ -828,6 +820,7 @@ class Envoy(Batchable):
 
         self._module = module
         self._module.__path__ = self.path
+        self._interleaver.wrap_module(module)
 
         if self._source is not None:
 
@@ -860,38 +853,7 @@ class Envoy(Batchable):
         for envoy in self._children:
             envoy._update_alias(alias)
 
-    def _set_interleaver(self, interleaver: Interleaver):
-        """
-        Set the interleaver for this Envoy and all its children.
 
-        This method recursively sets the interleaver for this Envoy and all
-        its children.
-
-        Args:
-            interleaver: The interleaver to set
-        """
-        self._interleaver = interleaver
-        
-        if interleaver is not None and not getattr(self._module.__class__.__call__, "__interleave__", False):
-            interleaver.patcher.add(Patch(self._module.__class__, interleaver.wrap(self._module.__class__.__call__), "__call__"))
-
-        for envoy in self._children:
-            envoy._set_interleaver(interleaver)
-
-        if self._source is not None:
-            self._source._set_interleaver(interleaver)
-
-    def _clear(self):
-        """
-        Clear all cached values and references.
-
-        This method removes all cached values and references to the interleaver,
-        preparing the Envoy for garbage collection.
-        """
-        self._interleaver = None
-
-        if self._source is not None:
-            self._source._clear()
 
     def _shallow_copy(self) -> Envoy:
         """Creates a new instance copy of the same class with the all the attributes of the original instance.
@@ -1302,27 +1264,6 @@ class OperationEnvoy:
     # def input(self):
     #     self._input = None
 
-    def _set_interleaver(self, interleaver: Interleaver):
-        """
-        Set the interleaver for this operation.
-
-        Args:
-            interleaver: The interleaver to use for managing execution flow
-        """
-        self._interleaver = interleaver
-
-        if self._source is not None:
-            self._source._set_interleaver(interleaver)
-
-    def _clear(self):
-        """
-        Clear all cached values and references.
-
-        This method removes all cached values and references to the interleaver,
-        preparing the OperationEnvoy for garbage collection.
-        """
-        self._interleaver = None
-
 
 class EnvoySource:
     """
@@ -1421,31 +1362,7 @@ class EnvoySource:
 
         return source
 
-    def _set_interleaver(self, interleaver: Interleaver):
-        """
-        Set the interleaver for all operations.
 
-        This method recursively sets the interleaver for all operations
-        in this source code representation.
-
-        Args:
-            interleaver: The interleaver to use for managing execution flow
-        """
-        for operation in self.operations:
-            operation._set_interleaver(interleaver)
-
-    def _clear(self):
-        """
-        Clear all cached values in all operations.
-
-        This method recursively clears all cached values and references
-        in all operations, preparing them for garbage collection.
-        """
-        for operation in self.operations:
-            operation._clear()
-
-            if operation._source is not None:
-                operation._source._clear()
 
     def __getattr__(self, name: str) -> Union[OperationEnvoy]:
 

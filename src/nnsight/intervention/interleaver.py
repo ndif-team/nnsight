@@ -10,8 +10,7 @@ from enum import Enum
 from functools import wraps
 from queue import Queue
 from threading import Thread
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -22,7 +21,6 @@ from .tracing.util import wrap_exception
 
 if TYPE_CHECKING:
     from .tracing.tracer import Cache, InterleavingTracer, Tracer
-    
 
 
 class Events(Enum):
@@ -50,10 +48,12 @@ class EarlyStopException(Exception):
 
     pass
 
+
 class SkipException(Exception):
     """
     Exception raised to skip the execution of the model.
     """
+
     def __init__(self, value: Any):
         self.value = value
 
@@ -66,80 +66,114 @@ class Interleaver:
     user-defined intervention functions, allowing for inspection and
     modification of intermediate values.
     """
+    
+    
 
-    def __init__(self, invokers: List[Mediator], tracer: InterleavingTracer, batcher: Batcher = None, user_cache: Optional[Cache] = None) -> None:
-        """
-        Initialize an Interleaver with mediators.
+    def initilaize(
+        self,
+        invokers: List[Mediator],
+        tracer: InterleavingTracer,
+        batcher: Batcher = None,
+        user_cache: Optional[Cache] = None,
+    ):
 
-        Args:
-            mediators: A list of Mediator objects that define intervention logic
-        """
-
+        self.patcher = None
         self.invokers = invokers
         self.batcher = batcher
         self.tracer = tracer
         self.mediators: Dict[str, Mediator] = {}
-
-        self.patcher = None
-
         self.state = dict()
         self.iteration_tracker = defaultdict(int)
-
-        self.user_cache: Optional[Cache] = user_cache
-        
-        #TODO legacy?
         self.default_all = None
+        self.user_cache = user_cache
         
-    def iterate(self, provider:str):
-        
+    
+    def cancel(self):
+        """Cancel all intervention threads."""
+
+        for mediator in list(self.mediators.values()):
+            mediator.cancel()
+
+        self.mediators = None
+        self.tracer = None
+        self.batcher = None
+        self.user_cache = None
+        self.invokers = None
+
+
+    @property
+    def interleaving(self):
+        return getattr(self, "mediators", None) is not None
+
+    def iterate(self, provider: str):
+
         iteration = self.iteration_tracker[provider]
 
         self.iteration_tracker[provider] += 1
 
         return f"{provider}.i{iteration}"
 
+    def wrap_module(self, module: torch.nn.Module):
 
-    def wrap(self, fn: Callable):
-        """
-        Wrap a function to intercept inputs and outputs for intervention.
+        skip = None
 
-        Args:
-            fn: The function to wrap
+        forward = module.forward
 
-        Returns:
-            A wrapped version of the function
-        """
+        @wraps(module.forward)
+        def skippable_forward(*args, **kwargs):
 
-        @wraps(fn)
-        def inner(module: torch.nn.Module, *args, **kwargs):
-                      
-            if torch.compiler.is_compiling():
-                return fn(module, *args, **kwargs)
+            nonlocal skip
 
-            if not hasattr(module, "__path__"):
-                return fn(module, *args, **kwargs)
+            if skip is None or not self.interleaving:
+                try:
+                    return forward(*args, **kwargs)
+                finally:
+                    skip = None
+
+            return skip
+
+        module.forward = skippable_forward
+
+        def input_hook(module: torch.nn.Module, args, kwargs):
+
+            if not self.interleaving or torch.compiler.is_compiling():
+                return args, kwargs
 
             provider = module.__path__
-            
-            print(provider)
-            
-            # Call our hook before the original __call__
-            
+
+            nonlocal skip
+
             try:
-                inputs = self.handle(self.iterate(f"{provider}.input"), (args, kwargs))
+                inputs = self.handle(f"{provider}.input", (args, kwargs), iterate=True)
             except SkipException as e:
-                value = e.value
+                skip = e.value
             else:
                 args, kwargs = inputs
-                value = fn(module, *args, **kwargs)
-            
-            value = self.handle(self.iterate(f"{provider}.output"), value)
-    
-            return value
-        
-        setattr(inner, "__interleave__", True)
 
-        return inner
+            return args, kwargs
+
+        module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
+
+        def output_hook(module: torch.nn.Module, _, output:Any):
+
+            if not self.interleaving or torch.compiler.is_compiling():
+                return output
+
+            provider = module.__path__
+
+            nonlocal skip
+
+            if skip is not None:
+
+                output = skip
+
+                skip = None
+
+            output = self.handle(f"{provider}.output", output, iterate=True)
+
+            return output
+
+        module.register_forward_hook(output_hook, prepend=True)
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
@@ -232,10 +266,9 @@ class Interleaver:
         Returns:
             A wrapped version of the backward method
         """
-        
 
         def inner(tensor: torch.Tensor, *args, **kwargs):
-            
+
             from .tracing.backwards import BackwardsTracer
 
             try:
@@ -249,7 +282,7 @@ class Interleaver:
             return tracer
 
         return inner
-    
+
     def check_cache_full(self):
         """
         Print a warning if a module to be cached was missed.
@@ -259,14 +292,24 @@ class Interleaver:
                 if cache.modules:
                     if cache.include_inputs and cache.include_output:
                         for module in cache.modules:
-                            if module not in cache.cache or cache.cache[module].inputs is None:
-                                print('\033[33m' + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called." + '\033[0m')
+                            if (
+                                module not in cache.cache
+                                or cache.cache[module].inputs is None
+                            ):
+                                print(
+                                    "\033[33m"
+                                    + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
+                                    + "\033[0m"
+                                )
                                 return
                     else:
                         if any(module not in cache.cache for module in cache.modules):
-                            print('\033[33m' + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called." + '\033[0m')
+                            print(
+                                "\033[33m"
+                                + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
+                                + "\033[0m"
+                            )
                             return
-
 
     def __enter__(self):
         """
@@ -278,7 +321,6 @@ class Interleaver:
 
         self.patcher = Patcher(
             [
-                Patch(torch.nn.Module, self.wrap(torch.nn.Module.__call__), "__call__"),
                 Patch(
                     torch.Tensor, self.wrap_backward(torch.Tensor.backward), "backward"
                 ),
@@ -299,6 +341,9 @@ class Interleaver:
             exc_val: Exception value if an exception was raised
             exc_tb: Exception traceback if an exception was raised
         """
+        
+        self.check_cache_full()
+        
         self.cancel()
 
         self.patcher.__exit__(None, None, None)
@@ -326,36 +371,39 @@ class Interleaver:
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
         # Or their Envoy was not called.
         for mediator in self.mediators.values():
-            
+
             if mediator.child is not None:
                 mediator = mediator.child
-            
+
             if not mediator.event_queue.empty():
                 requested_event, requester = mediator.event_queue.get()
-                
+
                 if isinstance(requester, tuple):
                     requester = requester[0]
-                    
-                    
 
-                mediator.respond(ValueError(f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called?")) 
+                mediator.respond(
+                    ValueError(
+                        f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called?"
+                    )
+                )
                 mediator.wait()
-                
+
                 if mediator.name.startswith("Iterator"):
                     try:
                         mediator.handle()
-                    except ValueError as e:  
+                    except ValueError as e:
                         msg = f"Execution complete but `{requester}` was not provided. This was in an Iterator at iteration {mediator.iteration} so likely this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
                         warnings.warn(msg)
                 else:
                     mediator.handle()
 
     ### Provider Methods ###
-
+    @torch._dynamo.disable
     def handle(
         self,
         provider: Optional[Any] = None,
         value: Optional[Any] = None,
+        iterate: bool = False,
     ):
         """
         Handle a provider's value, allowing mediators to consume and modify it.
@@ -368,15 +416,17 @@ class Interleaver:
             The original or modified value
         """
 
-                    
+        if iterate:
+            provider = self.iterate(provider)
+
         old = self.batcher.current_value
-                    
+
         self.batcher.current_value = value
 
         batch_size = len(self.batcher.batch_groups)
         skip_count = 0
         skip_values = []
-        
+
         for mediator in self.invokers:
 
             try:
@@ -386,33 +436,26 @@ class Interleaver:
                 skip_values.append(e.value)
 
         if skip_count == batch_size:
+
             def _swap(*args):
                 return torch.cat(args, dim=0)
 
             skip_value = applyn(skip_values, _swap, torch.Tensor)
             raise SkipException(skip_value)
         elif skip_count > 0 and skip_count < batch_size:
-            raise ValueError(f"A module skip must be applied to all the invokers defined in the tracer!")
-            
+            raise ValueError(
+                f"A module skip must be applied to all the invokers defined in the tracer!"
+            )
+
         value = self.batcher.current_value
-        
+
         self.batcher.current_value = old
 
         if len(self.user_cache) > 0:
             for cache in self.user_cache:
                 cache.add(provider, value)
-            
+
         return value
-
-    def cancel(self):
-        """Cancel all intervention threads."""
-        
-        for mediator in list(self.mediators.values()):
-            mediator.cancel()
-
-        self.mediators = None
-        self.tracer = None
-        self.batcher = None
 
     ### Requester Methods ###
 
@@ -420,7 +463,6 @@ class Interleaver:
     def current(self) -> Mediator:
         """Get the current mediator."""
         return self.mediators[threading.current_thread().name]
-
 
 
 class Mediator:
@@ -436,6 +478,7 @@ class Mediator:
         """
         Exception raised when interventions are defined out of order.
         """
+
         pass
 
     def __init__(
@@ -482,7 +525,7 @@ class Mediator:
 
         self.thread = Thread(
             target=self.intervention,
-            args=(self, self.info,  *self.args),
+            args=(self, self.info, *self.args),
             daemon=True,
             name=self.name,
         )
@@ -509,7 +552,7 @@ class Mediator:
         self.history.clear()
 
         self.thread = None
-        
+
         self.state = None
 
         if self.thread is not None and self.thread.is_alive():
@@ -548,13 +591,13 @@ class Mediator:
         process = not self.event_queue.empty()
 
         event = None
-        
+
         while process:
-            
+
             value = self.interleaver.batcher.current_value
 
             event, data = self.event_queue.get()
-    
+
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider, value)
             elif event == Events.SWAP:
@@ -583,8 +626,13 @@ class Mediator:
         if len(self.user_cache) > 0 and provider is not None:
 
             for cache in self.user_cache:
-                cache.add(provider, self.interleaver.batcher.narrow(self.batch_group, self.interleaver.batcher.current_value))
-                        
+                cache.add(
+                    provider,
+                    self.interleaver.batcher.narrow(
+                        self.batch_group, self.interleaver.batcher.current_value
+                    ),
+                )
+
     def handle_end_event(self):
         """
         Handle an end event by stopping the mediator.
@@ -625,7 +673,7 @@ class Mediator:
 
         return True
 
-    def handle_swap_event(self, provider: Any, requester: Any,  swap_value: Any):
+    def handle_swap_event(self, provider: Any, requester: Any, swap_value: Any):
         """
         Handle a swap event by swapping the value if the provider matches the requester.
 
@@ -638,9 +686,9 @@ class Mediator:
             Boolean indicating whether to continue processing events
         """
         if provider == requester:
-            
+
             self.interleaver.batcher.swap(self.batch_group, swap_value)
-     
+
             self.respond()
 
             return True
@@ -679,17 +727,17 @@ class Mediator:
             raise exception
 
         return False
-    
-    def handle_skip_event(self, provider:Any, requester: Any, value: Any):
-        
+
+    def handle_skip_event(self, provider: Any, requester: Any, value: Any):
+
         if provider == requester:
-            
+
             self.respond()
 
             self.history.add(provider)
-            
+
             raise SkipException(value)
-        
+
         else:
             if requester in self.history:
                 self.respond(
@@ -702,9 +750,9 @@ class Mediator:
             else:
                 self.history.add(provider)
                 self.event_queue.put((Events.SKIP, (requester, value)))
-                
+
                 return False
-        
+
     def handle_register_event(self, mediator: Mediator, fn: Optional[Callable] = None):
         """
         Handle a register event by registering a new mediator.
@@ -766,9 +814,9 @@ class Mediator:
             if frame and frame.f_code.co_filename.startswith("<nnsight"):
                 break
         return frame
-    
+
     def iterate(self, requester: Any):
-        
+
         return f"{requester}.i{self.iteration}"
 
     def push(self):
@@ -824,7 +872,6 @@ class Mediator:
             The requested value
         """
 
-    
         value = self.send(Events.VALUE, requester)
 
         return value
@@ -862,10 +909,10 @@ class Mediator:
             iteration: The number of iterations
         """
 
-        if isinstance(iteration, slice):            
+        if isinstance(iteration, slice):
 
             i = iteration.start if iteration.start is not None else self.iteration
-            
+
             stop = iteration.stop
 
             while True:
@@ -882,23 +929,23 @@ class Mediator:
 
                 if stop is not None and i >= stop:
                     break
-                
+
         elif isinstance(iteration, int):
 
             mediator.iteration = iteration
             mediator.args = list([mediator.iteration])
 
             self.register(mediator)
-            
+
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""
 
         self.push()
 
         raise EarlyStopException()
-    
+
     def skip(self, requester: Any, value: Any):
-        
+
         self.send(Events.SKIP, (requester, value))
 
     def end(self):
@@ -931,21 +978,21 @@ class Mediator:
 
     def __getstate__(self):
         """Get the state of the mediator for serialization."""
-        
+
         return {
             "name": self.name,
             "info": self.info,
             "batch_group": self.batch_group,
             "intervention": self.intervention,
         }
-        
+
     def __setstate__(self, state):
         """Set the state of the mediator for deserialization."""
         self.name = state["name"]
         self.info = state["info"]
         self.batch_group = state["batch_group"]
         self.intervention = state["intervention"]
-        
+
         self.event_queue = Queue()
         self.response_queue = Queue()
 
