@@ -82,8 +82,10 @@ class LanguageModel(RemoteableMixin):
 
         self.config = config
         self.tokenizer = tokenizer
-        self.repo_id: str = args[0] if isinstance(args[0], str) else None
-
+        # If the user passed in a pre-loaded model, might be able to get repo id off of it.
+        # That way if they dont provide a tokenizer, we can load it for them later.
+        self.repo_id: str = args[0] if isinstance(args[0], str) else getattr(args[0], 'name_or_path', None)
+        
         super().__init__(*args, **kwargs)
         
         if import_edits:
@@ -236,7 +238,10 @@ class LanguageModel(RemoteableMixin):
     ):
         
         if self.tokenizer is None:
-            raise AttributeError("Tokenizer not found. If you passed a pre-loaded model to `LanguageModel`, you need to provide a tokenizer when initializing: `LanguageModel(model, tokenizer=tokenizer)`.")
+            if self.repo_id is not None:
+                self._load_tokenizer(self.repo_id, **kwargs)
+            else:
+                raise AttributeError("Tokenizer not found. If you passed a pre-loaded model to `LanguageModel`, you need to provide a tokenizer when initializing: `LanguageModel(model, tokenizer=tokenizer)`.")
 
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
