@@ -47,7 +47,7 @@ def tp(request):
 
 @pytest.fixture(scope="module")
 def vllm_gpt2(tp: int):
-    return VLLM("gpt2", tensor_parallel_size=tp, dispatch=True)
+    return VLLM("gpt2", tensor_parallel_size=tp, gpu_memory_utilization=0.1, dispatch=True)
 
 @pytest.fixture
 def ET_prompt():
@@ -59,7 +59,7 @@ def MSG_prompt():
 
 
 def test_single_logit(vllm_gpt2, ET_prompt: str):
-    with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, backend=AssertSavedLenBackend(1)):
+    with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
         logits = vllm_gpt2.logits.output.save()
 
     next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
@@ -78,7 +78,7 @@ def test_multi_token_generation(vllm_gpt2, MSG_prompt: str):
 
 def test_sampling(vllm_gpt2, MSG_prompt: str):
     with vllm_gpt2.trace(max_tokens=3) as tracer:
-        with tracer.invoke(MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3):
+        with tracer.invoke(MSG_prompt, temperature=0.0, top_p=1.0):
             samples_1 = nnsight.list().save()
             for ii in range(3):
                 samples_1.append(vllm_gpt2.samples.output)

@@ -8,7 +8,8 @@ import torch
 import torch.distributed
 
 from nnsight.intervention import NNsight
-from vllm.distributed import (get_pp_group,
+from vllm.distributed import (get_kv_transfer_group,
+                              get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -17,7 +18,7 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
@@ -35,7 +36,7 @@ from ..sampling import NNsightSamplingMetadata
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
-
+    from vllm.worker.model_runner import GPUModelRunnerBase
     from ..sampling import NNsightSamplingMetadata
 
 
@@ -73,6 +74,8 @@ class NNsightModelInputForGPUWithSamplingMetadata(ModelInputForGPUWithSamplingMe
         selected_token_indices = tensor_dict.pop("selected_token_indices", None)
         intervention_graph = tensor_dict.pop("intervention_graph", None)
         intervention_graph.attachments = dict()
+        intervention_graph.compile()
+        intervention_graph.reset()
         batch_groups = tensor_dict.pop("batch_group", None)
         if selected_token_indices is not None:
             tensor_dict["sampling_metadata"] = NNsightSamplingMetadata(
@@ -95,10 +98,17 @@ class NNsightGPUModelRunner(ModelRunner):
         NNsightModelInputForGPUWithSamplingMetadata
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, model_runner: "GPUModelRunnerBase"):
 
-        super().__init__(*args, **kwargs)
-
+        super().__init__(
+            model_runner.vllm_config, 
+            model_runner.kv_cache_dtype, 
+            model_runner.is_driver_worker,
+            model_runner.return_hidden_states,
+            model_runner.input_registry,
+            model_runner.mm_registry,
+        )
+        
         self.model: VLLM
 
     def load_model(self) -> None:
@@ -213,6 +223,26 @@ class NNsightGPUModelRunner(ModelRunner):
         else:
             model_executable = self.model
 
+        ### vllm v0.6.5
+
+        # Receive KV cache in distributed KV cache transfer setting
+        # In disagg prefill setting, it will also recv hidden states and bypass
+        # model forwarding
+        # In KV cache database setting, it will change the model input so that
+        # we can skip prefilling on tokens that successfully received KV caches
+        # NOTE: The receive operation is blocking
+        bypass_model_exec = False
+        if self.need_recv_kv(model_input, kv_caches):
+
+            hidden_or_intermediate_states, bypass_model_exec, model_input = get_kv_transfer_group().recv_kv_caches_and_hidden_states(
+                # model is used to know which layer the current worker
+                # is working on, so that we can receive KV for only those
+                # layers.
+                model_executable,
+                model_input,
+                kv_caches=kv_caches
+            )
+
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = (
             {
@@ -244,24 +274,38 @@ class NNsightGPUModelRunner(ModelRunner):
 
         def inner():
 
-            with set_forward_context(model_input.attn_metadata):
-                hidden_or_intermediate_states = self.model._model(
-                    input_ids=model_input.input_tokens,
-                    positions=model_input.input_positions,
-                    kv_caches=kv_caches,
-                    attn_metadata=model_input.attn_metadata,
-                    intermediate_tensors=intermediate_tensors,
-                    **MultiModalInputs.as_kwargs(
-                        multi_modal_kwargs, device=self.device
-                    ),
-                    **seqlen_agnostic_kwargs,
-                )
+            if not bypass_model_exec:
+                with set_forward_context(model_input.attn_metadata, self.vllm_config):
+
+                    hidden_or_intermediate_states = model_executable(
+                        input_ids=model_input.input_tokens,
+                        positions=model_input.input_positions,
+                        kv_caches=kv_caches,
+                        attn_metadata=model_input.attn_metadata,
+                        intermediate_tensors=intermediate_tensors,
+                        **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                                     device=self.device),
+
+                        **seqlen_agnostic_kwargs)
 
             if (
                 self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
             ):
                 model_forward_end.record()
+
+            # Sending KV cache in distributed KV cache transfer setting
+            # NOTE: the send operation is non-blocking
+            if self.need_send_kv(model_input, kv_caches):
+                get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                    # model_executable is used to know which layer the current
+                    # worker is working on, so that we can send KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                    hidden_or_intermediate_states,
+                )
 
             # Compute the logits in the last pipeline stage.
             if not get_pp_group().is_last_rank:
@@ -290,18 +334,20 @@ class NNsightGPUModelRunner(ModelRunner):
                 hidden_or_intermediate_states, model_input.sampling_metadata
             )
 
-            # patching the batch_size to be the number of logits,
-            # since vLLM optimizes the inference by turning the size of the input to be of size power of 2.
-            patches = [Patch(interleaver, logits.shape[0], "batch_size")]
+            if logits is not None:
 
-            # `batch_groups` is adapted to the token positions of the flattened input during the first token generation iteration
-            # since the logit and sample tensors have different number of tokens, 
-            # we need to patch `batch_groups` to reflect the correct batches specified by the invoker contexts defined by the user.
-            if model_input.sampling_metadata.seq_groups[0].is_prompt:
-                patches.append(Patch(interleaver, model_input.sampling_metadata.nns_batch_groups, "batch_groups"))
+                # patching the batch_size to be the number of logits,
+                # since vLLM optimizes the inference by turning the size of the input to be of size power of 2.
+                patches = [Patch(interleaver, logits.shape[0], "batch_size")]
 
-            with Patcher(patches):
-                logits = self.model.logits(logits)
+                # `batch_groups` is adapted to the token positions of the flattened input during the first token generation iteration
+                # since the logit and sample tensors have different number of tokens, 
+                # we need to patch `batch_groups` to reflect the correct batches specified by the invoker contexts defined by the user.
+                if model_input.sampling_metadata.seq_groups[0].is_prompt:
+                    patches.append(Patch(interleaver, model_input.sampling_metadata.nns_batch_groups, "batch_groups"))
+
+                with Patcher(patches):
+                    logits = self.model.logits(logits)
 
             if not self.is_driver_worker:
                 return []
