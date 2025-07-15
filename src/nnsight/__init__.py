@@ -95,6 +95,29 @@ def wrap_autocast(func):
 DEFAULT_PATCHER.add(Patch(autocast, wrap_autocast(autocast.__init__), "__init__"))
 
 
+from torch import Tensor
+from .intervention.tracing.backwards import BackwardsTracer
+from .intervention.tracing.base import WithBlockNotFoundError
+
+def wrap_backward(func):
+
+    @wraps(func)
+    def inner(tensor: Tensor, *args, **kwargs):
+        
+        try:
+
+            tracer = BackwardsTracer(tensor, func, *args, **kwargs)
+
+        except WithBlockNotFoundError:
+
+            return func(tensor, *args, **kwargs)
+
+        return tracer
+
+    return inner
+
+DEFAULT_PATCHER.add(Patch(Tensor, wrap_backward(Tensor.backward), "backward"))
+
 DEFAULT_PATCHER.__enter__()
 
 

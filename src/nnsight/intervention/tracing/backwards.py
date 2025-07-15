@@ -3,13 +3,9 @@ from typing import TYPE_CHECKING, Any, Callable
 import torch
 
 from ...util import Patch
-from ..interleaver import Mediator
+from ..interleaver import Mediator, Interleaver
 from .invoker import Invoker
 
-if TYPE_CHECKING:
-    from ..interleaver import Interleaver
-else:
-    Interleaver = Any
 
 
 class BackwardsMediator(Mediator):
@@ -30,7 +26,6 @@ class BackwardsTracer(Invoker):
         self,
         tensor: torch.Tensor,
         fn: Callable,
-        interleaver: Interleaver,
         *args,
         **kwargs,
     ):
@@ -39,20 +34,21 @@ class BackwardsTracer(Invoker):
 
         self.tensor = tensor
         self.fn = fn
-        self.interleaver = interleaver
 
     def execute(self, fn: Callable):
 
         mediator = BackwardsMediator(fn, self.info)
 
-        grad_patch = Patch(torch.Tensor, self.interleaver.wrap_grad(), "grad")
+        
+        interleaver = Interleaver([mediator], self)
+        grad_patch = Patch(torch.Tensor, interleaver.wrap_grad(), "grad")
+        
+        try:
 
-        self.interleaver.patcher.add(grad_patch)
-
-        def inner():
-
-            self.fn(self.tensor, *self.args, **self.kwargs)
-
-            grad_patch.restore()
-
-        self.interleaver.current.register(mediator, inner)
+            with interleaver:
+                interleaver.patcher.add(grad_patch)
+                interleaver(self.fn, self.tensor, *self.args, **self.kwargs)
+            self.push(interleaver.state)
+            
+        finally:
+            interleaver.state.clear()
