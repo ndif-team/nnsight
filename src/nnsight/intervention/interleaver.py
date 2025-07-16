@@ -30,7 +30,6 @@ class Events(Enum):
     SWAP = "swap"  # Request for a swap
     END = "end"  # Signal to end the execution
     EXCEPTION = "exception"  # Signal that an exception occurred
-    REGISTER = "register"  # Signal that a mediator has been registered
     SKIP = "skip"  # Signal that an operation should be skipped
     CONTINUE = "continue"  # Signal that an operation should continue
 
@@ -77,9 +76,8 @@ class Interleaver:
         user_cache: Optional[Cache] = None,
     ):
 
-        self.patcher = None
         self.invokers = invokers
-        self.batcher = batcher
+        self.batcher = batcher if batcher is not None else Batcher()
         self.tracer = tracer
         self.mediators: Dict[str, Mediator] = {}
         self.state = dict()
@@ -208,81 +206,6 @@ class Interleaver:
 
         return inner
 
-    def wrap_grad(self):
-        """
-        Create a hook for gradient intervention.
-
-        Returns:
-            A function that can be used to intercept gradients
-        """
-
-        def wrap(tensor: torch.Tensor):
-
-            # Only wrap the tensor once
-            if tensor._backward_hooks:
-                return
-
-            # We are providing the grad of the tensor
-            provider = id(tensor)
-
-            # Well need to remove the hook
-            hook = None
-
-            # On backwards for this tensor
-            def inner(grad: torch.Tensor):
-
-                hook.remove()
-                # Inject the grad value
-                # Possibly editing it in the process
-                grad = self.handle(f"{provider}.grad", grad)
-
-                return grad
-
-            # Register the hook
-            hook = tensor.register_hook(inner)
-
-        def getter(tensor: torch.Tensor):
-
-            wrap(tensor)
-
-            requester = id(tensor)
-
-            return self.current.request(f"{requester}.grad")
-
-        def setter(tensor: torch.Tensor, value: torch.Tensor):
-
-            wrap(tensor)
-
-            requester = id(tensor)
-
-            return self.current.swap(f"{requester}.grad", value)
-
-        return property(getter, setter)
-
-    def wrap_backward(self, fn: Callable):
-        """
-        Wrap the backward method to intercept backpropagation.
-
-        Returns:
-            A wrapped version of the backward method
-        """
-
-        def inner(tensor: torch.Tensor, *args, **kwargs):
-
-            from .tracing.backwards import BackwardsTracer
-
-            try:
-
-                tracer = BackwardsTracer(tensor, fn, self, *args, **kwargs)
-
-            except WithBlockNotFoundError:
-
-                return fn(tensor, *args, **kwargs)
-
-            return tracer
-
-        return inner
-
     def check_cache_full(self):
         """
         Print a warning if a module to be cached was missed.
@@ -319,16 +242,6 @@ class Interleaver:
             The Interleaver instance
         """
 
-        self.patcher = Patcher(
-            [
-                Patch(
-                    torch.Tensor, self.wrap_backward(torch.Tensor.backward), "backward"
-                ),
-            ]
-        )
-
-        self.patcher.__enter__()
-
         # torch.Tensor.backward = self.wrap_backward()
         return self
 
@@ -345,8 +258,6 @@ class Interleaver:
         self.check_cache_full()
         
         self.cancel()
-
-        self.patcher.__exit__(None, None, None)
 
     def __call__(self, fn: Callable, *args, **kwargs):
         """
@@ -435,7 +346,7 @@ class Interleaver:
                 skip_count += 1
                 skip_values.append(e.value)
 
-        if skip_count == batch_size:
+        if skip_count == batch_size and batch_size > 0:
 
             def _swap(*args):
                 return torch.cat(args, dim=0)
@@ -451,7 +362,7 @@ class Interleaver:
 
         self.batcher.current_value = old
 
-        if len(self.user_cache) > 0:
+        if self.user_cache is not None and len(self.user_cache) > 0:
             for cache in self.user_cache:
                 cache.add(provider, value)
 
@@ -587,6 +498,8 @@ class Mediator:
                 self.child = None
 
                 # Continue to handle parent event
+            else:
+                return
 
         process = not self.event_queue.empty()
 
@@ -602,8 +515,6 @@ class Mediator:
                 process = self.handle_value_event(data, provider, value)
             elif event == Events.SWAP:
                 process = self.handle_swap_event(provider, *data)
-            elif event == Events.REGISTER:
-                process = self.handle_register_event(*data)
             elif event == Events.EXCEPTION:
                 process = self.handle_exception_event(data)
             elif event == Events.SKIP:
@@ -753,37 +664,6 @@ class Mediator:
 
                 return False
 
-    def handle_register_event(self, mediator: Mediator, fn: Optional[Callable] = None):
-        """
-        Handle a register event by registering a new mediator.
-
-        Args:
-            mediator: The mediator to register
-
-        Returns:
-            Boolean indicating whether to continue processing events
-        """
-
-        self.child = mediator
-
-        self.child.info.start_line += self.info.start_line - 1
-
-        mediator.start(self.interleaver)
-
-        self.response_queue.put(None)
-
-        if fn is not None:
-
-            fn()
-
-            self.response_queue.put(None)
-
-            self.wait()
-
-            self.handle()
-
-        return False
-
     def respond(self, value: Optional[Any] = None):
         """
         Set the value for a pending value request.
@@ -876,19 +756,6 @@ class Mediator:
 
         return value
 
-    def register(self, mediator: Mediator, fn: Optional[Callable] = None):
-
-        self.send(Events.REGISTER, (mediator, fn))
-
-        self.response_queue.get()
-
-        if fn is not None:
-            self.event_queue.put((Events.CONTINUE, None))
-
-            self.response_queue.get()
-
-        self.pull()
-
     def swap(self, requester: Any, value: Any):
         """
         Set a value to swap during execution.
@@ -909,6 +776,17 @@ class Mediator:
             iteration: The number of iterations
         """
 
+        def do_iteration(iter: int):
+
+            mediator.iteration = iter
+            mediator.args = list([mediator.iteration])
+            self.child = mediator
+            mediator.start(self.interleaver)
+
+            self.event_queue.put((Events.CONTINUE, None))
+
+            self.response_queue.get()
+
         if isinstance(iteration, slice):
 
             i = iteration.start if iteration.start is not None else self.iteration
@@ -917,10 +795,7 @@ class Mediator:
 
             while True:
 
-                mediator.iteration = i
-                mediator.args = list([mediator.iteration])
-
-                self.register(mediator)
+                do_iteration(i)
 
                 if self.interleaver.default_all is not None and stop is None:
                     stop = self.interleaver.default_all
@@ -930,12 +805,18 @@ class Mediator:
                 if stop is not None and i >= stop:
                     break
 
+        elif isinstance(iteration, list):
+
+            iteration.sort()
+
+            for i in iteration:
+                do_iteration(i)
+
         elif isinstance(iteration, int):
 
-            mediator.iteration = iteration
-            mediator.args = list([mediator.iteration])
+            do_iteration(iteration)
 
-            self.register(mediator)
+        self.child = None
 
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""

@@ -3,13 +3,60 @@ from typing import TYPE_CHECKING, Any, Callable
 import torch
 
 from ...util import Patch
-from ..interleaver import Mediator
+from ..interleaver import Interleaver, Mediator
 from .invoker import Invoker
 
-if TYPE_CHECKING:
-    from ..interleaver import Interleaver
-else:
-    Interleaver = Any
+
+def wrap_grad(interleaver: Interleaver):
+    """
+    Create a hook for gradient intervention.
+
+    Returns:
+        A function that can be used to intercept gradients
+    """
+
+    def wrap(tensor: torch.Tensor):
+
+        # Only wrap the tensor once
+        if tensor._backward_hooks:
+            return
+
+        # We are providing the grad of the tensor
+        provider = id(tensor)
+
+        # Well need to remove the hook
+        hook = None
+
+        # On backwards for this tensor
+        def inner(grad: torch.Tensor):
+
+            hook.remove()
+            # Inject the grad value
+            # Possibly editing it in the process
+            grad = interleaver.handle(f"{provider}.grad", grad)
+
+            return grad
+
+        # Register the hook
+        hook = tensor.register_hook(inner)
+
+    def getter(tensor: torch.Tensor):
+
+        wrap(tensor)
+
+        requester = id(tensor)
+
+        return interleaver.current.request(f"{requester}.grad")
+
+    def setter(tensor: torch.Tensor, value: torch.Tensor):
+
+        wrap(tensor)
+
+        requester = id(tensor)
+
+        return interleaver.current.swap(f"{requester}.grad", value)
+
+    return property(getter, setter)
 
 
 class BackwardsMediator(Mediator):
@@ -30,7 +77,6 @@ class BackwardsTracer(Invoker):
         self,
         tensor: torch.Tensor,
         fn: Callable,
-        interleaver: Interleaver,
         *args,
         **kwargs,
     ):
@@ -39,20 +85,20 @@ class BackwardsTracer(Invoker):
 
         self.tensor = tensor
         self.fn = fn
-        self.interleaver = interleaver
 
     def execute(self, fn: Callable):
 
         mediator = BackwardsMediator(fn, self.info)
 
-        grad_patch = Patch(torch.Tensor, self.interleaver.wrap_grad(), "grad")
+        interleaver = Interleaver([mediator], self)
+        grad_patch = Patch(torch.Tensor, wrap_grad(interleaver), "grad")
 
-        self.interleaver.patcher.add(grad_patch)
+        try:
 
-        def inner():
+            with interleaver:
+                interleaver.patcher.add(grad_patch)
+                interleaver(self.fn, self.tensor, *self.args, **self.kwargs)
+            self.push(interleaver.state)
 
-            self.fn(self.tensor, *self.args, **self.kwargs)
-
-            grad_patch.restore()
-
-        self.interleaver.current.register(mediator, inner)
+        finally:
+            interleaver.state.clear()

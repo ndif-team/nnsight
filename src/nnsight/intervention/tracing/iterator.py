@@ -1,25 +1,20 @@
 from typing import Callable, TYPE_CHECKING, Any, Union
-from .invoker import Invoker
-from ..interleaver import Mediator
+from .base import Tracer
+from ..interleaver import Interleaver, Mediator
 from .util import try_catch
 
-if TYPE_CHECKING:
-    from .tracer import InterleavingTracer
-else:
-    InterleavingTracer = Any
-    
 class IteratorProxy:
     
-    def __init__(self, interleaver):
+    def __init__(self, interleaver: Interleaver):
         self.interleaver = interleaver
         
     def __getitem__(self, iteration: Union[int, slice]):
-        return IteratorTracer(iteration, self.interleaver, None)
+        return IteratorTracer(iteration, self.interleaver)
     
-class IteratorTracer(Invoker):
+class IteratorTracer(Tracer):
     
-    def __init__(self, iteration: Union[int, slice], interleaver, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, iteration: Union[int, slice], interleaver: Interleaver):
+        super().__init__()
         
         self.interleaver = interleaver
         
