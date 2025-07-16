@@ -137,13 +137,18 @@ class Tracer:
         # Find the frame outside of nnsight by walking up the call stack
         frame = inspect.currentframe()
 
+        import re
         while frame:
             frame = frame.f_back
-            if frame and (
-                frame.f_code.co_filename.find("nnsight/tests") != -1
-                or frame.f_code.co_filename.find("nnsight/") == -1
-            ):
-                break
+            if frame:
+                filename = frame.f_code.co_filename
+                # Match if filename contains 'nnsight/tests' or 'nnsight\tests'
+                # OR if it does NOT contain '/nnsight/' or '\nnsight\'
+                if (
+                    re.search(r"[\\/]{1}nnsight[\\/]{1}tests", filename)
+                    or not re.search(r"[\\/]{1}nnsight[\\/]", filename)
+                ):
+                    break
 
         # Get source code lines from the appropriate location
         start_line = frame.f_lineno

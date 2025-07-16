@@ -1,4 +1,4 @@
-import inspect
+
 from typing import List, Callable, TYPE_CHECKING
 import contextlib
 import os
@@ -53,23 +53,6 @@ def try_catch(
 
     return indent(source)
 
-
-def get_frame(frame: inspect.FrameInfo, until:str="nnsight"):
-    """
-    Traverses up the call stack until finding a frame outside the specified module.
-    
-    Args:
-        frame: The starting frame to traverse from
-        until: The module name to traverse until (default: "nnsight")
-        
-    Returns:
-        The first frame found outside the specified module, or None
-    """
-    while frame:
-        frame = frame.f_back
-        if frame and frame.f_code.co_filename.find(until) == -1:
-            break
-    return frame
 
 @contextlib.contextmanager
 def suppress_all_output():
