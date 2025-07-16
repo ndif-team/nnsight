@@ -174,57 +174,6 @@ class Interleaver:
 
         return inner
 
-    def wrap_grad(self):
-        """
-        Create a hook for gradient intervention.
-
-        Returns:
-            A function that can be used to intercept gradients
-        """
-
-        def wrap(tensor: torch.Tensor):
-
-            # Only wrap the tensor once
-            if tensor._backward_hooks:
-                return
-
-            # We are providing the grad of the tensor
-            provider = id(tensor)
-
-            # Well need to remove the hook
-            hook = None
-
-            # On backwards for this tensor
-            def inner(grad: torch.Tensor):
-
-                hook.remove()
-                # Inject the grad value
-                # Possibly editing it in the process
-                grad = self.handle(f"{provider}.grad", grad)
-
-                return grad
-
-            # Register the hook
-            hook = tensor.register_hook(inner)
-
-        def getter(tensor: torch.Tensor):
-
-            wrap(tensor)
-
-            requester = id(tensor)
-
-            return self.current.request(f"{requester}.grad")
-
-        def setter(tensor: torch.Tensor, value: torch.Tensor):
-
-            wrap(tensor)
-
-            requester = id(tensor)
-
-            return self.current.swap(f"{requester}.grad", value)
-
-        return property(getter, setter)
-
     def check_cache_full(self):
         """
         Print a warning if a module to be cached was missed.

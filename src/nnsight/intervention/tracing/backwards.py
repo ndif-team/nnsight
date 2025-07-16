@@ -3,9 +3,60 @@ from typing import TYPE_CHECKING, Any, Callable
 import torch
 
 from ...util import Patch
-from ..interleaver import Mediator, Interleaver
+from ..interleaver import Interleaver, Mediator
 from .invoker import Invoker
 
+
+def wrap_grad(interleaver: Interleaver):
+    """
+    Create a hook for gradient intervention.
+
+    Returns:
+        A function that can be used to intercept gradients
+    """
+
+    def wrap(tensor: torch.Tensor):
+
+        # Only wrap the tensor once
+        if tensor._backward_hooks:
+            return
+
+        # We are providing the grad of the tensor
+        provider = id(tensor)
+
+        # Well need to remove the hook
+        hook = None
+
+        # On backwards for this tensor
+        def inner(grad: torch.Tensor):
+
+            hook.remove()
+            # Inject the grad value
+            # Possibly editing it in the process
+            grad = interleaver.handle(f"{provider}.grad", grad)
+
+            return grad
+
+        # Register the hook
+        hook = tensor.register_hook(inner)
+
+    def getter(tensor: torch.Tensor):
+
+        wrap(tensor)
+
+        requester = id(tensor)
+
+        return interleaver.current.request(f"{requester}.grad")
+
+    def setter(tensor: torch.Tensor, value: torch.Tensor):
+
+        wrap(tensor)
+
+        requester = id(tensor)
+
+        return interleaver.current.swap(f"{requester}.grad", value)
+
+    return property(getter, setter)
 
 
 class BackwardsMediator(Mediator):
@@ -39,16 +90,15 @@ class BackwardsTracer(Invoker):
 
         mediator = BackwardsMediator(fn, self.info)
 
-        
         interleaver = Interleaver([mediator], self)
-        grad_patch = Patch(torch.Tensor, interleaver.wrap_grad(), "grad")
-        
+        grad_patch = Patch(torch.Tensor, wrap_grad(interleaver), "grad")
+
         try:
 
             with interleaver:
                 interleaver.patcher.add(grad_patch)
                 interleaver(self.fn, self.tensor, *self.args, **self.kwargs)
             self.push(interleaver.state)
-            
+
         finally:
             interleaver.state.clear()
