@@ -24,3 +24,19 @@ class ExecutionBackend(Backend):
             raise wrap_exception(e, tracer.info) from None
         finally:
             Globals.exit()
+            
+    async def async_call(self, tracer: Tracer):
+        
+        tracer.info.source[0] = "async " + tracer.info.source[0]
+        
+        fn = await super().async_call(tracer)
+
+        try:
+            Globals.enter()
+            await tracer.async_execute(fn)
+        except Exception as e:
+
+            raise wrap_exception(e, tracer.info) from None
+        finally:
+            Globals.exit()
+            

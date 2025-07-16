@@ -28,3 +28,7 @@ class Backend:
         fn = list(local_namespace.values())[-1]
         
         return fn
+    
+    async def async_call(self, tracer: Tracer):
+        
+        return self.__call__(tracer)

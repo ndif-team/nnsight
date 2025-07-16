@@ -220,6 +220,10 @@ class Interleaver:
     @property
     def interleaving(self):
         return getattr(self, "_interleaving", False)
+    
+    @property
+    def async_interleaving(self):
+        return getattr(self, "_async_interleaving", False)
 
     def __enter__(self):
         
@@ -238,6 +242,18 @@ class Interleaver:
             raise
 
         return self
+    
+    async def __aenter__(self):
+        
+        self._async_interleaving = True
+        
+        return self.__enter__()
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        
+        self._async_interleaving = False
+        
+        return self.__exit__(exc_type, exc_val, exc_tb)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
 

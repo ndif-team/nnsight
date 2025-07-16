@@ -285,6 +285,18 @@ class Tracer:
             fn: The compiled function to execute
         """
         fn(self, self.info)
+        
+    async def async_execute(self, fn: Callable):
+        """
+        Execute the compiled async function.
+
+        Runs the compiled function with the necessary context to execute
+        the traced code block.
+
+        Args:
+            fn: The compiled function to execute
+        """
+        await fn(self, self.info)
 
     def push(self, state: Dict = None):
         """
@@ -386,6 +398,9 @@ class Tracer:
         self.info.frame.f_trace = skip
 
         return self
+    
+    async def __aenter__(self):
+        return self.__enter__()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
@@ -410,6 +425,30 @@ class Tracer:
             return True
 
         self.backend(self)
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """
+        Exit the tracing context.
+
+
+        Args:
+            exc_type: Exception type if an exception was raised
+            exc_val: Exception value if an exception was raised
+            exc_tb: Exception traceback if an exception was raised
+
+        Returns:
+            True if an ExitTracingException was caught (to suppress it),
+            None otherwise (to propagate other exceptions)
+        """
+        # Suppress the ExitTracingException but let other exceptions propagate
+        if exc_type is ExitTracingException:
+
+            # Execute the traced code using the configured backend
+            await self.backend.async_call(self)
+
+            return True
+
+        await self.backend.async_call(self)
 
     ### Serialization ###
 

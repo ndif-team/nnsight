@@ -718,7 +718,20 @@ class Envoy(Batchable):
             with self._interleaver:
                 fn(*args, **kwargs)
         finally:
-            self._interleaver.check_cache_full()
+            self._interleaver.cancel()
+            
+    async def async_interleave(self,  fn: Callable, *args, **kwargs):
+        
+        device = self.device
+        
+        (args, kwargs) = apply(
+            (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
+        )
+        
+        try:
+            async with self._interleaver:
+                fn(*args, **kwargs)
+        finally:
             self._interleaver.cancel()
 
     #### Private methods ####

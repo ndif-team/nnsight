@@ -335,6 +335,27 @@ class InterleavingTracer(Tracer):
         finally:
             interleaver.state.clear()
                     
+    async def async_execute(self, fn: Callable):
+        """
+        Execute the compiled function with interventions.
+        """
+        await fn(self.info, self)
+
+        args = self.batcher.batched_args
+        kwargs = self.batcher.batched_kwargs
+
+        self.batcher.batched_args = tuple()
+        self.batcher.batched_kwargs = {}
+        
+        interleaver = self.model._interleaver
+        interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
+
+        try:
+            await self.model.async_interleave(self.fn, *args, **kwargs)
+
+            self.push(interleaver.state)
+        finally:
+            interleaver.state.clear()
 
     ### Public API ####
 
