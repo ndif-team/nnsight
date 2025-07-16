@@ -1,7 +1,11 @@
 from dataclasses import fields
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
+from vllm.config import CompilationConfig
+from vllm import LLM
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 from ...intervention.envoy import Envoy
 from ...intervention.interleaver import Interleaver
@@ -9,26 +13,22 @@ from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
 from .workers.GPUWorker import NNsightGPUWorker
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 if TYPE_CHECKING:
     from torch.nn import Module
     from vllm.transformers_utils.tokenizer import AnyTokenizer
     from vllm.config import ModelConfig, SchedulerConfig, ParallelConfig, LoRAConfig
 
-from vllm.distributed import (
-    destroy_distributed_environment,
-    destroy_model_parallel,
-    get_world_group,
-    init_distributed_environment,
-    init_model_parallel_group,
-    initialize_model_parallel,
-    parallel_state,
-)
+from vllm import envs
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel, get_world_group,
+                              init_distributed_environment,
+                              init_model_parallel_group,
+                              initialize_model_parallel, parallel_state)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
-from vllm.model_executor.model_loader.utils import initialize_model, get_model_architecture
-from vllm import envs
+from vllm.model_executor.model_loader.utils import (get_model_architecture,
+                                                    initialize_model)
 
 envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
 # from vllm.model_executor.model_loader.loader import _initialize_model
@@ -126,10 +126,18 @@ class VLLM(RemoteableMixin):
         return model
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
-        
+        comp_cfg = CompilationConfig(
+            level=0,             # disables all optimization layers
+            use_inductor=False,  # ensures TorchInductor isn't used
+            compile_sizes=[],    # no piecewise compilation
+            # you can also tweak cudagraph flags if needed:
+            use_cudagraph=False,
+        )
         llm = LLM(
             repo_id,
-            #worker_cls='nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker',
+            worker_cls='nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker',
+            compilation_config=comp_cfg,
+            enforce_eager=True, 
             **kwargs,
         )
                 
@@ -159,6 +167,7 @@ class VLLM(RemoteableMixin):
             for prompt in arg:
 
                 param = NNsightSamplingParams(
+                    interleaver=self._interleaver,
                     **kwargs,
                 )
 
@@ -205,16 +214,21 @@ class VLLM(RemoteableMixin):
         **kwargs,
     ) -> Any:
         
-        # for param in params:
-        #     if param.is_default_param:
-        #         for attr, value in kwargs.items():
-        #             if hasattr(NNsightSamplingParams, attr):
-        #                 setattr(param, attr, value)
+        kwargs.pop('hook', None)
+        kwargs.pop('processed', None)
 
-        out = self.vllm_entrypoint.generate(prompts, sampling_params=params)
-        breakpoint()
-        self.generator(out, hook=True)
-
+        output = self.vllm_entrypoint.generate(prompts, sampling_params=params, **kwargs)
+        
+        with self._interleaver:
+            self.generator(output, hook=True)
+        
+    def interleave(self, fn: Callable, *args, **kwargs):
+        
+        try:
+            fn(*args, **kwargs)
+        finally:
+            self._interleaver.check_cache_full()
+            self._interleaver.cancel()
 
 if TYPE_CHECKING:
 

@@ -129,24 +129,37 @@ class NNsightGPUModelRunner(GPUModelRunner):
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
 
-        # Run the decoder.
-        # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens,
-                                 num_tokens_across_dp=num_tokens_across_dp):
-            self.maybe_setup_kv_connector(scheduler_output)
-            
-            model_output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-            )
+        
+        ### NNsight ####
+        from contextlib import ExitStack
 
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
+        interleavers = set([request.sampling_params.interleaver for request in  self.requests.values()])
+        
+        with ExitStack() as stack:
+            for interleaver in interleavers:
+                stack.enter_context(interleaver)
+            
+            
+        ################
+        
+            # Run the decoder.
+            # Use persistent buffers for CUDA graphs.
+            with set_forward_context(attn_metadata,
+                                    self.vllm_config,
+                                    num_tokens=num_input_tokens,
+                                    num_tokens_across_dp=num_tokens_across_dp):
+                self.maybe_setup_kv_connector(scheduler_output)
+                
+                model_output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+
+                self.maybe_wait_for_kv_save()
+                finished_sending, finished_recving = (
+                    self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output

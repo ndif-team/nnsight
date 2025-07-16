@@ -8,6 +8,6 @@ class NNsightGPUWorker(gpu_worker.Worker):
     def __init__(self, *args, **kwargs):
         
         gpu_worker.GPUModelRunner = NNsightGPUModelRunner
-        gpu_model_runner.InputBatch = NNsightInputBatch
+        # gpu_model_runner.InputBatch = NNsightInputBatch
         
         super().__init__(*args, **kwargs)
