@@ -29,11 +29,13 @@ def wrap_grad(interleaver: Interleaver):
 
         # On backwards for this tensor
         def inner(grad: torch.Tensor):
-
-            hook.remove()
+            
             # Inject the grad value
             # Possibly editing it in the process
-            grad = interleaver.handle(f"{provider}.grad", grad)
+            try:
+                grad = interleaver.handle(f"{provider}.grad", grad)
+            finally:
+                hook.remove()
 
             return grad
 
@@ -91,14 +93,16 @@ class BackwardsTracer(Invoker):
         mediator = BackwardsMediator(fn, self.info)
 
         interleaver = Interleaver([mediator], self)
+        
         grad_patch = Patch(torch.Tensor, wrap_grad(interleaver), "grad")
 
         try:
-
+            grad_patch.patch()
             with interleaver:
-                interleaver.patcher.add(grad_patch)
-                interleaver(self.fn, self.tensor, *self.args, **self.kwargs)
+                self.fn(self.tensor, *self.args, **self.kwargs)
+            grad_patch.restore()
             self.push(interleaver.state)
 
         finally:
+            interleaver.cancel()
             interleaver.state.clear()

@@ -10,7 +10,8 @@ from enum import Enum
 from functools import wraps
 from queue import Queue
 from threading import Thread
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
 import torch
 
@@ -66,9 +67,17 @@ class Interleaver:
     modification of intermediate values.
     """
     
-    
+    def __init__(
+        self,
+        invokers: List[Mediator] = None,
+        tracer: InterleavingTracer = None,
+        batcher: Batcher = None,
+        user_cache: Optional[Cache] = None,
+    ):
+        self.initialize(invokers, tracer, batcher, user_cache)
 
-    def initilaize(
+
+    def initialize(
         self,
         invokers: List[Mediator],
         tracer: InterleavingTracer,
@@ -77,31 +86,32 @@ class Interleaver:
     ):
 
         self.invokers = invokers
-        self.batcher = batcher if batcher is not None else Batcher()
         self.tracer = tracer
+        self.batcher = batcher if batcher is not None else Batcher()
+        self.user_cache = user_cache
+
         self.mediators: Dict[str, Mediator] = {}
         self.state = dict()
         self.iteration_tracker = defaultdict(int)
         self.default_all = None
-        self.user_cache = user_cache
         
-    
     def cancel(self):
         """Cancel all intervention threads."""
+        
+        try:
+            self.check_cache_full()
+            self.check_dangling_mediators()
+        finally:
+            
+            for mediator in list(self.mediators.values()):
+                mediator.cancel()
 
-        for mediator in list(self.mediators.values()):
-            mediator.cancel()
+            self.mediators = None
+            self.tracer = None
+            self.batcher = None
+            self.user_cache = None
+            self.invokers = None
 
-        self.mediators = None
-        self.tracer = None
-        self.batcher = None
-        self.user_cache = None
-        self.invokers = None
-
-
-    @property
-    def interleaving(self):
-        return getattr(self, "mediators", None) is not None
 
     def iterate(self, provider: str):
 
@@ -152,7 +162,7 @@ class Interleaver:
 
         module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
 
-        def output_hook(module: torch.nn.Module, _, output:Any):
+        def output_hook(module: torch.nn.Module, _, output: Any):
 
             if not self.interleaving or torch.compiler.is_compiling():
                 return output
@@ -206,79 +216,40 @@ class Interleaver:
 
         return inner
 
-    def check_cache_full(self):
-        """
-        Print a warning if a module to be cached was missed.
-        """
-        for invoker in self.invokers:
-            for cache in invoker.user_cache:
-                if cache.modules:
-                    if cache.include_inputs and cache.include_output:
-                        for module in cache.modules:
-                            if (
-                                module not in cache.cache
-                                or cache.cache[module].inputs is None
-                            ):
-                                print(
-                                    "\033[33m"
-                                    + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
-                                    + "\033[0m"
-                                )
-                                return
-                    else:
-                        if any(module not in cache.cache for module in cache.modules):
-                            print(
-                                "\033[33m"
-                                + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
-                                + "\033[0m"
-                            )
-                            return
+
+    @property
+    def interleaving(self):
+        return getattr(self, "_interleaving", False)
 
     def __enter__(self):
-        """
-        Context manager entry point. Replaces torch.nn.Module.__call__ with wrapped version.
-
-        Returns:
-            The Interleaver instance
-        """
-
-        # torch.Tensor.backward = self.wrap_backward()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        Context manager exit point. Restores original torch.nn.Module.__call__.
-
-        Args:
-            exc_type: Exception type if an exception was raised
-            exc_val: Exception value if an exception was raised
-            exc_tb: Exception traceback if an exception was raised
-        """
         
-        self.check_cache_full()
+        self._interleaving = True
         
-        self.cancel()
-
-    def __call__(self, fn: Callable, *args, **kwargs):
-        """
-        Execute a function with interventions.
-
-        Args:
-            fn: The function to execute
-            *args: Arguments to pass to the function
-            **kwargs: Keyword arguments to pass to the function
-        """
-
         try:
-
             for invoker in self.invokers:
                 invoker.start(self)
 
-            fn(*args, **kwargs)
+            try:
+                self.handle()
+            except EarlyStopException:
+                pass
+        except:
+            self._interleaving = False
+            raise
 
-        except EarlyStopException:
-            pass
+        return self
 
+    def __exit__(self, exc_type, exc_val, exc_tb):
+
+        self._interleaving = False
+        
+        
+        # If execution was stopped early, ignore and do nothing
+        if exc_type is not None and issubclass(exc_type, EarlyStopException):
+            return True
+        
+    def check_dangling_mediators(self):
+        
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
         # Or their Envoy was not called.
         for mediator in self.mediators.values():
@@ -307,6 +278,34 @@ class Interleaver:
                         warnings.warn(msg)
                 else:
                     mediator.handle()
+                    
+    def check_cache_full(self):
+        """
+        Print a warning if a module to be cached was missed.
+        """
+        for invoker in self.invokers:
+            for cache in invoker.user_cache:
+                if cache.modules:
+                    if cache.include_inputs and cache.include_output:
+                        for module in cache.modules:
+                            if (
+                                module not in cache.cache
+                                or cache.cache[module].inputs is None
+                            ):
+                                print(
+                                    "\033[33m"
+                                    + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
+                                    + "\033[0m"
+                                )
+                                return
+                    else:
+                        if any(module not in cache.cache for module in cache.modules):
+                            print(
+                                "\033[33m"
+                                + "NNsight Warning: A module to be cached was missed! Consider defining the Cache before the module is called."
+                                + "\033[0m"
+                            )
+                            return
 
     ### Provider Methods ###
     @torch._dynamo.disable
@@ -362,7 +361,11 @@ class Interleaver:
 
         self.batcher.current_value = old
 
-        if self.user_cache is not None and len(self.user_cache) > 0:
+        if (
+            self.user_cache is not None
+            and len(self.user_cache) > 0
+            and provider is not None
+        ):
             for cache in self.user_cache:
                 cache.add(provider, value)
 
@@ -374,6 +377,12 @@ class Interleaver:
     def current(self) -> Mediator:
         """Get the current mediator."""
         return self.mediators[threading.current_thread().name]
+
+    ### Serialization ###
+
+    def __deepcopy__(self, memo):
+
+        return self
 
 
 class Mediator:
@@ -423,6 +432,10 @@ class Mediator:
 
         self.args = list()
 
+    @property
+    def alive(self):
+        return self.thread is not None and self.thread.is_alive()
+
     def start(self, interleaver: Interleaver):
         """
         Start the mediator's intervention thread.
@@ -434,23 +447,23 @@ class Mediator:
 
         self.interleaver.mediators[self.name] = self
 
-        self.thread = Thread(
-            target=self.intervention,
-            args=(self, self.info, *self.args),
-            daemon=True,
-            name=self.name,
-        )
-        self.thread.start()
+        if not self.alive:
 
-        self.wait()
+            self.thread = Thread(
+                target=self.intervention,
+                args=(self, self.info, *self.args),
+                daemon=True,
+                name=self.name,
+            )
+            self.thread.start()
 
-        self.handle()
+            self.wait()
 
     ### Provider Methods ###
 
     def wait(self):
         """Wait for the next event to be set in the event queue."""
-        while self.event_queue.empty() and self.thread.is_alive():
+        while self.event_queue.empty() and self.alive:
             # Keep checking until there's an event in the queue
             time.sleep(0.001)  # Small sleep to prevent CPU spinning
 
@@ -466,7 +479,7 @@ class Mediator:
 
         self.state = None
 
-        if self.thread is not None and self.thread.is_alive():
+        if self.alive:
             # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
 

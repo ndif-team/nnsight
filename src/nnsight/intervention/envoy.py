@@ -714,9 +714,12 @@ class Envoy(Batchable):
             (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
         )
 
-        with self._interleaver:
-            
-            self._interleaver(fn, *args, **kwargs)
+        try:
+            with self._interleaver:
+                fn(*args, **kwargs)
+        finally:
+            self._interleaver.check_cache_full()
+            self._interleaver.cancel()
 
     #### Private methods ####
 

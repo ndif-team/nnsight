@@ -326,7 +326,7 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_kwargs = {}
         
         interleaver = self.model._interleaver
-        interleaver.initilaize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
+        interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
 
         try:
             self.model.interleave(self.fn, *args, **kwargs)
