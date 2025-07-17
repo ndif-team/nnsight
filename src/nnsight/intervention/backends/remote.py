@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import io
+import signal
 import sys
 import time
-from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
-import msgspec
 import requests
 import socketio
 import torch
@@ -55,6 +55,10 @@ class RemoteBackend(Backend):
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
+
+        # Create GracefulExit instance that does nothing by default
+        # Can be activated later by setting: self._graceful_exit.cleanup_function = self.cancel_request
+        self._graceful_exit = GracefulExit(cleanup_function=lambda: None)
 
     def request(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
 
@@ -127,6 +131,7 @@ class RemoteBackend(Backend):
 
                 result = response.data
 
+            self.job_id = None # Avoid triggering a delete request when the program exits
             return result
 
         # If were receiving a streamed value:
@@ -200,6 +205,7 @@ class RemoteBackend(Backend):
         if response.status_code == 200:
 
             response = ResponseModel(**response.json())
+            self.job_id = response.id
 
             self.handle_response(response)
 
@@ -390,6 +396,17 @@ class RemoteBackend(Backend):
 
                 raise e
 
+    def cancel_request(self):
+        """Cancel the current job by sending a DELETE request to the API."""
+        if self.job_id is not None:
+            print(f"Cancelling request {self.job_id}")
+            with requests.delete(
+                f"{self.address}/request/{self.job_id}",
+                headers={"ndif-api-key": self.api_key},
+            ) as response:
+                if response.status_code != 200:
+                    raise Exception(response.reason)
+
 
 def preprocess(graph: Graph):
 
@@ -402,3 +419,72 @@ def preprocess(graph: Graph):
             graph.nodes[node.index].kwargs["uploads"] = RemoteContext.from_local(node)
 
     return new_graph
+
+
+class GracefulExit:
+    """
+    A mixin class that captures termination signals and runs a cleanup function
+    before allowing the program to exit normally.
+    """
+    
+    def __init__(self, cleanup_function: Callable[[], Any], 
+                 signals_to_catch: Optional[list] = None):
+        """
+        Initialize the signal handler.
+        
+        Args:
+            cleanup_function: Function to call before exiting
+            signals_to_catch: List of signals to catch. Defaults to common termination signals.
+        """
+        self.cleanup_function = cleanup_function
+        self.original_handlers = {}
+        self.cleanup_called = False
+        
+        # Default signals to catch
+        if signals_to_catch is None:
+            self.signals_to_catch = [
+                signal.SIGINT,   # Ctrl+C
+                signal.SIGTERM,  # Termination signal
+            ]
+            # Add SIGHUP if available (not on Windows)
+            if hasattr(signal, 'SIGHUP'):
+                self.signals_to_catch.append(signal.SIGHUP)
+        else:
+            self.signals_to_catch = signals_to_catch
+        
+        # Register signal handlers
+        self._register_handlers()
+        
+        # Also register with atexit for normal program termination
+        atexit.register(self._run_cleanup)
+    
+    def _register_handlers(self):
+        """Register signal handlers for the specified signals."""
+        for sig in self.signals_to_catch:
+            try:
+                # Store original handler
+                self.original_handlers[sig] = signal.signal(sig, self._signal_handler)
+            except (OSError, ValueError) as e:
+                # Some signals might not be available on all platforms
+                print(f"Warning: Could not register handler for signal {sig}: {e}")
+    
+    def _signal_handler(self, signum, frame):
+        """Handle caught signals."""
+        print(f"\nReceived signal {signum}. Running cleanup...")
+        self._run_cleanup()
+        
+        # Restore original handler and re-raise the signal
+        if signum in self.original_handlers:
+            signal.signal(signum, self.original_handlers[signum])
+        
+        # Re-raise the signal to allow normal termination
+        signal.raise_signal(signum)
+    
+    def _run_cleanup(self):
+        """Run the cleanup function once."""
+        if not self.cleanup_called:
+            self.cleanup_called = True
+            try:
+                self.cleanup_function()
+            except Exception as e:
+                print(f"Error during cleanup: {e}")
