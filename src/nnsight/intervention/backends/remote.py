@@ -40,6 +40,7 @@ class RemoteBackend(Backend):
         job_id: str = None,
         ssl: bool = None,
         api_key: str = "",
+        callback: str = "",
     ) -> None:
 
         self.model_key = model_key
@@ -49,6 +50,7 @@ class RemoteBackend(Backend):
         self.zlib = CONFIG.API.ZLIB
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
+        self.callback = callback
 
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
@@ -68,6 +70,7 @@ class RemoteBackend(Backend):
             "nnsight-version": __version__,
             "ndif-api-key": self.api_key,
             "ndif-timestamp": str(time.time()),
+            "ndif-callback": self.callback,
         }
 
         return data, headers
@@ -197,6 +200,8 @@ class RemoteBackend(Backend):
         if response.status_code == 200:
 
             response = ResponseModel(**response.json())
+            
+            self.job_id = response.id
 
             self.handle_response(response)
 
@@ -332,46 +337,46 @@ class RemoteBackend(Backend):
     #         data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id),
     #     )
 
-    # def non_blocking_request(self, graph: Graph):
-    #     """Send intervention request to the remote service if request provided. Otherwise get job status.
+    def non_blocking_request(self, tracer: Tracer):
+        """Send intervention request to the remote service if request provided. Otherwise get job status.
 
-    #     Sets CONFIG.API.JOB_ID on initial request as to later get the status of said job.
+        Sets CONFIG.API.JOB_ID on initial request as to later get the status of said job.
 
-    #     When job is completed, clear CONFIG.API.JOB_ID to request a new job.
+        When job is completed, clear CONFIG.API.JOB_ID to request a new job.
 
-    #     Args:
-    #         request (RequestModel): Request if submitting a new request. Defaults to None
-    #     """
+        Args:
+            request (RequestModel): Request if submitting a new request. Defaults to None
+        """
 
-    #     if self.job_id is None:
+        if self.job_id is None:
 
-    #         data, headers = self.request(graph)
+            data, headers = self.request(tracer)
 
-    #         # Submit request via
-    #         response = self.submit_request(data, headers)
+            # Submit request via
+            response = self.submit_request(data, headers)
 
-    #         CONFIG.API.JOB_ID = response.id
+            CONFIG.API.JOB_ID = response.id
 
-    #         CONFIG.save()
+            CONFIG.save()
 
-    #     else:
+        else:
 
-    #         try:
+            try:
 
-    #             result = self.get_response()
+                result = self.get_response()
 
-    #             if result is not None:
+                if result is not None:
 
-    #                 CONFIG.API.JOB_ID = None
+                    CONFIG.API.JOB_ID = None
 
-    #                 CONFIG.save()
+                    CONFIG.save()
 
-    #                 return result
+                    return result
 
-    #         except Exception as e:
+            except Exception as e:
 
-    #             CONFIG.API.JOB_ID = None
+                CONFIG.API.JOB_ID = None
 
-    #             CONFIG.save()
+                CONFIG.save()
 
-    #             raise e
+                raise e
