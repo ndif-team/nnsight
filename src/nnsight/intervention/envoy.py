@@ -706,13 +706,16 @@ class Envoy(Batchable):
         """
         return util.fetch_attr(self, path)
 
-    def interleave(self,  fn: Callable, *args, **kwargs):
+    def interleave(self,  fn: Union[Callable, str], *args, **kwargs):
 
         device = self.device
 
         (args, kwargs) = apply(
             (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
         )
+        
+        if isinstance(fn, str):
+            fn = getattr(self, fn)
 
         try:
             with self._interleaver:
