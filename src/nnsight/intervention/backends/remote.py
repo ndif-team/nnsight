@@ -71,8 +71,6 @@ class RemoteBackend(Backend):
             "nnsight-version": __version__,
             "callback": self.callback,
         }
-        
-        print('headers', headers)
 
         return data, headers
 
