@@ -71,6 +71,8 @@ class RemoteBackend(Backend):
             "nnsight-version": __version__,
             "callback": self.callback,
         }
+        
+        print('headers', headers)
 
         return data, headers
 
@@ -363,10 +365,11 @@ class RemoteBackend(Backend):
         if self.job_id is None:
 
             data, headers = self.request(graph)
-
             # Submit request via
             response = self.submit_request(data, headers)
 
+            self.job_id = response.id
+            
             CONFIG.API.JOB_ID = response.id
 
             CONFIG.save()
