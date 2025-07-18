@@ -34,7 +34,7 @@ class ResponseModel(BaseModel):
     session_id: Optional[str] = None
 
     def __str__(self) -> str:
-        return f"[{self.id}] {self.status.name}: {self.description}"
+        return f"[{self.id}] {self.status.name.ljust(10)} : {self.description}"
 
     def log(self, logger: logging.Logger) -> ResponseModel:
        
