@@ -4,7 +4,7 @@ import logging
 remote_logger = logging.getLogger("nnsight_remote")
 remote_handler = logging.StreamHandler()
 remote_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(message)s")
+    logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M")
 )
 remote_handler.setLevel(logging.INFO)
 remote_logger.addHandler(remote_handler)

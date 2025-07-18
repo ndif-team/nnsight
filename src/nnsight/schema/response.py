@@ -17,7 +17,8 @@ class ResponseModel(BaseModel):
 
     class JobStatus(Enum):
         RECEIVED = "RECEIVED"
-        APPROVED = "APPROVED"
+        QUEUED = "QUEUED"
+        DISPATCHED = "DISPATCHED"
         RUNNING = "RUNNING"
         COMPLETED = "COMPLETED"
         LOG = "LOG"
@@ -33,7 +34,7 @@ class ResponseModel(BaseModel):
     session_id: Optional[str] = None
 
     def __str__(self) -> str:
-        return f"{self.id} - {self.status.name}: {self.description}"
+        return f"[{self.id}] {self.status.name}: {self.description}"
 
     def log(self, logger: logging.Logger) -> ResponseModel:
        
