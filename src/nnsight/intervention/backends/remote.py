@@ -22,6 +22,9 @@ else:
     Tracer = Any
 
 
+class RemoteException(Exception):
+    pass
+
 class RemoteBackend(Backend):
     """Backend to execute a context object via a remote service.
 
@@ -109,9 +112,9 @@ class RemoteBackend(Backend):
         Returns:
             ResponseModel: ResponseModel.
         """
-
+        
         if response.status == ResponseModel.JobStatus.ERROR:
-            raise SystemExit(f"{response.description}\nRemote exception.")
+            raise RemoteException(f"{response.description}\nRemote exception.")
 
         # Log response for user
         response.log(remote_logger)
@@ -129,51 +132,6 @@ class RemoteBackend(Backend):
 
             return result
 
-        # If were receiving a streamed value:
-        # elif response.status == ResponseModel.JobStatus.STREAM:
-
-        #     # Second item is index of LocalContext node.
-        #     # First item is the streamed value from the remote service.
-
-        #     index, dependencies = response.data
-
-        #     ResultModel.inject(graph, dependencies)
-
-        #     node = graph.nodes[index]
-
-        #     node.execute()
-
-        elif response.status == ResponseModel.JobStatus.NNSIGHT_ERROR:
-            if graph.debug:
-                error_node = graph.nodes[response.data["node_id"]]
-                try:
-                    raise NNsightError(
-                        response.data["err_message"],
-                        error_node.index,
-                        response.data["traceback"],
-                    )
-                except NNsightError as nns_err:
-                    if (
-                        __IPYTHON__
-                    ):  # in IPython the traceback content is rendered by the Error itself
-                        # add the error node traceback to the the error's traceback
-                        nns_err.traceback_content += "\nDuring handling of the above exception, another exception occurred:\n\n"
-                        nns_err.traceback_content += error_node.meta_data["traceback"]
-                    else:  # else we print the traceback manually
-                        print(f"\n{response.data['traceback']}")
-                        print(
-                            "During handling of the above exception, another exception occurred:\n"
-                        )
-                        print(f"{error_node.meta_data['traceback']}")
-
-                    sys.tracebacklimit = 0
-                    raise nns_err from None
-                finally:
-                    if __IPYTHON__:
-                        sys.tracebacklimit = None
-            else:
-                print(f"\n{response.data['traceback']}")
-                raise SystemExit("Remote exception.")
 
     def submit_request(
         self, data: bytes, headers: Dict[str, Any]
