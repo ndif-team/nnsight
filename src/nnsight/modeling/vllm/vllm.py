@@ -1,36 +1,43 @@
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union, Optional
+from ... import NNS_VLLM_VERSION
 
+try: 
+    import vllm
+    assert vllm.__version__ == NNS_VLLM_VERSION
+    print(f"vllm version: {vllm.__version__}")
+except Exception as e:
+    raise type(e)(
+        f"This version of NNsight requires vLLM v{NNS_VLLM_VERSION}.\n"
+        + f"`pip install vllm=={NNS_VLLM_VERSION}` in your environment to use it with NNsight.\n"
+        + "For more information on how to install vLLM, visit https://docs.vllm.ai/en/latest/getting_started/installation.html"
+    ) from e
+
+from dataclasses import fields
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
+
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel,
+                              init_distributed_environment,
+                              initialize_model_parallel)
+from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.llm import LLM
+from vllm.model_executor.model_loader.loader import _initialize_model
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
+from ...intervention import Envoy
+from ...intervention.interleaver import Interleaver
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .executors.GPUExecutor import NNsightGPUExecutor
 from .executors.RayGPUExecutor import NNsightRayGPUExecutor
 from .sampling import NNsightSamplingParams
-from dataclasses import fields
-from ...intervention.interleaver import Interleaver
-from ...intervention import Envoy
 
 if TYPE_CHECKING:
-    from ...intervention.graph import InterventionGraph
     from torch.nn import Module
+
+    from vllm.config import (LoRAConfig, ModelConfig, ParallelConfig,
+                             SchedulerConfig)
     from vllm.transformers_utils.tokenizer import AnyTokenizer
-    from vllm.config import ModelConfig, SchedulerConfig, ParallelConfig, LoRAConfig
-
-try:
-    from vllm.distributed import (destroy_distributed_environment,
-                                  destroy_model_parallel,
-                                  init_distributed_environment,
-                                  initialize_model_parallel)
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.entrypoints.llm import LLM
-    from vllm.model_executor.model_loader.loader import _initialize_model
-except Exception as e:
-    raise type(e)(
-        "Install vllm in your environment to use it with NNsight. "
-        + "https://docs.vllm.ai/en/latest/getting_started/installation.html"
-    ) from e
-
 
 
 class VLLM(RemoteableMixin):

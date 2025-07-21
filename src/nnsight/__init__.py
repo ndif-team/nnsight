@@ -19,6 +19,8 @@ try:
 except PackageNotFoundError:
     __version__ = "unknown version"
 
+NNS_VLLM_VERSION = "0.6.5"
+
 from IPython import get_ipython
 
 try:
