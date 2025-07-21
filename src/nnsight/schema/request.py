@@ -22,6 +22,8 @@ class RequestModel(BaseModel):
 
     
     def serialize(self, _zlib:bool) -> bytes:
+        
+        dill.settings['recurse'] = True
                 
         with io.BytesIO() as data:
         
