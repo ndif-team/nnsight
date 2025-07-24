@@ -1,8 +1,9 @@
 
-from typing import List, Callable, TYPE_CHECKING
 import contextlib
 import os
 import sys
+from builtins import open
+from typing import TYPE_CHECKING, Callable, List
 
 if TYPE_CHECKING:
     from .base import Tracer

@@ -259,7 +259,13 @@ class InterleavingTracer(Tracer):
         self.user_cache: List[Cache] = list()
 
         super().__init__(*args, backend=backend)
-
+            
+    def capture(self):
+        """
+        Capture the code block within the 'with' statement.
+        """
+        super().capture()
+        
         if not hasattr(self, "obj_var_name"):
             try:
                 self.obj_var_name = self.info.node.items[0].context_expr.func.value.id
@@ -272,6 +278,7 @@ class InterleavingTracer(Tracer):
                 if self.info.node.items[0].optional_vars is not None
                 else "__nnsight_tracer__"
             )
+        
 
     def compile(self) -> Callable:
         """

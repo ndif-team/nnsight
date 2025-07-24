@@ -1,4 +1,6 @@
+from builtins import compile, exec
 from typing import TYPE_CHECKING, Any
+
 if TYPE_CHECKING:
     from ..tracing.tracer import Tracer
 else:
