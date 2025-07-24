@@ -503,12 +503,12 @@ class Mediator:
 
                 # Tell the parent (current mediator) to continue
                 self.response_queue.put(None)
+                
+                # Then wipe the child
+                self.child = None
 
                 # Wait until the parent has an event
                 self.wait()
-
-                # Then wipe the child
-                self.child = None
 
                 # Continue to handle parent event
             else:
