@@ -1,6 +1,7 @@
 import ast
 import ctypes
 import inspect
+import re
 import sys
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -28,6 +29,12 @@ class WithBlockNotFoundError(Exception):
 
     pass
 
+class TracingDeffermentException(Exception):
+    """Exception raised when a tracing defferment is encountered.
+    
+    This exception is used to indicate that a tracing defferment is encountered.
+    """
+    pass
 
 class Tracer:
     """
@@ -123,7 +130,10 @@ class Tracer:
         self.info = _info if _info is not None else None
 
         if self.info is None:
-            self.capture()
+            try:
+                self.capture()
+            except TracingDeffermentException:
+                pass
 
     def capture(self):
         """
@@ -137,13 +147,15 @@ class Tracer:
         # Find the frame outside of nnsight by walking up the call stack
         frame = inspect.currentframe()
 
-        import re
         while frame:
             frame = frame.f_back
             if frame:
                 filename = frame.f_code.co_filename
                 # Match if filename contains 'nnsight/tests' or 'nnsight\tests'
                 # OR if it does NOT contain '/nnsight/' or '\nnsight\'
+
+                if "__defer_capture__" in frame.f_locals:
+                    raise TracingDeffermentException()
                 if (
                     re.search(r"[\\/]{1}nnsight[\\/]{1}tests", filename)
                     or not re.search(r"[\\/]{1}nnsight[\\/]", filename)
@@ -219,7 +231,7 @@ class Tracer:
         # Store the captured information for later use
         self.info = Tracer.Info(source_lines, frame, start_line, node)
 
-    def parse(self, source_lines, start_line):
+    def parse(self, source_lines:List[str], start_line:int):
         """
         Parse the source code to extract the source code.
 
@@ -254,7 +266,15 @@ class Tracer:
         visitor.visit(tree)
 
         if visitor.target is None:
-            raise WithBlockNotFoundError(f"With block not found at line {start_line}")
+            # Gather 5 lines before and after start_line for context
+            context_start = max(0, start_line - 5)
+            context_end = min(len(source_lines), start_line + 6)
+            context_lines = source_lines[context_start:context_end]
+            context_lines[start_line - context_start - 1] = context_lines[start_line - context_start - 1].rstrip('\n') + " <--- HERE\n"
+            context_str = "".join(context_lines)
+            message = f"With block not found at line {start_line}\n"
+            message += f"We looked here:\n\n{context_str}"
+            raise WithBlockNotFoundError(message)
 
         end_line = visitor.target.end_lineno
 
