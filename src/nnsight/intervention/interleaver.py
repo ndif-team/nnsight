@@ -105,20 +105,15 @@ class Interleaver:
         
     def cancel(self):
         """Cancel all intervention threads."""
-        
-        try:
-            self.check_cache_full()
-            self.check_dangling_mediators()
-        finally:
-            
-            for mediator in list(self.mediators.values()):
-                mediator.cancel()
+     
+        for mediator in list(self.mediators.values()):
+            mediator.cancel()
 
-            self.mediators = None
-            self.tracer = None
-            self.batcher = None
-            self.user_cache = None
-            self.invokers = None
+        self.mediators = None
+        self.tracer = None
+        self.batcher = None
+        self.user_cache = None
+        self.invokers = None
 
 
     def iterate(self, provider: str):

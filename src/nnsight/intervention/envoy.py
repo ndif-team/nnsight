@@ -720,8 +720,11 @@ class Envoy(Batchable):
         try:
             with self._interleaver:
                 fn(*args, **kwargs)
-        finally:
+                
             self._interleaver.check_cache_full()
+            self._interleaver.check_dangling_mediators()
+            
+        finally:
             self._interleaver.cancel()
 
     #### Private methods ####
