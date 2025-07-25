@@ -49,6 +49,14 @@ class EarlyStopException(Exception):
     pass
 
 
+class UnboundIteratorException(Exception):
+    """
+    An .iterator was used with no ties to any module.
+    """
+
+    pass
+
+
 class SkipException(Exception):
     """
     Exception raised to skip the execution of the model.
@@ -494,32 +502,12 @@ class Mediator:
             The original or modified value
         """
 
-        if self.child is not None:
-
-            self.child.handle(provider)
-
-            # If the child was canceled
-            if self.child.thread is None:
-
-                # Tell the parent (current mediator) to continue
-                self.response_queue.put(None)
-                
-                # Then wipe the child
-                self.child = None
-
-                # Wait until the parent has an event
-                self.wait()
-
-                # Continue to handle parent event
-            else:
-                return
-
         process = not self.event_queue.empty()
 
         event = None
-
+        
         while process:
-
+            
             value = self.interleaver.batcher.current_value
 
             event, data = self.event_queue.get()
@@ -542,6 +530,9 @@ class Mediator:
                 process = False
             elif event == Events.CONTINUE:
                 process = False
+        # Putting it down here gives the child a chance to handle after the parent has already had one for this provider.     
+        if self.handle_child(provider):
+            return
 
         if event == Events.END:
             self.handle_end_event()
@@ -556,6 +547,30 @@ class Mediator:
                         self.batch_group, self.interleaver.batcher.current_value
                     ),
                 )
+                
+    def handle_child(self, provider: Any) -> bool:
+        
+        if self.child is not None:
+            
+            self.child.handle(provider)
+
+            # If the child was canceled
+            if self.child.thread is None:
+                
+                # Tell the parent (current mediator) to continue
+                self.response_queue.put(None)
+                
+                # Then wipe the child
+                self.child = None
+
+                # Wait until the parent has an event
+                self.wait()
+                
+                # Give the parent a chance to handle the provider afer the child is done.
+                self.handle(provider)
+                
+                return True
+
 
     def handle_end_event(self):
         """
@@ -795,6 +810,9 @@ class Mediator:
             mediator.args = list([mediator.iteration])
             self.child = mediator
             mediator.start(self.interleaver)
+            
+            if not self.child.alive:
+                raise UnboundIteratorException("`.iter` encountered with no dependence on any module.\n`.iter` only makes sense in the context of iteration over mu;ltiple  module exeecutions." )
 
             self.event_queue.put((Events.CONTINUE, None))
 
@@ -809,7 +827,7 @@ class Mediator:
             while True:
 
                 do_iteration(i)
-
+                
                 if self.interleaver.default_all is not None and stop is None:
                     stop = self.interleaver.default_all
 

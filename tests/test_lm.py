@@ -832,17 +832,17 @@ def test_batched_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert gpt2.tokenizer.batch_decode(logits_1) == [" York", " City"]
     assert gpt2.tokenizer.batch_decode(logits_2) == [" New", " York", " City"]
 
-
+from nnsight.intervention.interleaver import UnboundIteratorException
 @torch.no_grad()
 @pytest.mark.iter
 def test_one_iter(gpt2: nnsight.LanguageModel):
-    with gpt2.generate("_", max_new_tokens=1) as tracer:
-        arr_gen = list().save()
+    with pytest.raises(UnboundIteratorException):
+        with gpt2.generate("_", max_new_tokens=1) as tracer:
+            arr_gen = list().save()
 
-        with tracer.all():
-            arr_gen.append(1)
+            with tracer.all():
+                arr_gen.append(1)
 
-    assert len(arr_gen) == 1
 
 
 @torch.no_grad()
