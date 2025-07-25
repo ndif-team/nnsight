@@ -399,13 +399,12 @@ class RemoteBackend(Backend):
     def cancel_request(self):
         """Cancel the current job by sending a DELETE request to the API."""
         if self.job_id is not None:
-            print(f"Cancelling request {self.job_id}")
             with requests.delete(
                 f"{self.address}/request/{self.job_id}",
                 headers={"ndif-api-key": self.api_key},
             ) as response:
                 if response.status_code != 200:
-                    raise Exception(response.reason)
+                    pass
 
 
 def preprocess(graph: Graph):
