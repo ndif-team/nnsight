@@ -11,7 +11,7 @@ import msgspec
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from .format.types import (MEMO, DeserializeHandler, Graph, GraphModel,
+from .format.types import (clear_memo, get_memo, DeserializeHandler, Graph, GraphModel,
                            GraphType, ValueTypes, try_deserialize)
 
 if TYPE_CHECKING:
@@ -31,9 +31,9 @@ class RequestModel(BaseModel):
 
         if memo is None:
 
-            self.memo = {**MEMO}
+            self.memo = {**get_memo()}
 
-            MEMO.clear()
+            clear_memo()
     
     @staticmethod
     def serialize(graph: Graph, format:str, _zlib:bool) -> bytes:
@@ -102,9 +102,9 @@ class StreamValueModel(BaseModel):
 
         if memo is None:
 
-            self.memo = {**MEMO}
+            self.memo = {**get_memo()}
 
-            MEMO.clear()
+            clear_memo()
 
     @staticmethod
     def serialize(values: Dict[int, Any], format:str, _zlib:bool) -> bytes:
