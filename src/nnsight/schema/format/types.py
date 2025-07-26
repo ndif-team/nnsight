@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import weakref
 from types import BuiltinFunctionType
 from types import FunctionType as FuncType
@@ -45,7 +46,21 @@ class DeserializeHandler:
 
 
 
-MEMO = {}
+# Thread-local storage for MEMO
+_local = threading.local()
+
+
+def get_memo():
+    """Get the thread-local MEMO dictionary."""
+    if not hasattr(_local, 'MEMO'):
+        _local.MEMO = {}
+    return _local.MEMO
+
+
+def clear_memo():
+    """Clear the thread-local MEMO dictionary."""
+    if hasattr(_local, 'MEMO'):
+        _local.MEMO.clear()
 
 
 class BaseNNsightModel(BaseModel):
@@ -78,7 +93,7 @@ def memoized(fn):
 
         _id = id(value)
 
-        MEMO[_id] = model
+        get_memo()[_id] = model
 
         return MemoReferenceModel(id=_id)
 
@@ -393,7 +408,7 @@ def check_memo(object: Any):
 
     _id = id(object)
 
-    if _id in MEMO:
+    if _id in get_memo():
 
         return MemoReferenceModel(id=_id)
 
