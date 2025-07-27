@@ -333,3 +333,15 @@ def test_torch_creation_operations_patch(tiny_model: NNsight, tiny_input: torch.
         torch.randn(l1_output.shape)
         torch.randperm(l1_output.shape[0])
         torch.zeros(l1_output.shape)
+
+
+def test_envoy_input_output_access(tiny_model: NNsight):
+
+    with pytest.raises(RuntimeError):
+        tiny_model.layer1.output
+
+    with pytest.raises(RuntimeError):
+        tiny_model.layer1.input
+
+    with pytest.raises(RuntimeError):
+        tiny_model.layer1.inputs
