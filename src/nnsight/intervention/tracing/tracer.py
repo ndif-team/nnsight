@@ -1,8 +1,8 @@
 import copy
 import re
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Union)
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -11,7 +11,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from ... import util
 from ..backends.base import Backend
 from ..batching import Batcher
-from ..interleaver import Interleaver
+from ..interleaver import Events, Mediator
 from .base import ExitTracingException, Tracer
 from .globals import Object
 from .invoker import Invoker
@@ -19,7 +19,6 @@ from .iterator import IteratorProxy
 
 if TYPE_CHECKING:
     from ..envoy import Envoy
-    from ..interleaver import Mediator
 else:
     Envoy = Any
 
@@ -408,6 +407,36 @@ class InterleavingTracer(Tracer):
         )
 
         return self.model._interleaver.current.user_cache[-1].cache
+    
+    def barrier(self, n_participants: int):
+        """
+        nnsight barrier: A synchronization primitive for coordinating multiple concurrent invocations in nnsight.
+
+        This works similarly to a threading.Barrier, but is designed for use with nnsight's model tracing and intervention system.
+        A barrier allows you to pause execution in multiple parallel invocations until all participants have reached the barrier,
+        at which point all are released to continue. This is useful when you want to synchronize the execution of different
+        model runs, for example to ensure that all have reached a certain point (such as after embedding lookup) before
+        proceeding to the next stage (such as generation or intervention).
+
+        Example usage:
+
+            with gpt2.generate(max_new_tokens=3) as tracer:
+                barrier = tracer.barrier(2)
+                
+                with tracer.invoke(MSG_prompt):
+                    embeddings = gpt2.transformer.wte.output
+                    barrier()
+                    output1 = gpt2.generator.output.save()
+
+                with tracer.invoke("_ _ _ _ _ _ _ _ _"):
+                    barrier()
+                    gpt2.transformer.wte.output = embeddings
+                    output2 = gpt2.generator.output.save()
+
+        In this example, both invocations will pause at the barrier until both have reached it, ensuring synchronization.
+        """
+        
+        return Barrier(self.model, n_participants)
 
     ### Serialization ###
 
@@ -496,3 +525,24 @@ class ScanningTracer(InterleavingTracer):
         # Clean up hooks
         for hook in hooks:
             hook.remove()
+            
+            
+
+class Barrier:
+    
+    def __init__(self, model: Envoy, n_participants: int):
+        
+        self.model = model
+        self.n_participants = n_participants
+        self.participants: Set[str] = set()
+        
+    def __call__(self):
+        
+        mediator = self.model._interleaver.current
+        
+        self.participants.add(mediator.name)
+         
+        if len(self.participants) == self.n_participants:
+            mediator.send(Events.BARRIER, self.participants)
+        else:
+            mediator.send(Events.BARRIER, None)
