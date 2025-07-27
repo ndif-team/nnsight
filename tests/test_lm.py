@@ -165,15 +165,22 @@ def test_adhoc_module(gpt2: nnsight.LanguageModel):
 def test_embeddings_set1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     with gpt2.generate(
         max_new_tokens=3
-    ) as generator:
-        with generator.invoke(MSG_prompt) as invoker:
+    ) as tracer:
+        
+        barrier = tracer.barrier(2)
+        
+        with tracer.invoke(MSG_prompt):
             embeddings = gpt2.transformer.wte.output
+
+            barrier()
 
 
             output1 = gpt2.generator.output.save()
 
-        with generator.invoke("_ _ _ _ _ _ _ _ _") as invoker:
-            gpt2.transformer.wte.wait_for_output()
+        with tracer.invoke("_ _ _ _ _ _ _ _ _"):
+            
+            barrier()
+            
             gpt2.transformer.wte.output = embeddings
 
             output2 = gpt2.generator.output.save()
@@ -832,16 +839,16 @@ def test_batched_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert gpt2.tokenizer.batch_decode(logits_1) == [" York", " City"]
     assert gpt2.tokenizer.batch_decode(logits_2) == [" New", " York", " City"]
 
-from nnsight.intervention.interleaver import UnboundIteratorException
-@torch.no_grad()
-@pytest.mark.iter
-def test_one_iter(gpt2: nnsight.LanguageModel):
-    with pytest.raises(UnboundIteratorException):
-        with gpt2.generate("_", max_new_tokens=1) as tracer:
-            arr_gen = list().save()
+#     from nnsight.intervention.interleaver import UnboundIteratorException
+# @torch.no_grad()
+# @pytest.mark.iter
+# def test_one_iter(gpt2: nnsight.LanguageModel):
+#     with pytest.raises(UnboundIteratorException):
+#         with gpt2.generate("_", max_new_tokens=1) as tracer:
+#             arr_gen = list().save()
 
-            with tracer.all():
-                arr_gen.append(1)
+#             with tracer.all():
+#                 arr_gen.append(1)
 
 
 

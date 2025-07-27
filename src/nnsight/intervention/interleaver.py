@@ -10,7 +10,7 @@ from enum import Enum
 from functools import wraps
 from queue import Queue
 from threading import Thread
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
 
 import torch
@@ -32,7 +32,8 @@ class Events(Enum):
     END = "end"  # Signal to end the execution
     EXCEPTION = "exception"  # Signal that an exception occurred
     SKIP = "skip"  # Signal that an operation should be skipped
-    CONTINUE = "continue"  # Signal that an operation should continue
+    REGISTER = "register"  # Signal that a child mediator should be registered
+    BARRIER = "barrier"  # Signal that a barrier should be set
 
 
 class Cancelation(Exception):
@@ -44,14 +45,6 @@ class Cancelation(Exception):
 class EarlyStopException(Exception):
     """
     Exception raised to stop the execution of the model.
-    """
-
-    pass
-
-
-class UnboundIteratorException(Exception):
-    """
-    An .iterator was used with no ties to any module.
     """
 
     pass
@@ -425,10 +418,11 @@ class Mediator:
         self.batch_group = batch_group
         self.event_queue = Queue()
         self.response_queue = Queue()
+        
+        self.child: Mediator = None
 
         self.thread = None
         self.interleaver = None
-        self.child: Mediator = None
         self.history = set()
         self.user_cache: List["Cache"] = list()
         self.iteration = 0
@@ -496,7 +490,16 @@ class Mediator:
         Returns:
             The original or modified value
         """
-
+        
+        if self.child is not None:
+            self.child.handle(provider)
+            
+            if not self.child.alive:
+                self.child = None
+                self.respond()
+            else:
+                return
+            
         process = not self.event_queue.empty()
 
         event = None
@@ -521,13 +524,12 @@ class Mediator:
                         for cache in self.user_cache:
                             cache.add(provider, e.value)
                     raise e
+            elif event == Events.REGISTER:
+                process = self.handle_register_event(provider, data)
+            elif event == Events.BARRIER:
+                process = self.handle_barrier_event(provider, data)
             elif event == Events.END:
                 process = False
-            elif event == Events.CONTINUE:
-                process = False
-        # Putting it down here gives the child a chance to handle after the parent has already had one for this provider.     
-        if self.handle_child(provider):
-            return
 
         if event == Events.END:
             self.handle_end_event()
@@ -543,28 +545,32 @@ class Mediator:
                     ),
                 )
                 
-    def handle_child(self, provider: Any) -> bool:
+    def handle_register_event(self, provider: Any, child:Mediator) -> bool:
+                
+        self.child = child
+        child.start(self.interleaver)
+        child.handle(provider)
         
-        if self.child is not None:
-            
-            self.child.handle(provider)
+        return False
 
-            # If the child was canceled
-            if self.child.thread is None:
+    def handle_barrier_event(self, provider: Any, participants: Set[str]):
+        """
+        Handle a barrier event by setting a barrier.
+        """
+        
+        if participants is not None:
+        
+            for mediator in self.interleaver.invokers:
                 
-                # Tell the parent (current mediator) to continue
-                self.response_queue.put(None)
+                while mediator.child is not None:
+                    mediator = mediator.child
+                    
+                if mediator.name in participants:
+                    
+                    mediator.handle(provider)
+                    
+                    mediator.respond()
                 
-                # Then wipe the child
-                self.child = None
-
-                # Wait until the parent has an event
-                self.wait()
-                
-                # Give the parent a chance to handle the provider afer the child is done.
-                self.handle(provider)
-                
-                return True
 
 
     def handle_end_event(self):
@@ -803,15 +809,8 @@ class Mediator:
 
             mediator.iteration = iter
             mediator.args = list([mediator.iteration])
-            self.child = mediator
-            mediator.start(self.interleaver)
             
-            if not self.child.alive:
-                raise UnboundIteratorException("`.iter` encountered with no dependence on any module.\n`.iter` only makes sense in the context of iteration over mu;ltiple  module exeecutions." )
-
-            self.event_queue.put((Events.CONTINUE, None))
-
-            self.response_queue.get()
+            self.send(Events.REGISTER, mediator)
 
         if isinstance(iteration, slice):
 
@@ -841,8 +840,6 @@ class Mediator:
         elif isinstance(iteration, int):
 
             do_iteration(iteration)
-
-        self.child = None
 
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""
