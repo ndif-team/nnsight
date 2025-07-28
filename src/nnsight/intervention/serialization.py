@@ -1,24 +1,20 @@
+import io
 import pickle
+from builtins import open
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import dill
 
-if TYPE_CHECKING:
-    from .envoy import Envoy
-else:
-    Envoy = Any
-
+from .envoy import Envoy
 
 
 class CustomDillPickler(dill.Pickler):
     def persistent_id(self, obj):
 
-        from .envoy import Envoy
-
         if isinstance(obj, Envoy):
             return f"ENVOY:{obj.path}"
-        
+
         if isinstance(obj, FrameType):
             return "FRAME"
 
@@ -43,13 +39,24 @@ class CustomDillUnpickler(dill.Unpickler):
         raise pickle.UnpicklingError(f"Unknown persistent id: {pid}")
 
 
-def save(obj: Any, path: str):
+def save(obj: Any, path: Optional[str] = None):
+
+    dill.settings["recurse"] = True
+
+    if path is None:
+        file = io.BytesIO()
+        CustomDillPickler(file).dump(obj)
+        file.seek(0)
+        return file.read()
 
     with open(path, "wb") as file:
         CustomDillPickler(file).dump(obj)
 
 
-def load(path: str, model: Envoy, frame: Optional[FrameType] = None):
+def load(data: Union[str, bytes], model: Envoy, frame: Optional[FrameType] = None):
 
-    with open(path, "rb") as file:
+    if isinstance(data, bytes):
+        return CustomDillUnpickler(io.BytesIO(data), model, frame).load()
+
+    with open(data, "rb") as file:
         return CustomDillUnpickler(file, model, frame).load()

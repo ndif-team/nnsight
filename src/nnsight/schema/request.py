@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Union
 
 import dill
 from pydantic import BaseModel, ConfigDict
-from ..intervention.serialization import CustomDillPickler, CustomDillUnpickler
+from ..intervention.serialization import save, load
 if TYPE_CHECKING:
     from .. import NNsight
     from ..intervention.tracing.tracer import Tracer
@@ -22,16 +22,8 @@ class RequestModel(BaseModel):
 
     
     def serialize(self, _zlib:bool) -> bytes:
-        
-        dill.settings['recurse'] = True
                 
-        with io.BytesIO() as data:
-        
-            CustomDillPickler(data).dump(self)
-
-            data.seek(0)
-
-            data = data.read()
+        data = save(self)
                 
         if _zlib:
 
@@ -50,7 +42,7 @@ class RequestModel(BaseModel):
 
             data.seek(0)
 
-            request:RequestModel = CustomDillUnpickler(data, model, None).load()
+            request:RequestModel = load(data.read(), model)
         
         return request
 
