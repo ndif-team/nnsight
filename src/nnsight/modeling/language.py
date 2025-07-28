@@ -63,6 +63,22 @@ class LanguageModel(RemoteableMixin):
     """
 
     tokenizer: PreTrainedTokenizer
+    
+    class Generator(WrapperModule):
+
+        class Streamer(WrapperModule):
+
+            def put(self, *args):
+                return self(*args)
+
+            def end(self):
+                pass
+
+        def __init__(self) -> None:
+
+            super().__init__()
+
+            self.streamer = LanguageModel.Generator.Streamer()
 
     def __init__(
         self,
@@ -98,7 +114,7 @@ class LanguageModel(RemoteableMixin):
             
                 self.import_edits()
             
-        self.generator: Envoy = WrapperModule()
+        self.generator: Envoy = LanguageModel.Generator()
     
     # Some transformer models compile on first generation. As of 0.5.0.dev7 this not not work with nnsight if fullgraph is True
     def _patch_generation_config(self, model:torch.nn.Module):
@@ -163,12 +179,14 @@ class LanguageModel(RemoteableMixin):
         if max_new_tokens is not None and self._interleaver is not None:
             self._interleaver.default_all = max_new_tokens
 
-        output = self._model.generate(*args, **kwargs)
+        streamer = kwargs.pop("streamer", self.generator.streamer._module)
+
+        output = self._model.generate(*args, streamer=streamer, **kwargs)
 
         if self._interleaver is not None:
             self._interleaver.default_all = None
 
-        output = self.generator._module(output)
+        output = self.generator(output, hook=True)
 
         return output
 
