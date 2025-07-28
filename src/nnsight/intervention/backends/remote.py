@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import io
 import sys
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import requests
 import socketio
@@ -11,15 +12,13 @@ import torch
 from tqdm.auto import tqdm
 
 from ... import __IPYTHON__, CONFIG, __version__
+from ..._c.py_mount import mount, unmount
+from ...intervention.serialization import load, save
 from ...log import remote_logger
 from ...schema.request import RequestModel
 from ...schema.response import RESULT, ResponseModel
+from ..tracing.tracer import Tracer
 from .base import Backend
-
-if TYPE_CHECKING:
-    from ..tracing.tracer import Tracer
-else:
-    Tracer = Any
 
 
 class RemoteException(Exception):
@@ -129,8 +128,20 @@ class RemoteBackend(Backend):
             else:
 
                 result = response.data
-
+                
             return result
+                
+        elif response.status == ResponseModel.JobStatus.STREAM:
+            
+            model = getattr(tracer, "model", None)
+            
+            fn = load(response.data, model)
+            
+            local_tracer = LocalTracer(_info=tracer.info)
+            
+            local_tracer.execute(fn)
+
+            
 
 
     def submit_request(
@@ -262,6 +273,7 @@ class RemoteBackend(Backend):
             response = self.submit_request(data, headers)
 
             try:
+                LocalTracer.register(lambda data: self.stream_send(data, sio))
                 # Loop until
                 while True:
 
@@ -278,22 +290,28 @@ class RemoteBackend(Backend):
             except Exception as e:
 
                 raise e
+            
+            finally:
+                LocalTracer.deregister()
+        
 
-    # def stream_send(
-    #     self, values: Dict[int, Any], job_id: str, sio: socketio.SimpleClient
-    # ):
-    #     """Upload some value to the remote service for some job id.
+    def stream_send(
+        self, values: Dict[int, Any],  sio: socketio.SimpleClient
+    ):
+        """Upload some value to the remote service for some job id.
 
-    #     Args:
-    #         value (Any): Value to upload
-    #         job_id (str): Job id.
-    #         sio (socketio.SimpleClient): Connected websocket client.
-    #     """
+        Args:
+            value (Any): Value to upload
+            job_id (str): Job id.
+            sio (socketio.SimpleClient): Connected websocket client.
+        """
+        
+        data = save(values)
 
-    #     sio.emit(
-    #         "stream_upload",
-    #         data=(StreamValueModel.serialize(values, self.format, self.zlib), job_id),
-    #     )
+        sio.emit(
+            "stream_upload",
+            data=(data, self.job_id),
+        )
 
     def non_blocking_request(self, tracer: Tracer):
         """Send intervention request to the remote service if request provided. Otherwise get job status.
@@ -338,3 +356,50 @@ class RemoteBackend(Backend):
                 CONFIG.save()
 
                 raise e
+
+
+class LocalTracer(Tracer):
+    
+    _send: Callable = None
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        self.remotes = set()
+        
+    @classmethod
+    def register(cls, send_fn: Callable):
+        
+        cls._send = send_fn
+        
+    @classmethod
+    def deregister(cls):
+        
+        cls._send = None
+    
+    def _save_remote(self, obj: Any):
+        
+        self.remotes.add(id(obj))
+        
+    def execute(self, fn: Callable):
+        
+        mount(self._save_remote, "remote")
+        
+        fn(self, self.info)
+        
+        unmount("remote")
+        
+        return 
+        
+    def push(self):
+        
+        # Find the frame where the traced code is executing
+        state_frame = inspect.currentframe().f_back
+
+        state = state_frame.f_locals
+        
+        super().push(state)
+        
+        state = {k:v for k,v in state.items() if id(v) in self.remotes}
+
+        LocalTracer._send(state)

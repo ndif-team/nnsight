@@ -5,14 +5,14 @@ import os
 import warnings
 from functools import wraps
 from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from torch.nn.modules.module import _addindent
 
 from .. import CONFIG, base_deprecation_message, deprecated, util
 from ..util import apply, Patch
-from . import serialization
+
 from .batching import Batchable
 from .inject import convert as inject
 from .tracing.base import Tracer, WithBlockNotFoundError
@@ -386,7 +386,7 @@ class Envoy(Batchable):
 
     #### Public methods ####
 
-    def trace(self, *args, fn: Optional[Callable] = None, trace: bool = None, **kwargs):
+    def trace(self, *args, fn: Optional[Callable] = None, trace: bool = None, tracer_cls: Type[InterleavingTracer] = InterleavingTracer, **kwargs):
         """
         Create a tracer for this module.
 
@@ -418,7 +418,7 @@ class Envoy(Batchable):
             fn = self.__call__
             kwargs["hook"] = True
 
-        return InterleavingTracer(fn, self, *args, **kwargs)
+        return tracer_cls(fn, self, *args, **kwargs)
 
     def scan(self, *args, **kwargs):
         """
@@ -518,6 +518,8 @@ class Envoy(Batchable):
         export_dir = os.path.expanduser(os.path.join(export_dir, name))
 
         os.makedirs(export_dir, exist_ok=True)
+        
+        from . import serialization
 
         serialization.save(
             self._default_mediators, os.path.join(export_dir, f"{variant}.dill")
@@ -539,6 +541,8 @@ class Envoy(Batchable):
             export_dir = os.path.join(CONFIG.APP.CACHE_DIR, "exports")
 
         export_dir = os.path.expanduser(os.path.join(export_dir, name))
+        
+        from . import serialization
 
         imported_mediators = serialization.load(
             os.path.join(export_dir, f"{variant}.dill"), self
@@ -547,8 +551,8 @@ class Envoy(Batchable):
         self._default_mediators.extend(imported_mediators)
 
     # TODO legacy
-    def session(self, *args, **kwargs):
-        return Tracer(*args, **kwargs)
+    def session(self, *args, tracer_cls: Type[Tracer] = Tracer, **kwargs):
+        return tracer_cls(*args, **kwargs)
 
     # TODO legacy
     @property
