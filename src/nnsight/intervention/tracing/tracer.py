@@ -297,8 +297,7 @@ class InterleavingTracer(Tracer):
 
         # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
-            invoker = self.invoke(*self.args, **self.kwargs)
-            invoker.info = self.info.copy()
+            invoker = self.invoke(*self.args, _info=self.info.copy(), **self.kwargs)
 
             invoker.__exit__(ExitTracingException, None, None)
 
@@ -322,7 +321,6 @@ class InterleavingTracer(Tracer):
         Args:
             fn: The compiled function to execute
         """
-
         fn(self.info, self)
 
         args = self.batcher.batched_args
@@ -337,7 +335,7 @@ class InterleavingTracer(Tracer):
         try:
             self.model.interleave(self.fn, *args, **kwargs)
 
-            self.push(interleaver.state)
+            self.push(self.mediators[-1].info.frame.f_locals)
         finally:
             interleaver.state.clear()
                     
@@ -538,11 +536,13 @@ class Barrier:
         
     def __call__(self):
         
+        
         mediator = self.model._interleaver.current
         
         self.participants.add(mediator.name)
          
         if len(self.participants) == self.n_participants:
+            
             mediator.send(Events.BARRIER, self.participants)
             self.participants = set()
         else:

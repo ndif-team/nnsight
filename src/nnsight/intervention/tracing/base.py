@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from ..backends.base import Backend
 from ..backends.execution import ExecutionBackend
 from .globals import Globals
-from .util import suppress_all_output
+from .util import (TracingDeffermentException, get_non_nnsight_frame,
+                   push_variables, suppress_all_output)
 
 
 class ExitTracingException(Exception):
@@ -29,12 +30,6 @@ class WithBlockNotFoundError(Exception):
 
     pass
 
-class TracingDeffermentException(Exception):
-    """Exception raised when a tracing defferment is encountered.
-    
-    This exception is used to indicate that a tracing defferment is encountered.
-    """
-    pass
 
 class Tracer:
     """
@@ -145,22 +140,7 @@ class Tracer:
         the source code structure.
         """
         # Find the frame outside of nnsight by walking up the call stack
-        frame = inspect.currentframe()
-
-        while frame:
-            frame = frame.f_back
-            if frame:
-                filename = frame.f_code.co_filename
-                # Match if filename contains 'nnsight/tests' or 'nnsight\tests'
-                # OR if it does NOT contain '/nnsight/' or '\nnsight\'
-
-                if "__defer_capture__" in frame.f_locals:
-                    raise TracingDeffermentException()
-                if (
-                    re.search(r"[\\/]{1}nnsight[\\/]{1}tests", filename)
-                    or not re.search(r"[\\/]{1}nnsight[\\/]", filename)
-                ):
-                    break
+        frame = get_non_nnsight_frame()
 
         # Get source code lines from the appropriate location
         start_line = frame.f_lineno
@@ -339,29 +319,11 @@ class Tracer:
             # Collect all non-nnsight variables from the frame
 
         state = {k: v for k, v in state.items() if not k.startswith("__nnsight")}
+        
+        if Globals.stack == 1 :
+            state = {k: v for k, v in state.items() if id(v) in Globals.saves}
 
-        if frame.f_code.co_filename.startswith("<nnsight"):
-            # For dynamically generated code, update both globals and locals
-            frame.f_globals.update(state)
-            frame.f_locals.update(state)
-
-            # Ensure locals are properly synchronized with the frame
-            ctypes.pythonapi.PyFrame_LocalsToFast(
-                ctypes.py_object(frame), ctypes.c_int(0)
-            )
-
-        else:
-            # For regular files, just update locals
-            for key, value in state.items():
-
-                if Globals.stack == 1 and id(value) not in Globals.saves:
-                    continue
-
-                frame.f_locals[key] = value
-
-                ctypes.pythonapi.PyFrame_LocalsToFast(
-                    ctypes.py_object(frame), ctypes.c_int(0)
-                )
+        push_variables(frame, state)
 
         state.clear()
 
