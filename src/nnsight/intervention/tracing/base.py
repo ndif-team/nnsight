@@ -215,7 +215,7 @@ class Tracer:
             ]
 
         # Extract the code using AST parsing
-        start_line, source_lines, node = self.parse(source_lines, start_line)
+        start_line, source_lines, node = self.parse(source_lines, start_line, frame)
 
         # Calculate indentation level of the Tracer creation line.
         stripped = source_lines[0].lstrip("\t ")  # removes leading tabs/spaces
@@ -231,7 +231,7 @@ class Tracer:
         # Store the captured information for later use
         self.info = Tracer.Info(source_lines, frame, start_line, node)
 
-    def parse(self, source_lines:List[str], start_line:int):
+    def parse(self, source_lines:List[str], start_line:int, frame: FrameType):
         """
         Parse the source code to extract the source code.
 
@@ -252,19 +252,37 @@ class Tracer:
         class Visitor(ast.NodeVisitor):
             """AST visitor to find the 'with' node at the specified line."""
 
-            def __init__(self, line_no):
+            def __init__(self, line_no, globals):
                 self.target = None
                 self.line_no = line_no
+                
+                self.global_var_names = set()
+                self.globals = globals
 
             def visit_With(self, node):
                 if node.lineno == self.line_no:
                     self.target = node
-                else:
-                    self.generic_visit(node)
+                self.generic_visit(node)
+                          
+            def check_node(self, id, lineno):
+                if self.target is not None and lineno <= self.target.body[-1].lineno and id in self.globals:
+                    self.global_var_names.add(id)
 
-        visitor = Visitor(start_line)
+
+            def visit_Assign(self, node):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.check_node(target.id, node.lineno)
+                self.generic_visit(node)
+                
+            def visit_AugAssign(self, node):
+                if isinstance(node.target, ast.Name):
+                    self.check_node(node.target.id, node.lineno)
+                self.generic_visit(node)
+
+        visitor = Visitor(start_line, {**frame.f_globals, **frame.f_locals})
         visitor.visit(tree)
-
+        
         if visitor.target is None:
             # Gather 5 lines before and after start_line for context
             context_start = max(0, start_line - 5)
@@ -279,8 +297,14 @@ class Tracer:
         end_line = visitor.target.end_lineno
 
         start_line = visitor.target.body[0].lineno - 1
+        
+        source_lines = source_lines[start_line:end_line]
+        
+        if len(visitor.global_var_names) > 0:
+            
+            source_lines.insert(0, f"    global {', '.join(visitor.global_var_names)}\n")            
 
-        return start_line, source_lines[start_line:end_line], visitor.target
+        return start_line, source_lines, visitor.target
 
     def compile(self) -> Callable:
         """
@@ -311,7 +335,7 @@ class Tracer:
         """
         fn(self, self.info)
 
-    def push(self, state: Dict = None):
+    def push(self, state: Optional[Dict] = None):
         """
         Push local variables back to the original execution frame.
 
@@ -334,7 +358,7 @@ class Tracer:
                 ):
                     break
 
-            state = state_frame.f_locals
+            state = { **state_frame.f_globals, **state_frame.f_locals}
 
             # Collect all non-nnsight variables from the frame
 

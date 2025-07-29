@@ -11,11 +11,15 @@ class Backend:
     
     def __call__(self, tracer: Tracer):
         
+        has_globals =  tracer.info.source[0].lstrip().startswith('global')
         
         tracer.compile()
+        
+        if has_globals:
+            tracer.info.start_line -= 1
 
         source = "".join(tracer.info.source)
-        
+                
         code_obj = compile(source, tracer.info.filename, "exec")
         
         local_namespace = {}
