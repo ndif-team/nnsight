@@ -46,7 +46,7 @@ class Batcher:
             
 
         
-    def batch(self, batchable: Batchable, *args, **kwargs):
+    def batch(self, batchable: Batchable, *args, **kwargs) -> Tuple[Any, Any]:
         
         if args or kwargs:
             
@@ -75,6 +75,8 @@ class Batcher:
                   
         else:
             self.batch_groups.append((-1, -1))
+
+        return args, kwargs
             
             
     def narrow(self, batch_group: int, data:Any):
