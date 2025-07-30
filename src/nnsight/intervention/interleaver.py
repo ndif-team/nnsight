@@ -93,7 +93,6 @@ class Interleaver:
         self.user_cache = user_cache
 
         self.mediators: Dict[str, Mediator] = {}
-        self.state = dict()
         self.iteration_tracker = defaultdict(int)
         self.default_all = None
         
@@ -475,8 +474,6 @@ class Mediator:
 
         self.thread = None
 
-        self.state = None
-
         if self.alive:
             # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
@@ -740,7 +737,7 @@ class Mediator:
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
         
-        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight")}
+        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight") and k not in self.frame.f_locals and k not in self.frame.f_globals}
 
         push_variables(self.frame, state)
 

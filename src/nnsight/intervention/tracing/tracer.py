@@ -1,4 +1,5 @@
 import copy
+import inspect
 import re
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
@@ -256,6 +257,8 @@ class InterleavingTracer(Tracer):
         self.batcher = Batcher(**kwargs)
 
         self.user_cache: List[Cache] = list()
+        
+        self._frame = None
 
         super().__init__(*args, backend=backend)
             
@@ -306,10 +309,16 @@ class InterleavingTracer(Tracer):
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
             *self.info.source,
-            f"    {self.tracer_var_name}.push()\n",
+            f"    {self.tracer_var_name}.get_frame()\n",
         ]
 
         self.args = tuple()
+        
+    def get_frame(self):
+        """
+        Get the frame of the tracer.
+        """
+        self._frame = inspect.currentframe().f_back
 
     def execute(self, fn: Callable):
         """
@@ -332,13 +341,11 @@ class InterleavingTracer(Tracer):
         interleaver = self.model._interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
 
-        try:
-            self.model.interleave(self.fn, *args, **kwargs)
+        self.model.interleave(self.fn, *args, **kwargs)
 
-            self.push(self.mediators[-1].info.frame.f_locals)
-        finally:
-            interleaver.state.clear()
-                    
+        self.push(self._frame.f_locals)
+
+                
 
     ### Public API ####
 
