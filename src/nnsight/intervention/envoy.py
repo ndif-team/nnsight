@@ -552,7 +552,9 @@ class Envoy(Batchable):
 
     # TODO legacy
     def session(self, *args, tracer_cls: Type[Tracer] = Tracer, **kwargs):
-        return tracer_cls(*args, **kwargs)
+        tracer = tracer_cls(*args, **kwargs)
+        setattr(tracer, "model", self)
+        return tracer
 
     # TODO legacy
     @property
@@ -1377,9 +1379,9 @@ class EnvoySource:
 
 
 
-    def __getattr__(self, name: str) -> Union[OperationEnvoy]:
+    def __getattribute__(self, name: str) -> Union[OperationEnvoy]:
 
-        return super().__getattr__(name)
+        return object.__getattribute__(self, name)
 
 
 class Aliaser:
