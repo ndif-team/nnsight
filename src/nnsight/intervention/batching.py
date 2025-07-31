@@ -1,6 +1,6 @@
 
 
-from typing import Any, Tuple
+from typing import Any, Tuple, List
 
 import torch
 from ..util import apply, applyn
@@ -25,7 +25,8 @@ class Batcher:
         self.batched_args = args
         self.batched_kwargs = kwargs
         
-        self.batch_groups = []
+        self.batch_groups: List[Tuple[int, int]] = []
+        self.cached_batch_groups: Optional[List[Tuple[int, int]]] = None
         
         self.first_input = True
         self.needs_batching = False
@@ -131,4 +132,33 @@ class Batcher:
             return current_value
                 
         self.current_value = applyn([self.current_value, swap_value], _swap, torch.Tensor)
+
+
+    def cache_batch_groups(self, new_batch_groups: List[Tuple[int, int]]):
+        """
+        Cache the batch groups for the current batch.
+
+        Args:
+            new_batch_groups (List[Tuple[int, int]]): The new batch groups to use as current batch groups.
+        """
+
+        if not self.needs_batching or self.cached_batch_groups != None:
+            return
+
+        
+        self.cached_batch_groups = self.batch_groups
+        self.batch_groups = new_batch_groups
+
+    
+    def restore_batch_groups(self):
+        """
+        Restore the batch groups to the previous batch groups.
+        """
+
+        if not self.needs_batching or self.cached_batch_groups is None:
+            return
+        
+        self.batch_groups = self.cached_batch_groups
+        self.cached_batch_groups = None
+        self._total_batch_size = None
             

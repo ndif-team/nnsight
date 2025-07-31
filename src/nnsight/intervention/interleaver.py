@@ -403,6 +403,7 @@ class Mediator:
         info: "Tracer.Info",
         name: Optional[str] = None,
         batch_group: Optional[int] = 0,
+        stop: Optional[int] = None,
     ) -> None:
         """
         Initialize a Mediator with an intervention function.
@@ -411,6 +412,7 @@ class Mediator:
             intervention: The intervention function
             info: Information about the tracing context
             name: Optional name for the mediator
+            stop: Optional number of times to execute this mediator
         """
         self.intervention = intervention
         self.name = name if name else f"Mediator{id(self)}"
@@ -426,6 +428,7 @@ class Mediator:
         self.history = set()
         self.user_cache: List["Cache"] = list()
         self.iteration = 0
+        self.all_stop: Optional[int] = stop
 
         self.args = list()
 
@@ -821,9 +824,13 @@ class Mediator:
             while True:
 
                 do_iteration(i)
+
+                if stop is None:
+                    if self.all_stop is not None:
+                        stop = self.all_stop
                 
-                if self.interleaver.default_all is not None and stop is None:
-                    stop = self.interleaver.default_all
+                    elif self.interleaver.default_all is not None:
+                        stop = self.interleaver.default_all
 
                 i += 1
 
