@@ -99,7 +99,7 @@ class BackwardsTracer(Invoker):
             grad_patch.patch()
             with interleaver:
                 self.fn(self.tensor, *self.args, **self.kwargs)
-            
+            interleaver.check_dangling_mediators()
 
         finally:
             grad_patch.restore()
