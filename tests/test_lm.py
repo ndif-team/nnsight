@@ -872,6 +872,23 @@ def test_iter_and_skip(gpt2: nnsight.LanguageModel):
     assert not torch.all(arr_gen[2] == 0)
 
 
+@torch.no_grad()
+@pytest.mark.iter
+def test_iter_with_batched_interventions(gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str):
+    with gpt2.generate(max_new_tokens=3) as tracer:
+        with tracer.invoke(ET_prompt):
+            logits_1 = list().save()
+            with tracer.iter[:]:
+                logits_1.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
+
+        with tracer.invoke(MSG_prompt):
+            logits_2 = list().save()
+            with tracer.iter[0:3]:
+                logits_2.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
+
+    assert all([not torch.equal(logit_1, logit_2) for logit_1, logit_2 in zip(logits_1, logits_2)])
+
+
 ######################### CACHE #################################
 
 @torch.no_grad()
