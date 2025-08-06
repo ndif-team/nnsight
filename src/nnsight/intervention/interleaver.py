@@ -329,7 +329,6 @@ class Interleaver:
 
         self.batcher.current_value = value
 
-        batch_size = len(self.batcher.batch_groups)
         skip_count = 0
         skip_values = []
 
@@ -341,14 +340,14 @@ class Interleaver:
                 skip_count += 1
                 skip_values.append(e.value)
 
-        if skip_count == batch_size and batch_size > 0:
+        if skip_count == len(self.invokers):
 
             def _swap(*args):
                 return torch.cat(args, dim=0)
 
             skip_value = applyn(skip_values, _swap, torch.Tensor)
             raise SkipException(skip_value)
-        elif skip_count > 0 and skip_count < batch_size:
+        elif skip_count > 0 and skip_count < len(self.invokers):
             raise ValueError(
                 f"A module skip must be applied to all the invokers defined in the tracer!"
             )

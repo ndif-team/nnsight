@@ -1,6 +1,6 @@
 
 
-from typing import Any, Tuple, List
+from typing import Any, Tuple, List, Optional, Union
 
 import torch
 from ..util import apply, applyn
@@ -47,7 +47,7 @@ class Batcher:
             
 
         
-    def batch(self, batchable: Batchable, *args, **kwargs):
+    def batch(self, batchable: Batchable, *args, **kwargs) -> Union[int, None]:
         
         if args or kwargs:
             
@@ -63,24 +63,25 @@ class Batcher:
                 
             else:
                 
-                if self.batch_groups[-1][1] == -1:
+                if self.batch_groups[0] == (-1, -1):
                     (self.batched_args, self.batched_kwargs), batch_size = batchable._batch(None, *self.batched_args, **self.batched_kwargs)
                     
-                    self.batch_groups[-1] = (0, batch_size)
+                    self.batch_groups[0] = (0, batch_size)
                                         
                 (self.batched_args, self.batched_kwargs), batch_size = batchable._batch((self.batched_args, self.batched_kwargs), *args, **kwargs)
-                    
+                                    
                 self.batch_groups.append((sum(self.batch_groups[-1]), batch_size))
                 
                 self.needs_batching = True
-                  
-        else:
-            self.batch_groups.append((-1, -1))
-            
-            
-    def narrow(self, batch_group: int, data:Any):
 
-        if not self.needs_batching:
+            return len(self.batch_groups) - 1
+            
+        return None
+            
+            
+    def narrow(self, batch_group: Union[int, None], data:Any):
+
+        if not self.needs_batching or batch_group == None:
             return data
     
         batch_start, batch_size = self.batch_groups[batch_group]
@@ -102,9 +103,9 @@ class Batcher:
         )
         
         
-    def swap(self, batch_group, swap_value: Any):
+    def swap(self, batch_group: Union[int, None], swap_value: Any):
         
-        if not self.needs_batching:
+        if not self.needs_batching or batch_group == None:
             self.current_value = swap_value
             return
                 
