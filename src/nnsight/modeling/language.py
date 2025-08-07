@@ -119,11 +119,11 @@ class LanguageModel(RemoteableMixin):
     # Some transformer models compile on first generation. As of 0.5.0.dev7 this not not work with nnsight if fullgraph is True
     def _patch_generation_config(self, model:torch.nn.Module):
         
-        if hasattr(model, "generation_config"):
+        if getattr(model, "generation_config", None) is not None:
             
             generation_config = model.generation_config
             
-            compile_config = generation_config.compile_config
+            compile_config = getattr(generation_config, "compile_config", None)
             
             if compile_config is None:
                 
@@ -134,7 +134,7 @@ class LanguageModel(RemoteableMixin):
             compile_config.fullgraph = False
             compile_config.dynamic = True
             
-            generation_config.compile_config = compile_config
+            setattr(generation_config, "compile_config", compile_config)
         
     def export_edits(self, name:Optional[str] = None, export_dir: Optional[str] = None, variant: str = '__default__'):
         """TODO
