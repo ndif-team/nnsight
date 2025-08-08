@@ -101,6 +101,7 @@ class LanguageModel(RemoteableMixin):
         # If the user passed in a pre-loaded model, might be able to get repo id off of it.
         # That way if they dont provide a tokenizer, we can load it for them later.
         self.repo_id: str = args[0] if isinstance(args[0], str) else getattr(args[0], 'name_or_path', None)
+        self.revision: str = getattr(args[0], 'revision', 'main')
         
         super().__init__(*args, **kwargs)
     
@@ -213,6 +214,7 @@ class LanguageModel(RemoteableMixin):
     def _load_meta(
         self,
         repo_id: str,
+        revision:Optional[str] = "main",
         tokenizer_kwargs: Optional[Dict[str, Any]] = {},
         patch_llama_scan: bool = True,
         **kwargs,
@@ -220,9 +222,11 @@ class LanguageModel(RemoteableMixin):
 
         self.repo_id = repo_id
 
-        self._load_config(repo_id, **kwargs)
+        self.revision = revision
 
-        self._load_tokenizer(repo_id, **tokenizer_kwargs)
+        self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
         if (
             patch_llama_scan
@@ -243,14 +247,15 @@ class LanguageModel(RemoteableMixin):
     def _load(
         self,
         repo_id: str,
+        revision:Optional[str] = "main",
         tokenizer_kwargs: Optional[Dict[str, Any]] = {},
         patch_llama_scan: bool = True,
         **kwargs,
     ) -> PreTrainedModel:
 
-        self._load_config(repo_id, **kwargs)
+        self._load_config(repo_id, revision=revision, **kwargs)
 
-        self._load_tokenizer(repo_id, **tokenizer_kwargs)
+        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
         if (
             patch_llama_scan
@@ -260,7 +265,7 @@ class LanguageModel(RemoteableMixin):
         ):
             self.config.rope_scaling["rope_type"] = "llama3"
 
-        model = self.automodel.from_pretrained(repo_id, config=self.config, **kwargs)
+        model = self.automodel.from_pretrained(repo_id, config=self.config, revision=revision, **kwargs)
         
         self.config = model.config
         
@@ -399,7 +404,7 @@ class LanguageModel(RemoteableMixin):
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {"repo_id": self.repo_id}  # , "torch_dtype": str(self._model.dtype)}
+            {"repo_id": self.repo_id, "revision": self.revision}  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
@@ -409,7 +414,9 @@ class LanguageModel(RemoteableMixin):
 
         repo_id = kwargs.pop("repo_id")
 
-        return LanguageModel(repo_id, **kwargs)
+        revision = kwargs.pop("revision", "main")
+
+        return LanguageModel(repo_id, revision=revision, **kwargs)
 
 
 if TYPE_CHECKING:
