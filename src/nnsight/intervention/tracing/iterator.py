@@ -36,12 +36,15 @@ class IteratorTracer(Tracer):
         # Wrap the captured code in a function definition with appropriate parameters
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {iteration_var_name}):\n",
+            "    __nnsight_mediator__.pull()\n",
             *try_catch(
                 self.info.source,
                 exception_source=["__nnsight_mediator__.exception(exception)\n"],
                 else_source=["__nnsight_mediator__.end()\n"],
             ),
         ]
+        
+        self.info.start_line -= 2
         
     def execute(self, fn: Callable):
                 

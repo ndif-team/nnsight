@@ -48,6 +48,7 @@ class Invoker(Tracer):
         """
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
+            "    __nnsight_mediator__.pull()\n",
             *try_catch(
                 self.info.source,
                 exception_source=["__nnsight_mediator__.exception(exception)\n"],
@@ -55,7 +56,7 @@ class Invoker(Tracer):
             ),
         ]
 
-        self.info.start_line -= 1
+        self.info.start_line -= 2
 
     def execute(self, fn: Callable):
         """

@@ -308,9 +308,12 @@ class InterleavingTracer(Tracer):
 
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
+            f"    {self.tracer_var_name}.pull()\n",
             *self.info.source,
             f"    {self.tracer_var_name}.get_frame()\n",
         ]
+        
+        self.info.start_line -= 1
 
         self.args = tuple()
         
