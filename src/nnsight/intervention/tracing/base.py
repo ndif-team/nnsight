@@ -275,9 +275,12 @@ class Tracer:
         # Wrap the captured code in a function definition with appropriate parameters
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracer__, __nnsight_tracing_info__):\n",
+            "    __nnsight_tracer__.pull()\n",
             *self.info.source,
             "    __nnsight_tracer__.push()\n",
         ]
+        
+        self.info.start_line -= 1
 
     def execute(self, fn: Callable):
         """
@@ -326,6 +329,24 @@ class Tracer:
         push_variables(frame, state)
 
         state.clear()
+        
+    def pull(self):
+        
+        frame = inspect.currentframe()
+
+        while frame:
+            frame = frame.f_back
+            if frame and frame.f_code.co_filename.startswith(
+                "<nnsight"
+            ):
+                break
+
+
+        state = self.info.frame.f_locals
+        
+        state = {k: v for k, v in state.items() if not k.startswith("__nnsight")}
+        
+        push_variables(frame, state)
 
     def __enter__(self):
         """

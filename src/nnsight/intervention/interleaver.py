@@ -738,8 +738,8 @@ class Mediator:
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
-        
-        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight") and k not in self.frame.f_locals and k not in self.frame.f_globals}
+
+        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight") and k not in self.frame.f_locals}
 
         push_variables(self.frame, state)
 
