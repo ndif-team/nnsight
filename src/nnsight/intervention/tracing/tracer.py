@@ -300,11 +300,12 @@ class InterleavingTracer(Tracer):
 
         # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
+
             invoker = self.invoke(*self.args, _info=self.info.copy(), **self.kwargs)
 
             invoker.__exit__(ExitTracingException, None, None)
 
-            self.info.source = ["    pass\n"]
+            self.info.source = [f"    {self.tracer_var_name}.mediators[0].info.frame = {self.tracer_var_name}.get_frame()\n"]
 
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
@@ -317,11 +318,14 @@ class InterleavingTracer(Tracer):
 
         self.args = tuple()
         
+        
     def get_frame(self):
         """
         Get the frame of the tracer.
         """
         self._frame = inspect.currentframe().f_back
+        
+        return self._frame
 
     def execute(self, fn: Callable):
         """
@@ -378,6 +382,11 @@ class InterleavingTracer(Tracer):
 
     def all(self):
         return self.iter[:]
+    
+    def next(self, step: int = 1):
+        self.model._interleaver.current.iteration += step
+        
+        return self
 
     def cache(
         self,
