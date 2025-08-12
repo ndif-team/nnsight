@@ -2,32 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
-)
+import warnings
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+
+import torch
 from huggingface_hub import constants
 from huggingface_hub.file_download import repo_folder_name
-
-from nnsight import CONFIG
-import torch
 from torch.nn.modules import Module
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    PretrainedConfig,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
+                          AutoTokenizer, BatchEncoding, PretrainedConfig,
+                          PreTrainedModel, PreTrainedTokenizer)
 from transformers.generation.utils import GenerationMixin
 from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
@@ -122,13 +106,17 @@ class LanguageModel(RemoteableMixin):
         
         if getattr(model, "generation_config", None) is not None:
             
+            
+            warnings.filterwarnings("ignore", message="The CUDA Graph is empty")
+            
             generation_config = model.generation_config
             
             compile_config = getattr(generation_config, "compile_config", None)
             
             if compile_config is None:
                 
-                from transformers.generation.configuration_utils import CompileConfig
+                from transformers.generation.configuration_utils import \
+                    CompileConfig
                 
                 compile_config = CompileConfig()
                 

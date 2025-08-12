@@ -138,9 +138,10 @@ class Interleaver:
 
         module.forward = skippable_forward
 
+        @torch._dynamo.disable
         def input_hook(module: torch.nn.Module, args, kwargs):
 
-            if not self.interleaving or torch.compiler.is_compiling():
+            if not self.interleaving:
                 return args, kwargs
 
             provider = module.__path__
@@ -158,9 +159,10 @@ class Interleaver:
 
         module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
 
+        @torch._dynamo.disable
         def output_hook(module: torch.nn.Module, _, output: Any):
 
-            if not self.interleaving or torch.compiler.is_compiling():
+            if not self.interleaving:
                 return output
 
             provider = module.__path__
@@ -304,7 +306,7 @@ class Interleaver:
                             return
 
     ### Provider Methods ###
-    @torch._dynamo.disable
+    
     def handle(
         self,
         provider: Optional[Any] = None,
