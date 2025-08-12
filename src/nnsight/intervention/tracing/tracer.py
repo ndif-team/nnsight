@@ -379,6 +379,11 @@ class InterleavingTracer(Tracer):
 
     def all(self):
         return self.iter[:]
+    
+    def next(self, step: int = 1):
+        self.model._interleaver.current.iteration += step
+        
+        return self
 
     def cache(
         self,

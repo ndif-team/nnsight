@@ -556,18 +556,23 @@ class Envoy(Batchable):
         setattr(tracer, "model", self)
         return tracer
 
-    # TODO legacy
     @property
     @deprecated(message="Use `tracer.iter` instead.")
     @trace_only
     def iter(self):
         return IteratorProxy(self._interleaver)
 
-    # TODO legacy
     @deprecated(message="Use `tracer.all()` instead.")
     @trace_only
     def all(self):
         return self.iter[:]
+    
+    @deprecated(message="Use `tracer.next()` instead.")
+    @trace_only
+    def next(self, step: int = 1):
+        self._interleaver.current.iteration += step
+        
+        return self
 
     @trace_only
     def skip(self, replacement: Any):
