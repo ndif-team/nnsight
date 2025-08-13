@@ -1,9 +1,13 @@
 
 import contextlib
+import ctypes
+import inspect
 import os
+import re
 import sys
 from builtins import open
-from typing import TYPE_CHECKING, Callable, List
+from types import FrameType
+from typing import TYPE_CHECKING, Callable, Dict, List
 
 if TYPE_CHECKING:
     from .base import Tracer
@@ -82,6 +86,7 @@ def get_dependencies(fn:Callable):
     return {name: fn.__globals__[name] for name in used_names if name in fn.__globals__}
 
 from ... import CONFIG
+
 
 class ExceptionWrapper(Exception):
     """
@@ -258,3 +263,54 @@ def wrap_exception(exception:Exception, info:"Tracer.Info"):
     wrapped.__dict__.update(exception.__dict__)
         
     return wrapped
+
+class TracingDeffermentException(Exception):
+    """Exception raised when a tracing defferment is encountered.
+    
+    This exception is used to indicate that a tracing defferment is encountered.
+    """
+    pass
+
+def get_non_nnsight_frame() -> FrameType:
+    frame = inspect.currentframe()
+
+    while frame:
+        frame = frame.f_back
+        if frame:
+            filename = frame.f_code.co_filename
+            # Match if filename contains 'nnsight/tests' or 'nnsight\tests'
+            # OR if it does NOT contain '/nnsight/' or '\nnsight\'
+
+            if "__defer_capture__" in frame.f_locals:
+                raise TracingDeffermentException()
+            if (
+                re.search(r"[\\/]{1}nnsight[\\/]{1}tests", filename)
+                or not re.search(r"[\\/]{1}nnsight[\\/]", filename)
+            ):
+                break
+            
+    return frame
+            
+            
+def push_variables(frame:FrameType, variables:Dict):
+    
+    is_generated_frame = frame.f_code.co_filename.startswith("<nnsight")
+    
+    if is_generated_frame:
+        
+        global_variables = {k: v for k, v in variables.items() if k not in frame.f_locals}
+    
+        for key, value in global_variables.items():
+            frame.f_globals[key] = value
+            
+            ctypes.pythonapi.PyFrame_LocalsToFast(
+                ctypes.py_object(frame), ctypes.c_int(0)
+            )
+    
+    for key, value in variables.items():
+        frame.f_locals[key] = value
+        
+        ctypes.pythonapi.PyFrame_LocalsToFast(
+            ctypes.py_object(frame), ctypes.c_int(0)
+        )
+                

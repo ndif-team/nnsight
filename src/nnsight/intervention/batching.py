@@ -53,8 +53,8 @@ class Batcher:
     def batch_groups(self, value: List[Tuple[int, int]]):
         self._batch_groups = value
         self._total_batch_size = None
-        
-    def batch(self, batchable: Batchable, *args, **kwargs) -> Union[int, None]:
+
+    def batch(self, batchable: Batchable, *args, **kwargs) -> Tuple[Tuple[Any, Any], Union[int, None]]:
         
         if args or kwargs:
             
@@ -81,10 +81,9 @@ class Batcher:
                 
                 self.needs_batching = True
 
-            return len(self.batch_groups) - 1
-            
-        return None
-            
+            return (args, kwargs), len(self.batch_groups) - 1
+
+        return (args, kwargs), None
             
     def narrow(self, batch_group: Union[int, None], data:Any):
 

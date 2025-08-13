@@ -2,32 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Type,
-    Union,
-)
+import warnings
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+
+import torch
 from huggingface_hub import constants
 from huggingface_hub.file_download import repo_folder_name
-
-from nnsight import CONFIG
-import torch
 from torch.nn.modules import Module
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BatchEncoding,
-    PretrainedConfig,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
+                          AutoTokenizer, BatchEncoding, PretrainedConfig,
+                          PreTrainedModel, PreTrainedTokenizer)
 from transformers.generation.utils import GenerationMixin
 from transformers.models.auto import modeling_auto
 from transformers.models.llama.configuration_llama import LlamaConfig
@@ -101,6 +85,7 @@ class LanguageModel(RemoteableMixin):
         # If the user passed in a pre-loaded model, might be able to get repo id off of it.
         # That way if they dont provide a tokenizer, we can load it for them later.
         self.repo_id: str = args[0] if isinstance(args[0], str) else getattr(args[0], 'name_or_path', None)
+        self.revision: str = getattr(args[0], 'revision', 'main')
         
         super().__init__(*args, **kwargs)
     
@@ -119,22 +104,26 @@ class LanguageModel(RemoteableMixin):
     # Some transformer models compile on first generation. As of 0.5.0.dev7 this not not work with nnsight if fullgraph is True
     def _patch_generation_config(self, model:torch.nn.Module):
         
-        if hasattr(model, "generation_config"):
+        if getattr(model, "generation_config", None) is not None:
+            
+            
+            warnings.filterwarnings("ignore", message="The CUDA Graph is empty")
             
             generation_config = model.generation_config
             
-            compile_config = generation_config.compile_config
+            compile_config = getattr(generation_config, "compile_config", None)
             
             if compile_config is None:
                 
-                from transformers.generation.configuration_utils import CompileConfig
+                from transformers.generation.configuration_utils import \
+                    CompileConfig
                 
                 compile_config = CompileConfig()
                 
             compile_config.fullgraph = False
             compile_config.dynamic = True
             
-            generation_config.compile_config = compile_config
+            setattr(generation_config, "compile_config", compile_config)
         
     def export_edits(self, name:Optional[str] = None, export_dir: Optional[str] = None, variant: str = '__default__'):
         """TODO
@@ -213,6 +202,7 @@ class LanguageModel(RemoteableMixin):
     def _load_meta(
         self,
         repo_id: str,
+        revision:Optional[str] = "main",
         tokenizer_kwargs: Optional[Dict[str, Any]] = {},
         patch_llama_scan: bool = True,
         **kwargs,
@@ -220,9 +210,11 @@ class LanguageModel(RemoteableMixin):
 
         self.repo_id = repo_id
 
-        self._load_config(repo_id, **kwargs)
+        self.revision = revision
 
-        self._load_tokenizer(repo_id, **tokenizer_kwargs)
+        self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
         if (
             patch_llama_scan
@@ -243,14 +235,15 @@ class LanguageModel(RemoteableMixin):
     def _load(
         self,
         repo_id: str,
+        revision:Optional[str] = "main",
         tokenizer_kwargs: Optional[Dict[str, Any]] = {},
         patch_llama_scan: bool = True,
         **kwargs,
     ) -> PreTrainedModel:
 
-        self._load_config(repo_id, **kwargs)
+        self._load_config(repo_id, revision=revision, **kwargs)
 
-        self._load_tokenizer(repo_id, **tokenizer_kwargs)
+        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
         if (
             patch_llama_scan
@@ -260,7 +253,7 @@ class LanguageModel(RemoteableMixin):
         ):
             self.config.rope_scaling["rope_type"] = "llama3"
 
-        model = self.automodel.from_pretrained(repo_id, config=self.config, **kwargs)
+        model = self.automodel.from_pretrained(repo_id, config=self.config, revision=revision, **kwargs)
         
         self.config = model.config
         
@@ -399,7 +392,7 @@ class LanguageModel(RemoteableMixin):
 
     def _remoteable_model_key(self) -> str:
         return json.dumps(
-            {"repo_id": self.repo_id}  # , "torch_dtype": str(self._model.dtype)}
+            {"repo_id": self.repo_id, "revision": self.revision}  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
@@ -409,7 +402,9 @@ class LanguageModel(RemoteableMixin):
 
         repo_id = kwargs.pop("repo_id")
 
-        return LanguageModel(repo_id, **kwargs)
+        revision = kwargs.pop("revision", "main")
+
+        return LanguageModel(repo_id, revision=revision, **kwargs)
 
 
 if TYPE_CHECKING:

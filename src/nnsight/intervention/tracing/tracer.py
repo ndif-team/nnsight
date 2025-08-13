@@ -1,4 +1,5 @@
 import copy
+import inspect
 import re
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
@@ -256,6 +257,8 @@ class InterleavingTracer(Tracer):
         self.batcher = Batcher(**kwargs)
 
         self.user_cache: List[Cache] = list()
+        
+        self._frame = None
 
         super().__init__(*args, backend=backend)
             
@@ -297,20 +300,32 @@ class InterleavingTracer(Tracer):
 
         # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
-            invoker = self.invoke(*self.args, **self.kwargs)
-            invoker.info = self.info.copy()
+
+            invoker = self.invoke(*self.args, _info=self.info.copy(), **self.kwargs)
 
             invoker.__exit__(ExitTracingException, None, None)
 
-            self.info.source = ["    pass\n"]
+            self.info.source = [f"    {self.tracer_var_name}.mediators[0].info.frame = {self.tracer_var_name}.get_frame()\n"]
 
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
+            f"    {self.tracer_var_name}.pull()\n",
             *self.info.source,
-            f"    {self.tracer_var_name}.push()\n",
+            f"    {self.tracer_var_name}.get_frame()\n",
         ]
+        
+        self.info.start_line -= 1
 
         self.args = tuple()
+        
+        
+    def get_frame(self):
+        """
+        Get the frame of the tracer.
+        """
+        self._frame = inspect.currentframe().f_back
+        
+        return self._frame
 
     def execute(self, fn: Callable):
         """
@@ -322,7 +337,6 @@ class InterleavingTracer(Tracer):
         Args:
             fn: The compiled function to execute
         """
-
         fn(self.info, self)
 
         args = self.batcher.batched_args
@@ -334,13 +348,11 @@ class InterleavingTracer(Tracer):
         interleaver = self.model._interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
 
-        try:
-            self.model.interleave(self.fn, *args, **kwargs)
+        self.model.interleave(self.fn, *args, **kwargs)
 
-            self.push(interleaver.state)
-        finally:
-            interleaver.state.clear()
-                    
+        self.push(self._frame.f_locals)
+
+                
 
     ### Public API ####
 
@@ -370,6 +382,11 @@ class InterleavingTracer(Tracer):
 
     def all(self):
         return self.iter[:]
+    
+    def next(self, step: int = 1):
+        self.model._interleaver.current.iteration += step
+        
+        return self
 
     def cache(
         self,
@@ -538,11 +555,13 @@ class Barrier:
         
     def __call__(self):
         
+        
         mediator = self.model._interleaver.current
         
         self.participants.add(mediator.name)
          
         if len(self.participants) == self.n_participants:
+            
             mediator.send(Events.BARRIER, self.participants)
             self.participants = set()
         else:

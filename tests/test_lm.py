@@ -888,18 +888,6 @@ def test_batched_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert gpt2.tokenizer.batch_decode(logits_1) == [" York", " City"]
     assert gpt2.tokenizer.batch_decode(logits_2) == [" New", " York", " City"]
 
-#     from nnsight.intervention.interleaver import UnboundIteratorException
-# @torch.no_grad()
-# @pytest.mark.iter
-# def test_one_iter(gpt2: nnsight.LanguageModel):
-#     with pytest.raises(UnboundIteratorException):
-#         with gpt2.generate("_", max_new_tokens=1) as tracer:
-#             arr_gen = list().save()
-
-#             with tracer.all():
-#                 arr_gen.append(1)
-
-
 
 @torch.no_grad()
 @pytest.mark.iter
@@ -923,7 +911,7 @@ def test_iter_and_skip(gpt2: nnsight.LanguageModel):
 
 @torch.no_grad()
 @pytest.mark.iter
-def test_iter_with_invokers(gpt2: nnsight.LanguageModel, ET_prompt: str):
+def test_iter_with_promptless_invokers(gpt2: nnsight.LanguageModel, ET_prompt: str):
     with gpt2.trace() as tracer:
         with tracer.invoke(ET_prompt):
             pass
@@ -971,6 +959,7 @@ def test_iter_with_batched_interventions(gpt2: nnsight.LanguageModel, ET_prompt:
                 logits_2.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
     assert all([not torch.equal(logit_1, logit_2) for logit_1, logit_2 in zip(logits_1, logits_2)])
+
 
 ######################### CACHE #################################
 

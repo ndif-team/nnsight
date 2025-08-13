@@ -6,7 +6,6 @@ from ...util import Patch
 from ..interleaver import Interleaver, Mediator
 from .invoker import Invoker
 
-
 def wrap_grad(interleaver: Interleaver):
     """
     Create a hook for gradient intervention.
@@ -100,9 +99,8 @@ class BackwardsTracer(Invoker):
             grad_patch.patch()
             with interleaver:
                 self.fn(self.tensor, *self.args, **self.kwargs)
-            grad_patch.restore()
-            self.push(interleaver.state)
+            interleaver.check_dangling_mediators()
 
         finally:
+            grad_patch.restore()
             interleaver.cancel()
-            interleaver.state.clear()

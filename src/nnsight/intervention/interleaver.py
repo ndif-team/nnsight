@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import inspect
+import re
 import threading
 import time
 import warnings
@@ -10,15 +11,15 @@ from enum import Enum
 from functools import wraps
 from queue import Queue
 from threading import Thread
+from types import FrameType
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
 
 import torch
 
-from ..util import Patch, Patcher, applyn
+from ..util import applyn
 from .batching import Batcher
-from .tracing.base import WithBlockNotFoundError
-from .tracing.util import wrap_exception
+from .tracing.util import wrap_exception, get_non_nnsight_frame, push_variables
 
 if TYPE_CHECKING:
     from .tracing.tracer import Cache, InterleavingTracer, Tracer
@@ -92,7 +93,6 @@ class Interleaver:
         self.user_cache = user_cache
 
         self.mediators: Dict[str, Mediator] = {}
-        self.state = dict()
         self.iteration_tracker = defaultdict(int)
         self.default_all = None
         
@@ -138,9 +138,10 @@ class Interleaver:
 
         module.forward = skippable_forward
 
+        @torch._dynamo.disable
         def input_hook(module: torch.nn.Module, args, kwargs):
 
-            if not self.interleaving or torch.compiler.is_compiling():
+            if not self.interleaving:
                 return args, kwargs
 
             provider = module.__path__
@@ -158,9 +159,10 @@ class Interleaver:
 
         module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
 
+        @torch._dynamo.disable
         def output_hook(module: torch.nn.Module, _, output: Any):
 
-            if not self.interleaving or torch.compiler.is_compiling():
+            if not self.interleaving:
                 return output
 
             provider = module.__path__
@@ -304,7 +306,7 @@ class Interleaver:
                             return
 
     ### Provider Methods ###
-    @torch._dynamo.disable
+    
     def handle(
         self,
         provider: Optional[Any] = None,
@@ -476,8 +478,6 @@ class Mediator:
 
         self.thread = None
 
-        self.state = None
-
         if self.alive:
             # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
@@ -568,11 +568,14 @@ class Mediator:
                     mediator = mediator.child
                     
                 if mediator.name in participants:
-                    
-                    mediator.handle(provider)
-                    
+               
                     mediator.respond()
-                
+        
+                    mediator.handle(provider)
+
+                    
+                    
+                            
 
 
     def handle_end_event(self):
@@ -710,20 +713,18 @@ class Mediator:
     ### Requester Methods ###
 
     @property
-    def frame(self):
+    def frame(self) -> FrameType:
         """
         Get the frame of the intervention function.
 
         Returns:
             The frame of the intervention function
         """
+        
+       
 
-        frame = inspect.currentframe()
+        frame = get_non_nnsight_frame()
 
-        while frame:
-            frame = frame.f_back
-            if frame and frame.f_code.co_filename.startswith("<nnsight"):
-                break
         return frame
 
     def iterate(self, requester: Any):
@@ -732,21 +733,17 @@ class Mediator:
 
     def push(self):
         """Push local variables to the interleaver state."""
-        self.interleaver.state.update(self.frame.f_locals)
+        
+        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight")}
+         # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
+        push_variables(self.info.frame, state)
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
 
-        for key in list(self.interleaver.state.keys()):
-            if key.startswith("__nnsight"):
-                self.interleaver.state.pop(key)
+        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight") and k not in self.frame.f_locals}
 
-        self.frame.f_globals.update(self.interleaver.state)
-        self.frame.f_locals.update(self.interleaver.state)
-
-        ctypes.pythonapi.PyFrame_LocalsToFast(
-            ctypes.py_object(self.frame), ctypes.c_int(0)
-        )
+        push_variables(self.frame, state)
 
     def send(self, event: Events, requester: Any):
         """
