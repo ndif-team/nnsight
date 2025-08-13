@@ -242,19 +242,16 @@ def test_invoker_group_batching(vllm_gpt2, ET_prompt: str, MSG_prompt: str):
                 MSG_logits.append(vllm_gpt2.logits.output)
 
         with tracer.invoke():
-            all_logits = list().save()
 
             with tracer.all():
                 all_logits.append(vllm_gpt2.logits.output)
 
         with tracer.invoke([ET_prompt, MSG_prompt], max_tokens=max_tokens_3):
-            two_prompts_logits = list().save()
 
             with tracer.all():
                 two_prompts_logits.append(vllm_gpt2.logits.output)
 
         with tracer.invoke(ET_prompt, max_tokens=max_tokens_2):
-            ET_logits = list().save()
 
             with tracer.iter[:]:
                 ET_logits.append(vllm_gpt2.logits.output)
