@@ -38,6 +38,23 @@ def test_single_logit(vllm_gpt2, ET_prompt: str):
 
 
 @torch.no_grad()
+def test_request_cleanup(vllm_gpt2, ET_prompt: str, MSG_prompt: str):
+    with vllm_gpt2.trace() as tracer:
+        with tracer.invoke(ET_prompt):
+            pass
+
+        with tracer.invoke(MSG_prompt):
+            pass
+
+    with vllm_gpt2.trace(MSG_prompt, temperature=0.0, top_p=1, max_tokens=3) as tracer:
+        logits = list().save()
+        with tracer.iter[0:3]:
+            logits.append(vllm_gpt2.logits.output)
+
+    assert vllm_gpt2.tokenizer.batch_decode([logit.argmax(dim=-1) for logit in logits]) == [" New", " York", " City"]
+
+
+@torch.no_grad()
 def test_multi_token_generation(vllm_gpt2, MSG_prompt: str):
     with vllm_gpt2.trace(MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3) as tracer:
         logits = list().save()
@@ -65,9 +82,9 @@ def test_sampling(vllm_gpt2, MSG_prompt: str):
 
 @torch.no_grad()
 def test_max_token_generation(vllm_gpt2, ET_prompt: str):
-    with vllm_gpt2.trace(ET_prompt, max_tokens=10):
-        logits = nnsight.list().save()
-        with vllm_gpt2.logits.all():
+    with vllm_gpt2.trace(ET_prompt, max_tokens=10) as tracer:
+        logits = list().save()
+        with tracer.all():
             logits.append(vllm_gpt2.logits.output)
 
     assert len(logits) == 10
@@ -174,11 +191,11 @@ def test_batched_multi_token_generation_with_iter(vllm_gpt2, ET_prompt: str, MSG
     with vllm_gpt2.trace(max_tokens=10) as tracer:
         with tracer.invoke(ET_prompt):
             ET_logits = list().save()
-            with vllm_gpt2.logits.iter[1:7]:
+            with tracer.iter[1:7]:
                 ET_logits.append(vllm_gpt2.logits.output)
         with tracer.invoke(MSG_prompt, max_tokens=5):
             MSG_logits = list().save()
-            with vllm_gpt2.logits.iter[:5]:
+            with tracer.iter[:5]:
                 MSG_logits.append(vllm_gpt2.logits.output)
 
     assert len(ET_logits) == 6
@@ -205,13 +222,63 @@ def test_mutli_token_generation_with_intervention(tp, vllm_gpt2, MSG_prompt: str
         assert vllm_gpt2.tokenizer.decode(logits[2].argmax(dim=-1)) != " City"
 
 
-""" def test_multi_referenced_module(vllm_gpt2, ET_prompt: str):
-    with vllm_gpt2.trace(ET_prompt):
-        act_in = vllm_gpt2.transformer.h[0].mlp.act.input.save()
-        vllm_gpt2.transformer.h[0].mlp.act.next()
-        act_in_other = vllm_gpt2.transformer.h[1].mlp.act.input.save()
+@torch.no_grad()
+def test_invoker_group_batching(vllm_gpt2, ET_prompt: str, MSG_prompt: str):
 
-    assert not torch.equal(act_in, act_in_other) """
+    max_tokens_1 = 1
+    max_tokens_2 = 2
+    max_tokens_3 = 3
+
+    MSG_logits = list()
+    ET_logits = list()
+    two_prompts_logits = list()
+    all_logits = list()
+
+    with vllm_gpt2.trace() as tracer:
+
+        with tracer.invoke(MSG_prompt, max_tokens=max_tokens_1):
+
+            with tracer.iter[:]:
+                MSG_logits.append(vllm_gpt2.logits.output)
+
+        with tracer.invoke():
+            all_logits = list().save()
+
+            with tracer.all():
+                all_logits.append(vllm_gpt2.logits.output)
+
+        with tracer.invoke([ET_prompt, MSG_prompt], max_tokens=max_tokens_3):
+            two_prompts_logits = list().save()
+
+            with tracer.all():
+                two_prompts_logits.append(vllm_gpt2.logits.output)
+
+        with tracer.invoke(ET_prompt, max_tokens=max_tokens_2):
+            ET_logits = list().save()
+
+            with tracer.iter[:]:
+                ET_logits.append(vllm_gpt2.logits.output)
+
+    # each invoker has the correct number of logits
+    assert len(MSG_logits) == max_tokens_1
+    assert len(ET_logits) == max_tokens_2
+    assert len(two_prompts_logits) == max_tokens_3
+    assert len(all_logits) == max_tokens_3
+
+    # check correctness of prompt-less invoker
+    assert all_logits[0].shape[0] == 4 and all_logits[1].shape[0] == 3 and all_logits[2].shape[0] == 2
+
+    # iter 0
+    assert torch.equal(all_logits[0][0], MSG_logits[0][0]) 
+    assert torch.equal(all_logits[0][1:3], two_prompts_logits[0][:2])
+    assert torch.equal(all_logits[0][3], ET_logits[0][0]) 
+
+    # iter 1
+    assert torch.equal(all_logits[1][0:2], two_prompts_logits[1])
+    assert torch.equal(all_logits[1][2], ET_logits[1][0])
+    
+    # iter 2
+    assert torch.equal(all_logits[2], two_prompts_logits[2])
 
 
 @torch.no_grad()

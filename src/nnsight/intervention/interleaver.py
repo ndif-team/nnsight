@@ -340,7 +340,7 @@ class Interleaver:
                 skip_count += 1
                 skip_values.append(e.value)
 
-        if skip_count == len(self.invokers):
+        if skip_count == len(self.invokers) and self.invokers:
 
             def _swap(*args):
                 return torch.cat(args, dim=0)

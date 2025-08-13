@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, Set
 
 import torch
 import torch.distributed
@@ -19,13 +19,170 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
 
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
 
     from ....intervention.interleaver import Interleaver
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 class NNsightGPUModelRunner(GPUModelRunner):
+
+    class NNsightRequestHelper:
+        '''
+        Helper class for batching requests in the GPUModelRunner.
+
+        Attributes:
+            ids_to_batch_group (Dict[str, int]): Dictionary mapping request IDs to their assigned batch group indices.
+            interleaver_to_ids (Dict[Interleaver, Set[str]]): Dictionary mapping interleavers to sets of request IDs.
+            flat_batch_groups (Dict[Interleaver, List[Tuple[int, int]]]): Dictionary mapping interleavers to their flattened batch groups.
+
+        Methods:
+            process_new_reqs(new_reqs: List[NewRequestData]) -> None: Process new requests and compute the flat batch groups.
+            process_finished_req(req_id: str, interleaver: Interleaver) -> None: Process a finished request,
+                by updating batch groups and cleaning up mappings.
+        '''
+
+        def __init__(self):
+
+            self.ids_to_batch_group: Dict[str, int] = {}
+            self.interleaver_to_ids: Dict["Interleaver", Set[str]] = defaultdict(set)
+            self.flat_batch_groups: Dict["Interleaver", List[Tuple[int, int]]] = defaultdict(list)
+
+        def process_new_reqs(self, new_reqs: List["NewRequestData"]) -> None:
+            """
+            Process new requests and organize them into batch groups for execution.
+            
+            This method handles the batching logic for new requests, organizing them
+            into appropriate batch groups based on their interleaver's batching strategy.
+            
+            Args:
+                new_reqs (List[NewRequestData]): List of new request data objects to process.
+                    Each request contains sampling parameters with an associated interleaver
+                    that defines the batching behavior.
+            
+            Notes:
+                - Resets the flat_batch_groups dictionary at the start
+                - For interleavers that require batching, requests are assigned to batch groups
+                - Batch groups are tuples of (start_position, size) indicating token ranges
+                - Updates internal tracking dictionaries for request-to-batch-group mapping
+                - Advances to next batch group when current group capacity is exceeded
+            """
+
+            # reset
+            self.flat_batch_groups = defaultdict(list)
+
+            # current batch group index per interleaver
+            curr_batch_groups: Dict["Interleaver", int] = defaultdict(int)
+
+            interleavers: Set["Interleaver"] = set()
+
+            for new_req in new_reqs:
+                interleaver = new_req.sampling_params.interleaver
+
+                # clean up any finished requests from the previous round
+                if interleaver not in interleavers:
+                    interleavers.add(interleaver)
+
+                    if interleaver in self.interleaver_to_ids:
+                        for req_id in self.interleaver_to_ids[interleaver]:
+                            self.ids_to_batch_group.pop(req_id)
+
+                    self.interleaver_to_ids[interleaver] = set()
+
+                if interleaver.batcher.needs_batching:
+                    # linking request to batch group
+                    batch_groups: List[Tuple[int, int]] = interleaver.batcher.batch_groups
+                    batch_group_idx: int = curr_batch_groups[interleaver]
+
+                    self.interleaver_to_ids[interleaver].add(new_req.req_id)
+
+                    # update current batch group index
+                    if len(self.interleaver_to_ids[interleaver]) > sum(batch_groups[batch_group_idx]):
+                        curr_batch_groups[interleaver] += 1
+
+                    self.ids_to_batch_group[new_req.req_id] = curr_batch_groups[interleaver]
+
+                    # first seen request
+                    if self.flat_batch_groups[interleaver] == []:
+                        # req_to_interleaver_dict[interleaver] = (0, 0)
+                        # the first batch group starts at 0 and has a size of the number of tokens in the prompt
+                        batch_group = (batch_groups[0][0], len(new_req.prompt_token_ids))
+                        self.flat_batch_groups[interleaver].append(batch_group)
+
+                    else:
+                        req_count: int = len(self.interleaver_to_ids[interleaver])
+                        curr_batch_group: Tuple[int, int] = batch_groups[batch_group_idx]
+                        last_flat_batch_group: Tuple[int, int] = self.flat_batch_groups[interleaver][-1]
+
+                        # check if the current request is within the current batch group
+                        if req_count < sum(curr_batch_group):
+                            # update the current batch group with the number of tokens in the new request
+                            batch_group = (last_flat_batch_group[0], last_flat_batch_group[1] + len(new_req.prompt_token_ids))
+                            self.flat_batch_groups[interleaver][-1] = batch_group
+
+                        else:
+                            # add a new batch group
+                            batch_group = (sum(last_flat_batch_group), len(new_req.prompt_token_ids))
+                            self.flat_batch_groups[interleaver].append(batch_group)
+
+        def process_finished_req(self, req_id: str, interleaver: "Interleaver") -> None:
+            """
+            Process a finished request by updating batch groups and cleaning up mappings.
+            
+            This method handles the removal of a completed request from the batch tracking
+            system. When a request finishes, it:
+            1. Removes the request from the interleaver's tracking set
+            2. Decrements the batch group count 
+            3. If the batch group becomes empty, removes it and updates indices
+            4. Updates batch group mappings for remaining requests
+            5. Cleans up the request ID mapping
+            
+            Args:
+                req_id (str): The unique identifier of the finished request
+                interleaver (Interleaver): The interleaver instance managing this request
+            """
+
+            if req_id in self.interleaver_to_ids[interleaver]:
+
+                # remove finished request
+                self.interleaver_to_ids[interleaver].remove(req_id)
+                
+                batch_idx = self.ids_to_batch_group[req_id]
+                batch_groups = interleaver.batcher.batch_groups
+
+                batch_group = batch_groups[batch_idx]
+                new_batch_group = (batch_group[0], batch_group[1] - 1)
+
+                if new_batch_group[1] == 0:
+                    batch_groups.pop(batch_idx)
+
+                    for idx in range(batch_idx, len(batch_groups)):
+                        # update the batch start
+                        if idx == batch_idx:
+                            batch_groups[idx] = (batch_group[0], batch_groups[idx][1])
+                        else:
+                            batch_groups[idx] = (sum(batch_groups[idx-1]), batch_groups[idx][1])
+
+                    # update the batch group index for remaining requests
+                    for other_req_id in self.interleaver_to_ids[interleaver]:
+                        if self.ids_to_batch_group[other_req_id] > batch_idx:
+                            self.ids_to_batch_group[other_req_id] -= 1
+
+                    for mediator in interleaver.invokers:
+                        if mediator.batch_group and mediator.batch_group > batch_idx:
+                            mediator.batch_group -= 1
+
+                        if mediator.child:
+                            mediator.child.batch_group = mediator.batch_group
+
+                    interleaver.batcher.batch_groups = batch_groups
+                        
+                else:
+                    batch_groups[batch_idx] = new_batch_group
+
+                # remove finished request
+                self.ids_to_batch_group.pop(req_id)
+
 
     def __init__(self, *args, **kwargs):
         
@@ -34,6 +191,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
         super().__init__(*args, **kwargs)
         
         self.nnsight_model: VLLM
+
+        self.nnsight_request_helper = self.NNsightRequestHelper()
 
     def load_model(self) -> None:
         
@@ -53,8 +212,25 @@ class NNsightGPUModelRunner(GPUModelRunner):
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+
+        ########## NNsight ##########
+
+        self.nnsight_request_helper.process_new_reqs(scheduler_output.scheduled_new_reqs)
+
+        #############################
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
+            
+            ########## NNsight ##########
+
+            self.nnsight_request_helper.process_finished_req(
+                req_id, 
+                self.requests[req_id].sampling_params.interleaver
+            )
+
+            #############################
+
             self.requests.pop(req_id, None)
             self.encoder_cache.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
@@ -91,58 +267,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         req_ids_to_add: list[str] = []
 
-
-        ########## NNsight ##########
-
-        new_batch_groups_dict: Dict[Interleaver, List[Tuple[int, int]]] = defaultdict(list)
-        req_count_dict: Dict[Interleaver, Tuple[int, int]] = {}     # (request count, current batch group index)
-
-        for new_req in scheduler_output.scheduled_new_reqs:
-            interleaver = new_req.sampling_params.interleaver
-
-            # batching  
-            if interleaver.batcher.needs_batching:
-
-                if new_batch_groups_dict[interleaver] == []:
-                    req_count_dict[interleaver] = (0, 0)
-                    # the first batch group starts at 0 and has a size of the number of tokens in the prompt
-                    batch_group = (interleaver.batcher.batch_groups[0][0], len(new_req.prompt_token_ids))
-                    new_batch_groups_dict[interleaver].append(batch_group)
-
-                else:
-                    req_count: int = req_count_dict[interleaver][0] + 1
-                    curr_batch_group: Tuple[int, int] = interleaver.batcher.batch_groups[req_count_dict[interleaver][1]]
-                    last_new_batch_group: Tuple[int, int] = new_batch_groups_dict[interleaver][-1]
-
-                    # check if the current request is within the current batch group
-                    if req_count < sum(curr_batch_group):
-                        # update the current batch group with the number of tokens in the new request
-                        batch_group = (last_new_batch_group[0], last_new_batch_group[1] + len(new_req.prompt_token_ids))
-                        new_batch_groups_dict[interleaver][-1] = batch_group
-                        
-                        # increment the request count
-                        req_count_dict[interleaver] = (req_count, req_count_dict[interleaver][1])
-
-                    else:
-                        # add a new batch group
-                        batch_group = (last_new_batch_group[1], len(new_req.prompt_token_ids))
-                        new_batch_groups_dict[interleaver].append(batch_group)
-
-                        # increment the request count and the batch group index
-                        req_count_dict[interleaver] = (req_count, req_count_dict[interleaver][1] + 1)
-    
-        #############################
-
-
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
 
-
             ########## NNsight ##########
 
-            sampling_params.interleaver.batcher.cache_batch_groups(new_batch_groups_dict[sampling_params.interleaver])
+            # flatten batch groups to match vLLM's batch processing method
+            batcher = sampling_params.interleaver.batcher
+            batcher.cache_batch_groups(self.nnsight_request_helper.flat_batch_groups[sampling_params.interleaver])
 
             #############################
 

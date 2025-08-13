@@ -25,7 +25,6 @@ class Batcher:
         self.batched_args = args
         self.batched_kwargs = kwargs
         
-        self.batch_groups: List[Tuple[int, int]] = []
         self.cached_batch_groups: Optional[List[Tuple[int, int]]] = None
         
         self.first_input = True
@@ -33,6 +32,7 @@ class Batcher:
         
         self.current_value = None
         
+        self._batch_groups: List[Tuple[int, int]] = []
         self._total_batch_size = None
         
         
@@ -44,8 +44,15 @@ class Batcher:
             self._total_batch_size = sum(self.batch_groups[-1])
             
         return self._total_batch_size
-            
 
+    @property
+    def batch_groups(self) -> List[Tuple[int, int]]:
+        return self._batch_groups
+
+    @batch_groups.setter
+    def batch_groups(self, value: List[Tuple[int, int]]):
+        self._batch_groups = value
+        self._total_batch_size = None
         
     def batch(self, batchable: Batchable, *args, **kwargs) -> Union[int, None]:
         

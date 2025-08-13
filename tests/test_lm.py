@@ -797,16 +797,16 @@ def test_skip_module_for_batch_error(gpt2: nnsight.LanguageModel, ET_prompt: str
 @torch.no_grad()
 @pytest.mark.iter
 def test_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate(MSG_prompt, max_new_tokens=3):
+    with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
         logits_all = list().save()
 
-        with gpt2.all():
+        with tracer.all():
             logits_all.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
-    with gpt2.generate(MSG_prompt, max_new_tokens=3):
+    with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
         logits_iter = list().save()
 
-        with gpt2.iter[:]:
+        with tracer.iter[:]:
             logits_iter.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
     assert len(logits_all) == 3

@@ -210,13 +210,19 @@ class VLLM(RemoteableMixin):
         kwargs.pop('hook', None)
         kwargs.pop('processed', None)
 
+        max_max_tokens = 0
         for param in params:
             for attr, value in kwargs.items():
                 if hasattr(NNsightSamplingParams, attr) and getattr(param, attr) == getattr(default_param, attr):
                     setattr(param, attr, value)
 
-        for idx, batch_group in enumerate(self._interleaver.batcher.batch_groups):
-            self._interleaver.invokers[idx].all_stop = params[batch_group[0]].max_tokens
+            max_max_tokens = param.max_tokens if param.max_tokens > max_max_tokens else max_max_tokens
+
+        for mediator in self._interleaver.invokers:
+            if mediator.batch_group != None:
+                mediator.all_stop = params[self._interleaver.batcher.batch_groups[mediator.batch_group][0]].max_tokens
+            else:
+                mediator.all_stop = max_max_tokens
         
         output = self.vllm_entrypoint.generate(prompts, sampling_params=params)
         
