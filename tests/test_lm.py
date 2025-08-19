@@ -539,3 +539,15 @@ def test_undispatched_extra_module(device: str, MSG_prompt: str):
         output = model.generator.output.save()
 
     output.value
+
+
+def test_envoy_input_output_access(gpt2: nnsight.LanguageModel):
+
+    with pytest.raises(RuntimeError):
+        gpt2.transformer.h[0].output
+
+    with pytest.raises(RuntimeError):
+        gpt2.transformer.h[0].input
+
+    with pytest.raises(RuntimeError):
+        gpt2.transformer.h[0].inputs

@@ -25,6 +25,41 @@ from .backends import EditingBackend
 from .contexts import InterleavingTracer
 from .graph import InterventionNodeType, InterventionProxyType
 
+def requires_tracing(func=None, *, is_property=False, property_name=None):
+    """Decorator that checks if tracing is active before executing a method or property.
+    
+    Args:
+        func: The function to decorate
+        is_property: Whether this is decorating a property getter
+        property_name: Optional name override for the property in error messages
+    
+    Raises:
+        RuntimeError: If the method is called outside of a tracing context.
+    """
+    def decorator(f):
+        def wrapper(self, *args, **kwargs):
+            if not self._tracing():
+                name = property_name or (f.__name__ if not is_property else f.__name__)
+                message = (
+                    f"{'Property' if is_property else 'Method'} '{name}' can only be accessed within a tracing context. "
+                    f"Make sure you're using the model within a Session or other appropriate context manager."
+                )
+                
+                if is_property:
+                    message += (
+                        " If you need to access the value outside of the tracing context, use '.save()' on the proxy "
+                        f"within the context (e.g., 'x = model.transformer.h[0].{name}.save()')."
+                    )
+                
+                raise RuntimeError(message)
+            return f(self, *args, **kwargs)
+        return wrapper
+    
+    # This allows the decorator to be used with or without arguments
+    if func is not None:
+        return decorator(func)
+    return decorator
+
 
 class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
     """Envoy objects act as proxies for torch modules themselves within a model's module tree in order to add nnsight functionality.
@@ -105,6 +140,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         )
 
     @property
+    @requires_tracing(is_property=True, property_name="output")
     def output(self) -> InterventionProxyType:
         """
         Calling denotes the user wishes to get the output of the underlying module and therefore we create a Proxy of that request.
@@ -113,6 +149,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Returns:
             InterventionProxy: Output proxy.
         """
+            
         output = self._output_stack.pop()
 
         if output is None:
@@ -147,6 +184,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         return output
 
     @output.setter
+    @requires_tracing
     def output(self, value: Union[InterventionProxyType, Any]) -> None:
         """
         Calling denotes the user wishes to set the output of the underlying module and therefore we create a Proxy of that request.
@@ -160,6 +198,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self._output_stack[-1] = None
 
     @property
+    @requires_tracing(is_property=True, property_name="inputs")
     def inputs(self) -> InterventionProxyType:
         """
         Calling denotes the user wishes to get the input of the underlying module and therefore we create a Proxy of that request.
@@ -168,6 +207,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         Returns:
             InterventionProxy: Input proxy.
         """
+
 
         input = self._input_stack.pop()
 
@@ -203,6 +243,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         return input
 
     @inputs.setter
+    @requires_tracing
     def inputs(self, value: Union[InterventionProxyType, Any]) -> None:
         """
         Calling denotes the user wishes to set the input of the underlying module and therefore we create a Proxy of that request.
@@ -216,6 +257,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         self._input_stack[-1] = None
 
     @property
+    @requires_tracing(is_property=True, property_name="input")
     def input(self) -> InterventionProxyType:
         """Getting the first positional argument input of the model's module.
 
@@ -232,6 +274,7 @@ class Envoy(Generic[InterventionProxyType, InterventionNodeType]):
         return self.inputs[0][0]
 
     @input.setter
+    @requires_tracing
     def input(self, value: Union[InterventionProxyType, Any]) -> None:
         """Setting the value of the input's first positional argument in the model's module.
 
