@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import io
-import sys
+import os
 import time
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
@@ -46,17 +46,20 @@ class RemoteBackend(Backend):
     ) -> None:
 
         self.model_key = model_key
+        
+        self.host = host or os.environ.get("NDIF_HOST", None) or CONFIG.API.HOST
+        self.api_key = api_key or os.environ.get("NDIF_API_KEY", None) or CONFIG.API.APIKEY
 
         self.job_id = job_id or CONFIG.API.JOB_ID
         self.ssl = CONFIG.API.SSL if ssl is None else ssl
         self.zlib = CONFIG.API.ZLIB
-        self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
         self.callback = callback
-
-        self.host = host or CONFIG.API.HOST
+        
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
+        
+        self.job_status = None
 
     def request(self, tracer: Tracer) -> Tuple[bytes, Dict[str, str]]:
 
@@ -77,7 +80,7 @@ class RemoteBackend(Backend):
 
         return data, headers
 
-    def __call__(self, tracer):
+    def __call__(self, tracer = None):
 
         if self.blocking:
 
@@ -89,8 +92,10 @@ class RemoteBackend(Backend):
             # Otherwise we are getting the status / result of the existing job.
             result = self.non_blocking_request(tracer)
 
-        if result is not None:
+        if tracer is not None and result is not None:
             tracer.push(result)
+            
+        return result
 
     def handle_response(
         self, response: ResponseModel, tracer: Optional[Tracer] = None
@@ -111,6 +116,8 @@ class RemoteBackend(Backend):
         Returns:
             ResponseModel: ResponseModel.
         """
+        
+        self.job_status = response.status
         
         if response.status == ResponseModel.JobStatus.ERROR:
             raise RemoteException(f"{response.description}\nRemote exception.")
