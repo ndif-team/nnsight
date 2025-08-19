@@ -460,11 +460,12 @@ class InterleavingTracer(Tracer):
     def __getstate__(self):
         """Get the state of the tracer for serialization."""
         state = super().__getstate__()
-        state["fn"] = self.fn.__name__
+        state["fn"] = self.fn if isinstance(self.fn, str) else self.fn.__name__
         state["model"] = self.model
         state["tracer_var_name"] = self.tracer_var_name
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
+        state["rename"] = self.model._alias.rename if self.model._alias is not None else None
 
         return state
 
@@ -478,7 +479,8 @@ class InterleavingTracer(Tracer):
         self.tracer_var_name = state["tracer_var_name"]
         self.mediators = state["mediators"]
         self.batcher = state["batcher"]
-
+        if state["rename"] is not None:
+            self.model._update_alias(state["rename"])
         self.obj_var_name = None
         self.user_cache = list()
 

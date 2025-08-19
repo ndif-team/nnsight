@@ -868,10 +868,12 @@ class Envoy(Batchable):
         """
         Update the alias for this Envoy and its children.
         """
-        self._alias = alias
+        if alias is not None:
+            self._alias = Aliaser(alias)
+            self._alias.build(self)
 
-        for envoy in self._children:
-            envoy._update_alias(alias)
+            for envoy in self._children:
+                envoy._update_alias(alias)
 
 
 
