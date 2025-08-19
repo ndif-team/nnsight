@@ -53,6 +53,7 @@ class RemoteBackend(Backend):
         self.api_key = api_key or CONFIG.API.APIKEY
         self.blocking = blocking
         self.callback = callback
+        self.job_status = None
 
         self.host = host or CONFIG.API.HOST
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
@@ -118,6 +119,7 @@ class RemoteBackend(Backend):
 
         # Log response for user
         response.log(remote_logger)
+        self.job_status = response.status
 
         # If job is completed:
         if response.status == ResponseModel.JobStatus.COMPLETED:
