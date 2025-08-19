@@ -1,9 +1,12 @@
 import ast
-import astor
-import textwrap
-from typing import Callable
 import inspect
+import textwrap
+from builtins import compile, exec
 from collections import defaultdict
+from typing import Callable
+
+import astor
+
 
 class FunctionCallWrapper(ast.NodeTransformer):
     
