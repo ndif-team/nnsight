@@ -72,9 +72,18 @@ class Cache:
         module hierarchy, allowing for intuitive navigation through nested modules.
         """
 
-        def __init__(self, data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", path: Optional[str] = "", alias: Optional[Dict[str, str]] = None):
+        def __init__(
+            self, 
+            data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", 
+            path: str = "", 
+            alias: Dict[str, str] = dict(),
+            rename: Dict[str, str] = dict(),
+            alias_paths: Dict[str, str] = dict(),
+        ):
             self._path = path
             self._alias = alias
+            self._rename = rename
+            self._alias_paths = alias_paths
 
             super().__init__(data)
         
@@ -98,10 +107,31 @@ class Cache:
             Returns the input property from the Cache.Entry at the current path.
             """
             return dict.__getitem__(self, self._path).input
+
+        def keys(self, alias: bool=False):
+            if alias:
+                return self._alias_paths.keys()
+            
+            return super().keys()
+
+        def _add_alias_path(self, module_path):
+            if self._rename:
+                alias_path = str(module_path)
+
+                for path, alias in self._rename.items():
+                    path = path.removeprefix(".")
+                    alias_path = alias_path.replace(path, alias)
+                    
+                if alias_path != module_path:
+                    self._alias_paths[alias_path] =  module_path
+
         
         def __getitem__(self, key):
-            name = self._alias[key] if self._alias is not None and key in self._alias else key
-            if isinstance(key, str):
+            name = self._alias.get(key, key)
+
+            if isinstance(name, str):
+                name = self._alias_paths.get(name, name)
+
                 path = self._path + "." + name if self._path != "" else name
                 return dict.__getitem__(self, path)
             
@@ -109,7 +139,7 @@ class Cache:
                 path = self._path + "." + f"{name}"
                 
                 if any(key.startswith(path) for key in self):
-                    return Cache.CacheDict(self, path, self._alias)
+                    return Cache.CacheDict(self, path, rename=self._rename, alias=self._alias, alias_paths=self._alias_paths)
                 elif any(key.startswith(self._path + ".") and len(key) >= len(self._path) + 1 and key[len(self._path) + 1].isdigit() for key in self):
                     raise IndexError(f"Index {key} is out of bounds for modulelist or module does not allow indexing.")
                 
@@ -119,9 +149,11 @@ class Cache:
             path = self._path + "." + attr if self._path != "" else attr
 
             if any(key.startswith(path) for key in self):
-                return Cache.CacheDict(self, path, self._alias)
-            elif self._alias is not None and attr in self._alias:
-                return self.__getattr__(self._alias[attr])
+                return Cache.CacheDict(self, path, rename=self._rename, alias=self._alias, alias_paths=self._alias_paths)
+            elif self._alias and attr in self._alias:
+                name = self._alias[attr]
+                name = name.removeprefix(".")
+                return self.__getattr__(name)
             else:
                 raise AttributeError(f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute.")
 
@@ -133,7 +165,8 @@ class Cache:
         detach: Optional[bool] = True,
         include_output: bool = True,
         include_inputs: bool = False,
-        alias: Optional[Dict[str, str]] = None
+        rename: Optional[Dict[str, str]] = None,
+        alias: Optional[Dict[str, str]] = None,
     ):
         """
         Initialize a Cache with optional transformation parameters.
@@ -155,7 +188,7 @@ class Cache:
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
 
-        self.cache = Cache.CacheDict({}, alias=alias).save()
+        self.cache = Cache.CacheDict({}, rename=rename, alias=alias).save()
 
     def add(self, provider: str, value: Any):
         """
@@ -200,6 +233,7 @@ class Cache:
 
         if module_path not in self.cache:
             self.cache[module_path] = Cache.Entry(**{key: value})
+            self.cache._add_alias_path(module_path)
         else:
 
             if isinstance(self.cache[module_path], Cache.Entry):
@@ -412,15 +446,18 @@ class InterleavingTracer(Tracer):
             A dictionary containing the cached values
         """
 
-        alias_dict = {value: key for key, value in self.model._alias.rename.items()} if self.model._alias is not None else None
+        rename_dict = self.model._alias.rename if self.model._alias is not None else dict()
+        alias_dict = {value: key for key, value in rename_dict.items()}
 
         if not self.model.interleaving:
-            self.user_cache.append(Cache(modules, device, dtype, detach, include_output, include_inputs, alias_dict))
+            self.user_cache.append(
+                Cache(modules, device, dtype, detach, include_output, include_inputs, rename_dict, alias_dict)
+            )
 
             return self.user_cache[-1].cache
 
         self.model._interleaver.current.set_user_cache(
-            Cache(modules, device, dtype, detach, include_output, include_inputs, alias_dict)
+            Cache(modules, device, dtype, detach, include_output, include_inputs, rename_dict, alias_dict)
         )
 
         return self.model._interleaver.current.user_cache[-1].cache
