@@ -124,6 +124,7 @@ class RemoteBackend(Backend):
 
         # Log response for user
         response.log(remote_logger)
+        self.job_status = response.status
 
         # If job is completed:
         if response.status == ResponseModel.JobStatus.COMPLETED:
