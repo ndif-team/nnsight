@@ -50,7 +50,7 @@ class RemoteBackend(Backend):
         self.host = host or os.environ.get("NDIF_HOST", None) or CONFIG.API.HOST
         self.api_key = api_key or os.environ.get("NDIF_API_KEY", None) or CONFIG.API.APIKEY
 
-        self.job_id = job_id or CONFIG.API.JOB_ID
+        self.job_id = job_id
         self.ssl = CONFIG.API.SSL if ssl is None else ssl
         self.zlib = CONFIG.API.ZLIB
         self.blocking = blocking
@@ -340,31 +340,12 @@ class RemoteBackend(Backend):
 
             self.job_id = response.id
             
-            CONFIG.API.JOB_ID = response.id
-
-            CONFIG.save()
-
         else:
 
-            try:
+            result = self.get_response()
 
-                result = self.get_response()
+            return result
 
-                if result is not None:
-
-                    CONFIG.API.JOB_ID = None
-
-                    CONFIG.save()
-
-                    return result
-
-            except Exception as e:
-
-                CONFIG.API.JOB_ID = None
-
-                CONFIG.save()
-
-                raise e
 
 
 class LocalTracer(Tracer):

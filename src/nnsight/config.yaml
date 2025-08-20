@@ -1,7 +1,6 @@
 API:
   APIKEY: null
   HOST: api.ndif.us
-  JOB_ID: null
   SSL: true
   ZLIB: true
 APP:

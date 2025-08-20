@@ -8,11 +8,10 @@ from ..log import remote_logger
 
 
 class ApiConfigModel(BaseModel):
-    HOST: str = "ndif.dev"
+    HOST: str = "api.ndif.us"
     SSL: bool = True
     ZLIB: bool = True
     APIKEY: Optional[str] = None
-    JOB_ID: Optional[str] = None
 
 
 class AppConfigModel(BaseModel):
