@@ -56,9 +56,7 @@ class RemoteBackend(Backend):
         self.address = f"http{'s' if self.ssl else ''}://{self.host}"
         self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
 
-        # Create GracefulExit instance that does nothing by default
-        # Can be activated later by setting: self._graceful_exit.cleanup_function = self.cancel_request
-        self._graceful_exit = GracefulExit(cleanup_function=lambda: None)
+        self._graceful_exit = GracefulExit(cleanup_function=self.cancel_request)
 
     def request(self, graph: Graph) -> Tuple[bytes, Dict[str, str]]:
 
