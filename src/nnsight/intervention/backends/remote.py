@@ -338,6 +338,8 @@ class RemoteBackend(Backend):
             # Submit request via
             response = self.submit_request(data, headers)
 
+            self.job_id = response.id
+            
             CONFIG.API.JOB_ID = response.id
 
             CONFIG.save()
