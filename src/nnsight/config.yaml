@@ -1,10 +1,10 @@
 API:
   APIKEY: null
-  HOST: ndif.dev
+  HOST: api.ndif.us
   JOB_ID: null
   SSL: true
   ZLIB: true
 APP:
+  CACHE_DIR: ~/.cache/nnsight/
   DEBUG: true
   REMOTE_LOGGING: true
-  CACHE_DIR: "~/.cache/nnsight/"
