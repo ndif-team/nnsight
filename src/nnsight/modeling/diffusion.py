@@ -68,7 +68,6 @@ class DiffusionModel(RemoteableMixin):
         batched_inputs: Optional[Dict[str, Any]],
         prepared_inputs: BatchEncoding,
     ) -> torch.Tensor:
-        breakpoint()
         if batched_inputs is None:
 
             return ((prepared_inputs, ), {})

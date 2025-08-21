@@ -47,8 +47,9 @@ class IteratorTracer(Tracer):
         self.info.start_line -= 2
         
     def execute(self, fn: Callable):
-                
-        mediator = Mediator(fn, self.info, batch_group=self.interleaver.current.batch_group)
+        
+        mediator = Mediator(fn, self.info, batch_group=self.interleaver.current.batch_group, stop=self.interleaver.current.all_stop)
+
         mediator.name = "Iterator" + mediator.name
         
         self.interleaver.current.iter(mediator, self.iteration)

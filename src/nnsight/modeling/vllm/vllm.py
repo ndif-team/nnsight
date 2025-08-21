@@ -1,25 +1,21 @@
+from ... import NNS_VLLM_VERSION
+
+try:
+    import vllm 
+    assert vllm.__version__ == NNS_VLLM_VERSION
+except Exception as e:
+    raise type(e)(
+        f"This pre-release of NNsight requires vLLM v{NNS_VLLM_VERSION}.\n"
+        + f"`pip install vllm=={NNS_VLLM_VERSION}` to use vLLM with NNsight.\n"
+        + "For more information on how to install vLLM, visit https://docs.vllm.ai/en/latest/getting_started/installation.html"
+    ) from e
+
 from dataclasses import fields
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 
-import torch
+from vllm import LLM, envs
 from vllm.config import CompilationConfig
-from vllm import LLM
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-
-from ...intervention.envoy import Envoy
-from ...intervention.interleaver import Interleaver
-from ...util import WrapperModule
-from ..mixins import RemoteableMixin
-from .sampling import NNsightSamplingParams
-from .workers.GPUWorker import NNsightGPUWorker
-
-if TYPE_CHECKING:
-    from torch.nn import Module
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
-    from vllm.config import ModelConfig, SchedulerConfig, ParallelConfig, LoRAConfig
-
-from vllm import envs
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel, get_world_group,
                               init_distributed_environment,
@@ -27,16 +23,20 @@ from vllm.distributed import (destroy_distributed_environment,
                               initialize_model_parallel, parallel_state)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
-from vllm.model_executor.model_loader.utils import (get_model_architecture,
-                                                    initialize_model)
+from vllm.model_executor.model_loader.utils import get_model_architecture
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+
+from ...intervention.envoy import Envoy
+from ...util import WrapperModule
+from ..mixins import RemoteableMixin
+from .sampling import NNsightSamplingParams
+
+if TYPE_CHECKING:
+    from torch.nn import Module
+
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
-# from vllm.model_executor.model_loader.loader import _initialize_model
-# except Exception as e:
-#     raise type(e)(
-#         "Install vllm in your environment to use it with NNsight. "
-#         + "https://docs.vllm.ai/en/latest/getting_started/installation.html"
-#     ) from e
 
 
 class VLLM(RemoteableMixin):
@@ -74,6 +74,10 @@ class VLLM(RemoteableMixin):
         self.logits: Envoy = WrapperModule()
         self.samples: Envoy = WrapperModule()
         self.generator: Envoy = WrapperModule()
+
+    def __del__(self):
+        destroy_model_parallel()
+        destroy_distributed_environment()
 
     def _load_meta(self, repo_id: str, **kwargs) -> "Module":
         
@@ -117,7 +121,6 @@ class VLLM(RemoteableMixin):
         vllm_config.compilation_config.level = 1
         model_class, _ = get_model_architecture(vllm_config.model_config)
         model =  model_class(vllm_config=vllm_config, prefix="")
-        #model = initialize_model(vllm_config)
       
         self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config,
                                 vllm_config.scheduler_config,
@@ -126,17 +129,10 @@ class VLLM(RemoteableMixin):
         return model
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
-        comp_cfg = CompilationConfig(
-            level=0,             # disables all optimization layers
-            use_inductor=False,  # ensures TorchInductor isn't used
-            compile_sizes=[],    # no piecewise compilation
-            # you can also tweak cudagraph flags if needed:
-            use_cudagraph=False,
-        )
+        
         llm = LLM(
             repo_id,
             worker_cls='nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker',
-            compilation_config=comp_cfg,
             enforce_eager=True, 
             **kwargs,
         )
@@ -145,7 +141,6 @@ class VLLM(RemoteableMixin):
 
         # load the tokenizer
         self.tokenizer = llm.llm_engine.tokenizer.tokenizer
-        
         
         return llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model
 
@@ -178,34 +173,30 @@ class VLLM(RemoteableMixin):
                 params.append(param)
 
         return (prompts, params), {"processed": True}
-
+    
     def _batch(
         self,
-        batched_inputs: Union[Tuple[Tuple[Any], Dict[str, Any]], None],
-        prompts: List[str],
-        params: List[NNsightSamplingParams],
-        **kwargs,
-    ) -> Tuple[Union[Tuple[Any], Dict[str, Any]]]:
-
+        batched_inputs,
+        prompts,
+        params,
+        **kwargs
+    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
+        
+        batch_size = len(prompts)
+        
         if batched_inputs is None:
-            batched_inputs = (([], []), {"invoker_group": 0}), len(prompts)
 
-        (bprompts, bparams), kwargs = batched_inputs
+            return ((prompts, params), kwargs), batch_size
+        
+        batched_args = batched_inputs[0]
+        batched_kwargs = batched_inputs[1]
 
-        invoker_group = kwargs["invoker_group"]
+        batched_args[0].extend(prompts)
+        batched_args[1].extend(params)
 
-        for prompt in prompts:
-            bprompts.append(prompt)
+        batched_kwargs.update(kwargs)
 
-        for param in params:
-
-            param.invoker_group = invoker_group
-
-            bparams.append(param)
-
-        kwargs["invoker_group"] += 1
-
-        return ((bprompts, bparams), kwargs), len(prompts)
+        return batched_inputs, batch_size
 
     def __call__(
         self,
@@ -214,10 +205,26 @@ class VLLM(RemoteableMixin):
         **kwargs,
     ) -> Any:
         
+        default_param = NNsightSamplingParams.from_optional()
+
         kwargs.pop('hook', None)
         kwargs.pop('processed', None)
 
-        output = self.vllm_entrypoint.generate(prompts, sampling_params=params, **kwargs)
+        max_max_tokens = 0
+        for param in params:
+            for attr, value in kwargs.items():
+                if hasattr(NNsightSamplingParams, attr) and getattr(param, attr) == getattr(default_param, attr):
+                    setattr(param, attr, value)
+
+            max_max_tokens = param.max_tokens if param.max_tokens > max_max_tokens else max_max_tokens
+
+        for mediator in self._interleaver.invokers:
+            if mediator.batch_group != None:
+                mediator.all_stop = params[self._interleaver.batcher.batch_groups[mediator.batch_group][0]].max_tokens
+            else:
+                mediator.all_stop = max_max_tokens
+        
+        output = self.vllm_entrypoint.generate(prompts, sampling_params=params)
         
         with self._interleaver:
             self.generator(output, hook=True)

@@ -69,10 +69,10 @@ class Invoker(Tracer):
             fn: The compiled intervention function
         """
         
-        inputs = self.tracer.batcher.batch(self.tracer.model, *self.args, **self.kwargs)
+        inputs, batch_group = self.tracer.batcher.batch(self.tracer.model, *self.args, **self.kwargs)
 
         self.inputs = inputs
 
-        mediator = Mediator(fn, self.info, batch_group=len(self.tracer.mediators))
+        mediator = Mediator(fn, self.info, batch_group=batch_group)
 
         self.tracer.mediators.append(mediator)

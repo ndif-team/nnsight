@@ -26,6 +26,8 @@ except NameError:
 __INTERACTIVE__ = (sys.flags.interactive or not sys.argv[0]) and not __IPYTHON__
 
 base_deprecation_message = "is deprecated as of v0.5.0 and will be removed in a future version."
+
+NNS_VLLM_VERSION = "0.9.2"
     
 def deprecated(message:Optional[str]=None, error:bool=False):
     

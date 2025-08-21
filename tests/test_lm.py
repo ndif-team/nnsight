@@ -444,6 +444,36 @@ def test_input_setting(gpt2: nnsight.LanguageModel, MSG_prompt: str):
 
     assert prediction_1 == prediction_2
 
+@torch.no_grad()
+def test_invoker_group_batching(gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str):
+
+    with gpt2.trace() as tracer:
+        with tracer.invoke(ET_prompt):
+            out_1 = gpt2.lm_head.output[:, -1].save()
+
+        with tracer.invoke([MSG_prompt, ET_prompt]):
+            out_2 = gpt2.lm_head.output[:, -1].save()
+
+        with tracer.invoke():
+            out_3 = gpt2.lm_head.output[:, -1].save()
+
+        with tracer.invoke():
+            out_4 = gpt2.lm_head.output[:, -1].save()
+
+        with tracer.invoke(MSG_prompt):
+            out_5 = gpt2.lm_head.output[:, -1].save()
+
+
+    assert out_1.shape[0] == 1
+    assert out_2.shape[0] == 2
+    assert out_3.shape[0] == 4
+    assert out_4.shape[0] == 4
+    assert out_5.shape[0] == 1
+
+    assert torch.equal(out_1, out_2[1].unsqueeze(0))
+    assert torch.equal(out_3, out_4)
+    assert torch.equal(torch.concatenate([out_1, out_2, out_5]), out_3)           
+
 
 ######################### SCAN #################################
 
@@ -646,6 +676,25 @@ def test_operation_envoy_update(MSG_prompt: str):
     assert isinstance(out, tuple)
 
 
+@torch.no_grad()
+@pytest.mark.source
+def test_source_output_with_barrier(gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str):
+    with gpt2.trace() as tracer:
+
+        barrier = tracer.barrier(2)
+
+        with tracer.invoke(ET_prompt):
+            attn_out = gpt2.transformer.h[0].attn.source.attention_interface_0.output[0].save()
+            barrier()
+
+        with tracer.invoke(MSG_prompt):
+            barrier()
+            gpt2.transformer.h[0].attn.source.attention_interface_0.output[0][:, -1, 0, :] = attn_out[:, -1, 0, :]
+            attn_out_2 = gpt2.transformer.h[0].attn.source.attention_interface_0.output[0].save()
+
+    assert torch.all(attn_out[:, -1, 0, :] == attn_out_2[:, -1, 0, :])
+    
+
 ######################### SKIP #################################
 
 @torch.no_grad()
@@ -748,16 +797,16 @@ def test_skip_module_for_batch_error(gpt2: nnsight.LanguageModel, ET_prompt: str
 @torch.no_grad()
 @pytest.mark.iter
 def test_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-    with gpt2.generate(MSG_prompt, max_new_tokens=3):
+    with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
         logits_all = list().save()
 
-        with gpt2.all():
+        with tracer.all():
             logits_all.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
-    with gpt2.generate(MSG_prompt, max_new_tokens=3):
+    with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
         logits_iter = list().save()
 
-        with gpt2.iter[:]:
+        with tracer.iter[:]:
             logits_iter.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
     assert len(logits_all) == 3
@@ -839,18 +888,6 @@ def test_batched_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert gpt2.tokenizer.batch_decode(logits_1) == [" York", " City"]
     assert gpt2.tokenizer.batch_decode(logits_2) == [" New", " York", " City"]
 
-#     from nnsight.intervention.interleaver import UnboundIteratorException
-# @torch.no_grad()
-# @pytest.mark.iter
-# def test_one_iter(gpt2: nnsight.LanguageModel):
-#     with pytest.raises(UnboundIteratorException):
-#         with gpt2.generate("_", max_new_tokens=1) as tracer:
-#             arr_gen = list().save()
-
-#             with tracer.all():
-#                 arr_gen.append(1)
-
-
 
 @torch.no_grad()
 @pytest.mark.iter
@@ -870,6 +907,41 @@ def test_iter_and_skip(gpt2: nnsight.LanguageModel):
     assert not torch.all(arr_gen[0] == 0)
     assert torch.all(arr_gen[1] == 0)
     assert not torch.all(arr_gen[2] == 0)
+
+
+@torch.no_grad()
+@pytest.mark.iter
+def test_iter_with_promptless_invokers(gpt2: nnsight.LanguageModel, ET_prompt: str):
+    with gpt2.trace() as tracer:
+        with tracer.invoke(ET_prompt):
+            pass
+
+        with tracer.invoke():
+            out = gpt2.transformer.h[0].output[0].clone().save()
+
+        with tracer.invoke():
+            with tracer.iter[0]:
+                gpt2.transformer.h[0].output[0][:] = 0
+
+        with tracer.invoke():
+            out_2 = gpt2.transformer.h[0].output[0].save()
+
+    assert not torch.all(out[0] == 0)
+    assert torch.all(out_2[0] == 0)
+
+
+@torch.no_grad()
+@pytest.mark.iter
+def test_slice_iter_with_envoy_called_before(gpt2: nnsight.LanguageModel):
+    logits = list()
+    with gpt2.generate("_", max_new_tokens=5) as tracer:
+        out = gpt2.transformer.h[0].output[0].clone().save()
+
+        with tracer.iter[2:4]:
+            logits.append(gpt2.lm_head.output.save())
+
+    assert isinstance(out, torch.Tensor)
+    assert len(logits) == 2
 
 
 @torch.no_grad()
