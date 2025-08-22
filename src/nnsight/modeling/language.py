@@ -240,6 +240,8 @@ class LanguageModel(RemoteableMixin):
         patch_llama_scan: bool = True,
         **kwargs,
     ) -> PreTrainedModel:
+        
+        self.repo_id = repo_id
 
         self._load_config(repo_id, revision=revision, **kwargs)
 
