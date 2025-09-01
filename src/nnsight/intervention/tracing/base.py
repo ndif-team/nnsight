@@ -1,5 +1,5 @@
 import ast
-import ctypes
+import linecache
 import inspect
 import re
 import sys
@@ -11,6 +11,7 @@ from ..backends.execution import ExecutionBackend
 from .globals import Globals
 from .util import (TracingDeffermentException, get_non_nnsight_frame,
                    push_variables, suppress_all_output)
+from ...util import Patch, Patcher
 
 
 class ExitTracingException(Exception):
@@ -162,8 +163,15 @@ class Tracer:
 
         # CASE 3: We're in a regular Python file.
         elif not frame.f_code.co_filename.startswith("<nnsight"):
-            # For regular files, get source lines using inspect
-            source_lines, offset = inspect.getsourcelines(frame)
+            
+            def noop(*args, **kwargs):
+                pass
+            
+            # We dont want linecache to clear the cache for the file we're tracing as the user might have edited it.
+            with Patcher([Patch(linecache, noop,"checkcache")]):
+            
+                # For regular files, get source lines using inspect
+                source_lines, offset = inspect.getsourcelines(frame)
 
             start_line = start_line if offset == 0 else start_line - offset + 1
 
