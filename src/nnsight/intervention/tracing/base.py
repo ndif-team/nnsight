@@ -189,11 +189,17 @@ class Tracer:
         else:
             raise ValueError("No source code found")
 
+        # Find the first non-blank line to determine indentation
+        for line in source_lines:
+            if line.strip():
+                first_non_blank = line
+                break
+        else:
+            first_non_blank = source_lines[0]  # fallback if all lines are blank
+
         # Calculate indentation level of the source code itself
-        stripped = source_lines[0].lstrip(
-            "\t "
-        )  # indent for removing leading tabs/spaces
-        indent = len(source_lines[0]) - len(stripped)
+        stripped = first_non_blank.lstrip("\t ")  # indent for removing leading tabs/spaces
+        indent = len(first_non_blank) - len(stripped)
 
         # If theres an indent, we need to remove it. This handles the case of say a trace in an indented function. E.x. a trace inside a method on a class.
         if indent > 0:
@@ -234,7 +240,7 @@ class Tracer:
             List of source code lines.
         """
         # Parse the entire source into an AST
-
+        
         tree = ast.parse("".join(source_lines))
 
         class Visitor(ast.NodeVisitor):
