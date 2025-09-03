@@ -207,6 +207,8 @@ class VLLM(RemoteableMixin):
         
         default_param = NNsightSamplingParams.from_optional()
 
+        # Extract LoRA request if present
+        lora_request = kwargs.pop('lora_request', None)
         kwargs.pop('hook', None)
         kwargs.pop('processed', None)
 
@@ -224,7 +226,7 @@ class VLLM(RemoteableMixin):
             else:
                 mediator.all_stop = max_max_tokens
         
-        output = self.vllm_entrypoint.generate(prompts, sampling_params=params)
+        output = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_request)
         
         with self._interleaver:
             self.generator(output, hook=True)
