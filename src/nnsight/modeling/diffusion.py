@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
+import json
 from diffusers import DiffusionPipeline
 from transformers import BatchEncoding
 from typing_extensions import Self
@@ -21,6 +22,8 @@ class Diffuser(util.WrapperModule):
         for key, value in self.pipeline.__dict__.items():
             if isinstance(value, torch.nn.Module) or isinstance(value, PreTrainedTokenizerBase):
                 setattr(self, key, value)
+
+        self.config = self.pipeline.config
                 
     def generate(self, *args, **kwargs):
         return self.pipeline.generate(*args, **kwargs)
@@ -28,18 +31,22 @@ class Diffuser(util.WrapperModule):
 
 class DiffusionModel(RemoteableMixin):
     
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, repo_id: str, *args, **kwargs) -> None:
+
+        self.repo_id = repo_id
+        self.revision: str = kwargs.get('revision', 'main')
 
         self._model: Diffuser = None
 
-        super().__init__(*args, **kwargs)
+        super().__init__(repo_id, *args, **kwargs)
         
     def _load_meta(self, repo_id:str, **kwargs):
-        
+
+        kwargs = kwargs.copy()
+        kwargs['device_map'] = None
         
         model = Diffuser(
             repo_id,
-            device_map=None,
             low_cpu_mem_usage=False,
             **kwargs,
         )
@@ -48,6 +55,9 @@ class DiffusionModel(RemoteableMixin):
         
 
     def _load(self, repo_id: str, device_map=None, **kwargs) -> Diffuser:
+
+        # https://github.com/huggingface/diffusers/issues/11555
+        device_map = "balanced" if device_map == "auto" else device_map
 
         model = Diffuser(repo_id, device_map=device_map, **kwargs)
 
@@ -110,6 +120,20 @@ class DiffusionModel(RemoteableMixin):
 
         return output
     
+
+    def _remoteable_model_key(self) -> str:
+        return json.dumps(
+            {"repo_id": self.repo_id}  # , "torch_dtype": str(self._model.dtype)}
+        )
+
+    @classmethod
+    def _remoteable_from_model_key(cls, model_key: str, **kwargs) -> Self:
+
+        kwargs = {**json.loads(model_key), **kwargs}
+
+        repo_id = kwargs.pop("repo_id")
+
+        return DiffusionModel(repo_id, **kwargs)
 
 
 if TYPE_CHECKING:
