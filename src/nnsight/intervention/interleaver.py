@@ -891,6 +891,7 @@ class Mediator:
             "info": self.info,
             "batch_group": self.batch_group,
             "intervention": self.intervention,
+            "all_stop": self.all_stop,
         }
 
     def __setstate__(self, state):
@@ -899,7 +900,8 @@ class Mediator:
         self.info = state["info"]
         self.batch_group = state["batch_group"]
         self.intervention = state["intervention"]
-
+        self.all_stop = state["all_stop"]
+        
         self.event_queue = Queue()
         self.response_queue = Queue()
 

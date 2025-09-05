@@ -4,7 +4,6 @@ import io
 import zlib
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Union
 
-import dill
 from pydantic import BaseModel, ConfigDict
 from ..intervention.serialization import save, load
 if TYPE_CHECKING:
