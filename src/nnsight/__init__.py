@@ -1,8 +1,41 @@
-from functools import wraps
+# This section ensures that the source code for both the main script and the file where `nnsight` is imported
+# is cached in Python's `linecache` module. This is important for robust stack trace and debugging support,
+# especially in interactive or dynamic environments where files may change after import.
+# 
+# 1. We first attempt to cache the main script (the file passed to the Python interpreter) by calling
+#    `linecache.getlines` on `sys.argv[0]`. This ensures that if the script is modified or deleted after
+#    execution starts, traceback and inspection tools can still access its source.
+# 2. Next, we walk up the call stack to find the first frame outside of importlib (i.e., the user code that
+#    imported `nnsight`), and cache its source file as well. This helps ensure that the file where `nnsight`
+#    is imported is also available in `linecache`, even if it changes later.
+
+import linecache
+import sys
+import os
+
+try:
+    # Cache the main script file
+    linecache.getlines(os.path.abspath(sys.argv[0]))
+except Exception:
+    pass
+
 import inspect
-import os, yaml, sys
+
+try:
+    # Walk up the stack to cache the file where nnsight is imported
+    frame = inspect.currentframe()
+    while frame.f_back:
+        frame = frame.f_back
+        if 'importlib' not in frame.f_code.co_filename:
+            linecache.getlines(frame.f_code.co_filename, frame.f_globals)
+except Exception:
+    pass
+
+from functools import wraps
+
+import os, yaml
 import warnings
-from typing import Optional
+from typing import Optional, Any
 from .schema.config import ConfigModel
 
 PATH = os.path.dirname(os.path.abspath(__file__))
@@ -60,7 +93,25 @@ from .modeling.base import NNsight
 from .modeling.language import LanguageModel
 from .intervention.tracing.base import Tracer
 
+from .intervention.tracing.globals import Globals
 
+def save(obj: Any):
+    """
+    Save an object to be accessable after the trace context is exited.
+    To be used for objects that already implement a `.save()` method.
+    
+    Example:
+    
+    >>> import nnsight
+    >>> model = nnsight.modeling.diffusion.DiffusionModel("black-forest-labs/FLUX.1-schnell", device_map='auto', dispatch=True)
+    >>> with model.generate("The Great Wave off Kanagawa"):
+    >>>     image = nnsight.save(model.output.images[0])
+    >>> image.save("flux_ndif.png")
+    """
+
+    Globals.saves.add(id(obj))
+
+    return obj
     
 def session(*args, **kwargs):
     return Tracer(*args, **kwargs)

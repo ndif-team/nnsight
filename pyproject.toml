@@ -28,7 +28,7 @@ classifiers = [
 dependencies = [
     "transformers",
     "astor", 
-    "dill",
+    "cloudpickle",
     "python-socketio[client]",
     "pydantic>=2.9.0",
     "torch>=2.4.0",
@@ -38,6 +38,11 @@ dependencies = [
     ]
 
 [project.optional-dependencies]
+
+diffusion = [
+    "diffusers",
+]
+
 test = [
   "pytest",
   "toml"

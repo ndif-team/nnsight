@@ -4,6 +4,7 @@ import inspect
 import io
 import os
 import time
+from sys import version as python_version
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import requests
@@ -73,6 +74,7 @@ class RemoteBackend(Backend):
             "nnsight-model-key": self.model_key,
             "nnsight-zlib": str(self.zlib),
             "nnsight-version": __version__,
+            "python-version": python_version,
             "ndif-api-key": self.api_key,
             "ndif-timestamp": str(time.time()),
             "ndif-callback": self.callback,

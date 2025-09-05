@@ -4,12 +4,12 @@ from builtins import open
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-import dill
+import cloudpickle
 
 from .envoy import Envoy
 
 
-class CustomDillPickler(dill.Pickler):
+class CustomCloudPickler(cloudpickle.Pickler):
     def persistent_id(self, obj):
 
         if isinstance(obj, Envoy):
@@ -21,7 +21,7 @@ class CustomDillPickler(dill.Pickler):
         return None
 
 
-class CustomDillUnpickler(dill.Unpickler):
+class CustomCloudUnpickler(pickle.Unpickler):
     def __init__(self, file, root: Envoy, frame: FrameType):
         super().__init__(file)
         self.root = root
@@ -41,22 +41,21 @@ class CustomDillUnpickler(dill.Unpickler):
 
 def save(obj: Any, path: Optional[str] = None):
 
-    dill.settings["recurse"] = True
 
     if path is None:
         file = io.BytesIO()
-        CustomDillPickler(file).dump(obj)
+        CustomCloudPickler(file, protocol=4).dump(obj)
         file.seek(0)
         return file.read()
 
     with open(path, "wb") as file:
-        CustomDillPickler(file).dump(obj)
+        CustomCloudPickler(file).dump(obj)
 
 
 def load(data: Union[str, bytes], model: Envoy, frame: Optional[FrameType] = None):
 
     if isinstance(data, bytes):
-        return CustomDillUnpickler(io.BytesIO(data), model, frame).load()
+        return CustomCloudUnpickler(io.BytesIO(data), model, frame).load()
 
     with open(data, "rb") as file:
-        return CustomDillUnpickler(file, model, frame).load()
+        return CustomCloudUnpickler(file, model, frame).load()
