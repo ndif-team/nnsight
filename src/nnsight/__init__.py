@@ -35,7 +35,7 @@ from functools import wraps
 
 import os, yaml
 import warnings
-from typing import Optional
+from typing import Optional, Any
 from .schema.config import ConfigModel
 
 PATH = os.path.dirname(os.path.abspath(__file__))
@@ -93,7 +93,25 @@ from .modeling.base import NNsight
 from .modeling.language import LanguageModel
 from .intervention.tracing.base import Tracer
 
+from .intervention.tracing.globals import Globals
 
+def save(obj: Any):
+    """
+    Save an object to be accessable after the trace context is exited.
+    To be used for objects that already implement a `.save()` method.
+    
+    Example:
+    
+    >>> import nnsight
+    >>> model = nnsight.modeling.diffusion.DiffusionModel("black-forest-labs/FLUX.1-schnell", device_map='auto', dispatch=True)
+    >>> with model.generate("The Great Wave off Kanagawa"):
+    >>>     image = nnsight.save(model.output.images[0])
+    >>> image.save("flux_ndif.png")
+    """
+
+    Globals.saves.add(id(obj))
+
+    return obj
     
 def session(*args, **kwargs):
     return Tracer(*args, **kwargs)
