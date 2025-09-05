@@ -38,6 +38,11 @@ dependencies = [
     ]
 
 [project.optional-dependencies]
+
+diffusion = [
+    "diffusers",
+]
+
 test = [
   "pytest",
   "toml"
