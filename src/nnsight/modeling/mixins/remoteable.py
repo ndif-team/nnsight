@@ -74,8 +74,10 @@ class RemoteableMixin(MetaMixin):
         raise NotImplementedError()
 
     def to_model_key(self) -> str:
+        
+        import_path = f"{self._remoteable_model_key.__func__.__module__}.{self._remoteable_model_key.__func__.__qualname__.split('.')[0]}"
 
-        return f"{to_import_path(type(self))}:{self._remoteable_model_key()}"
+        return f"{import_path}:{self._remoteable_model_key()}"
 
     @classmethod
     def from_model_key(cls, model_key: str, **kwargs) -> Self:

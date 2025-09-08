@@ -11,10 +11,6 @@ from .envoy import Envoy
 
 class CustomCloudPickler(cloudpickle.Pickler):
     def persistent_id(self, obj):
-
-        if isinstance(obj, Envoy):
-            return f"ENVOY:{obj.path}"
-
         if isinstance(obj, FrameType):
             return "FRAME"
 
@@ -26,12 +22,31 @@ class CustomCloudUnpickler(pickle.Unpickler):
         super().__init__(file)
         self.root = root
         self.frame = frame
+        
+    def find_class(self, module, name):
+        
+        cls = super().find_class(module, name)
+        
+        if isinstance(cls, type) and issubclass(cls, Envoy):
+            
+            class EnvoyProxy(cls):
+                def __setstate__(_self, state):
+                    cls.__setstate__(_self, state) 
+                    
+                    envoy = self.root.get(_self.path.removeprefix("model"))
+
+                    _self._module = envoy._module
+                    _self._interleaver = envoy._interleaver
+                    
+                    for key, value in envoy.__dict__.items():
+                        if key not in _self.__dict__:
+                            _self.__dict__[key] = value
+            
+            return EnvoyProxy
+        return cls
 
     def persistent_load(self, pid):
 
-        if pid.startswith("ENVOY:"):
-            path = pid.removeprefix("ENVOY:model")
-            return self.root.get(path)
 
         if pid == "FRAME":
             return self.frame

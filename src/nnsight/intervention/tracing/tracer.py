@@ -502,22 +502,18 @@ class InterleavingTracer(Tracer):
         state["tracer_var_name"] = self.tracer_var_name
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
-        state["rename"] = self.model._alias.rename if self.model._alias is not None else None
 
         return state
 
     def __setstate__(self, state):
         """Set the state of the tracer for deserialization."""
         super().__setstate__(state)
-
         
         self.model = state["model"]
         self.fn = state["fn"]
         self.tracer_var_name = state["tracer_var_name"]
         self.mediators = state["mediators"]
         self.batcher = state["batcher"]
-        if state["rename"] is not None:
-            self.model._update_alias(state["rename"])
         self.obj_var_name = None
         self.user_cache = list()
 
