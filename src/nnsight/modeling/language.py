@@ -6,7 +6,7 @@ import warnings
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
-from huggingface_hub import constants
+from huggingface_hub import HfApi, constants
 from huggingface_hub.file_download import repo_folder_name
 from torch.nn.modules import Module
 from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
@@ -391,8 +391,11 @@ class LanguageModel(RemoteableMixin):
         ), len(prepared_kwargs["input_ids"])
 
     def _remoteable_model_key(self) -> str:
+        
+        repo_id = HfApi().model_info(self.repo_id).id
+        
         return json.dumps(
-            {"repo_id": self.repo_id, "revision": self.revision}  # , "torch_dtype": str(self._model.dtype)}
+            {"repo_id": repo_id, "revision": self.revision}  # , "torch_dtype": str(self._model.dtype)}
         )
 
     @classmethod
