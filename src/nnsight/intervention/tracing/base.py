@@ -251,10 +251,13 @@ class Tracer:
                 self.line_no = line_no
 
             def visit_With(self, node):
-                if node.lineno == self.line_no:
-                    self.target = node
-                else:
-                    self.generic_visit(node)
+                
+                for inode in node.items:
+                    if inode.context_expr.lineno == self.line_no:
+                        self.target = node
+                        return
+             
+                self.generic_visit(node)
 
         visitor = Visitor(start_line)
         visitor.visit(tree)
