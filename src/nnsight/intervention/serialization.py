@@ -41,6 +41,8 @@ class CustomCloudUnpickler(pickle.Unpickler):
                     for key, value in envoy.__dict__.items():
                         if key not in _self.__dict__:
                             _self.__dict__[key] = value
+                            
+                    _self.__class__ = cls
             
             return EnvoyProxy
         return cls
