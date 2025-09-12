@@ -573,11 +573,6 @@ class Mediator:
         
                     mediator.handle(provider)
 
-                    
-                    
-                            
-
-
     def handle_end_event(self):
         """
         Handle an end event by stopping the mediator.

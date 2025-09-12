@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+import json
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Type,
+                    Union)
 
 import torch
-import json
 from diffusers import DiffusionPipeline
-from transformers import BatchEncoding
+from transformers import BatchEncoding, PreTrainedTokenizerBase
 from typing_extensions import Self
-from transformers import PreTrainedTokenizerBase
 
 from .. import util
+from ..intervention.batching import DiffusionBatcher
 from .mixins import RemoteableMixin
+
+if TYPE_CHECKING:
+    from ..intervention.batching import Batcher
 
 
 class Diffuser(util.WrapperModule):
@@ -77,12 +81,16 @@ class DiffusionModel(RemoteableMixin):
         self,
         batched_inputs: Optional[Dict[str, Any]],
         prepared_inputs: BatchEncoding,
+        **kwargs: Dict[str, Any],
     ) -> torch.Tensor:
+
         if batched_inputs is None:
 
-            return ((prepared_inputs, ), {})
+            return ((prepared_inputs, ), kwargs), len(prepared_inputs)
 
-        return (batched_inputs + prepared_inputs, )
+        batched_prompts = batched_inputs[0][0] + prepared_inputs
+
+        return ((batched_prompts, ), batched_inputs[1]), len(prepared_inputs)
 
     def __call__(self, prepared_inputs: Any, *args, **kwargs):
 
@@ -134,6 +142,10 @@ class DiffusionModel(RemoteableMixin):
         repo_id = kwargs.pop("repo_id")
 
         return DiffusionModel(repo_id, **kwargs)
+
+    @classmethod
+    def _batcher_class(cls) -> ClassVar[Type["Batcher"]]:
+        return DiffusionBatcher
 
 
 if TYPE_CHECKING:
