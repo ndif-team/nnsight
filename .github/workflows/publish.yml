@@ -73,8 +73,13 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
-
+          path: artifacts
+  
+      - name: Collect distributions
+        run: |
+          mkdir -p dist
+          cp artifacts/*/* dist/
+  
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
