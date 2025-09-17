@@ -1,49 +1,82 @@
 name: Publish to PyPI.org
+
 on:
   release:
     types: [published]
   workflow_dispatch:
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build_wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-        
+        uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          
-      - name: Install dependencies
+
+      - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build cibuildwheel
-          
-      # Build wheels for all platforms
-      - name: Build Linux wheels
-        run: cibuildwheel --output-dir dist --platform linux
+          pip install cibuildwheel
+
+      - name: Build wheels
+        run: cibuildwheel --output-dir dist
         env:
           CIBW_SKIP: "pp* *musllinux*"
-          
-      - name: Build Windows wheels
-        run: cibuildwheel --output-dir dist --platform windows
-        env:
-          CIBW_SKIP: "pp*"
-          
-      - name: Build macOS wheels
-        run: cibuildwheel --output-dir dist --platform macos
-        env:
-          CIBW_SKIP: "pp*"
-          
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
       - name: Build sdist
-        run: python -m build --sdist --outdir dist
-        
-      - name: List built packages
-        run: ls -la dist/
-        
+        run: python -m build --sdist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [build_wheels, build_sdist]
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
