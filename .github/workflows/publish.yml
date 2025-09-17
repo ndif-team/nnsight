@@ -35,7 +35,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: wheels-${{ matrix.os }}
           path: dist/*
 
   build_sdist:
@@ -61,19 +61,24 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: sdist
           path: dist/*
-
+          
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: [build_wheels, build_sdist]
     steps:
-      - name: Download distributions
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist
+          path: artifacts
+
+      - name: Collect distributions
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -l dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
