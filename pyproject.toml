@@ -35,6 +35,7 @@ dependencies = [
     "accelerate",
     "toml",
     "ipython",
+    "autopep8",
     ]
 
 [project.optional-dependencies]
