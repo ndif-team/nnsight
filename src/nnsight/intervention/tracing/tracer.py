@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Tuple, Union)
+from autopep8 import fix_code
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -344,7 +345,7 @@ class InterleavingTracer(Tracer):
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
             f"    {self.tracer_var_name}.pull()\n",
-            *self.info.source,
+            *["    " + line for line in fix_code("".join(self.info.source)).splitlines(keepends=True)],
             f"    {self.tracer_var_name}.get_frame()\n",
         ]
         
