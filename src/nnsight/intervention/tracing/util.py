@@ -264,13 +264,6 @@ def wrap_exception(exception:Exception, info:"Tracer.Info"):
         
     return wrapped
 
-class TracingDeffermentException(Exception):
-    """Exception raised when a tracing defferment is encountered.
-    
-    This exception is used to indicate that a tracing defferment is encountered.
-    """
-    pass
-
 def get_non_nnsight_frame() -> FrameType:
     frame = inspect.currentframe()
 
@@ -281,8 +274,6 @@ def get_non_nnsight_frame() -> FrameType:
             # Match if filename contains 'nnsight/tests' or 'nnsight\tests'
             # OR if it does NOT contain '/nnsight/' or '\nnsight\'
 
-            if "__defer_capture__" in frame.f_locals:
-                raise TracingDeffermentException()
             if (
                 re.search(r"[\\/]{1}nnsight[\\/]{1}tests", filename)
                 or not re.search(r"[\\/]{1}nnsight[\\/]", filename)
