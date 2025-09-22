@@ -2,8 +2,8 @@ import io
 import pickle
 from builtins import open
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Optional, Union
-
+from typing import Any, Optional, Union
+from ..util import Patcher, Patch
 import cloudpickle
 
 from .envoy import Envoy
@@ -16,6 +16,9 @@ class CustomCloudPickler(cloudpickle.Pickler):
 
         return None
 
+original_setstate = Envoy.__setstate__
+    
+   
 
 class CustomCloudUnpickler(pickle.Unpickler):
     def __init__(self, file, root: Envoy, frame: FrameType):
@@ -23,29 +26,23 @@ class CustomCloudUnpickler(pickle.Unpickler):
         self.root = root
         self.frame = frame
         
-    def find_class(self, module, name):
+    def load(self):
         
-        cls = super().find_class(module, name)
+        def inject(_self, state):
+            
+            original_setstate(_self, state)
+            
+            envoy = self.root.get(_self.path.removeprefix("model"))
+            
+            _self._module = envoy._module
+            _self._interleaver = envoy._interleaver
+                                                
+            for key, value in envoy.__dict__.items():
+                if key not in _self.__dict__:
+                    _self.__dict__[key] = value
         
-        if isinstance(cls, type) and issubclass(cls, Envoy):
-            
-            class EnvoyProxy(cls):
-                def __setstate__(_self, state):
-                    cls.__setstate__(_self, state) 
-                    
-                    envoy = self.root.get(_self.path.removeprefix("model"))
-
-                    _self._module = envoy._module
-                    _self._interleaver = envoy._interleaver
-                    
-                    for key, value in envoy.__dict__.items():
-                        if key not in _self.__dict__:
-                            _self.__dict__[key] = value
-                            
-                    _self.__class__ = cls
-            
-            return EnvoyProxy
-        return cls
+        with Patcher([Patch(Envoy, inject, '__setstate__')]):
+            return super().load()
 
     def persistent_load(self, pid):
 
