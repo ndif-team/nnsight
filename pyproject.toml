@@ -1,10 +1,5 @@
 [build-system]
-requires = [
-    "setuptools>=45",
-    "setuptools_scm[toml]>=6.2",
-    "wheel",
-    "setuptools_scm_git_archive",
-]
+requires = ["setuptools>=61", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 [tool.setuptools_scm]
 
@@ -12,17 +7,27 @@ build-backend = "setuptools.build_meta"
 dynamic = ["version"]
 name = "nnsight"
 authors = [
-  { name="Jaden Fiotto-Kaufman", email="jadenfk@outlook.com" },
+    { name="Jaden Fiotto-Kaufman", email="jadenfk@outlook.com" },
 ]
 description = "Package for interpreting and manipulating the internals of deep learning models."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 license = { text = "MIT License" }
+keywords = ["deep learning", "neural networks", "interpretability", "pytorch", "transformers"]
 
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 dependencies = [
@@ -35,24 +40,36 @@ dependencies = [
     "accelerate",
     "toml",
     "ipython",
-    ]
+]
 
 [project.optional-dependencies]
 test = [
-  "pytest",
-  "toml"
+    "pytest>=6.0",
+    "pytest-cov",
 ]
 
+all = ["nnsight[test]"]
+
 [project.urls]
-"Homepage" = "https://github.com/ndif-team/nnsight"
-"Website" = "https://nnsight.net/"
-"Documentation" = "https://nnsight.net/documentation/"
-"Changelog" = "https://github.com/ndif-team/nnsight/CHANGELOG.md"
-"Releases" = "https://github.com/ndif-team/nnsight/releases"
+Homepage = "https://github.com/ndif-team/nnsight"
+Website = "https://nnsight.net/"
+Documentation = "https://nnsight.net/documentation/"
+Changelog = "https://github.com/ndif-team/nnsight/CHANGELOG.md"
+Repository = "https://github.com/ndif-team/nnsight.git"
+"Bug Tracker" = "https://github.com/ndif-team/nnsight/issues"
 
 [tool.setuptools]
 include-package-data = true
 license-files = ["LICENSE"]
 
+
 [tool.setuptools.package-data]
 nnsight = ["config.yaml"]
+
+# Optional: Code formatting tools configuration
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
