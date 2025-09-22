@@ -596,8 +596,8 @@ class Barrier:
         self.participants.add(mediator.name)
          
         if len(self.participants) == self.n_participants:
-            
-            mediator.send(Events.BARRIER, self.participants)
+            participants = self.participants
             self.participants = set()
+            mediator.send(Events.BARRIER, participants)
         else:
             mediator.send(Events.BARRIER, None)
