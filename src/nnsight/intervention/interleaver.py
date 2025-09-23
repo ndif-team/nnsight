@@ -433,6 +433,8 @@ class Mediator:
         self.all_stop: Optional[int] = stop
 
         self.args = list()
+        
+        self.original_globals = {}
 
     @property
     def alive(self):
@@ -448,7 +450,8 @@ class Mediator:
         self.interleaver = interleaver
 
         self.interleaver.mediators[self.name] = self
-
+        
+        self.original_globals = self.intervention.__globals__.copy()
         if not self.alive:
 
             self.thread = Thread(
@@ -747,10 +750,10 @@ class Mediator:
         state = {**self.info.frame.f_locals}
         
         for key in {**state}:
-            if key in self.frame.f_locals and key not in self.intervention.__globals__:
+            if key in self.frame.f_locals and key not in self.original_globals:
                 del state[key]
-            elif key not in self.frame.f_locals and key in self.intervention.__globals__:
-                state[key] = self.intervention.__globals__[key]
+            elif key not in self.frame.f_locals and key in self.original_globals:
+                state[key] = self.original_globals[key]
 
         push_variables(self.frame, state)
 
@@ -921,3 +924,4 @@ class Mediator:
         self.user_cache: "Cache" = list()
         self.iteration = 0
         self.args = list()
+        self.original_globals = {}
