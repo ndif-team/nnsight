@@ -69,10 +69,16 @@ class Invoker(Tracer):
             fn: The compiled intervention function
         """
         
-        inputs, batch_group = self.tracer.batcher.batch(self.tracer.model, *self.args, **self.kwargs)
+        # Extract request_id from kwargs before batching
+        custom_data = {}
+        filtered_kwargs = dict(self.kwargs)
+        if 'request_id' in filtered_kwargs:
+            custom_data['request_id'] = filtered_kwargs.pop('request_id')
+
+        inputs, batch_group = self.tracer.batcher.batch(self.tracer.model, *self.args, **filtered_kwargs)
 
         self.inputs = inputs
 
-        mediator = Mediator(fn, self.info, batch_group=batch_group)
+        mediator = Mediator(fn, self.info, batch_group=batch_group, custom_data=custom_data)
 
         self.tracer.mediators.append(mediator)

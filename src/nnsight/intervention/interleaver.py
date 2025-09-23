@@ -405,6 +405,7 @@ class Mediator:
         name: Optional[str] = None,
         batch_group: Optional[int] = 0,
         stop: Optional[int] = None,
+        custom_data: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Initialize a Mediator with an intervention function.
@@ -414,11 +415,13 @@ class Mediator:
             info: Information about the tracing context
             name: Optional name for the mediator
             stop: Optional number of times to execute this mediator
+            custom_data: Optional dictionary to store custom metadata
         """
         self.intervention = intervention
         self.name = name if name else f"Mediator{id(self)}"
         self.info = info
         self.batch_group = batch_group
+        self.custom_data = custom_data or {}
         self.event_queue = Queue()
         self.response_queue = Queue()
         
