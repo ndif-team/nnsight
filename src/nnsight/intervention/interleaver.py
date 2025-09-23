@@ -432,6 +432,8 @@ class Mediator:
         self.all_stop: Optional[int] = stop
 
         self.args = list()
+        
+        self.original_globals = {}
 
     @property
     def alive(self):
@@ -447,7 +449,8 @@ class Mediator:
         self.interleaver = interleaver
 
         self.interleaver.mediators[self.name] = self
-
+        
+        self.original_globals = self.intervention.__globals__.copy()
         if not self.alive:
 
             self.thread = Thread(
@@ -734,14 +737,22 @@ class Mediator:
     def push(self):
         """Push local variables to the interleaver state."""
         
-        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight")}
+        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight") and (v is not self.original_globals.get(k, None))}
+        
          # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
         push_variables(self.info.frame, state)
+        
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
-
-        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight") and k not in self.frame.f_locals}
+        
+        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight")}
+        
+        for key in {**state}:
+            if key in self.frame.f_locals:
+                del state[key]
+            elif key in self.original_globals:
+                state[key] = self.original_globals[key]
 
         push_variables(self.frame, state)
 
@@ -912,3 +923,4 @@ class Mediator:
         self.user_cache: "Cache" = list()
         self.iteration = 0
         self.args = list()
+        self.original_globals = {}
