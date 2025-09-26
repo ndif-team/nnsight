@@ -43,6 +43,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+
+diffusion = [
+    "diffusers",
+]
+
 test = [
     "pytest>=6.0",
     "pytest-cov",
