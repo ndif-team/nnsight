@@ -2,8 +2,8 @@ import io
 import pickle
 from builtins import open
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Optional, Union
-
+from typing import Any, Optional, Union
+from ..util import Patcher, Patch
 import cloudpickle
 
 from .envoy import Envoy
@@ -11,27 +11,41 @@ from .envoy import Envoy
 
 class CustomCloudPickler(cloudpickle.Pickler):
     def persistent_id(self, obj):
-
-        if isinstance(obj, Envoy):
-            return f"ENVOY:{obj.path}"
-
         if isinstance(obj, FrameType):
             return "FRAME"
 
         return None
 
+original_setstate = Envoy.__setstate__
+    
+   
 
 class CustomCloudUnpickler(pickle.Unpickler):
     def __init__(self, file, root: Envoy, frame: FrameType):
         super().__init__(file)
         self.root = root
         self.frame = frame
+        
+    def load(self):
+        
+        def inject(_self, state):
+            
+            original_setstate(_self, state)
+            
+            envoy = self.root.get(_self.path.removeprefix("model"))
+            
+            _self._module = envoy._module
+            _self._interleaver = envoy._interleaver
+                                                
+            for key, value in envoy.__dict__.items():
+                if key not in _self.__dict__:
+                    _self.__dict__[key] = value
+        
+        with Patcher([Patch(Envoy, inject, '__setstate__')]):
+            return super().load()
 
     def persistent_load(self, pid):
 
-        if pid.startswith("ENVOY:"):
-            path = pid.removeprefix("ENVOY:model")
-            return self.root.get(path)
 
         if pid == "FRAME":
             return self.frame

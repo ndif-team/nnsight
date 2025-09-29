@@ -122,9 +122,16 @@ class Interleaver:
         skip = None
 
         forward = module.forward
+        
+        # If wrapping the same module more than once, we need to get the original forward function
+        pre_wrapped = hasattr(forward, "__nnsight_original_forward__")
+        if pre_wrapped:
+            forward.__nnsight_input_handle__.remove()
+            forward.__nnsight_output_handle__.remove()
+            forward = forward.__nnsight_original_forward__
 
-        @wraps(module.forward)
-        def skippable_forward(*args, **kwargs):
+        @wraps(forward)
+        def nnsight_forward(*args, **kwargs):
 
             nonlocal skip
 
@@ -135,8 +142,8 @@ class Interleaver:
                     skip = None
 
             return skip
-
-        module.forward = skippable_forward
+        
+        module.forward = nnsight_forward
 
         @torch._dynamo.disable
         def input_hook(module: torch.nn.Module, args, kwargs):
@@ -157,7 +164,7 @@ class Interleaver:
 
             return args, kwargs
 
-        module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
+        input_handle = module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
 
         @torch._dynamo.disable
         def output_hook(module: torch.nn.Module, _, output: Any):
@@ -179,7 +186,11 @@ class Interleaver:
 
             return output
 
-        module.register_forward_hook(output_hook, prepend=True)
+        output_handle = module.register_forward_hook(output_hook, prepend=True)
+    
+        nnsight_forward.__nnsight_original_forward__ = forward
+        nnsight_forward.__nnsight_input_handle__ = input_handle
+        nnsight_forward.__nnsight_output_handle__ = output_handle
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
@@ -416,6 +427,7 @@ class Mediator:
             stop: Optional number of times to execute this mediator
         """
         self.intervention = intervention
+        
         self.name = name if name else f"Mediator{id(self)}"
         self.info = info
         self.batch_group = batch_group
@@ -432,6 +444,8 @@ class Mediator:
         self.all_stop: Optional[int] = stop
 
         self.args = list()
+        
+        self.original_globals = {}
 
     @property
     def alive(self):
@@ -447,7 +461,8 @@ class Mediator:
         self.interleaver = interleaver
 
         self.interleaver.mediators[self.name] = self
-
+        
+        self.original_globals = self.intervention.__globals__.copy()
         if not self.alive:
 
             self.thread = Thread(
@@ -734,14 +749,22 @@ class Mediator:
     def push(self):
         """Push local variables to the interleaver state."""
         
-        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight")}
+        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight") and (v is not self.original_globals.get(k, None))}
+        
          # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
         push_variables(self.info.frame, state)
+        
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
-
-        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight") and k not in self.frame.f_locals}
+        
+        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight")}
+        
+        for key in {**state}:
+            if key in self.frame.f_locals:
+                del state[key]
+            elif key in self.original_globals:
+                state[key] = self.original_globals[key]
 
         push_variables(self.frame, state)
 
@@ -912,3 +935,4 @@ class Mediator:
         self.user_cache: "Cache" = list()
         self.iteration = 0
         self.args = list()
+        self.original_globals = {}
