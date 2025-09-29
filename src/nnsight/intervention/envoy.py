@@ -1062,6 +1062,30 @@ class Envoy(Batchable):
             self._add_envoy(value, key)
         else:
             super().__setattr__(key, value)
+            
+    def __getstate__(self):
+        return {
+            "alias": self._alias,
+            "children": self._children,
+            "named_children": {key: value for key, value in self.__dict__.items() if isinstance(value, Envoy)},
+            "path": self.path,
+            "default_mediators": self._default_mediators,
+
+        }
+    
+    def __setstate__(self, state):
+        self._module = None
+        self._source = None
+        self.fake_inputs = None
+        self.fake_output = None
+        
+        self._alias = state["alias"]
+        self._children = state["children"]
+        self.__dict__.update(state["named_children"])
+        
+        self.path = state["path"]
+        self._default_mediators = state["default_mediators"]
+
 
 
 # TODO extend Envoy

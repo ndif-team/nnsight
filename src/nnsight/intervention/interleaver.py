@@ -427,6 +427,7 @@ class Mediator:
             stop: Optional number of times to execute this mediator
         """
         self.intervention = intervention
+        
         self.name = name if name else f"Mediator{id(self)}"
         self.info = info
         self.batch_group = batch_group
