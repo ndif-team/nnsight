@@ -122,9 +122,16 @@ class Interleaver:
         skip = None
 
         forward = module.forward
+        
+        # If wrapping the same module more than once, we need to get the original forward function
+        pre_wrapped = hasattr(forward, "__nnsight_original_forward__")
+        if pre_wrapped:
+            forward.__nnsight_input_handle__.remove()
+            forward.__nnsight_output_handle__.remove()
+            forward = forward.__nnsight_original_forward__
 
-        @wraps(module.forward)
-        def skippable_forward(*args, **kwargs):
+        @wraps(forward)
+        def nnsight_forward(*args, **kwargs):
 
             nonlocal skip
 
@@ -135,8 +142,8 @@ class Interleaver:
                     skip = None
 
             return skip
-
-        module.forward = skippable_forward
+        
+        module.forward = nnsight_forward
 
         @torch._dynamo.disable
         def input_hook(module: torch.nn.Module, args, kwargs):
@@ -157,7 +164,7 @@ class Interleaver:
 
             return args, kwargs
 
-        module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
+        input_handle = module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
 
         @torch._dynamo.disable
         def output_hook(module: torch.nn.Module, _, output: Any):
@@ -179,7 +186,11 @@ class Interleaver:
 
             return output
 
-        module.register_forward_hook(output_hook, prepend=True)
+        output_handle = module.register_forward_hook(output_hook, prepend=True)
+    
+        nnsight_forward.__nnsight_original_forward__ = forward
+        nnsight_forward.__nnsight_input_handle__ = input_handle
+        nnsight_forward.__nnsight_output_handle__ = output_handle
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
