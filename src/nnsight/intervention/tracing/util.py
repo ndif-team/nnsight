@@ -270,16 +270,13 @@ def get_non_nnsight_frame() -> FrameType:
     while frame:
         frame = frame.f_back
         if frame:
-            filename = frame.f_code.co_filename
             # Match if filename contains 'nnsight/tests' or 'nnsight\tests'
             # OR if it does NOT contain '/nnsight/' or '\nnsight\'
 
-            if (
-                re.search(r"[\\/]{1}nnsight[\\/]{1}tests", filename)
-                or not re.search(r"[\\/]{1}nnsight[\\/]", filename)
-            ):
+            norm = frame.f_code.co_filename.replace("\\", "/")
+            if "/nnsight/tests" in norm or "/nnsight/" not in norm:
                 break
-            
+                
     return frame
             
             
