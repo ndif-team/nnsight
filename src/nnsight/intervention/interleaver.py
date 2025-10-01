@@ -1,25 +1,22 @@
 from __future__ import annotations
 
-import ctypes
 import inspect
-import re
 import threading
-import time
 import warnings
 from collections import defaultdict
 from enum import Enum
 from functools import wraps
-from queue import Queue
+from queue import SimpleQueue
 from threading import Thread
 from types import FrameType
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Union)
 
 import torch
 
 from ..util import applyn
 from .batching import Batcher
-from .tracing.util import wrap_exception, get_non_nnsight_frame, push_variables
+from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
 
 if TYPE_CHECKING:
     from .tracing.tracer import Cache, InterleavingTracer, Tracer
@@ -431,8 +428,8 @@ class Mediator:
         self.name = name if name else f"Mediator{id(self)}"
         self.info = info
         self.batch_group = batch_group
-        self.event_queue = Queue()
-        self.response_queue = Queue()
+        self.event_queue = SimpleQueue()
+        self.response_queue = SimpleQueue()
         
         self.child: Mediator = None
 
@@ -479,9 +476,7 @@ class Mediator:
 
     def wait(self):
         """Wait for the next event to be set in the event queue."""
-        while self.event_queue.empty() and self.alive:
-            # Keep checking until there's an event in the queue
-            time.sleep(0.001)  # Small sleep to prevent CPU spinning
+        self.event_queue.put(self.event_queue.get())
 
     def cancel(self):
         """Cancel the intervention thread and clear caches."""
@@ -496,6 +491,7 @@ class Mediator:
         if self.alive:
             # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
+            self.event_queue.put(None)
 
     def handle(self, provider: Optional[Any] = None):
         """
@@ -587,11 +583,6 @@ class Mediator:
                     mediator.respond()
         
                     mediator.handle(provider)
-
-                    
-                    
-                            
-
 
     def handle_end_event(self):
         """
@@ -925,8 +916,8 @@ class Mediator:
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
         
-        self.event_queue = Queue()
-        self.response_queue = Queue()
+        self.event_queue = SimpleQueue()
+        self.response_queue = SimpleQueue()
 
         self.thread = None
         self.interleaver = None
