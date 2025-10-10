@@ -730,7 +730,9 @@ class Envoy(Batchable):
 
         try:
             with self._interleaver:
-                fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
+                
+                self._interleaver.handle("result", result)
                 
             self._interleaver.check_cache_full()
             self._interleaver.check_dangling_mediators()
