@@ -491,6 +491,35 @@ class InterleavingTracer(Tracer):
         """
         
         return Barrier(self.model, n_participants)
+    
+    @property
+    def result(self) -> Object:
+        """
+        Get the result of the method being traced.
+
+        This property allows access to the return values produced by the method being traced.
+
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.generate("Hello World") as tracer:
+            >>>     result = tracer.result.save()
+            >>> print(result)
+
+        Returns:
+            The result of the method being traced
+        """
+
+        if self.model.interleaving:
+
+            return self.model._interleaver.current.request(
+                "result"
+            )
+        else:
+            raise ValueError(
+                "Cannot return result of Envoy that is not interleaving."
+            )
+        
+        
 
     ### Serialization ###
 

@@ -259,8 +259,11 @@ class Interleaver:
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
         # Or their Envoy was not called.
         for mediator in self.mediators.values():
+            
+            parent = None
 
             if mediator.child is not None:
+                parent = mediator
                 mediator = mediator.child
 
             if not mediator.event_queue.empty():
@@ -284,6 +287,15 @@ class Interleaver:
                         warnings.warn(msg)
                 else:
                     mediator.handle()
+                    
+                    
+                if parent is not None:
+                    
+                    parent.respond(
+                    ValueError(
+                        f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called?"
+                    )
+                )
                     
     def check_cache_full(self):
         """

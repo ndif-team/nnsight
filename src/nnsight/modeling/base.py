@@ -1,5 +1,4 @@
 
-from typing import Optional
 from ..intervention.envoy import Envoy
 
 class NNsight(Envoy):
