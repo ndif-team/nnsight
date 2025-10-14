@@ -381,10 +381,16 @@ class InterleavingTracer(Tracer):
         
         interleaver = self.model._interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
+        
+        try:
 
-        self.model.interleave(self.fn, *args, **kwargs)
-
+            self.model.interleave(self.fn, *args, **kwargs)
+        finally:
+            self.mediators.clear()
+            
         self.push(self._frame.f_locals)
+        
+        del self._frame
 
                 
 
