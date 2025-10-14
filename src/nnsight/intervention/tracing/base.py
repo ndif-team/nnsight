@@ -469,8 +469,6 @@ class Tracer:
         # Push the filtered variables back to the original frame
         push_variables(target_frame, filtered_state)
 
-        # Clear the state to prevent memory leaks
-        state.clear()
         
     def pull(self):
         """
