@@ -1,14 +1,8 @@
 from ... import NNS_VLLM_VERSION
 
-try:
-    import vllm 
-    assert vllm.__version__ == NNS_VLLM_VERSION
-except Exception as e:
-    raise type(e)(
-        f"This pre-release of NNsight requires vLLM v{NNS_VLLM_VERSION}.\n"
-        + f"`pip install vllm=={NNS_VLLM_VERSION}` to use vLLM with NNsight.\n"
-        + "For more information on how to install vLLM, visit https://docs.vllm.ai/en/latest/getting_started/installation.html"
-    ) from e
+
+import vllm 
+
 
 from dataclasses import fields
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
@@ -24,7 +18,7 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
 from vllm.model_executor.model_loader.utils import get_model_architecture
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 
 from ...intervention.envoy import Envoy
 from ...util import WrapperModule
@@ -140,7 +134,8 @@ class VLLM(RemoteableMixin):
         self.vllm_entrypoint = llm
 
         # load the tokenizer
-        self.tokenizer = llm.llm_engine.tokenizer.tokenizer
+
+        self.tokenizer = llm.llm_engine.tokenizer._tokenizer
         
         return llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model
 
