@@ -209,14 +209,14 @@ class Interleaver:
 
             fn = self.handle(f"{name}.fn", fn)
 
-            args, kwargs = self.handle(f"{name}.input", (args, kwargs))
+            args, kwargs = self.handle(f"{name}.input", (args, kwargs), iterate=True)
 
             if not inspect.ismethod(fn) and bound_obj is not None:
                 value = fn(bound_obj, *args, **kwargs)
             else:
                 value = fn(*args, **kwargs)
 
-            value = self.handle(f"{name}.output", value)
+            value = self.handle(f"{name}.output", value, iterate=True)
 
             return value
 
