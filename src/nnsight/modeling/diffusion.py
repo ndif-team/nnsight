@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import torch
 from diffusers import DiffusionPipeline
-from transformers import BatchEncoding
+from transformers import BatchEncoding, PreTrainedTokenizerBase
 from typing_extensions import Self
-from transformers import PreTrainedTokenizerBase
 
 from .. import util
 from .mixins import RemoteableMixin
@@ -86,8 +86,13 @@ class DiffusionModel(RemoteableMixin):
         self, prepared_inputs: Any, *args, seed: int = None, **kwargs
     ):
         
-        steps = kwargs.get("num_inference_steps")
         if self._interleaver is not None:
+            steps = kwargs.get("num_inference_steps")
+            if steps is None:
+                try:
+                    steps = inspect.signature(self.pipeline.generate).parameters["num_inference_steps"].default
+                except:
+                    steps = 50
             self._interleaver.default_all = steps
 
         generator = torch.Generator(self.device)
