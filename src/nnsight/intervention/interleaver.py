@@ -752,6 +752,9 @@ class Mediator:
     def push(self):
         """Push local variables to the interleaver state."""
         
+        if self.info.frame is None:
+            return
+        
         state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight") and (v is not self.original_globals.get(k, None))}
         
          # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
@@ -760,6 +763,9 @@ class Mediator:
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
+        
+        if self.info.frame is None:
+            return
         
         state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight")}
         

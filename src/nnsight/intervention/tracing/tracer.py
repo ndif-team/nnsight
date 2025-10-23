@@ -339,7 +339,7 @@ class InterleavingTracer(Tracer):
 
             invoker.__exit__(ExitTracingException, None, None)
 
-            self.info.source = [f"    {self.tracer_var_name}.mediators[0].info.frame = {self.tracer_var_name}.get_frame()\n"]
+            self.info.source = [f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"]
 
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
