@@ -288,13 +288,13 @@ class InterleavingTracer(Tracer):
 
         self.mediators: List[Mediator] = []
 
-        self.batcher = Batcher(**kwargs)
+        self.batcher = Batcher()
 
         self.user_cache: List[Cache] = list()
         
         self._frame = None
 
-        super().__init__(*args, backend=backend)
+        super().__init__(*args, **kwargs, backend=backend)
             
     def capture(self):
         """
@@ -335,7 +335,7 @@ class InterleavingTracer(Tracer):
         # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
 
-            invoker = self.invoke(*self.args, _info=self.info.copy(), **self.kwargs)
+            invoker = self.invoke(*self.args, _info=self.info.copy())
 
             invoker.__exit__(ExitTracingException, None, None)
 
@@ -374,14 +374,14 @@ class InterleavingTracer(Tracer):
         fn(self.info, self)
 
         args = self.batcher.batched_args
-        kwargs = self.batcher.batched_kwargs
+        kwargs = {**self.batcher.batched_kwargs, **self.kwargs}
 
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
         
         interleaver = self.model._interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
-        
+
         try:
 
             self.model.interleave(self.fn, *args, **kwargs)
