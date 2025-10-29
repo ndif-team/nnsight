@@ -13,8 +13,6 @@ import linecache
 import sys
 import os
 
-from httpx import Response
-
 try:
     # Cache the main script file
     linecache.getlines(os.path.abspath(sys.argv[0]))
@@ -39,7 +37,7 @@ import os, yaml
 import warnings
 from typing import Optional
 from .schema.config import ConfigModel
-from IPython.display import HTML
+
 PATH = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(PATH, "config.yaml"), "r") as file:
     CONFIG = ConfigModel(**yaml.safe_load(file))
