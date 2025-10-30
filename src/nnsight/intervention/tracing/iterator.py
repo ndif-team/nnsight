@@ -37,22 +37,58 @@ class IteratorTracer(Tracer):
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {iteration_var_name}):\n",
             "    __nnsight_mediator__.pull()\n",
-            *try_catch(
-                self.info.source,
-                exception_source=["__nnsight_mediator__.exception(exception)\n"],
-                else_source=["__nnsight_mediator__.end()\n"],
-            ),
+            *self.info.source
         ]
         
         self.info.start_line -= 2
         
     def execute(self, fn: Callable):
         
-        mediator = Mediator(fn, self.info, batch_group=self.interleaver.current.batch_group, stop=self.interleaver.current.all_stop)
-
-        mediator.name = "Iterator" + mediator.name
+        mediator = self.interleaver.current
         
-        self.interleaver.current.iter(mediator, self.iteration)
+        def do_iteration(iter: int):
+            
+            mediator.iteration = iter
+            
+            fn(mediator, mediator.info, iter)
+            
+        original_iteration = mediator.iteration
+        
+        if isinstance(self.iteration, slice):
+
+            i = self.iteration.start if self.iteration.start is not None else self.iteration
+
+            stop = self.iteration.stop
+
+            while True:
+
+                do_iteration(i)
+
+                if stop is None:
+                    if mediator.all_stop is not None:
+                        stop = mediator.all_stop
+                
+                    elif mediator.interleaver.default_all is not None:
+                        stop = mediator.interleaver.default_all
+
+                i += 1
+
+                if stop is not None and i >= stop:
+                    break
+
+        elif isinstance(self.iteration, list):
+
+            self.iteration.sort()
+
+            for i in self.iteration:
+                do_iteration(i)
+
+        elif isinstance(self.iteration, int):
+
+            do_iteration(self.iteration)
+            
+        mediator.iteration = original_iteration
+        
     
     
     
