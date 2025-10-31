@@ -51,6 +51,9 @@ class IteratorTracer(Tracer):
         
         def do_iteration(iter: int):
             
+            if iter < 0:
+                raise ValueError("Iteration cannot be negative.")
+            
             mediator.iteration = iter
             
             fn(mediator, self.info, iter)
