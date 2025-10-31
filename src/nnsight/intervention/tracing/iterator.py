@@ -44,6 +44,8 @@ class IteratorTracer(Tracer):
         self.info.start_line -= 1
         
     def execute(self, fn: Callable):
+        
+        mediator.push()
                 
         mediator = self.interleaver.current
         
@@ -54,7 +56,7 @@ class IteratorTracer(Tracer):
             fn(mediator, self.info, iter)
             
         original_iteration = mediator.iteration
-
+        
         if isinstance(self.iteration, slice):
 
             i = self.iteration.start if self.iteration.start is not None else mediator.iteration
@@ -89,6 +91,8 @@ class IteratorTracer(Tracer):
             do_iteration(self.iteration)
             
         mediator.iteration = original_iteration
+        
+        mediator.pull()
         
     
     
