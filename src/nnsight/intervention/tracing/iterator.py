@@ -44,10 +44,10 @@ class IteratorTracer(Tracer):
         self.info.start_line -= 1
         
     def execute(self, fn: Callable):
-        
-        mediator.push()
                 
         mediator = self.interleaver.current
+        
+        mediator.push()
         
         def do_iteration(iter: int):
             
