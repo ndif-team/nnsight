@@ -49,6 +49,8 @@ try:
 except PackageNotFoundError:
     __version__ = "unknown version"
 
+from .ndif import *
+
 from IPython import get_ipython
 
 try:

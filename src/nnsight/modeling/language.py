@@ -85,7 +85,7 @@ class LanguageModel(RemoteableMixin):
         # If the user passed in a pre-loaded model, might be able to get repo id off of it.
         # That way if they dont provide a tokenizer, we can load it for them later.
         self.repo_id: str = args[0] if isinstance(args[0], str) else getattr(args[0], 'name_or_path', None)
-        self.revision: str = getattr(args[0], 'revision', 'main')
+        self.revision: str = kwargs.get('revision', 'main')
         
         super().__init__(*args, **kwargs)
     
@@ -209,8 +209,6 @@ class LanguageModel(RemoteableMixin):
     ) -> Module:
 
         self.repo_id = repo_id
-
-        self.revision = revision
 
         self._load_config(repo_id, revision=revision, **kwargs)
 

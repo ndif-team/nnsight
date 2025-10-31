@@ -40,6 +40,7 @@ dependencies = [
     "accelerate",
     "toml",
     "ipython",
+    "rich",
 ]
 
 [project.optional-dependencies]
