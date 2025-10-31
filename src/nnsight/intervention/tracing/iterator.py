@@ -37,26 +37,27 @@ class IteratorTracer(Tracer):
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {iteration_var_name}):\n",
             "    __nnsight_mediator__.pull()\n",
-            *self.info.source
+            *self.info.source,
+            "    __nnsight_mediator__.push()\n"
         ]
         
-        self.info.start_line -= 2
+        self.info.start_line -= 1
         
     def execute(self, fn: Callable):
-        
+                
         mediator = self.interleaver.current
         
         def do_iteration(iter: int):
             
             mediator.iteration = iter
             
-            fn(mediator, mediator.info, iter)
+            fn(mediator, self.info, iter)
             
         original_iteration = mediator.iteration
-        
+
         if isinstance(self.iteration, slice):
 
-            i = self.iteration.start if self.iteration.start is not None else self.iteration
+            i = self.iteration.start if self.iteration.start is not None else mediator.iteration
 
             stop = self.iteration.stop
 

@@ -259,8 +259,6 @@ class Interleaver:
         # Or their Envoy was not called.
         for mediator in self.mediators.values():
             
-            parent = None
-
 
             if not mediator.event_queue.empty():
                 requested_event, requester = mediator.event_queue.get()
@@ -275,23 +273,15 @@ class Interleaver:
                 )
                 mediator.wait()
 
-                if mediator.name.startswith("Iterator"):
+                if mediator.iteration != 0:
                     try:
                         mediator.handle()
                     except ValueError as e:
-                        msg = f"Execution complete but `{requester}` was not provided. This was in an Iterator at iteration {mediator.iteration} so likely this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
+                        msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {mediator.iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
                         warnings.warn(msg)
                 else:
                     mediator.handle()
                     
-                    
-                if parent is not None:
-                    
-                    parent.respond(
-                    ValueError(
-                        f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called?"
-                    )
-                )
                     
     def check_cache_full(self):
         """

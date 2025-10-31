@@ -338,6 +338,8 @@ class InterleavingTracer(Tracer):
             invoker = self.invoke(*self.args, _info=self.info.copy())
 
             invoker.__exit__(ExitTracingException, None, None)
+            
+            invoker.info.start_line = 0
 
             self.info.source = [f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"]
 
