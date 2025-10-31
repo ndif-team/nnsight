@@ -5,5 +5,5 @@ API:
   ZLIB: true
 APP:
   CACHE_DIR: ~/.cache/nnsight/
-  DEBUG: true
+  DEBUG: false
   REMOTE_LOGGING: true
