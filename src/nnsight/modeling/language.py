@@ -251,7 +251,7 @@ class LanguageModel(RemoteableMixin):
         ):
             self.config.rope_scaling["rope_type"] = "llama3"
 
-        model = self.automodel.from_pretrained(repo_id, config=self.config, revision=revision, **kwargs)
+        model = self.automodel.from_pretrained(repo_id, config=self.config, revision=revision)
         
         self.config = model.config
         
