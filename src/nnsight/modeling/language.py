@@ -235,23 +235,14 @@ class LanguageModel(RemoteableMixin):
         repo_id: str,
         revision:Optional[str] = "main",
         tokenizer_kwargs: Optional[Dict[str, Any]] = {},
-        patch_llama_scan: bool = True,
         **kwargs,
     ) -> PreTrainedModel:
-
+        
         self._load_config(repo_id, revision=revision, **kwargs)
 
         self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
-
-        if (
-            patch_llama_scan
-            and isinstance(self.config, LlamaConfig)
-            and isinstance(self.config.rope_scaling, dict)
-            and "rope_type" in self.config.rope_scaling
-        ):
-            self.config.rope_scaling["rope_type"] = "llama3"
-
-        model = self.automodel.from_pretrained(repo_id, config=self.config, revision=revision, **kwargs)
+        
+        model = self.automodel.from_pretrained(repo_id, revision=revision, **kwargs)
         
         self.config = model.config
         
