@@ -455,7 +455,15 @@ class InterleavingTracer(Tracer):
         """
 
         rename_dict = self.model._alias.rename if self.model._alias is not None else dict()
-        alias_dict = {value: key for key, value in rename_dict.items()}
+
+        alias_dict = dict()
+
+        if self.model._alias is not None:
+            def get_alias_dict(alias_dict, envoy):
+                alias_dict.update(envoy._alias.alias_to_name)
+                for child in envoy._children:
+                    get_alias_dict(alias_dict, child)
+            get_alias_dict(alias_dict, self.model)
 
         if not self.model.interleaving:
             self.user_cache.append(

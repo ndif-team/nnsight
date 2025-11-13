@@ -1199,6 +1199,17 @@ def test_cache_alias(MSG_prompt: str):
 
     assert torch.equal(cache['model.model.first_layer'].output[0], cache.model.model.first_layer.output[0])
     assert torch.equal(cache['model.model.h.second_layer'].output[0], cache.model.model.h["second_layer"].output[0])
+
+
+@torch.no_grad()
+@pytest.mark.cache
+def test_cache_ignores_wrong_alias(MSG_prompt: str):
+    gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={"transformer": "model", "model.language_model": "foo"})
+
+    with gpt2.trace(MSG_prompt) as tracer:
+        cache = tracer.cache()
+
+    assert torch.equal(cache['model.transformer.h.0'].output[0], cache.model.model.h[0].output[0])
     
 
 ######################### RENAME #################################
