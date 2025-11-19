@@ -297,6 +297,9 @@ class LanguageModel(TransformersModel):
         ), len(prepared_kwargs["input_ids"])
 
 
+    def _remoteable_model_key(self) -> str:
+        return super()._remoteable_model_key()
+
 if TYPE_CHECKING:
 
     class LanguageModel(GenerationMixin, LanguageModel, PreTrainedModel):
