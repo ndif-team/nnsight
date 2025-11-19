@@ -132,9 +132,9 @@ class RemoteBackend(Backend):
         if response.status == ResponseModel.JobStatus.COMPLETED:
 
             # If the response has no result data, it was too big and we need to stream it from the server.
-            if response.data is None:
-
-                result = self.get_result(response.id)
+            if isinstance(response.data, str):
+                
+                result = self.get_result(response.data)
             else:
 
                 result = response.data
@@ -220,14 +220,14 @@ class RemoteBackend(Backend):
 
             raise Exception(response.reason)
 
-    def get_result(self, id: str) -> RESULT:
+    def get_result(self, url: str) -> RESULT:
 
         result_bytes = io.BytesIO()
         result_bytes.seek(0)
 
         # Get result from result url using job id.
         with requests.get(
-            url=f"{self.address}/result/{id}",
+            url=url,
             stream=True,
         ) as stream:
             # Total size of incoming data.
