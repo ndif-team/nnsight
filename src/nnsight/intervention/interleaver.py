@@ -105,13 +105,25 @@ class Interleaver:
         self.invokers = None
 
 
-    def iterate(self, provider: str):
+    def iterate_provider(self, provider: str):
 
         iteration = self.iteration_tracker[provider]
 
-        self.iteration_tracker[provider] += 1
-
         return f"{provider}.i{iteration}"
+    
+    
+    def iterate_requester(self, requester: str):
+        
+        mediator = self.current
+        
+        iteration = mediator.iteration
+        
+        if iteration is None:
+            iteration = self.iteration_tracker[requester]
+        elif isinstance(iteration, tuple):
+            iteration, mediator.iteration = iteration
+
+        return f"{requester}.i{iteration}"
 
     def wrap_module(self, module: torch.nn.Module):
 
@@ -329,9 +341,11 @@ class Interleaver:
         Returns:
             The original or modified value
         """
+        
+        original_provider = provider
 
         if iterate:
-            provider = self.iterate(provider)
+            provider = self.iterate_provider(provider)
 
         old = self.batcher.current_value
 
@@ -347,6 +361,9 @@ class Interleaver:
             except SkipException as e:
                 skip_count += 1
                 skip_values.append(e.value)
+                
+        if iterate:
+            self.iteration_tracker[original_provider] += 1
 
         if skip_count == len(self.invokers) and self.invokers:
 
@@ -709,11 +726,7 @@ class Mediator:
         frame = get_non_nnsight_frame()
 
         return frame
-
-    def iterate(self, requester: Any):
-
-        return f"{requester}.i{self.iteration}"
-
+    
     def push(self):
         """Push local variables to the interleaver state."""
         
