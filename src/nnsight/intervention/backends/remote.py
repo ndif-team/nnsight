@@ -133,8 +133,9 @@ class RemoteBackend(Backend):
 
             # If the response has no result data, it was too big and we need to stream it from the server.
             if isinstance(response.data, str):
-                
                 result = self.get_result(response.data)
+            elif isinstance(response.data, tuple):
+                result = self.get_result(*response.data)
             else:
 
                 result = response.data
@@ -220,18 +221,17 @@ class RemoteBackend(Backend):
 
             raise Exception(response.reason)
 
-    def get_result(self, url: str) -> RESULT:
+    def get_result(self, url: str, content_length: float = None) -> RESULT:
 
         result_bytes = io.BytesIO()
         result_bytes.seek(0)
-
         # Get result from result url using job id.
         with requests.get(
             url=url,
             stream=True,
         ) as stream:
             # Total size of incoming data.
-            total_size = float(stream.headers["Content-length"])
+            total_size = content_length or float(stream.headers["Content-length"])
 
             with tqdm(
                 total=total_size,
@@ -240,7 +240,7 @@ class RemoteBackend(Backend):
                 desc="Downloading result",
             ) as progress_bar:
                 # chunk_size=None so server determines chunk size.
-                for data in stream.iter_content(chunk_size=None):
+                for data in stream.iter_content(chunk_size=128 * 1024):
                     progress_bar.update(len(data))
                     result_bytes.write(data)
 
