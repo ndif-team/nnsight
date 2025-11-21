@@ -134,7 +134,7 @@ class RemoteBackend(Backend):
             # If the response has no result data, it was too big and we need to stream it from the server.
             if isinstance(response.data, str):
                 result = self.get_result(response.data)
-            elif isinstance(response.data, tuple):
+            elif isinstance(response.data, (tuple, list)):
                 result = self.get_result(*response.data)
             else:
 
