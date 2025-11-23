@@ -30,7 +30,6 @@ class Events(Enum):
     END = "end"  # Signal to end the execution
     EXCEPTION = "exception"  # Signal that an exception occurred
     SKIP = "skip"  # Signal that an operation should be skipped
-    REGISTER = "register"  # Signal that a child mediator should be registered
     BARRIER = "barrier"  # Signal that a barrier should be set
 
 
@@ -106,13 +105,25 @@ class Interleaver:
         self.invokers = None
 
 
-    def iterate(self, provider: str):
+    def iterate_provider(self, provider: str):
 
         iteration = self.iteration_tracker[provider]
 
-        self.iteration_tracker[provider] += 1
-
         return f"{provider}.i{iteration}"
+    
+    
+    def iterate_requester(self, requester: str):
+        
+        mediator = self.current
+        
+        iteration = mediator.iteration
+        
+        if iteration is None:
+            iteration = self.iteration_tracker[requester]
+        elif isinstance(iteration, tuple):
+            iteration, mediator.iteration = iteration
+
+        return f"{requester}.i{iteration}"
 
     def wrap_module(self, module: torch.nn.Module):
 
@@ -209,14 +220,14 @@ class Interleaver:
 
             fn = self.handle(f"{name}.fn", fn)
 
-            args, kwargs = self.handle(f"{name}.input", (args, kwargs))
+            args, kwargs = self.handle(f"{name}.input", (args, kwargs), iterate=True)
 
             if not inspect.ismethod(fn) and bound_obj is not None:
                 value = fn(bound_obj, *args, **kwargs)
             else:
                 value = fn(*args, **kwargs)
 
-            value = self.handle(f"{name}.output", value)
+            value = self.handle(f"{name}.output", value, iterate=True)
 
             return value
 
@@ -260,11 +271,6 @@ class Interleaver:
         # Or their Envoy was not called.
         for mediator in self.mediators.values():
             
-            parent = None
-
-            if mediator.child is not None:
-                parent = mediator
-                mediator = mediator.child
 
             if not mediator.event_queue.empty():
                 requested_event, requester = mediator.event_queue.get()
@@ -279,23 +285,15 @@ class Interleaver:
                 )
                 mediator.wait()
 
-                if mediator.name.startswith("Iterator"):
+                if mediator.iteration != 0:
                     try:
                         mediator.handle()
                     except ValueError as e:
-                        msg = f"Execution complete but `{requester}` was not provided. This was in an Iterator at iteration {mediator.iteration} so likely this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
+                        msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {mediator.iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
                         warnings.warn(msg)
                 else:
                     mediator.handle()
                     
-                    
-                if parent is not None:
-                    
-                    parent.respond(
-                    ValueError(
-                        f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called?"
-                    )
-                )
                     
     def check_cache_full(self):
         """
@@ -343,9 +341,11 @@ class Interleaver:
         Returns:
             The original or modified value
         """
+        
+        original_provider = provider
 
         if iterate:
-            provider = self.iterate(provider)
+            provider = self.iterate_provider(provider)
 
         old = self.batcher.current_value
 
@@ -361,6 +361,9 @@ class Interleaver:
             except SkipException as e:
                 skip_count += 1
                 skip_values.append(e.value)
+                
+        if iterate:
+            self.iteration_tracker[original_provider] += 1
 
         if skip_count == len(self.invokers) and self.invokers:
 
@@ -443,8 +446,6 @@ class Mediator:
         self.event_queue = SimpleQueue()
         self.response_queue = SimpleQueue()
         
-        self.child: Mediator = None
-
         self.thread = None
         self.interleaver = None
         self.history = set()
@@ -515,15 +516,7 @@ class Mediator:
         Returns:
             The original or modified value
         """
-        
-        if self.child is not None:
-            self.child.handle(provider)
-            
-            if not self.child.alive:
-                self.child = None
-                self.respond()
-            else:
-                return
+    
             
         process = not self.event_queue.empty()
 
@@ -549,8 +542,6 @@ class Mediator:
                         for cache in self.user_cache:
                             cache.add(provider, e.value)
                     raise e
-            elif event == Events.REGISTER:
-                process = self.handle_register_event(provider, data)
             elif event == Events.BARRIER:
                 process = self.handle_barrier_event(provider, data)
             elif event == Events.END:
@@ -570,13 +561,6 @@ class Mediator:
                     ),
                 )
                 
-    def handle_register_event(self, provider: Any, child:Mediator) -> bool:
-                
-        self.child = child
-        child.start(self.interleaver)
-        child.handle(provider)
-        
-        return False
 
     def handle_barrier_event(self, provider: Any, participants: Set[str]):
         """
@@ -586,9 +570,7 @@ class Mediator:
         if participants is not None:
         
             for mediator in self.interleaver.invokers:
-                
-                while mediator.child is not None:
-                    mediator = mediator.child
+            
                     
                 if mediator.name in participants:
                
@@ -744,13 +726,12 @@ class Mediator:
         frame = get_non_nnsight_frame()
 
         return frame
-
-    def iterate(self, requester: Any):
-
-        return f"{requester}.i{self.iteration}"
-
+    
     def push(self):
         """Push local variables to the interleaver state."""
+        
+        if self.info.frame is None:
+            return
         
         state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight") and (v is not self.original_globals.get(k, None))}
         
@@ -760,6 +741,9 @@ class Mediator:
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
+        
+        if self.info.frame is None:
+            return
         
         state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight")}
         
@@ -821,54 +805,6 @@ class Mediator:
 
         self.send(Events.SWAP, (requester, value))
 
-    def iter(self, mediator: Mediator, iteration: Union[int, slice]):
-        """
-        Iterate a mediator a specified number of times.
-
-        Args:
-            mediator: The mediator to iterate
-            iteration: The number of iterations
-        """
-
-        def do_iteration(iter: int):
-
-            mediator.iteration = iter
-            mediator.args = list([mediator.iteration])
-            
-            self.send(Events.REGISTER, mediator)
-
-        if isinstance(iteration, slice):
-
-            i = iteration.start if iteration.start is not None else self.iteration
-
-            stop = iteration.stop
-
-            while True:
-
-                do_iteration(i)
-
-                if stop is None:
-                    if self.all_stop is not None:
-                        stop = self.all_stop
-                
-                    elif self.interleaver.default_all is not None:
-                        stop = self.interleaver.default_all
-
-                i += 1
-
-                if stop is not None and i >= stop:
-                    break
-
-        elif isinstance(iteration, list):
-
-            iteration.sort()
-
-            for i in iteration:
-                do_iteration(i)
-
-        elif isinstance(iteration, int):
-
-            do_iteration(iteration)
 
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""
@@ -933,7 +869,6 @@ class Mediator:
 
         self.thread = None
         self.interleaver = None
-        self.child: Mediator = None
         self.history = set()
         self.user_cache: "Cache" = list()
         self.iteration = 0

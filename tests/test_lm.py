@@ -1260,65 +1260,6 @@ def test_rename_module_list_path(MSG_prompt: str):
     assert mlp_out_1 is not None
 
 
-######################### PARAMETER #################################
-
-
-# def test_parameter_protocol(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-#     og_weights = gpt2.transformer.h[0].mlp.c_proj.weight
-#     og_bias = gpt2.transformer.h[0].mlp.c_proj.bias
-
-#     with gpt2.trace(MSG_prompt):
-#         cl_weights = gpt2.transformer.h[0].mlp.c_proj.weight
-#         cl_bias = gpt2.transformer.h[0].mlp.c_proj.bias
-
-#     assert not (cl_weights is og_weights)
-#     assert not (cl_bias is og_bias)
-
-#     assert torch.equal(og_weights, cl_weights)
-#     assert torch.equal(og_bias, cl_bias)
-
-
-# def test_parameter_protocol_meta(MSG_prompt: str):
-#     model = nnsight.LanguageModel("openai-community/gpt2")
-
-#     with model.trace(MSG_prompt):
-        
-#         weights = model.transformer.h[0].mlp.c_proj.weight
-#         bias = model.transformer.h[0].mlp.c_proj.bias
-
-#     assert weights.device.type != "meta"
-#     assert bias.device.type != "bias"
-
-
-# def test_parameter_protocol_result(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-#     with gpt2.trace(MSG_prompt):
-#         weights = gpt2.transformer.h[0].mlp.c_proj.weight
-#         bias = gpt2.transformer.h[0].mlp.c_proj.bias
-
-#         c_proj_in = gpt2.transformer.h[0].mlp.c_proj.input
-
-#         c_proj_out_2 = torch.addmm(
-#             bias, c_proj_in.view(-1, c_proj_in.size(-1)), weights
-#         )
-
-#         c_proj_out = gpt2.transformer.h[0].mlp.c_proj.output[0]
-
-#     assert torch.equal(c_proj_out_2, c_proj_out)
-
-
-# def test_parameter_protocol_safety(gpt2: nnsight.LanguageModel, MSG_prompt: str):
-#     with gpt2.trace(MSG_prompt):
-#         hs_1 = gpt2.transformer.h[0].mlp.c_proj.output[0]
-
-#     with gpt2.trace(MSG_prompt):
-#         gpt2.transformer.h[0].mlp.c_proj.weight[:] = 0
-
-#     with gpt2.trace(MSG_prompt):
-#         hs_2 = gpt2.transformer.h[0].mlp.c_proj.output[0]
-
-#     assert torch.equal(hs_1, hs_2)
-
-
 def test_undispatched_extra_module(device: str, MSG_prompt: str):
 
     model = nnsight.LanguageModel(
@@ -1330,3 +1271,56 @@ def test_undispatched_extra_module(device: str, MSG_prompt: str):
         output = model.generator.output.save()
 
     output
+
+
+def test_iter_with_streamer1(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+
+
+    with gpt2.generate(MSG_prompt, max_new_tokens=10) as tracer:
+        
+        hs = list()
+        hs.save()
+        
+        strm = list()
+        strm.save()
+        
+        
+        
+        with tracer.iter[2:6]:
+            hs.append(gpt2.transformer.h[-2].output[0])
+            strm.append(gpt2.generator.streamer.output)
+            
+            
+        with tracer.iter[6:8]:
+            hs.append(gpt2.transformer.h[-2].output[0])
+            strm.append(gpt2.generator.streamer.output)
+            
+        
+    assert len(hs) == 6
+    assert len(strm) == 6
+    
+def test_iter_with_streamer2(gpt2: nnsight.LanguageModel, MSG_prompt: str):
+
+
+    with gpt2.generate(MSG_prompt, max_new_tokens=10) as tracer:
+        
+        hs = list()
+        hs.save()
+        
+        strm = list()
+        strm.save()
+        
+        strm.append(gpt2.generator.streamer.output)
+        
+        with tracer.iter[2:6]:
+            hs.append(gpt2.transformer.h[-2].output[0])
+            strm.append(gpt2.generator.streamer.output)
+            
+            
+        with tracer.iter[6:8]:
+            hs.append(gpt2.transformer.h[-2].output[0])
+            strm.append(gpt2.generator.streamer.output)
+            
+        
+    assert len(hs) == 6
+    assert len(strm) == 7

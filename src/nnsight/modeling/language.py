@@ -1,29 +1,28 @@
 from __future__ import annotations
 
-import json
-import os
+
 import warnings
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
-from huggingface_hub import HfApi, constants
-from huggingface_hub.file_download import repo_folder_name
-from torch.nn.modules import Module
-from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM,
-                          AutoTokenizer, BatchEncoding, PretrainedConfig,
-                          PreTrainedModel, PreTrainedTokenizer)
+from transformers import (
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BatchEncoding,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+)
 from transformers.generation.utils import GenerationMixin
-from transformers.models.auto import modeling_auto
-from transformers.models.llama.configuration_llama import LlamaConfig
-from typing_extensions import Self
+
 
 from ..intervention.envoy import Envoy
 from ..intervention.tracing.tracer import InterleavingTracer
 from ..util import WrapperModule
-from .mixins import RemoteableMixin
+from .transformers import TransformersModel
 
 
-class LanguageModel(RemoteableMixin):
+class LanguageModel(TransformersModel):
     """LanguageModels are NNsight wrappers around transformers language models.
 
     Inputs can be in the form of:
@@ -46,8 +45,6 @@ class LanguageModel(RemoteableMixin):
 
     """
 
-    tokenizer: PreTrainedTokenizer
-    
     class Generator(WrapperModule):
 
         class Streamer(WrapperModule):
@@ -67,99 +64,74 @@ class LanguageModel(RemoteableMixin):
     def __init__(
         self,
         *args,
-        config: Optional[PretrainedConfig] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
         automodel: Type[AutoModel] = AutoModelForCausalLM,
-        import_edits:Union[bool, str] = False,
         **kwargs,
     ) -> None:
 
-        self.automodel = (
-            automodel
-            if not isinstance(automodel, str)
-            else getattr(modeling_auto, automodel)
-        )
+        self.tokenizer: PreTrainedTokenizer = tokenizer
 
-        self.config = config
-        self.tokenizer = tokenizer
-        # If the user passed in a pre-loaded model, might be able to get repo id off of it.
-        # That way if they dont provide a tokenizer, we can load it for them later.
-        self.repo_id: str = args[0] if isinstance(args[0], str) else getattr(args[0], 'name_or_path', None)
-        self.revision: str = getattr(args[0], 'revision', 'main')
-        
-        super().__init__(*args, **kwargs)
-    
-        if import_edits:
-            
-            if isinstance(import_edits, str):
-                
-                self.import_edits(variant=import_edits)
-                
-            else:
-            
-                self.import_edits()
-            
+        super().__init__(*args, automodel=automodel, **kwargs)
+
         self.generator: Envoy = LanguageModel.Generator()
-    
+
+    def _load_meta(
+        self,
+        repo_id: str,
+        revision: Optional[str] = None,
+        tokenizer_kwargs: Optional[Dict[str, Any]] = {},
+        **kwargs,
+    ):
+
+        self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
+
+        model = super()._load_meta(repo_id, revision=revision, **kwargs)
+
+        self._patch_generation_config(model)
+
+        return model
+
+    def _load(
+        self,
+        repo_id: str,
+        revision: Optional[str] = None,
+        tokenizer_kwargs: Optional[Dict[str, Any]] = {},
+        **kwargs,
+    ):
+
+        self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
+
+        model = super()._load(repo_id, revision=revision, **kwargs)
+
+        self._patch_generation_config(model)
+
+        return model
+
     # Some transformer models compile on first generation. As of 0.5.0.dev7 this not not work with nnsight if fullgraph is True
-    def _patch_generation_config(self, model:torch.nn.Module):
-        
+    def _patch_generation_config(self, model: torch.nn.Module):
+
         if getattr(model, "generation_config", None) is not None:
-            
-            
+
             warnings.filterwarnings("ignore", message="The CUDA Graph is empty")
-            
+
             generation_config = model.generation_config
-            
+
             compile_config = getattr(generation_config, "compile_config", None)
-            
+
             if compile_config is None:
-                
-                from transformers.generation.configuration_utils import \
-                    CompileConfig
-                
+
+                from transformers.generation.configuration_utils import CompileConfig
+
                 compile_config = CompileConfig()
-                
+
             compile_config.fullgraph = False
             compile_config.dynamic = True
-            
+
             setattr(generation_config, "compile_config", compile_config)
-        
-    def export_edits(self, name:Optional[str] = None, export_dir: Optional[str] = None, variant: str = '__default__'):
-        """TODO
-
-        Args:
-            name (Optional[str], optional): _description_. Defaults to None.
-            export_dir (Optional[str], optional): _description_. Defaults to None.
-            variant (str, optional): _description_. Defaults to '__default__'.
-        """
-        
-        if name is None:
-            name = repo_folder_name(repo_id=self.repo_id, repo_type='model')
-                
-            if export_dir is None:
-                export_dir = os.path.join(constants.HF_HUB_CACHE, name, 'nnsight', 'exports')
-                name = ""       
-            
-        super().export_edits(name, export_dir=export_dir, variant=variant)
-        
-    def import_edits(self, name:Optional[str] = None, export_dir: Optional[str] = None, variant: str = '__default__'):
-        """TODO
-
-        Args:
-            name (Optional[str], optional): _description_. Defaults to None.
-            export_dir (Optional[str], optional): _description_. Defaults to None.
-            variant (str, optional): _description_. Defaults to '__default__'.
-        """
-        
-        if name is None:
-            name = repo_folder_name(repo_id=self.repo_id, repo_type='model')
-                
-            if export_dir is None:
-                export_dir = os.path.join(constants.HF_HUB_CACHE, name, 'nnsight', 'exports')
-                name = ""       
-            
-        super().import_edits(name, export_dir=export_dir, variant=variant)
 
     def __nnsight_generate__(self, *args, **kwargs):
 
@@ -179,12 +151,6 @@ class LanguageModel(RemoteableMixin):
 
         return output
 
-    def _load_config(self, repo_id: str, **kwargs):
-
-        if self.config is None:
-
-            self.config = AutoConfig.from_pretrained(repo_id, **kwargs)
-
     def _load_tokenizer(self, repo_id: str, **kwargs):
 
         if self.tokenizer is None:
@@ -199,68 +165,6 @@ class LanguageModel(RemoteableMixin):
             if getattr(self.tokenizer, "pad_token", None) is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    def _load_meta(
-        self,
-        repo_id: str,
-        revision:Optional[str] = "main",
-        tokenizer_kwargs: Optional[Dict[str, Any]] = {},
-        patch_llama_scan: bool = True,
-        **kwargs,
-    ) -> Module:
-
-        self.repo_id = repo_id
-
-        self.revision = revision
-
-        self._load_config(repo_id, revision=revision, **kwargs)
-
-        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
-
-        if (
-            patch_llama_scan
-            and isinstance(self.config, LlamaConfig)
-            and isinstance(self.config.rope_scaling, dict)
-            and "rope_type" in self.config.rope_scaling
-        ):
-            self.config.rope_scaling["rope_type"] = "default"
-
-        model = self.automodel.from_config(self.config, trust_remote_code=True)
-        
-        self.config = model.config
-        
-        self._patch_generation_config(model)
-
-        return model
-
-    def _load(
-        self,
-        repo_id: str,
-        revision:Optional[str] = "main",
-        tokenizer_kwargs: Optional[Dict[str, Any]] = {},
-        patch_llama_scan: bool = True,
-        **kwargs,
-    ) -> PreTrainedModel:
-
-        self._load_config(repo_id, revision=revision, **kwargs)
-
-        self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
-
-        if (
-            patch_llama_scan
-            and isinstance(self.config, LlamaConfig)
-            and isinstance(self.config.rope_scaling, dict)
-            and "rope_type" in self.config.rope_scaling
-        ):
-            self.config.rope_scaling["rope_type"] = "llama3"
-
-        model = self.automodel.from_pretrained(repo_id, config=self.config, revision=revision, **kwargs)
-        
-        self.config = model.config
-        
-        self._patch_generation_config(model)
-        
-        return model
-
     def _tokenize(
         self,
         inputs: Union[
@@ -274,12 +178,14 @@ class LanguageModel(RemoteableMixin):
         ],
         **kwargs,
     ):
-        
+
         if self.tokenizer is None:
             if self.repo_id is not None:
                 self._load_tokenizer(self.repo_id, **kwargs)
             else:
-                raise AttributeError("Tokenizer not found. If you passed a pre-loaded model to `LanguageModel`, you need to provide a tokenizer when initializing: `LanguageModel(model, tokenizer=tokenizer)`.")
+                raise AttributeError(
+                    "Tokenizer not found. If you passed a pre-loaded model to `LanguageModel`, you need to provide a tokenizer when initializing: `LanguageModel(model, tokenizer=tokenizer)`."
+                )
 
         if isinstance(inputs, str) or (
             isinstance(inputs, list) and isinstance(inputs[0], int)
@@ -390,25 +296,9 @@ class LanguageModel(RemoteableMixin):
             {**new_batched_inputs, **batched_inputs, "labels": batched_labels},
         ), len(prepared_kwargs["input_ids"])
 
+
     def _remoteable_model_key(self) -> str:
-        
-        repo_id = HfApi().model_info(self.repo_id).id
-        
-        return json.dumps(
-            {"repo_id": repo_id, "revision": self.revision}  # , "torch_dtype": str(self._model.dtype)}
-        )
-
-    @classmethod
-    def _remoteable_from_model_key(cls, model_key: str, **kwargs) -> Self:
-
-        kwargs = {**json.loads(model_key), **kwargs}
-
-        repo_id = kwargs.pop("repo_id")
-
-        revision = kwargs.pop("revision", "main")
-
-        return LanguageModel(repo_id, revision=revision, **kwargs)
-
+        return super()._remoteable_model_key()
 
 if TYPE_CHECKING:
 
