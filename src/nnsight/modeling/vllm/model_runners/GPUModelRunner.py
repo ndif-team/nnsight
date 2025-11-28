@@ -74,9 +74,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             for new_req in new_reqs:
 
-                if not isinstance(new_req.sampling_params, NNsightSamplingParams):
-                    continue
-
                 if isinstance(new_req.sampling_params.interleaver, bytes):
 
                     new_req.sampling_params.interleaver = load(
@@ -286,7 +283,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             Globals.exit()
 
-            result = self.requests['0'].sampling_params.interleaver.invokers[0].info.frame
+            result = list(self.requests.values())[0].sampling_params.interleaver.invokers[0].info.frame
 
             result = {key: value for key,
                       value in result.items() if id(value) in Globals.saves}
@@ -295,5 +292,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model._interleaver.invokers = [
             invoker for invoker in self.nnsight_model._interleaver.invokers if invoker.alive]
+
+        self.nnsight_model._interleaver.mediators.clear()
+        self.nnsight_model._interleaver.iteration_tracker.clear()
 
         return result

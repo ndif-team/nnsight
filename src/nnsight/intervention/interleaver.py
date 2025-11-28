@@ -555,7 +555,7 @@ class Mediator:
                 cache.add(
                     provider,
                     self.interleaver.batcher.narrow(
-                        self.batch_group, self.interleaver.batcher.current_value
+                        self.batch_group
                     ),
                 )
                 
