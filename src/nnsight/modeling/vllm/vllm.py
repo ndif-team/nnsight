@@ -1,35 +1,33 @@
 from ... import NNS_VLLM_VERSION
 
-
+import torch
 import vllm 
 
-
-from dataclasses import fields
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Tuple,
                     Union)
 
 from vllm import LLM, envs
-from vllm.config import CompilationConfig
 from vllm.distributed import (destroy_distributed_environment,
-                              destroy_model_parallel, get_world_group,
+                              destroy_model_parallel,
                               init_distributed_environment,
-                              init_model_parallel_group,
-                              initialize_model_parallel, parallel_state)
+                              initialize_model_parallel)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
-from vllm.model_executor.model_loader.utils import get_model_architecture
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 
 from ...intervention.envoy import Envoy
+from ...intervention.tracing.util import push_variables
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
-
+from ...intervention.tracing.globals import Globals
+from .engines.engine import NNsightLLMEngine
 if TYPE_CHECKING:
     from torch.nn import Module
 
     from vllm.transformers_utils.tokenizer import AnyTokenizer
-
+    
+    
 envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
 
 
@@ -63,15 +61,23 @@ class VLLM(RemoteableMixin):
         self.vllm_entrypoint: LLM = None
         self.tokenizer: "AnyTokenizer" = None
 
+        if not torch.distributed.is_initialized():
+
+            init_distributed_environment(
+                1,
+                0,
+                "tcp://127.0.0.1:47303",
+                0,
+                backend="gloo",
+            )
+
+            initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
+
         super().__init__(*args, **kwargs)
 
         self.logits: Envoy = WrapperModule()
         self.samples: Envoy = WrapperModule()
         self.generator: Envoy = WrapperModule()
-
-    def __del__(self):
-        destroy_model_parallel()
-        destroy_distributed_environment()
 
     def _load_meta(self, repo_id: str, **kwargs) -> "Module":
         
@@ -87,42 +93,26 @@ class VLLM(RemoteableMixin):
 
         # creating the vllm engine configuration
         vllm_config = engine_args.create_engine_config()
-        vllm_config_dict = {
-            field.name: getattr(vllm_config, field.name)
-            for field in fields(type(vllm_config))
-        }
 
-        # starting the distributed environment
-        init_distributed_environment(
-            1,
-            0,
-            "tcp://127.0.0.1:47303",
-            0,
-            backend="gloo",
-        )
+        vllm_config.load_config.device = "meta"
 
-        # message queue broadcaster is only used in tensor model parallel group
-        parallel_state._TP = parallel_state._PP = parallel_state._DP = (
-            init_model_parallel_group(
-                [[0]],
-                get_world_group().local_rank,
-                "gloo",
-                use_message_queue_broadcaster=True,
-                group_name="tp",
-            )
-        )
-        # initialize the model
-        vllm_config.compilation_config.level = 1
-        model_class, _ = get_model_architecture(vllm_config.model_config)
-        model =  model_class(vllm_config=vllm_config, prefix="")
-      
-        self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config,
-                                vllm_config.scheduler_config,
-                                vllm_config.lora_config)
+        loader = DummyModelLoader(vllm_config.load_config)
+        loader.load_weights = lambda *args, **kwargs: None
+        model = loader.load_model(vllm_config, vllm_config.model_config)
+
+     
+        # self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config,
+        #                         vllm_config.scheduler_config,
+        #                         vllm_config.lora_config)
 
         return model
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
+
+        meta_model = self._load_meta(repo_id, **kwargs)
+
+        destroy_model_parallel()
+        destroy_distributed_environment()
         
         llm = LLM(
             repo_id,
@@ -131,13 +121,15 @@ class VLLM(RemoteableMixin):
             **kwargs,
         )
                 
+        llm.llm_engine.__class__ = NNsightLLMEngine
+
         self.vllm_entrypoint = llm
 
         # load the tokenizer
 
         self.tokenizer = llm.llm_engine.tokenizer._tokenizer
-        
-        return llm.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model
+
+        return meta_model
 
     def _prepare_input(
         self, *args, **kwargs
@@ -220,9 +212,15 @@ class VLLM(RemoteableMixin):
                 mediator.all_stop = max_max_tokens
         
         output = self.vllm_entrypoint.generate(prompts, sampling_params=params)
-        
-        with self._interleaver:
-            self.generator(output, hook=True)
+
+        saves = output[0].saves
+
+        for value in saves.values():
+
+            Globals.saves.add(id(value))
+
+        push_variables(self._interleaver.invokers[0].info.frame, output[0].saves)
+
         
     def interleave(self, fn: Callable, *args, **kwargs):
         

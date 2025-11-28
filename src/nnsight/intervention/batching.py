@@ -85,7 +85,9 @@ class Batcher:
 
         return (args, kwargs), None
             
-    def narrow(self, batch_group: Union[int, None], data:Any):
+    def narrow(self, batch_group: Union[int, None]):
+
+        data = self.current_value
 
         if not self.needs_batching or batch_group == None:
             return data

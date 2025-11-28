@@ -524,12 +524,10 @@ class Mediator:
         
         while process:
             
-            value = self.interleaver.batcher.current_value
-
             event, data = self.event_queue.get()
 
             if event == Events.VALUE:
-                process = self.handle_value_event(data, provider, value)
+                process = self.handle_value_event(data, provider)
             elif event == Events.SWAP:
                 process = self.handle_swap_event(provider, *data)
             elif event == Events.EXCEPTION:
@@ -584,7 +582,7 @@ class Mediator:
         """
         self.cancel()
 
-    def handle_value_event(self, requester: Any, provider: Any, value: Any):
+    def handle_value_event(self, requester: Any, provider: Any):
         """
         Handle a value event by providing the requested value or recording a missed provider.
 
@@ -599,7 +597,7 @@ class Mediator:
 
         if provider == requester:
 
-            value = self.interleaver.batcher.narrow(self.batch_group, value)
+            value = self.interleaver.batcher.narrow(self.batch_group)
 
             self.respond(value)
         else:
@@ -735,8 +733,14 @@ class Mediator:
         
         state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight") and (v is not self.original_globals.get(k, None))}
         
+        if isinstance(self.info.frame, FrameType):
+        
          # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
-        push_variables(self.info.frame, state)
+            push_variables(self.info.frame, state)
+            
+        else:
+            
+            self.info.frame.update(state)
         
 
     def pull(self):
@@ -745,7 +749,9 @@ class Mediator:
         if self.info.frame is None:
             return
         
-        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight")}
+        state = self.info.frame.f_locals if isinstance(self.info.frame, FrameType) else self.info.frame
+        
+        state = {k: v for k, v in state.items() if not k.startswith("__nnsight")}
         
         for key in {**state}:
             if key in self.frame.f_locals:
