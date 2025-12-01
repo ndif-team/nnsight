@@ -22,6 +22,7 @@ from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
 from ...intervention.tracing.globals import Globals
 from .engines.engine import NNsightLLMEngine
+from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 if TYPE_CHECKING:
     from torch.nn import Module
 
@@ -99,6 +100,8 @@ class VLLM(RemoteableMixin):
         loader = DummyModelLoader(vllm_config.load_config)
         loader.load_weights = lambda *args, **kwargs: None
         model = loader.load_model(vllm_config, vllm_config.model_config)
+
+        _ROPE_DICT.clear()
 
      
         # self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config,
