@@ -35,9 +35,14 @@ class VLLMBatcher(Batcher):
 
             self.parallel = False
             self.gathered = False
+            self.current_module = None
+            self.type = None
+
+            return args, kwargs
 
         def pre_output_hook(module: torch.nn.Module, args: Any, output: Any):
 
+            self.current_module = module
             self.type = 'output'
 
             if isinstance(module, ColumnParallelLinear):
@@ -87,7 +92,8 @@ class VLLMBatcher(Batcher):
             module._module.register_forward_hook(
                 post_output_hook, prepend=False)
 
-    def narrow(self, batch_group: Union[int, None]):
+
+    def check_gathered(self):
 
         if self.parallel and not self.gathered:
 
@@ -111,32 +117,15 @@ class VLLMBatcher(Batcher):
                         self.current_value, lambda x: tensor_model_parallel_all_reduce(x), torch.Tensor)
 
             self.gathered = True
+
+    def narrow(self, batch_group: Union[int, None]):
+
+        self.check_gathered()
 
         return super().narrow(batch_group)
 
     def swap(self, batch_group: Union[int, None], swap_value: Any):
 
-        if self.parallel and not self.gathered:
-
-            if isinstance(self.current_module, ColumnParallelLinear):
-
-                if self.type == 'output':
-
-                    self.current_value = apply(
-                        self.current_value, lambda x: tensor_model_parallel_all_gather(x), torch.Tensor)
-
-            elif isinstance(self.current_module, RowParallelLinear):
-
-                if self.type == 'input':
-
-                    self.current_value = apply(
-                        self.current_value, lambda x: tensor_model_parallel_all_gather(x), torch.Tensor)
-
-                elif self.type == 'output':
-
-                    self.current_value = apply(
-                        self.current_value, lambda x: tensor_model_parallel_all_reduce(x), torch.Tensor)
-
-            self.gathered = True
+        self.check_gathered()
 
         return super().swap(batch_group, swap_value)
