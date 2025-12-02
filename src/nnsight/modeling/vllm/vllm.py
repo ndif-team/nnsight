@@ -6,6 +6,7 @@ import vllm
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Tuple,
                     Union)
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 
 from vllm import LLM, envs
 from vllm.distributed import (destroy_distributed_environment,
@@ -103,10 +104,7 @@ class VLLM(RemoteableMixin):
 
         _ROPE_DICT.clear()
 
-     
-        # self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config,
-        #                         vllm_config.scheduler_config,
-        #                         vllm_config.lora_config)
+        self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config)
 
         return model
 
@@ -127,10 +125,6 @@ class VLLM(RemoteableMixin):
         llm.llm_engine.__class__ = NNsightLLMEngine
 
         self.vllm_entrypoint = llm
-
-        # load the tokenizer
-
-        self.tokenizer = llm.llm_engine.tokenizer._tokenizer
 
         return meta_model
 

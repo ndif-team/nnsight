@@ -2,12 +2,12 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Set
 
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 
 from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from ....intervention.serialization import load
-from ..sampling import NNsightSamplingParams
 from vllm.outputs import RequestOutput
 from nnsight.intervention.tracing.globals import Globals
 from ..batching import VLLMBatcher
@@ -82,6 +82,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 interleaver = new_req.sampling_params.interleaver
 
                 model._interleaver.invokers.extend(interleaver.invokers)
+                model._interleaver.asynchronous = interleaver.asynchronous
                 for invoker in interleaver.invokers:
                     invoker.start(model._interleaver)
 
@@ -216,6 +217,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
         super().load_model(*args, **kwargs)
 
         self.nnsight_model = VLLM(self.model)
+
+        self.nnsight_model.tokenizer = init_tokenizer_from_configs(self.model_config)
 
         self.nnsight_model._interleaver.invokers = []
 
