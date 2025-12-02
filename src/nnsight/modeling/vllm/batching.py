@@ -30,8 +30,8 @@ class VLLMBatcher(Batcher):
 
                 if isinstance(self.current_module, RowParallelLinear):
 
-                    args, kwargs = apply(args, lambda x: split_tensor_along_last_dim(
-                        (args, kwargs), num_partitions=self.current_module.tp_size)[self.current_module.tp_rank].contiguous(), torch.Tensor)
+                    args, kwargs = apply((args, kwargs), lambda x: split_tensor_along_last_dim(
+                        x, num_partitions=self.current_module.tp_size)[self.current_module.tp_rank].contiguous(), torch.Tensor)
 
             self.parallel = False
             self.gathered = False
