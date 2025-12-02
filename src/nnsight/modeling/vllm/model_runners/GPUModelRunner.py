@@ -82,7 +82,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 interleaver = new_req.sampling_params.interleaver
 
                 model._interleaver.invokers.extend(interleaver.invokers)
-                model._interleaver.asynchronous = interleaver.asynchronous
+                
                 for invoker in interleaver.invokers:
                     invoker.start(model._interleaver)
 
