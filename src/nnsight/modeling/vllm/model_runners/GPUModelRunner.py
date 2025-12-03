@@ -270,6 +270,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 **{**state._asdict(), "logits": logits})
 
         Globals.exit()
+        
+        self.nnsight_model._interleaver.invokers = [
+            invoker for invoker in self.nnsight_model._interleaver.invokers if invoker.alive]
 
 
     def _sample(self, *args, **kwargs):
@@ -284,6 +287,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 sampler_output, hook=True)
 
         Globals.exit()
+        
+        self.nnsight_model._interleaver.invokers = [
+            invoker for invoker in self.nnsight_model._interleaver.invokers if invoker.alive]
+        
 
         return sampler_output
         
