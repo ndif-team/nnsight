@@ -1,6 +1,6 @@
 from typing import Callable, TYPE_CHECKING, Any
 
-from ..interleaver import Mediator
+from ..interleaver import AsyncMediator, Mediator
 from .base import Tracer
 from .util import try_catch
 
@@ -46,8 +46,11 @@ class Invoker(Tracer):
         Returns:
             A callable intervention function
         """
+
+        asynchronous = 'async ' if self.asynchronous else ''
+
         self.info.source = [
-            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
+            f"{asynchronous}def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
             "    __nnsight_mediator__.pull()\n",
             *try_catch(
                 self.info.source,
@@ -73,6 +76,8 @@ class Invoker(Tracer):
 
         self.inputs = inputs
 
-        mediator = Mediator(fn, self.info, batch_group=batch_group)
+        mediator_type = AsyncMediator if self.tracer.asynchronous else Mediator
+
+        mediator = mediator_type(fn, self.info, batch_group=batch_group)
 
         self.tracer.mediators.append(mediator)

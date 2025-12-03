@@ -20,7 +20,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver
+from .interleaver import Interleaver, AsyncMediator
 
 
 
@@ -147,11 +147,17 @@ class Envoy(Batchable):
             The module's output values
         """
 
+
         if self.interleaving:
 
-            return self._interleaver.current.request(
-                self._interleaver.iterate_requester(f"{self.path}.output")
-            )
+            requester = self._interleaver.iterate_requester(f"{self.path}.output")
+
+            if self._interleaver.asynchronous:
+                return AsyncProxy(requester, self._interleaver.current)
+            else:
+                return self._interleaver.current.request(
+                    requester
+                )
         elif self._fake_output is not inspect._empty:
             return self._fake_output
         else:
@@ -176,9 +182,14 @@ class Envoy(Batchable):
             value: The new output value to use.
         """
         if self.interleaving:
-            self._interleaver.current.swap(
-                self._interleaver.iterate_requester(f"{self.path}.output"), value
-            )
+
+            if self._interleaver.asynchronous:
+                #TODO Error
+                pass
+            else:
+                self._interleaver.current.swap(
+                    self._interleaver.iterate_requester(f"{self.path}.output"), value
+                )
 
         else:
             raise ValueError("Cannot set output of Envoy that is not interleaving.")
@@ -202,9 +213,15 @@ class Envoy(Batchable):
         """
 
         if self.interleaving:
-            return self._interleaver.current.request(
-                self._interleaver.iterate_requester(f"{self.path}.input")
-            )
+
+            requester = self._interleaver.iterate_requester(f"{self.path}.input")
+
+            if self._interleaver.asynchronous:
+                return AsyncProxy(requester, self._interleaver.current)
+            else:
+                return self._interleaver.current.request(
+                    requester
+                )
         elif self._fake_inputs is not inspect._empty:
             return self._fake_inputs
         else:
@@ -229,9 +246,14 @@ class Envoy(Batchable):
             value: The new input value(s) to use, structured as a tuple of (args, kwargs)
         """
         if self.interleaving:
-            self._interleaver.current.swap(
-                self._interleaver.iterate_requester(f"{self.path}.input"), value
-            )
+
+            if self._interleaver.asynchronous:
+                #TODO Error
+                pass
+            else:
+                self._interleaver.current.swap(
+                    self._interleaver.iterate_requester(f"{self.path}.input"), value
+                )
         else:
             raise ValueError("Cannot set inputs of Envoy that is not interleaving.")
 
@@ -1018,7 +1040,7 @@ class Envoy(Batchable):
             value = getattr(self._module, name)
 
             # It's a method bound to the module, create an interleaver for it
-            if isinstance(
+            if not self._interleaver.interleaving and isinstance(
                 value,
                 (FunctionType, MethodType, BuiltinFunctionType, BuiltinMethodType),
             ):
@@ -1087,6 +1109,35 @@ class Envoy(Batchable):
         
         self.path = state["path"]
         self._default_mediators = state["default_mediators"]
+
+
+class AsyncProxy:
+
+    def __init__(self, requester: str, mediator: AsyncMediator, type: str = "get", value: Any = None):
+        self.requester = requester
+        self.mediator = mediator
+        self.type = type
+        self.value = value
+
+    def __await__(self):
+
+        if self.type == "get":
+            value = yield from self.mediator.request(
+                self.requester
+            )
+        elif self.type == "set":
+            value = yield from self.mediator.swap(
+                self.requester, 
+                self.value
+            )
+
+        return value
+
+    def set(self, value: Any):
+
+        return AsyncProxy(self.requester, self.mediator, "set", value)
+
+
 
 
 
@@ -1168,9 +1219,14 @@ class OperationEnvoy:
             The operation's output value(s)
         """
 
-        return self._interleaver.current.request(
-            self._interleaver.iterate_requester(f"{self.name}.output")
-        )
+        requester = self._interleaver.iterate_requester(f"{self.name}.output")
+
+        if self._interleaver.asynchronous:
+            return AsyncProxy(requester, self._interleaver.current)
+        else:
+            return self._interleaver.current.request(
+                requester
+            )
 
     @output.setter
     def output(self, value: Any) -> None:
@@ -1183,6 +1239,12 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
+
+        if self._interleaver.asynchronous:
+            #TODO Error
+            pass
+
+
         self._interleaver.current.swap(
             self._interleaver.iterate_requester(f"{self.name}.output"), value
         )
@@ -1200,9 +1262,14 @@ class OperationEnvoy:
         Returns:
             The operation's input value(s)
         """
-        return self._interleaver.current.request(
-            self._interleaver.iterate_requester(f"{self.name}.input")
-        )
+        requester = self._interleaver.iterate_requester(f"{self.name}.input")
+
+        if self._interleaver.asynchronous:
+            return AsyncProxy(requester, self._interleaver.current)
+        else:
+            return self._interleaver.current.request(
+                requester
+            )
 
     @inputs.setter
     def inputs(self, value: Any) -> None:
@@ -1215,9 +1282,13 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        self._interleaver.current.swap(
-            self._interleaver.iterate_requester(f"{self.name}.input"), value
-        )
+        if self._interleaver.asynchronous:
+            #TODO Error
+            pass
+        else:
+            self._interleaver.current.swap(
+                self._interleaver.iterate_requester(f"{self.name}.input"), value
+            )
 
     @inputs.deleter
     def inputs(self):
@@ -1275,6 +1346,7 @@ class OperationEnvoy:
         """
 
         if self._source is None:
+            # TODO does not work with async
             fn = self._interleaver.current.request(f"{self.name}.fn")
 
             # TODO maybe do something else here

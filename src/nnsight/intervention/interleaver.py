@@ -81,6 +81,7 @@ class Interleaver:
         tracer: InterleavingTracer,
         batcher: Batcher = None,
         user_cache: Optional[Cache] = None,
+        asynchronous: bool = False,
     ):
 
         self.invokers = invokers
@@ -91,6 +92,10 @@ class Interleaver:
         self.mediators: Dict[str, Mediator] = {}
         self.iteration_tracker = defaultdict(int)
         self.default_all = None
+
+        self._current = None
+
+        self.asynchronous = asynchronous
         
     def cancel(self):
         """Cancel all intervention threads."""
@@ -103,6 +108,8 @@ class Interleaver:
         self.batcher = None
         self.user_cache = None
         self.invokers = None
+
+        self._current = None
 
 
     def iterate_provider(self, provider: str):
@@ -396,14 +403,17 @@ class Interleaver:
     @property
     def current(self) -> Mediator:
         """Get the current mediator."""
-        return self.mediators[threading.current_thread().name]
+
+        if self.asynchronous:
+            return self._current
+        else:
+            return self.mediators[threading.current_thread().name]
 
     ### Serialization ###
 
     def __deepcopy__(self, memo):
 
         return self
-
 
 class Mediator:
     """
@@ -446,7 +456,7 @@ class Mediator:
         self.event_queue = SimpleQueue()
         self.response_queue = SimpleQueue()
         
-        self.thread = None
+        self.worker = None
         self.interleaver = None
         self.history = set()
         self.user_cache: List["Cache"] = list()
@@ -459,7 +469,10 @@ class Mediator:
 
     @property
     def alive(self):
-        return self.thread is not None and self.thread.is_alive()
+        if self.interleaver.asynchronous:
+            return self.worker is not None
+        else:
+            return self.worker is not None and self.worker.is_alive()
 
     def start(self, interleaver: Interleaver):
         """
@@ -473,17 +486,19 @@ class Mediator:
         self.interleaver.mediators[self.name] = self
         
         self.original_globals = self.intervention.__globals__.copy()
+
         if not self.alive:
 
-            self.thread = Thread(
+            self.worker = Thread(
                 target=self.intervention,
                 args=(self, self.info, *self.args),
                 daemon=True,
                 name=self.name,
             )
-            self.thread.start()
+            self.worker.start()
 
             self.wait()
+
 
     ### Provider Methods ###
 
@@ -499,7 +514,7 @@ class Mediator:
 
         self.history.clear()
 
-        self.thread = None
+        self.worker = None
 
         if self.alive:
             # TODO: cancel inactive threads at the end of the model's execution
@@ -772,13 +787,17 @@ class Mediator:
         Returns:
             The response from the provider
         """
-        self.push()
+
+        # TODO find a way to only push if there are multiple invokers AND they share the same parent frame
+        if len(self.interleaver.invokers) > 1:
+            self.push()
 
         self.event_queue.put((event, requester))
 
         response = self.response_queue.get()
 
-        self.pull()
+        if len(self.interleaver.invokers) > 1:
+            self.pull()
 
         if isinstance(response, Exception):
             raise response
@@ -873,10 +892,112 @@ class Mediator:
         self.event_queue = SimpleQueue()
         self.response_queue = SimpleQueue()
 
-        self.thread = None
+        self.worker = None
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()
         self.iteration = 0
         self.args = list()
         self.original_globals = {}
+
+
+class AsyncMediator(Mediator):
+    """
+    Mediates between the model execution and intervention functions asynchronously.
+    """
+
+    def start(self, interleaver: Interleaver):
+        """
+        Start the mediator's intervention thread.
+
+        Args:
+            interleaver: The interleaver managing this mediator
+        """
+        self.interleaver = interleaver
+
+        self.interleaver.mediators[self.name] = self
+        
+        self.original_globals = self.intervention.__globals__.copy()
+
+        if not self.alive:
+
+            self.worker = self.intervention(self, self.info, *self.args)
+
+            self.interleaver._current = self
+
+            self.respond()
+            
+
+    def respond(self, value: Optional[Any] = None):
+        """
+        Set the value for a pending value request.
+
+        Args:
+            value: The value to provide
+        """
+
+        try:
+
+            self.event_queue.put(self.worker.send(value))
+
+        except StopIteration:
+            pass
+
+
+    def send(self, event: Events, requester: Any):
+        """
+        Send an event to the event queue and wait for a response.
+
+        Args:
+            event: The event to send
+            requester: The identifier of the requester
+
+        Returns:
+            The response from the provider
+        """
+        self.push()
+
+        response = yield (event, requester)
+
+        self.interleaver._current = self
+
+        self.pull()
+
+        if isinstance(response, Exception):
+            raise response
+
+        return response
+
+    def request(self, requester: Any):
+        """
+        Request a value from a specific provider.
+
+        Args:
+            requester: The identifier of the provider to request a value from
+
+        Returns:
+            The requested value
+        """
+
+        value = yield from self.send(Events.VALUE, requester)
+
+        return value
+
+    def swap(self, requester: Any, value: Any):
+        """
+        Set a value to swap during execution.
+
+        Args:
+            requester: The identifier of the requester
+            value: The value to swap in
+        """
+
+        response = yield  from self.send(Events.SWAP, (requester, value))
+
+        return response
+
+    def skip(self, requester: Any, value: Any):
+
+        response = yield from self.send(Events.SKIP, (requester, value))
+
+        return response

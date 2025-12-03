@@ -16,6 +16,7 @@ class ApiConfigModel(BaseModel):
 
 class AppConfigModel(BaseModel):
     REMOTE_LOGGING: bool = True
+    PYMOUNT: bool = True
     DEBUG: bool = True
     CACHE_DIR:str = '~/.cache/nnsight/'
 

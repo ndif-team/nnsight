@@ -1,5 +1,6 @@
 import ast
 import inspect
+import sys
 import textwrap
 from builtins import compile, exec
 from collections import defaultdict
@@ -7,49 +8,62 @@ from typing import Callable
 
 import astor
 
+# Use ast.unparse if available (Python 3.9+), otherwise fall back to astor
+if sys.version_info >= (3, 9):
+    _ast_to_source = ast.unparse
+else:
+    _ast_to_source = astor.to_source
+
 
 class FunctionCallWrapper(ast.NodeTransformer):
     
     def __init__(self, name:str):
-        
         self.name_index = defaultdict(int)
         self.line_numbers = {}
         self.name = name
+        # Cache the name prefix to avoid repeated string operations
+        self._name_prefix = f'{name}.'
         
-    def get_name(self, node:ast.Name):
-        
-        func_name = None
-        if isinstance(node.func, ast.Name):
+    def get_name(self, node:ast.Call):
+        """Extract and index function name from a Call node."""
+        func = node.func
+        if isinstance(func, ast.Name):
             # Simple function call like foo()
-            func_name = node.func.id
-        elif isinstance(node.func, ast.Attribute):
+            func_name = func.id
+        elif isinstance(func, ast.Attribute):
             # Method call like obj.method() or module.submodule.func()
+            # Build parts in reverse order to avoid reversing later
             parts = []
-            current = node.func
+            current = func
             while isinstance(current, ast.Attribute):
                 parts.append(current.attr)
                 current = current.value
             if isinstance(current, ast.Name):
                 parts.append(current.id)
-            # Reverse to get the correct order (e.g., torch.nn.functional)
+            # Join in reverse order (most specific to least specific)
             func_name = "_".join(reversed(parts))
+        else:
+            # Fallback for other call types
+            func_name = "unknown"
             
-        name = f'{func_name}_{self.name_index[func_name]}'
-        
-        self.name_index[func_name] += 1
-        
-        return name
+        index = self.name_index[func_name]
+        self.name_index[func_name] = index + 1
+        return f'{func_name}_{index}'
   
     def visit_Call(self, node):
         self.generic_visit(node)  # First, process nested calls
         # Get the fully qualified name of the function being called
         func_name = self.get_name(node)
         self.line_numbers[func_name] = node.lineno - 2
+        
+        # Build the wrapped call name string using cached prefix
+        wrapped_name = f'{self._name_prefix}{func_name}'
+        
         return ast.Call(
             func=ast.Call(
                 func=ast.Name(id='wrap', ctx=ast.Load()),
                 args=[node.func],
-                keywords=[ast.keyword(arg='name', value=ast.Constant(value=f'{self.name}.{func_name}'))]
+                keywords=[ast.keyword(arg='name', value=ast.Constant(value=wrapped_name))]
             ),
             args=node.args,
             keywords=node.keywords
@@ -73,11 +87,20 @@ def convert(fn:Callable, wrap:Callable, name:str):
     local_namespace = {'wrap': wrap}
     
     # Include both globals from this module and the module where forward is defined
-    global_namespace = {**globals(), **module_globals, 'wrap': wrap}
+    # Optimize: avoid creating intermediate dicts when possible
+    global_namespace = globals().copy()
+    global_namespace.update(module_globals)
+    global_namespace['wrap'] = wrap
     
     filename = "<nnsight>"
     
-    code_obj = compile(astor.to_source(tree), filename, 'exec')
+    # Compile directly from AST (Python 3.8+), which is faster than converting to source first
+    # However, compile() with AST requires mode='exec' and the AST must be a Module node
+    if isinstance(tree, ast.Module):
+        code_obj = compile(tree, filename, 'exec')
+    else:
+        # Fallback: convert to source if tree structure is unexpected
+        code_obj = compile(_ast_to_source(tree), filename, 'exec')
     
     exec(code_obj, global_namespace, local_namespace)
             

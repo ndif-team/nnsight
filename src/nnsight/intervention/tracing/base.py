@@ -161,7 +161,7 @@ class Tracer:
 
     # === Initialization ===
     
-    def __init__(self, *args, backend: Backend = None, _info: Info = None, **kwargs):
+    def __init__(self, *args, backend: Backend = None, _info: Info = None, asynchronous: bool = False, **kwargs):
         """
         Initialize a Tracer instance.
 
@@ -179,6 +179,8 @@ class Tracer:
 
         # Set up the execution backend (defaults to direct execution)
         self.backend = ExecutionBackend() if backend is None else backend
+
+        self.asynchronous = asynchronous
 
         # Initialize or use provided tracing info
         self.info = _info if _info is not None else None
@@ -325,7 +327,7 @@ class Tracer:
         tree = ast.parse("".join(source_lines))
 
         class WithBlockVisitor(ast.NodeVisitor):
-            """AST visitor to find the 'with' node at the specified line."""
+            """AST visitor to find the 'with' or 'async with' node at the specified line."""
 
             def __init__(self, target_line_no):
                 self.target = None
@@ -334,6 +336,17 @@ class Tracer:
             def visit_With(self, node):
                 """Visit with statement nodes and check if they match our target line."""
                 # Check each context expression in the with statement
+                for item_node in node.items:
+                    if item_node.context_expr.lineno == self.line_no:
+                        self.target = node
+                        return
+                
+                # Continue visiting child nodes if this isn't the target
+                self.generic_visit(node)
+
+            def visit_AsyncWith(self, node):
+                """Visit async with statement nodes and check if they match our target line."""
+                # Check each context expression in the async with statement
                 for item_node in node.items:
                     if item_node.context_expr.lineno == self.line_no:
                         self.target = node
@@ -606,6 +619,18 @@ class Tracer:
         self.backend(self)
         
         # Return None to allow other exceptions to propagate normally
+
+
+    async def __aenter__(self):
+
+        self.asynchronous = True
+
+        #TODO maybe make seperate async versions that await an async backend?
+        return self.__enter__()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+
+        return self.__exit__(exc_type, exc_val, exc_tb)
 
     # === Serialization Methods ===
     

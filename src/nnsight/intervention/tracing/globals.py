@@ -4,7 +4,13 @@ import torch
 from typing_extensions import Self
 from ... import deprecated
 from ..._c.py_mount import mount, unmount
+from ... import CONFIG
 
+def save(object: Any):
+
+    Globals.saves.add(id(object))
+
+    return object
 
 class Object(torch.Tensor):
 
@@ -20,7 +26,7 @@ class Object(torch.Tensor):
         >>> print(attn_0)
         """
 
-        Globals.saves.add(id(self))
+        save(self)
 
         return self
     
@@ -56,7 +62,7 @@ class Globals:
 
     @staticmethod
     def enter():
-        if Globals.stack == 0:
+        if CONFIG.APP.PYMOUNT and Globals.stack == 0:
             mount(Object.save, "save")
             mount(Object.stop, "stop")
         Globals.stack += 1
@@ -64,6 +70,6 @@ class Globals:
     @staticmethod
     def exit():
         Globals.stack -= 1
-        if Globals.stack == 0:
+        if CONFIG.APP.PYMOUNT and Globals.stack == 0:
             unmount("save")
             unmount("stop")

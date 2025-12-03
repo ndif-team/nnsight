@@ -382,7 +382,8 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_kwargs = {}
         
         interleaver = self.model._interleaver
-        interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
+
+        interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache, asynchronous=self.asynchronous)
 
         try:
 
@@ -410,7 +411,7 @@ class InterleavingTracer(Tracer):
             An Invoker instance
         """
         # TODO make sure not already executing
-        return Invoker(self, *args, **kwargs)
+        return Invoker(self, *args, asynchronous=self.asynchronous, **kwargs)
 
     def stop(self):
         """
