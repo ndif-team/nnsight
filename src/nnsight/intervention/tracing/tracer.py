@@ -627,7 +627,9 @@ class Barrier:
         self.participants: Set[str] = set()
         
     def __call__(self):
-        
+
+        if self.model._interleaver.asynchronous:
+            return self
         
         mediator = self.model._interleaver.current
         
@@ -639,3 +641,18 @@ class Barrier:
             mediator.send(Events.BARRIER, participants)
         else:
             mediator.send(Events.BARRIER, None)
+
+
+    def __await__(self):
+
+        mediator = self.model._interleaver.current
+        
+        self.participants.add(mediator.name)
+         
+        if len(self.participants) == self.n_participants:
+            participants = self.participants
+            self.participants = set()
+            yield from mediator.send(Events.BARRIER, participants)
+        else:
+            yield from mediator.send(Events.BARRIER, None)
+

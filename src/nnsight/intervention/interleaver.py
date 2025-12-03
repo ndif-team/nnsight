@@ -906,6 +906,24 @@ class AsyncMediator(Mediator):
     Mediates between the model execution and intervention functions asynchronously.
     """
 
+        
+    class Future:
+
+        def __init__(self, event: Events, requester: str, mediator: AsyncMediator):
+            self.event = event
+            self.requester = requester
+            self.mediator = mediator
+
+        def __await__(self):
+
+            value = yield from self.mediator.send(self.event, self.requester)
+
+            return value
+
+        def set(self, value: Any):
+
+            return AsyncMediator.Future(Events.SWAP, (self.requester, value), self.mediator)
+
     def start(self, interleaver: Interleaver):
         """
         Start the mediator's intervention thread.
@@ -979,9 +997,7 @@ class AsyncMediator(Mediator):
             The requested value
         """
 
-        value = yield from self.send(Events.VALUE, requester)
-
-        return value
+        return AsyncMediator.Future(Events.VALUE, requester, self)
 
     def swap(self, requester: Any, value: Any):
         """
@@ -992,12 +1008,8 @@ class AsyncMediator(Mediator):
             value: The value to swap in
         """
 
-        response = yield  from self.send(Events.SWAP, (requester, value))
-
-        return response
+        raise ValueError("Cannot set an attribute in asynchronous mode. Call .set() instead like: `await my_envoy.output.set(value)`")
 
     def skip(self, requester: Any, value: Any):
 
-        response = yield from self.send(Events.SKIP, (requester, value))
-
-        return response
+        return AsyncMediator.Future(Events.SKIP, (requester, value), self)

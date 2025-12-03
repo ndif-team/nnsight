@@ -20,8 +20,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver, AsyncMediator
-
+from .interleaver import Interleaver
 
 
 def trace_only(fn: Callable):
@@ -30,7 +29,8 @@ def trace_only(fn: Callable):
     def wrapper(self: Envoy, *args, **kwargs):
 
         if self._interleaver is None:
-            raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
+            raise ValueError(
+                f"Must be within a trace to use `.{fn.__name__}(...)`")
 
         return fn(self, *args, **kwargs)
 
@@ -147,17 +147,10 @@ class Envoy(Batchable):
             The module's output values
         """
 
-
         if self.interleaving:
-
-            requester = self._interleaver.iterate_requester(f"{self.path}.output")
-
-            if self._interleaver.asynchronous:
-                return AsyncProxy(requester, self._interleaver.current)
-            else:
-                return self._interleaver.current.request(
-                    requester
-                )
+            return self._interleaver.current.request(
+                self._interleaver.iterate_requester(f"{self.path}.output")
+            )
         elif self._fake_output is not inspect._empty:
             return self._fake_output
         else:
@@ -183,16 +176,14 @@ class Envoy(Batchable):
         """
         if self.interleaving:
 
-            if self._interleaver.asynchronous:
-                #TODO Error
-                pass
-            else:
-                self._interleaver.current.swap(
-                    self._interleaver.iterate_requester(f"{self.path}.output"), value
-                )
+            self._interleaver.current.swap(
+                self._interleaver.iterate_requester(
+                    f"{self.path}.output"), value
+            )
 
         else:
-            raise ValueError("Cannot set output of Envoy that is not interleaving.")
+            raise ValueError(
+                "Cannot set output of Envoy that is not interleaving.")
 
     @property
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
@@ -214,14 +205,9 @@ class Envoy(Batchable):
 
         if self.interleaving:
 
-            requester = self._interleaver.iterate_requester(f"{self.path}.input")
-
-            if self._interleaver.asynchronous:
-                return AsyncProxy(requester, self._interleaver.current)
-            else:
-                return self._interleaver.current.request(
-                    requester
-                )
+            return self._interleaver.current.request(
+                self._interleaver.iterate_requester(f"{self.path}.input")
+            )
         elif self._fake_inputs is not inspect._empty:
             return self._fake_inputs
         else:
@@ -247,15 +233,13 @@ class Envoy(Batchable):
         """
         if self.interleaving:
 
-            if self._interleaver.asynchronous:
-                #TODO Error
-                pass
-            else:
-                self._interleaver.current.swap(
-                    self._interleaver.iterate_requester(f"{self.path}.input"), value
-                )
+            self._interleaver.current.swap(
+                self._interleaver.iterate_requester(
+                    f"{self.path}.input"), value
+            )
         else:
-            raise ValueError("Cannot set inputs of Envoy that is not interleaving.")
+            raise ValueError(
+                "Cannot set inputs of Envoy that is not interleaving.")
 
     @property
     def input(self) -> Object:
@@ -395,7 +379,8 @@ class Envoy(Batchable):
             )
             self._module.forward = MethodType(forward, self._module)
 
-            self._source = EnvoySource(self._module.__path__, source, line_numbers, interleaver=self._interleaver)
+            self._source = EnvoySource(
+                self._module.__path__, source, line_numbers, interleaver=self._interleaver)
 
         return self._source
 
@@ -540,11 +525,12 @@ class Envoy(Batchable):
         export_dir = os.path.expanduser(os.path.join(export_dir, name))
 
         os.makedirs(export_dir, exist_ok=True)
-        
+
         from . import serialization
 
         serialization.save(
-            self._default_mediators, os.path.join(export_dir, f"{variant}.dill")
+            self._default_mediators, os.path.join(
+                export_dir, f"{variant}.dill")
         )
 
     def import_edits(
@@ -563,7 +549,7 @@ class Envoy(Batchable):
             export_dir = os.path.join(CONFIG.APP.CACHE_DIR, "exports")
 
         export_dir = os.path.expanduser(os.path.join(export_dir, name))
-        
+
         from . import serialization
 
         imported_mediators = serialization.load(
@@ -588,12 +574,12 @@ class Envoy(Batchable):
     @trace_only
     def all(self):
         return self.iter[:]
-    
+
     @deprecated(message="Use `tracer.next()` instead.")
     @trace_only
     def next(self, step: int = 1):
         self._interleaver.current.iteration += step
-        
+
         return self
 
     @trace_only
@@ -613,9 +599,7 @@ class Envoy(Batchable):
             replacement (Any): The replacement value to replace the module's output with.
         """
 
-        requester = self._interleaver.iterate_requester(f"{self.path}.input")
-
-        self._interleaver.current.skip(requester, replacement)
+        return self._interleaver.current.skip(self._interleaver.iterate_requester(f"{self.path}.input"), replacement)
 
     @trace_only
     def wait_for_input(self):
@@ -746,19 +730,19 @@ class Envoy(Batchable):
         (args, kwargs) = apply(
             (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
         )
-        
+
         if isinstance(fn, str):
             fn = getattr(self, fn)
 
         try:
             with self._interleaver:
                 result = fn(*args, **kwargs)
-                
+
                 self._interleaver.handle("result", result)
-                
+
             self._interleaver.check_cache_full()
             self._interleaver.check_dangling_mediators()
-            
+
         finally:
             self._interleaver.cancel()
 
@@ -858,7 +842,7 @@ class Envoy(Batchable):
             self._children[i]._update(child)
 
         # Handle extra modules added after initialization: issues/376
-        for name, child in list(self._module.named_children())[i + 1 :]:
+        for name, child in list(self._module.named_children())[i + 1:]:
 
             setattr(module, name, child)
 
@@ -898,8 +882,6 @@ class Envoy(Batchable):
 
             for envoy in self._children:
                 envoy._update_alias(alias)
-
-
 
     def _shallow_copy(self) -> Envoy:
         """Creates a new instance copy of the same class with the all the attributes of the original instance.
@@ -1064,7 +1046,7 @@ class Envoy(Batchable):
                 # https://github.com/ndif-team/nnsight/issues/479
                 # This happened because some transformers models set this class attr: _checkpoint_conversion_mapping
                 if hasattr(value, "__path__"):
-                    return util.fetch_attr(self, value.__path__[len(self.path) :])
+                    return util.fetch_attr(self, value.__path__[len(self.path):])
                 return self._add_envoy(value, name)
             else:
                 return value
@@ -1086,7 +1068,7 @@ class Envoy(Batchable):
             self._add_envoy(value, key)
         else:
             super().__setattr__(key, value)
-            
+
     def __getstate__(self):
         return {
             "alias": self._alias,
@@ -1096,49 +1078,19 @@ class Envoy(Batchable):
             "default_mediators": self._default_mediators,
 
         }
-    
+
     def __setstate__(self, state):
         self._module = None
         self._source = None
         self.fake_inputs = None
         self.fake_output = None
-        
+
         self._alias = state["alias"]
         self._children = state["children"]
         self.__dict__.update(state["named_children"])
-        
+
         self.path = state["path"]
         self._default_mediators = state["default_mediators"]
-
-
-class AsyncProxy:
-
-    def __init__(self, requester: str, mediator: AsyncMediator, type: str = "get", value: Any = None):
-        self.requester = requester
-        self.mediator = mediator
-        self.type = type
-        self.value = value
-
-    def __await__(self):
-
-        if self.type == "get":
-            value = yield from self.mediator.request(
-                self.requester
-            )
-        elif self.type == "set":
-            value = yield from self.mediator.swap(
-                self.requester, 
-                self.value
-            )
-
-        return value
-
-    def set(self, value: Any):
-
-        return AsyncProxy(self.requester, self.mediator, "set", value)
-
-
-
 
 
 # TODO extend Envoy
@@ -1219,14 +1171,9 @@ class OperationEnvoy:
             The operation's output value(s)
         """
 
-        requester = self._interleaver.iterate_requester(f"{self.name}.output")
-
-        if self._interleaver.asynchronous:
-            return AsyncProxy(requester, self._interleaver.current)
-        else:
-            return self._interleaver.current.request(
-                requester
-            )
+        return self._interleaver.current.request(
+            self._interleaver.iterate_requester(f"{self.name}.output")
+        )
 
     @output.setter
     def output(self, value: Any) -> None:
@@ -1239,11 +1186,6 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
-
-        if self._interleaver.asynchronous:
-            #TODO Error
-            pass
-
 
         self._interleaver.current.swap(
             self._interleaver.iterate_requester(f"{self.name}.output"), value
@@ -1262,14 +1204,9 @@ class OperationEnvoy:
         Returns:
             The operation's input value(s)
         """
-        requester = self._interleaver.iterate_requester(f"{self.name}.input")
-
-        if self._interleaver.asynchronous:
-            return AsyncProxy(requester, self._interleaver.current)
-        else:
-            return self._interleaver.current.request(
-                requester
-            )
+        return self._interleaver.current.request(
+            self._interleaver.iterate_requester(f"{self.name}.input")
+        )
 
     @inputs.setter
     def inputs(self, value: Any) -> None:
@@ -1282,13 +1219,9 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        if self._interleaver.asynchronous:
-            #TODO Error
-            pass
-        else:
-            self._interleaver.current.swap(
-                self._interleaver.iterate_requester(f"{self.name}.input"), value
-            )
+        self._interleaver.current.swap(
+            self._interleaver.iterate_requester(f"{self.name}.input"), value
+        )
 
     @inputs.deleter
     def inputs(self):
@@ -1483,14 +1416,13 @@ class EnvoySource:
                         )
             else:
                 # Regular line with no operations
-                line_prefix = " " * (max_name_length + 4) + f"{line_number:3d} "
+                line_prefix = " " * (max_name_length + 4) + \
+                    f"{line_number:3d} "
                 formatted_lines.append(f"{line_prefix}{line}")
 
         source = "\n".join(formatted_lines)
 
         return source
-
-
 
     def __getattribute__(self, name: str) -> Union[OperationEnvoy]:
 
