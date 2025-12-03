@@ -271,6 +271,23 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.exit()
 
+
+    def _sample(self, *args, **kwargs):
+
+        Globals.enter()
+
+        with self.nnsight_model._interleaver:
+
+            sampler_output = super()._sample(*args, **kwargs)
+
+            sampler_output = self.model.samples(
+                sampler_output, hook=True)
+
+        Globals.exit()
+
+        return sampler_output
+        
+
     def finish_nnsight(self, finished_requests: list[RequestOutput]) -> ModelRunnerOutput:
 
         result = None
