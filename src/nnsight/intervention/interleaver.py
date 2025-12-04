@@ -909,20 +909,20 @@ class AsyncMediator(Mediator):
         
     class Future:
 
-        def __init__(self, event: Events, requester: str, mediator: AsyncMediator):
+        def __init__(self, event: Events, requester: str, mediator: "AsyncMediator"):
             self.event = event
             self.requester = requester
             self.mediator = mediator
 
         def __await__(self):
-
             value = yield from self.mediator.send(self.event, self.requester)
-
             return value
 
         def set(self, value: Any):
-
             return AsyncMediator.Future(Events.SWAP, (self.requester, value), self.mediator)
+
+        def __getstate__(self):
+            raise RuntimeError("Cannot pickle an AsyncFuture object. Did you forget to await a future before attempting to serialize it?")
 
     def start(self, interleaver: Interleaver):
         """

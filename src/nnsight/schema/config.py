@@ -19,6 +19,7 @@ class AppConfigModel(BaseModel):
     PYMOUNT: bool = True
     DEBUG: bool = True
     CACHE_DIR:str = '~/.cache/nnsight/'
+    DEFAULT_MODE: str = 'threading'
 
 
     def __setattr__(self, name, value):

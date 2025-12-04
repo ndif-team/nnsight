@@ -161,7 +161,7 @@ class Tracer:
 
     # === Initialization ===
     
-    def __init__(self, *args, backend: Backend = None, _info: Info = None, asynchronous: bool = False, **kwargs):
+    def __init__(self, *args, backend: Backend = None, _info: Info = None, **kwargs):
         """
         Initialize a Tracer instance.
 
@@ -180,10 +180,10 @@ class Tracer:
         # Set up the execution backend (defaults to direct execution)
         self.backend = ExecutionBackend() if backend is None else backend
 
-        self.asynchronous = asynchronous
-
         # Initialize or use provided tracing info
         self.info = _info if _info is not None else None
+
+        self.asynchronous = False
 
         # If no pre-existing info, attempt to capture the code block
         if self.info is None:
@@ -609,28 +609,33 @@ class Tracer:
         if exc_type is ExitTracingException:
             # This is the expected case - the traced code was intercepted
             # Execute the captured code using the configured backend
+            if self.asynchronous:
+                return self.backend(self)
+
             self.backend(self)
-            
-            # Return True to suppress the ExitTracingException
+
             return True
 
         # For any other case (no exception or different exception), 
         # still execute the backend (handles edge cases)
-        self.backend(self)
+        return self.backend(self)
         
         # Return None to allow other exceptions to propagate normally
 
 
     async def __aenter__(self):
 
+        print("aenter")
+
         self.asynchronous = True
 
-        #TODO maybe make seperate async versions that await an async backend?
         return self.__enter__()
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
 
-        return self.__exit__(exc_type, exc_val, exc_tb)
+        await self.__exit__(exc_type, exc_val, exc_tb)
+
+        return True
 
     # === Serialization Methods ===
     

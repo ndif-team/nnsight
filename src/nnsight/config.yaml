@@ -8,3 +8,4 @@ APP:
   DEBUG: false
   REMOTE_LOGGING: true
   PYMOUNT: true
+  DEFAULT_MODE: threading

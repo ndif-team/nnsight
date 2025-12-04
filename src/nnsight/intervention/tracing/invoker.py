@@ -19,7 +19,7 @@ class Invoker(Tracer):
     that can be executed by the Interleaver.
     """
 
-    def __init__(self, tracer: InterleavingTracer, *args, **kwargs):
+    def __init__(self, tracer: InterleavingTracer, *args, mode: str = 'threading', **kwargs):
         """
         Initialize an Invoker with a reference to the parent tracer.
 
@@ -34,6 +34,8 @@ class Invoker(Tracer):
         
         self.tracer = tracer
 
+        self.mode = mode
+
         super().__init__(*args, **kwargs)
 
     def compile(self):
@@ -47,7 +49,7 @@ class Invoker(Tracer):
             A callable intervention function
         """
 
-        asynchronous = 'async ' if self.asynchronous else ''
+        asynchronous = 'async ' if self.mode == 'async' else ''
 
         self.info.source = [
             f"{asynchronous}def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
@@ -76,7 +78,7 @@ class Invoker(Tracer):
 
         self.inputs = inputs
 
-        mediator_type = AsyncMediator if self.tracer.asynchronous else Mediator
+        mediator_type = AsyncMediator if self.tracer.mode == 'async' else Mediator
 
         mediator = mediator_type(fn, self.info, batch_group=batch_group)
 

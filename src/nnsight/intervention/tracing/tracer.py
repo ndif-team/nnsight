@@ -9,7 +9,7 @@ import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-from ... import util
+from ... import util, CONFIG
 from ..backends.base import Backend
 from ..batching import Batcher
 from ..interleaver import Events, Mediator
@@ -271,7 +271,7 @@ class InterleavingTracer(Tracer):
     """
 
     def __init__(
-        self, fn: Callable, model: Envoy, *args, backend: Backend = None, **kwargs
+        self, fn: Callable, model: Envoy, *args, backend: Backend = None, mode: str = None, **kwargs
     ):
         """
         Initialize an InterleavingTracer with a function and model.
@@ -293,6 +293,11 @@ class InterleavingTracer(Tracer):
         self.user_cache: List[Cache] = list()
         
         self._frame = None
+
+        self.mode = mode if mode is not None else CONFIG.APP.DEFAULT_MODE
+
+        if self.mode not in {'async', 'threading'}:
+            raise ValueError(f"Invalid mode tracing '{self.mode}'. Mode must be either 'async' or 'threading'.")
 
         super().__init__(*args, **kwargs, backend=backend)
             
@@ -383,8 +388,7 @@ class InterleavingTracer(Tracer):
         
         interleaver = self.model._interleaver
 
-        interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache, asynchronous=self.asynchronous)
-
+        interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache, asynchronous=self.mode == 'async')
         try:
 
             self.model.interleave(self.fn, *args, **kwargs)
@@ -411,7 +415,7 @@ class InterleavingTracer(Tracer):
             An Invoker instance
         """
         # TODO make sure not already executing
-        return Invoker(self, *args, asynchronous=self.asynchronous, **kwargs)
+        return Invoker(self, *args, mode=self.mode, **kwargs)
 
     def stop(self):
         """
@@ -540,6 +544,7 @@ class InterleavingTracer(Tracer):
         state["tracer_var_name"] = self.tracer_var_name
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
+        state["mode"] = self.mode
 
         return state
 
@@ -554,6 +559,7 @@ class InterleavingTracer(Tracer):
         self.batcher = state["batcher"]
         self.obj_var_name = None
         self.user_cache = list()
+        self.mode = state["mode"]
 
 class ScanningTracer(InterleavingTracer):
     """
