@@ -18,9 +18,7 @@ class AppConfigModel(BaseModel):
     REMOTE_LOGGING: bool = True
     PYMOUNT: bool = True
     DEBUG: bool = True
-    CACHE_DIR:str = '~/.cache/nnsight/'
-    DEFAULT_MODE: str = 'threading'
-
+    CACHE_DIR: str = "~/.cache/nnsight/"
 
     def __setattr__(self, name, value):
         if name == "REMOTE_LOGGING":
@@ -29,7 +27,7 @@ class AppConfigModel(BaseModel):
 
     def on_remote_logging_change(self, value: bool):
         if value != self.REMOTE_LOGGING:
-            remote_logger.disabled = (not value)
+            remote_logger.disabled = not value
         self.__dict__["REMOTE_LOGGING"] = value
 
 

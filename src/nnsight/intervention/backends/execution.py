@@ -16,9 +16,23 @@ class ExecutionBackend(Backend):
 
         fn = super().__call__(tracer)
 
+        if tracer.asynchronous:
+
+            async def async_call():
+
+                try:
+                    Globals.enter()
+                    return await tracer.execute(fn)
+                except Exception as e:
+                    raise wrap_exception(e, tracer.info) from None
+                finally:
+                    Globals.exit()
+
+            return async_call()
+
         try:
             Globals.enter()
-            tracer.execute(fn)
+            return tracer.execute(fn)
         except Exception as e:
 
             raise wrap_exception(e, tracer.info) from None

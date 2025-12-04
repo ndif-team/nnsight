@@ -19,7 +19,7 @@ class Invoker(Tracer):
     that can be executed by the Interleaver.
     """
 
-    def __init__(self, tracer: InterleavingTracer, *args, mode: str = 'threading', **kwargs):
+    def __init__(self, tracer: InterleavingTracer, *args, **kwargs):
         """
         Initialize an Invoker with a reference to the parent tracer.
 
@@ -28,15 +28,17 @@ class Invoker(Tracer):
             *args: Additional arguments to pass to the traced function
             **kwargs: Additional keyword arguments to pass to the traced function
         """
-        
+
         if tracer is not None and tracer.model.interleaving:
-            raise ValueError("Cannot invoke during an active model execution / interleaving.")
-        
+            raise ValueError(
+                "Cannot invoke during an active model execution / interleaving."
+            )
+
         self.tracer = tracer
 
-        self.mode = mode
-
         super().__init__(*args, **kwargs)
+
+        print("invoker", self.args, self.kwargs)
 
     def compile(self):
         """
@@ -49,7 +51,12 @@ class Invoker(Tracer):
             A callable intervention function
         """
 
-        asynchronous = 'async ' if self.mode == 'async' else ''
+        asynchronous = (
+            "async "
+            if (self.tracer is not None and self.tracer.asynchronous)
+            or self.asynchronous
+            else ""
+        )
 
         self.info.source = [
             f"{asynchronous}def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
@@ -73,12 +80,16 @@ class Invoker(Tracer):
         Args:
             fn: The compiled intervention function
         """
-        
-        inputs, batch_group = self.tracer.batcher.batch(self.tracer.model, *self.args, **self.kwargs)
+
+        print("invoke", self.args)
+
+        inputs, batch_group = self.tracer.batcher.batch(
+            self.tracer.model, *self.args, **self.kwargs
+        )
 
         self.inputs = inputs
 
-        mediator_type = AsyncMediator if self.tracer.mode == 'async' else Mediator
+        mediator_type = AsyncMediator if self.tracer.asynchronous else Mediator
 
         mediator = mediator_type(fn, self.info, batch_group=batch_group)
 
