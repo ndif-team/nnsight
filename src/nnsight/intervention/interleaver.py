@@ -9,11 +9,11 @@ from functools import wraps
 from queue import SimpleQueue
 from threading import Thread
 from types import FrameType
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
-                    Tuple, Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 
+from .tracing.globals import save
 from ..util import applyn
 from .batching import Batcher
 from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
@@ -64,7 +64,7 @@ class Interleaver:
     user-defined intervention functions, allowing for inspection and
     modification of intermediate values.
     """
-    
+
     def __init__(
         self,
         invokers: List[Mediator] = None,
@@ -73,7 +73,6 @@ class Interleaver:
         user_cache: Optional[Cache] = None,
     ):
         self.initialize(invokers, tracer, batcher, user_cache)
-
 
     def initialize(
         self,
@@ -96,10 +95,10 @@ class Interleaver:
         self._current = None
 
         self.asynchronous = asynchronous
-        
+
     def cancel(self):
         """Cancel all intervention threads."""
-     
+
         for mediator in list(self.mediators.values()):
             mediator.cancel()
 
@@ -111,20 +110,18 @@ class Interleaver:
 
         self._current = None
 
-
     def iterate_provider(self, provider: str):
 
         iteration = self.iteration_tracker[provider]
 
         return f"{provider}.i{iteration}"
-    
-    
+
     def iterate_requester(self, requester: str):
-        
+
         mediator = self.current
-        
+
         iteration = mediator.iteration
-        
+
         if iteration is None:
             iteration = self.iteration_tracker[requester]
         elif isinstance(iteration, tuple):
@@ -137,7 +134,7 @@ class Interleaver:
         skip = None
 
         forward = module.forward
-        
+
         # If wrapping the same module more than once, we need to get the original forward function
         pre_wrapped = hasattr(forward, "__nnsight_original_forward__")
         if pre_wrapped:
@@ -157,7 +154,7 @@ class Interleaver:
                     skip = None
 
             return skip
-        
+
         module.forward = nnsight_forward
 
         @torch._dynamo.disable
@@ -179,7 +176,9 @@ class Interleaver:
 
             return args, kwargs
 
-        input_handle = module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
+        input_handle = module.register_forward_pre_hook(
+            input_hook, with_kwargs=True, prepend=True
+        )
 
         @torch._dynamo.disable
         def output_hook(module: torch.nn.Module, _, output: Any):
@@ -202,7 +201,7 @@ class Interleaver:
             return output
 
         output_handle = module.register_forward_hook(output_hook, prepend=True)
-    
+
         nnsight_forward.__nnsight_original_forward__ = forward
         nnsight_forward.__nnsight_input_handle__ = input_handle
         nnsight_forward.__nnsight_output_handle__ = output_handle
@@ -240,15 +239,14 @@ class Interleaver:
 
         return inner
 
-
     @property
     def interleaving(self):
         return getattr(self, "_interleaving", False)
 
     def __enter__(self):
-        
+
         self._interleaving = True
-        
+
         try:
             for invoker in self.invokers:
                 invoker.start(self)
@@ -266,18 +264,16 @@ class Interleaver:
     def __exit__(self, exc_type, exc_val, exc_tb):
 
         self._interleaving = False
-        
-        
+
         # If execution was stopped early, ignore and do nothing
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
             return True
-        
+
     def check_dangling_mediators(self):
-        
+
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
         # Or their Envoy was not called.
         for mediator in self.mediators.values():
-            
 
             if not mediator.event_queue.empty():
                 requested_event, requester = mediator.event_queue.get()
@@ -300,8 +296,7 @@ class Interleaver:
                         warnings.warn(msg)
                 else:
                     mediator.handle()
-                    
-                    
+
     def check_cache_full(self):
         """
         Print a warning if a module to be cached was missed.
@@ -331,7 +326,7 @@ class Interleaver:
                             return
 
     ### Provider Methods ###
-    
+
     def handle(
         self,
         provider: Optional[Any] = None,
@@ -348,7 +343,7 @@ class Interleaver:
         Returns:
             The original or modified value
         """
-        
+
         original_provider = provider
 
         if iterate:
@@ -368,7 +363,7 @@ class Interleaver:
             except SkipException as e:
                 skip_count += 1
                 skip_values.append(e.value)
-                
+
         if iterate:
             self.iteration_tracker[original_provider] += 1
 
@@ -415,6 +410,7 @@ class Interleaver:
 
         return self
 
+
 class Mediator:
     """
     Mediates between the model execution and intervention functions.
@@ -449,13 +445,13 @@ class Mediator:
             stop: Optional number of times to execute this mediator
         """
         self.intervention = intervention
-        
+
         self.name = name if name else f"Mediator{id(self)}"
         self.info = info
         self.batch_group = batch_group
         self.event_queue = SimpleQueue()
         self.response_queue = SimpleQueue()
-        
+
         self.worker = None
         self.interleaver = None
         self.history = set()
@@ -464,7 +460,7 @@ class Mediator:
         self.all_stop: Optional[int] = stop
 
         self.args = list()
-        
+
         self.original_globals = {}
 
     @property
@@ -484,7 +480,7 @@ class Mediator:
         self.interleaver = interleaver
 
         self.interleaver.mediators[self.name] = self
-        
+
         self.original_globals = self.intervention.__globals__.copy()
 
         if not self.alive:
@@ -498,7 +494,6 @@ class Mediator:
             self.worker.start()
 
             self.wait()
-
 
     ### Provider Methods ###
 
@@ -531,14 +526,13 @@ class Mediator:
         Returns:
             The original or modified value
         """
-    
-            
+
         process = not self.event_queue.empty()
 
         event = None
-        
+
         while process:
-            
+
             event, data = self.event_queue.get()
 
             if event == Events.VALUE:
@@ -569,26 +563,22 @@ class Mediator:
             for cache in self.user_cache:
                 cache.add(
                     provider,
-                    self.interleaver.batcher.narrow(
-                        self.batch_group
-                    ),
+                    self.interleaver.batcher.narrow(self.batch_group),
                 )
-                
 
     def handle_barrier_event(self, provider: Any, participants: Set[str]):
         """
         Handle a barrier event by setting a barrier.
         """
-        
+
         if participants is not None:
-        
+
             for mediator in self.interleaver.invokers:
-            
-                    
+
                 if mediator.name in participants:
-               
+
                     mediator.respond()
-        
+
                     mediator.handle(provider)
 
     def handle_end_event(self):
@@ -733,41 +723,47 @@ class Mediator:
         Returns:
             The frame of the intervention function
         """
-        
-       
 
         frame = get_non_nnsight_frame()
 
         return frame
-    
+
     def push(self):
         """Push local variables to the interleaver state."""
-        
+
         if self.info.frame is None:
             return
-        
-        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight") and (v is not self.original_globals.get(k, None))}
-        
+
+        state = {
+            k: v
+            for k, v in self.frame.f_locals.items()
+            if not k.startswith("__nnsight")
+            and (v is not self.original_globals.get(k, None))
+        }
+
         if isinstance(self.info.frame, FrameType):
-        
-         # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
+
+            # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
             push_variables(self.info.frame, state)
-            
+
         else:
-            
+
             self.info.frame.update(state)
-        
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
-        
+
         if self.info.frame is None:
             return
-        
-        state = self.info.frame.f_locals if isinstance(self.info.frame, FrameType) else self.info.frame
-        
+
+        state = (
+            self.info.frame.f_locals
+            if isinstance(self.info.frame, FrameType)
+            else self.info.frame
+        )
+
         state = {k: v for k, v in state.items() if not k.startswith("__nnsight")}
-        
+
         for key in {**state}:
             if key in self.frame.f_locals:
                 del state[key]
@@ -830,7 +826,6 @@ class Mediator:
 
         self.send(Events.SWAP, (requester, value))
 
-
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""
 
@@ -888,7 +883,7 @@ class Mediator:
         self.batch_group = state["batch_group"]
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
-        
+
         self.event_queue = SimpleQueue()
         self.response_queue = SimpleQueue()
 
@@ -906,23 +901,57 @@ class AsyncMediator(Mediator):
     Mediates between the model execution and intervention functions asynchronously.
     """
 
-        
     class Future:
 
-        def __init__(self, event: Events, requester: str, mediator: "AsyncMediator"):
+        def __init__(
+            self,
+            event: Events,
+            requester: str,
+            mediator: "AsyncMediator",
+        ):
             self.event = event
             self.requester = requester
             self.mediator = mediator
 
+            self._save = False
+
+            self.pre_hook = None
+            self.post_hook = None
+
+            self.set_hook = None
+
         def __await__(self):
+            if self.pre_hook is not None:
+                yield from self.pre_hook(self)
+
             value = yield from self.mediator.send(self.event, self.requester)
+
+            if self.post_hook is not None:
+                value = self.post_hook(self, value)
+
+            if self._save:
+                save(value)
+
             return value
 
         def set(self, value: Any):
-            return AsyncMediator.Future(Events.SWAP, (self.requester, value), self.mediator)
+
+            future = AsyncMediator.Future(
+                Events.SWAP, (self.requester, value), self.mediator
+            )
+
+            future.pre_hook = self.set_hook
+
+            return future
+
+        def save(self):
+            self._save = True
+            return self
 
         def __getstate__(self):
-            raise RuntimeError("Cannot pickle an AsyncFuture object. Did you forget to await a future before attempting to serialize it?")
+            raise RuntimeError(
+                "Cannot pickle an AsyncFuture object. Did you forget to await a future before attempting to serialize it?"
+            )
 
     def start(self, interleaver: Interleaver):
         """
@@ -934,7 +963,7 @@ class AsyncMediator(Mediator):
         self.interleaver = interleaver
 
         self.interleaver.mediators[self.name] = self
-        
+
         self.original_globals = self.intervention.__globals__.copy()
 
         if not self.alive:
@@ -944,7 +973,6 @@ class AsyncMediator(Mediator):
             self.interleaver._current = self
 
             self.respond()
-            
 
     def respond(self, value: Optional[Any] = None):
         """
@@ -960,7 +988,6 @@ class AsyncMediator(Mediator):
 
         except StopIteration:
             pass
-
 
     def send(self, event: Events, requester: Any):
         """
@@ -1008,7 +1035,9 @@ class AsyncMediator(Mediator):
             value: The value to swap in
         """
 
-        raise ValueError("Cannot set an attribute in asynchronous mode. Call .set() instead like: `await my_envoy.output.set(value)`")
+        raise ValueError(
+            "Cannot set an attribute in asynchronous mode. Call .set() instead like: `await my_envoy.output.set(value)`"
+        )
 
     def skip(self, requester: Any, value: Any):
 

@@ -38,8 +38,6 @@ class Invoker(Tracer):
 
         super().__init__(*args, **kwargs)
 
-        print("invoker", self.args, self.kwargs)
-
     def compile(self):
         """
         Compile the captured code block into an intervention function.
@@ -80,8 +78,6 @@ class Invoker(Tracer):
         Args:
             fn: The compiled intervention function
         """
-
-        print("invoke", self.args)
 
         inputs, batch_group = self.tracer.batcher.batch(
             self.tracer.model, *self.args, **self.kwargs

@@ -5,7 +5,17 @@ import os
 import warnings
 from functools import wraps
 from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import torch
 from torch.nn.modules.module import _addindent
@@ -20,7 +30,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver
+from .interleaver import AsyncMediator, Interleaver
 
 
 def trace_only(fn: Callable):
@@ -29,8 +39,7 @@ def trace_only(fn: Callable):
     def wrapper(self: Envoy, *args, **kwargs):
 
         if self._interleaver is None:
-            raise ValueError(
-                f"Must be within a trace to use `.{fn.__name__}(...)`")
+            raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
 
         return fn(self, *args, **kwargs)
 
@@ -130,7 +139,7 @@ class Envoy(Batchable):
     #### Properties ####
 
     @property
-    def output(self) -> Object:
+    def output(self) -> Object | AsyncMediator.Future:
         """
         Get the output of the module's forward pass.
 
@@ -177,16 +186,14 @@ class Envoy(Batchable):
         if self.interleaving:
 
             self._interleaver.current.swap(
-                self._interleaver.iterate_requester(
-                    f"{self.path}.output"), value
+                self._interleaver.iterate_requester(f"{self.path}.output"), value
             )
 
         else:
-            raise ValueError(
-                "Cannot set output of Envoy that is not interleaving.")
+            raise ValueError("Cannot set output of Envoy that is not interleaving.")
 
     @property
-    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
+    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]] | AsyncMediator.Future:
         """
         Get the inputs to the module's forward pass.
 
@@ -234,15 +241,13 @@ class Envoy(Batchable):
         if self.interleaving:
 
             self._interleaver.current.swap(
-                self._interleaver.iterate_requester(
-                    f"{self.path}.input"), value
+                self._interleaver.iterate_requester(f"{self.path}.input"), value
             )
         else:
-            raise ValueError(
-                "Cannot set inputs of Envoy that is not interleaving.")
+            raise ValueError("Cannot set inputs of Envoy that is not interleaving.")
 
     @property
-    def input(self) -> Object:
+    def input(self) -> Object | AsyncMediator.Future:
         """
         Get the first input to the module's forward pass.
 
@@ -258,6 +263,34 @@ class Envoy(Batchable):
         Returns:
             The first input value
         """
+
+        if self._interleaver.asynchronous:
+
+            future = self.inputs
+
+            def get_hook(_self: AsyncMediator.Future, inputs: Any):
+
+                input = [*inputs[0], *inputs[1].values()][0]
+
+                return input
+
+            future.post_hook = get_hook
+
+            def set_hook(_self: AsyncMediator.Future):
+
+                inputs = yield from self.inputs.__await__()
+
+                value = _self.requester[1]
+
+                value = (value, *inputs[0][1:]), inputs[1]
+
+                _self.requester = (_self.requester[0], value)
+
+                return value
+
+            future.set_hook = set_hook
+
+            return future
 
         inputs = self.inputs
 
@@ -279,6 +312,13 @@ class Envoy(Batchable):
         Args:
             value: The new value for the first input
         """
+
+        if self._interleaver.asynchronous:
+
+            raise ValueError(
+                "Cannot set input of Envoy that is not asynchronous. Call `await module.input.set(value)` instead."
+            )
+
         inputs = self.inputs
 
         value = (value, *inputs[0][1:]), inputs[1]
@@ -380,7 +420,11 @@ class Envoy(Batchable):
             self._module.forward = MethodType(forward, self._module)
 
             self._source = EnvoySource(
-                self._module.__path__, source, line_numbers, interleaver=self._interleaver)
+                self._module.__path__,
+                source,
+                line_numbers,
+                interleaver=self._interleaver,
+            )
 
         return self._source
 
@@ -393,7 +437,14 @@ class Envoy(Batchable):
 
     #### Public methods ####
 
-    def trace(self, *args, fn: Optional[Callable] = None, trace: bool = None, tracer_cls: Type[InterleavingTracer] = InterleavingTracer, **kwargs):
+    def trace(
+        self,
+        *args,
+        fn: Optional[Callable] = None,
+        trace: bool = None,
+        tracer_cls: Type[InterleavingTracer] = InterleavingTracer,
+        **kwargs,
+    ):
         """
         Create a tracer for this module.
 
@@ -529,8 +580,7 @@ class Envoy(Batchable):
         from . import serialization
 
         serialization.save(
-            self._default_mediators, os.path.join(
-                export_dir, f"{variant}.dill")
+            self._default_mediators, os.path.join(export_dir, f"{variant}.dill")
         )
 
     def import_edits(
@@ -599,7 +649,9 @@ class Envoy(Batchable):
             replacement (Any): The replacement value to replace the module's output with.
         """
 
-        return self._interleaver.current.skip(self._interleaver.iterate_requester(f"{self.path}.input"), replacement)
+        return self._interleaver.current.skip(
+            self._interleaver.iterate_requester(f"{self.path}.input"), replacement
+        )
 
     @trace_only
     def wait_for_input(self):
@@ -723,7 +775,7 @@ class Envoy(Batchable):
         """
         return util.fetch_attr(self, path)
 
-    def interleave(self,  fn: Union[Callable, str], *args, **kwargs):
+    def interleave(self, fn: Union[Callable, str], *args, **kwargs):
 
         device = self.device
 
@@ -765,7 +817,7 @@ class Envoy(Batchable):
             module,
             path=module_path,
             rename=self._alias.rename if self._alias is not None else None,
-            interleaver=self._interleaver
+            interleaver=self._interleaver,
         )
 
         self._children.append(envoy)
@@ -842,7 +894,7 @@ class Envoy(Batchable):
             self._children[i]._update(child)
 
         # Handle extra modules added after initialization: issues/376
-        for name, child in list(self._module.named_children())[i + 1:]:
+        for name, child in list(self._module.named_children())[i + 1 :]:
 
             setattr(module, name, child)
 
@@ -1046,7 +1098,7 @@ class Envoy(Batchable):
                 # https://github.com/ndif-team/nnsight/issues/479
                 # This happened because some transformers models set this class attr: _checkpoint_conversion_mapping
                 if hasattr(value, "__path__"):
-                    return util.fetch_attr(self, value.__path__[len(self.path):])
+                    return util.fetch_attr(self, value.__path__[len(self.path) :])
                 return self._add_envoy(value, name)
             else:
                 return value
@@ -1073,10 +1125,13 @@ class Envoy(Batchable):
         return {
             "alias": self._alias,
             "children": self._children,
-            "named_children": {key: value for key, value in self.__dict__.items() if isinstance(value, Envoy)},
+            "named_children": {
+                key: value
+                for key, value in self.__dict__.items()
+                if isinstance(value, Envoy)
+            },
             "path": self.path,
             "default_mediators": self._default_mediators,
-
         }
 
     def __setstate__(self, state):
@@ -1223,16 +1278,6 @@ class OperationEnvoy:
             self._interleaver.iterate_requester(f"{self.name}.input"), value
         )
 
-    @inputs.deleter
-    def inputs(self):
-        """
-        Clear the cached input value.
-
-        This removes any stored input values, forcing them to be recomputed
-        on the next access.
-        """
-        self._input = None
-
     @property
     def input(self) -> Union[Any, torch.Tensor]:
         """
@@ -1244,6 +1289,34 @@ class OperationEnvoy:
         Returns:
             The first input value
         """
+
+        if self._interleaver.asynchronous:
+
+            future = self.inputs
+
+            def get_hook(_self: AsyncMediator.Future, inputs: Any):
+
+                input = [*inputs[0], *inputs[1].values()][0]
+
+                return input
+
+            future.post_hook = get_hook
+
+            def set_hook(_self: AsyncMediator.Future):
+
+                inputs = yield from self.inputs.__await__()
+
+                value = _self.requester[1]
+
+                value = (value, *inputs[0][1:]), inputs[1]
+
+                _self.requester = (_self.requester[0], value)
+
+                return value
+
+            future.set_hook = set_hook
+
+            return future
 
         inputs = self.inputs
 
@@ -1260,6 +1333,13 @@ class OperationEnvoy:
         Args:
             value: The new value for the first input
         """
+
+        if self._interleaver.asynchronous:
+
+            raise ValueError(
+                "Cannot set input of Envoy that is not asynchronous. Call `await operation.input.set(value)` instead."
+            )
+
         inputs = self.inputs
 
         value = (value, *inputs[0][1:]), inputs[1]
@@ -1313,17 +1393,6 @@ class OperationEnvoy:
             self._interleaver.current.swap(f"{self.name}.fn", self._fn)
 
         return self._source
-
-    # @input.setter
-    # def input(self, value: Any):
-    #     #TODO would need await...
-    #     inputs = self._input
-    #     self._input = ((value, *inputs[0]), inputs[1])
-    #     self.interleaver.set_swap(self._input, (self.module, self.name), Events.INPUT)
-
-    # @input.deleter
-    # def input(self):
-    #     self._input = None
 
 
 class EnvoySource:
@@ -1416,8 +1485,7 @@ class EnvoySource:
                         )
             else:
                 # Regular line with no operations
-                line_prefix = " " * (max_name_length + 4) + \
-                    f"{line_number:3d} "
+                line_prefix = " " * (max_name_length + 4) + f"{line_number:3d} "
                 formatted_lines.append(f"{line_prefix}{line}")
 
         source = "\n".join(formatted_lines)

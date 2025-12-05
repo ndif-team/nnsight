@@ -653,6 +653,7 @@ class Tracer:
             "args": self.args,
             "kwargs": self.kwargs,
             "info": self.info,
+            "asynchronous": self.asynchronous,
         }
 
     def __setstate__(self, state):
@@ -668,6 +669,7 @@ class Tracer:
         self.args = state["args"]
         self.kwargs = state["kwargs"]
         self.info = state["info"]
+        self.asynchronous = state["asynchronous"]
 
         # Reset values that cannot be reliably serialized
         self.info.start_line = 0  # Line numbers may not be valid in new context
