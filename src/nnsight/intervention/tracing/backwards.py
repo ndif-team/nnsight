@@ -3,8 +3,9 @@ from typing import TYPE_CHECKING, Any, Callable
 import torch
 
 from ...util import Patch
-from ..interleaver import Interleaver, Mediator
+from ..interleaver import Interleaver, Mediator, AsyncMediator
 from .invoker import Invoker
+
 
 def wrap_grad(interleaver: Interleaver):
     """
@@ -28,7 +29,7 @@ def wrap_grad(interleaver: Interleaver):
 
         # On backwards for this tensor
         def inner(grad: torch.Tensor):
-            
+
             # Inject the grad value
             # Possibly editing it in the process
             try:
@@ -72,6 +73,17 @@ class BackwardsMediator(Mediator):
         return super().request(requester)
 
 
+class AsyncBackwardsMediator(AsyncMediator):
+    def request(self, requester: Any):
+
+        if not requester.endswith(".grad"):
+            raise ValueError(
+                f"Cannot request `{requester}` in a backwards tracer. You can only request `.grad`. Please define your Tensors before the Backwards Tracer and interact with their gradients within the Backwards Tracer."
+            )
+
+        return super().request(requester)
+
+
 class BackwardsTracer(Invoker):
 
     def __init__(
@@ -87,12 +99,14 @@ class BackwardsTracer(Invoker):
         self.tensor = tensor
         self.fn = fn
 
-    def execute(self, fn: Callable):
+    def _execute(self, fn: Callable):
 
-        mediator = BackwardsMediator(fn, self.info)
+        mediator_type = AsyncMediator if self.asynchronous else BackwardsMediator
 
-        interleaver = Interleaver([mediator], self)
-        
+        mediator = mediator_type(fn, self.info)
+
+        interleaver = Interleaver([mediator], self, asynchronous=self.asynchronous)
+
         grad_patch = Patch(torch.Tensor, wrap_grad(interleaver), "grad")
 
         try:
@@ -104,3 +118,14 @@ class BackwardsTracer(Invoker):
         finally:
             grad_patch.restore()
             interleaver.cancel()
+
+    async def async_execute(self, fn: Callable):
+
+        self._execute(fn)
+
+    def execute(self, fn: Callable):
+
+        if self.asynchronous:
+            return self.async_execute(fn)
+
+        return self._execute(fn)

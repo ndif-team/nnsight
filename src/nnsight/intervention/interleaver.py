@@ -71,8 +71,9 @@ class Interleaver:
         tracer: InterleavingTracer = None,
         batcher: Batcher = None,
         user_cache: Optional[Cache] = None,
+        asynchronous: bool = False,
     ):
-        self.initialize(invokers, tracer, batcher, user_cache)
+        self.initialize(invokers, tracer, batcher, user_cache, asynchronous)
 
     def initialize(
         self,
