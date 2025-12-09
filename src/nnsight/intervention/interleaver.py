@@ -93,7 +93,7 @@ class Interleaver:
         self.iteration_tracker = defaultdict(int)
         self.default_all = None
 
-        self._current = None
+        self.current = None
 
         self.asynchronous = asynchronous
 
@@ -109,7 +109,7 @@ class Interleaver:
         self.user_cache = None
         self.invokers = None
 
-        self._current = None
+        self.current = None
 
     def iterate_provider(self, provider: str):
 
@@ -345,12 +345,12 @@ class Interleaver:
             The original or modified value
         """
 
+        original_mediator = self.current
         original_provider = provider
+        original_value = self.batcher.current_value
 
         if iterate:
             provider = self.iterate_provider(provider)
-
-        old = self.batcher.current_value
 
         self.batcher.current_value = value
 
@@ -358,6 +358,8 @@ class Interleaver:
         skip_values = []
 
         for mediator in self.invokers:
+
+            self.current = mediator
 
             try:
                 mediator.handle(provider)
@@ -382,7 +384,8 @@ class Interleaver:
 
         value = self.batcher.current_value
 
-        self.batcher.current_value = old
+        self.batcher.current_value = original_value
+        self.current = original_mediator
 
         if (
             self.user_cache is not None
@@ -395,15 +398,6 @@ class Interleaver:
         return value
 
     ### Requester Methods ###
-
-    @property
-    def current(self) -> Mediator:
-        """Get the current mediator."""
-
-        if self.asynchronous:
-            return self._current
-        else:
-            return self.mediators[threading.current_thread().name]
 
     ### Serialization ###
 
@@ -492,14 +486,19 @@ class Mediator:
                 daemon=True,
                 name=self.name,
             )
+
+            self.interleaver.current = self
             self.worker.start()
 
             self.wait()
+
+            self.interleaver.current = None
 
     ### Provider Methods ###
 
     def wait(self):
         """Wait for the next event to be set in the event queue."""
+
         self.event_queue.put(self.event_queue.get())
 
     def cancel(self):
@@ -574,13 +573,19 @@ class Mediator:
 
         if participants is not None:
 
+            original_mediator = self.interleaver.current
+
             for mediator in self.interleaver.invokers:
 
                 if mediator.name in participants:
 
+                    self.interleaver.current = mediator
+
                     mediator.respond()
 
                     mediator.handle(provider)
+
+            self.interleaver.current = original_mediator
 
     def handle_end_event(self):
         """
@@ -971,9 +976,11 @@ class AsyncMediator(Mediator):
 
             self.worker = self.intervention(self, self.info, *self.args)
 
-            self.interleaver._current = self
+            self.interleaver.current = self
 
             self.respond()
+
+            self.interleaver.current = None
 
     def respond(self, value: Optional[Any] = None):
         """
@@ -1004,8 +1011,6 @@ class AsyncMediator(Mediator):
         self.push()
 
         response = yield (event, requester)
-
-        self.interleaver._current = self
 
         self.pull()
 

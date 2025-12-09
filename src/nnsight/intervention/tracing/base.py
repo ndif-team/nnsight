@@ -413,8 +413,11 @@ class Tracer:
         # 2. Variable import from original scope (pull)
         # 3. The original traced code block
         # 4. Variable export back to original scope (push)
+
+        asynchronous = "async " if self.asynchronous else ""
+
         self.info.source = [
-            f"def {function_name}(__nnsight_tracer__, __nnsight_tracing_info__):\n",
+            f"{asynchronous}def {function_name}(__nnsight_tracer__, __nnsight_tracing_info__):\n",
             "    __nnsight_tracer__.pull()\n",
             *self.info.source,
             "    __nnsight_tracer__.push()\n",
@@ -436,7 +439,7 @@ class Tracer:
             fn: The compiled function to execute (created by compile() method)
         """
         # Execute the compiled function with tracer and info as context
-        fn(self, self.info)
+        return fn(self, self.info)
 
     # === Variable Management ===
 
