@@ -1418,6 +1418,19 @@ class EnvoySource:
 
         return source
 
+    def __iter__(self):
+        """
+        An iterator over the submodules in the source code (i.e. submodules that can be accessed after `.source`)
+        """
+        submodules = []
+        processed_lines = []
+
+        for name, line_number in self.line_numbers.items():
+            if line_number not in processed_lines:
+                processed_lines.append(line_number)
+                submodules.append(name)
+
+        return iter(submodules)
 
 
     def __getattribute__(self, name: str) -> Union[OperationEnvoy]:
