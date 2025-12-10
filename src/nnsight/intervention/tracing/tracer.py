@@ -11,7 +11,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from ... import util, CONFIG
 from ..backends.base import Backend
 from ..batching import Batcher
-from ..interleaver import Events, Mediator
+from ..interleaver import AsyncMediator, Events, Mediator
 from .base import ExitTracingException, Tracer
 from .globals import Object
 from .invoker import Invoker
@@ -351,9 +351,16 @@ class InterleavingTracer(Tracer):
         # If Envoy has a default mediators ( created via Envoy.edit() ), add them
         if self.model._default_mediators:
 
-            for mediators in self.model._default_mediators:
+            for mediator in self.model._default_mediators:
 
-                self.mediators.append(mediators)
+                async_mediator = isinstance(mediator, AsyncMediator)
+
+                if async_mediator != self.asynchronous:
+                    raise ValueError(
+                        "Asynchronous mode mismatch between tracer and edits. Use async with both or neither."
+                    )
+
+                self.mediators.append(mediator)
                 self.batcher.batch_groups.append((-1, -1))
 
         # If positional arguments were passed directly to a tracer, assume one invoker
