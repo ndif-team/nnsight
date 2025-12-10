@@ -71,9 +71,8 @@ class Interleaver:
         tracer: InterleavingTracer = None,
         batcher: Batcher = None,
         user_cache: Optional[Cache] = None,
-        asynchronous: bool = False,
     ):
-        self.initialize(invokers, tracer, batcher, user_cache, asynchronous)
+        self.initialize(invokers, tracer, batcher, user_cache)
 
     def initialize(
         self,
@@ -81,7 +80,6 @@ class Interleaver:
         tracer: InterleavingTracer,
         batcher: Batcher = None,
         user_cache: Optional[Cache] = None,
-        asynchronous: bool = False,
     ):
 
         self.invokers = invokers
@@ -94,8 +92,6 @@ class Interleaver:
         self.default_all = None
 
         self.current = None
-
-        self.asynchronous = asynchronous
 
     def cancel(self):
         """Cancel all intervention threads."""
@@ -243,6 +239,10 @@ class Interleaver:
     @property
     def interleaving(self):
         return getattr(self, "_interleaving", False)
+
+    @property
+    def asynchronous(self):
+        return self.tracer.asynchronous
 
     def __enter__(self):
 

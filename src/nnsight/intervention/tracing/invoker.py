@@ -68,7 +68,7 @@ class Invoker(Tracer):
 
         self.info.start_line -= 2
 
-    def execute(self, fn: Callable):
+    def _execute(self, fn: Callable):
         """
         Execute the compiled intervention function.
 
@@ -90,3 +90,18 @@ class Invoker(Tracer):
         mediator = mediator_type(fn, self.info, batch_group=batch_group)
 
         self.tracer.mediators.append(mediator)
+
+    async def async_execute(self, fn: Callable):
+        """
+        Execute the compiled intervention function asynchronously.
+        """
+        self._execute(fn)
+
+    def execute(self, fn: Callable):
+        """
+        Execute the compiled intervention function.
+        """
+        if self.asynchronous:
+            return self.async_execute(fn)
+
+        return self._execute(fn)

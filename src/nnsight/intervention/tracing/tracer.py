@@ -405,11 +405,7 @@ class InterleavingTracer(Tracer):
         interleaver = self.model._interleaver
 
         interleaver.initialize(
-            self.mediators,
-            self,
-            batcher=self.batcher,
-            user_cache=self.user_cache,
-            asynchronous=self.asynchronous,
+            self.mediators, self, batcher=self.batcher, user_cache=self.user_cache
         )
         try:
             self.model.interleave(self.fn, *args, **kwargs)

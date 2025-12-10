@@ -105,7 +105,7 @@ class BackwardsTracer(Invoker):
 
         mediator = mediator_type(fn, self.info)
 
-        interleaver = Interleaver([mediator], self, asynchronous=self.asynchronous)
+        interleaver = Interleaver([mediator], self)
 
         grad_patch = Patch(torch.Tensor, wrap_grad(interleaver), "grad")
 
