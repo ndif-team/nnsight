@@ -56,6 +56,9 @@ class SkipException(Exception):
         self.value = value
 
 
+__NNSIGHT_PREFIX = "__nnsight"
+
+
 class Interleaver:
     """
     Manages the interleaving of model execution and interventions.
@@ -345,7 +348,6 @@ class Interleaver:
             The original or modified value
         """
 
-        original_mediator = self.current
         original_provider = provider
         original_value = self.batcher.current_value
 
@@ -359,13 +361,13 @@ class Interleaver:
 
         for mediator in self.invokers:
 
-            self.current = mediator
+            with mediator:
 
-            try:
-                mediator.handle(provider)
-            except SkipException as e:
-                skip_count += 1
-                skip_values.append(e.value)
+                try:
+                    mediator.handle(provider)
+                except SkipException as e:
+                    skip_count += 1
+                    skip_values.append(e.value)
 
         if iterate:
             self.iteration_tracker[original_provider] += 1
@@ -385,7 +387,6 @@ class Interleaver:
         value = self.batcher.current_value
 
         self.batcher.current_value = original_value
-        self.current = original_mediator
 
         if (
             self.user_cache is not None
@@ -458,6 +459,18 @@ class Mediator:
 
         self.original_globals = {}
 
+        self._prev = None
+
+    def __enter__(self):
+
+        self._prev = self.interleaver.current
+        self.interleaver.current = self
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.interleaver.current = self._prev
+
     @property
     def alive(self):
         if self.interleaver.asynchronous:
@@ -487,12 +500,11 @@ class Mediator:
                 name=self.name,
             )
 
-            self.interleaver.current = self
-            self.worker.start()
+            with self:
 
-            self.wait()
+                self.worker.start()
 
-            self.interleaver.current = None
+                self.wait()
 
     ### Provider Methods ###
 
@@ -545,7 +557,7 @@ class Mediator:
                 try:
                     process = self.handle_skip_event(provider, *data)
                 except SkipException as e:
-                    if len(self.user_cache) > 0:
+                    if self.user_cache:
                         for cache in self.user_cache:
                             cache.add(provider, e.value)
                     raise e
@@ -558,7 +570,7 @@ class Mediator:
             self.handle_end_event()
 
         # TODO maybe move this to the interleaver to cache the pre-iteration provider
-        if len(self.user_cache) > 0 and provider is not None:
+        if self.user_cache and provider is not None:
 
             for cache in self.user_cache:
                 cache.add(
@@ -573,19 +585,15 @@ class Mediator:
 
         if participants is not None:
 
-            original_mediator = self.interleaver.current
-
             for mediator in self.interleaver.invokers:
 
                 if mediator.name in participants:
 
-                    self.interleaver.current = mediator
+                    with mediator:
 
-                    mediator.respond()
+                        mediator.respond()
 
-                    mediator.handle(provider)
-
-            self.interleaver.current = original_mediator
+                        mediator.handle(provider)
 
     def handle_end_event(self):
         """
@@ -743,7 +751,7 @@ class Mediator:
         state = {
             k: v
             for k, v in self.frame.f_locals.items()
-            if not k.startswith("__nnsight")
+            if not k.startswith(__NNSIGHT_PREFIX)
             and (v is not self.original_globals.get(k, None))
         }
 
@@ -768,7 +776,7 @@ class Mediator:
             else self.info.frame
         )
 
-        state = {k: v for k, v in state.items() if not k.startswith("__nnsight")}
+        state = {k: v for k, v in state.items() if not k.startswith(__NNSIGHT_PREFIX)}
 
         for key in {**state}:
             if key in self.frame.f_locals:
@@ -976,11 +984,9 @@ class AsyncMediator(Mediator):
 
             self.worker = self.intervention(self, self.info, *self.args)
 
-            self.interleaver.current = self
+            with self:
 
-            self.respond()
-
-            self.interleaver.current = None
+                self.respond()
 
     def respond(self, value: Optional[Any] = None):
         """
