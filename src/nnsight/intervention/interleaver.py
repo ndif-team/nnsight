@@ -56,7 +56,7 @@ class SkipException(Exception):
         self.value = value
 
 
-__NNSIGHT_PREFIX = "__nnsight"
+NNSIGHT_PREFIX = "__nnsight"
 
 
 class Interleaver:
@@ -751,7 +751,7 @@ class Mediator:
         state = {
             k: v
             for k, v in self.frame.f_locals.items()
-            if not k.startswith(__NNSIGHT_PREFIX)
+            if not k.startswith(NNSIGHT_PREFIX)
             and (v is not self.original_globals.get(k, None))
         }
 
@@ -776,7 +776,7 @@ class Mediator:
             else self.info.frame
         )
 
-        state = {k: v for k, v in state.items() if not k.startswith(__NNSIGHT_PREFIX)}
+        state = {k: v for k, v in state.items() if not k.startswith(NNSIGHT_PREFIX)}
 
         for key in {**state}:
             if key in self.frame.f_locals:
