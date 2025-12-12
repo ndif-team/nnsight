@@ -1,20 +1,21 @@
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
-
+from vllm.outputs import RequestOutput
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from ....intervention.serialization import load
-from vllm.outputs import RequestOutput
+
 from nnsight.intervention.tracing.globals import Globals
+
+from ....intervention.serialization import load
 from ..batching import VLLMBatcher
 
 if TYPE_CHECKING:
 
-    from vllm.v1.core.sched.output import SchedulerOutput, NewRequestData
+    from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
     from ....intervention.interleaver import Interleaver
 
