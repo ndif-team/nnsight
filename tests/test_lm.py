@@ -812,8 +812,8 @@ def test_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert len(logits_all) == 3
     assert len(logits_iter) == 3
     
-    assert gpt2.tokenizer.batch_decode(logits_all) == [" New", " York", " City"]
-    assert gpt2.tokenizer.batch_decode(logits_iter) == [" New", " York", " City"]
+    assert gpt2.tokenizer.batch_decode(logits_all) == [" New York City"]
+    assert gpt2.tokenizer.batch_decode(logits_iter) == [" New York City"]
 
 
 @torch.no_grad()
@@ -827,7 +827,7 @@ def test_iter_slice(gpt2: nnsight.LanguageModel, MSG_prompt: str):
             logits.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
     assert len(logits) == 2
-    assert gpt2.tokenizer.batch_decode(logits) == [" York", " City"]
+    assert gpt2.tokenizer.batch_decode(logits) == [" York City"]
 
 
 @torch.no_grad()
@@ -885,8 +885,8 @@ def test_batched_iter(gpt2: nnsight.LanguageModel, MSG_prompt: str):
     assert len(logits_1) == 2
     assert len(logits_2) == 3
 
-    assert gpt2.tokenizer.batch_decode(logits_1) == [" York", " City"]
-    assert gpt2.tokenizer.batch_decode(logits_2) == [" New", " York", " City"]
+    assert gpt2.tokenizer.batch_decode(logits_1) == [" York City"]
+    assert gpt2.tokenizer.batch_decode(logits_2) == [" New York City"]
 
 
 @torch.no_grad()
