@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import threading
 import warnings
 from collections import defaultdict
 from enum import Enum
@@ -13,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tupl
 
 import torch
 
-from .tracing.globals import save
+from .. import CONFIG
 from ..util import applyn
 from .batching import Batcher
 from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
@@ -243,10 +242,6 @@ class Interleaver:
     def interleaving(self):
         return getattr(self, "_interleaving", False)
 
-    @property
-    def asynchronous(self):
-        return self.tracer.asynchronous
-
     def __enter__(self):
 
         self._interleaving = True
@@ -445,6 +440,7 @@ class Mediator:
         self.name = name if name else f"Mediator{id(self)}"
         self.info = info
         self.batch_group = batch_group
+
         self.event_queue = SimpleQueue()
         self.response_queue = SimpleQueue()
 
@@ -473,10 +469,8 @@ class Mediator:
 
     @property
     def alive(self):
-        if self.interleaver.asynchronous:
-            return self.worker is not None
-        else:
-            return self.worker is not None and self.worker.is_alive()
+
+        return self.worker is not None and self.worker.is_alive()
 
     def start(self, interleaver: Interleaver):
         """
@@ -799,14 +793,14 @@ class Mediator:
         """
 
         # TODO find a way to only push if there are multiple invokers AND they share the same parent frame
-        if len(self.interleaver.invokers) > 1:
+        if len(self.interleaver.invokers) > 1 and CONFIG.APP.CROSS_INVOKER:
             self.push()
 
         self.event_queue.put((event, requester))
 
         response = self.response_queue.get()
 
-        if len(self.interleaver.invokers) > 1:
+        if len(self.interleaver.invokers) > 1 and CONFIG.APP.CROSS_INVOKER:
             self.pull()
 
         if isinstance(response, Exception):
@@ -908,149 +902,3 @@ class Mediator:
         self.iteration = 0
         self.args = list()
         self.original_globals = {}
-
-
-class AsyncMediator(Mediator):
-    """
-    Mediates between the model execution and intervention functions asynchronously.
-    """
-
-    class Future:
-
-        def __init__(
-            self,
-            event: Events,
-            requester: str,
-            mediator: "AsyncMediator",
-        ):
-            self.event = event
-            self.requester = requester
-            self.mediator = mediator
-
-            self._save = False
-
-            self.pre_hook = None
-            self.post_hook = None
-
-            self.set_hook = None
-
-        def __await__(self):
-            if self.pre_hook is not None:
-                yield from self.pre_hook(self)
-
-            value = yield from self.mediator.send(self.event, self.requester)
-
-            if self.post_hook is not None:
-                value = self.post_hook(self, value)
-
-            if self._save:
-                save(value)
-
-            return value
-
-        def set(self, value: Any):
-
-            future = AsyncMediator.Future(
-                Events.SWAP, (self.requester, value), self.mediator
-            )
-
-            future.pre_hook = self.set_hook
-
-            return future
-
-        def save(self):
-            self._save = True
-            return self
-
-        def __getstate__(self):
-            raise RuntimeError(
-                "Cannot pickle an AsyncFuture object. Did you forget to await a future before attempting to serialize it?"
-            )
-
-    def start(self, interleaver: Interleaver):
-        """
-        Start the mediator's intervention thread.
-
-        Args:
-            interleaver: The interleaver managing this mediator
-        """
-        self.interleaver = interleaver
-
-        self.interleaver.mediators[self.name] = self
-
-        self.original_globals = self.intervention.__globals__.copy()
-
-        if not self.alive:
-
-            self.worker = self.intervention(self, self.info, *self.args)
-
-            with self:
-
-                self.respond()
-
-    def respond(self, value: Optional[Any] = None):
-        """
-        Set the value for a pending value request.
-
-        Args:
-            value: The value to provide
-        """
-
-        try:
-
-            self.event_queue.put(self.worker.send(value))
-
-        except StopIteration:
-            pass
-
-    def send(self, event: Events, requester: Any):
-        """
-        Send an event to the event queue and wait for a response.
-
-        Args:
-            event: The event to send
-            requester: The identifier of the requester
-
-        Returns:
-            The response from the provider
-        """
-        self.push()
-
-        response = yield (event, requester)
-
-        self.pull()
-
-        if isinstance(response, Exception):
-            raise response
-
-        return response
-
-    def request(self, requester: Any):
-        """
-        Request a value from a specific provider.
-
-        Args:
-            requester: The identifier of the provider to request a value from
-
-        Returns:
-            The requested value
-        """
-
-        return AsyncMediator.Future(Events.VALUE, requester, self)
-
-    def swap(self, requester: Any, value: Any):
-        """
-        Set a value to swap during execution.
-
-        Args:
-            requester: The identifier of the requester
-            value: The value to swap in
-        """
-
-        raise ValueError(
-            "Cannot set an attribute in asynchronous mode. Call .set() instead like: `await my_envoy.output.set(value)`"
-        )
-
-    def skip(self, requester: Any, value: Any):
-
-        return AsyncMediator.Future(Events.SKIP, (requester, value), self)

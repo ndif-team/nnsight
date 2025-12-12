@@ -414,10 +414,8 @@ class Tracer:
         # 3. The original traced code block
         # 4. Variable export back to original scope (push)
 
-        asynchronous = "async " if self.asynchronous else ""
-
         self.info.source = [
-            f"{asynchronous}def {function_name}(__nnsight_tracer__, __nnsight_tracing_info__):\n",
+            f"def {function_name}(__nnsight_tracer__, __nnsight_tracing_info__):\n",
             "    __nnsight_tracer__.pull()\n",
             *self.info.source,
             "    __nnsight_tracer__.push()\n",

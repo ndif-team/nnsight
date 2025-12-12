@@ -21,7 +21,7 @@ import torch
 from torch.nn.modules.module import _addindent
 
 from .. import CONFIG, base_deprecation_message, deprecated, util
-from ..util import apply, Patch
+from ..util import apply
 
 from .batching import Batchable
 from .inject import convert as inject
@@ -30,7 +30,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import AsyncMediator, Interleaver
+from .interleaver import Interleaver
 
 
 def trace_only(fn: Callable):
@@ -139,7 +139,7 @@ class Envoy(Batchable):
     #### Properties ####
 
     @property
-    def output(self) -> Object | AsyncMediator.Future:
+    def output(self) -> Object:
         """
         Get the output of the module's forward pass.
 
@@ -193,7 +193,7 @@ class Envoy(Batchable):
             raise ValueError("Cannot set output of Envoy that is not interleaving.")
 
     @property
-    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]] | AsyncMediator.Future:
+    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
         """
         Get the inputs to the module's forward pass.
 
@@ -247,7 +247,7 @@ class Envoy(Batchable):
             raise ValueError("Cannot set inputs of Envoy that is not interleaving.")
 
     @property
-    def input(self) -> Object | AsyncMediator.Future:
+    def input(self) -> Object:
         """
         Get the first input to the module's forward pass.
 
@@ -263,34 +263,6 @@ class Envoy(Batchable):
         Returns:
             The first input value
         """
-
-        if self._interleaver.asynchronous:
-
-            future = self.inputs
-
-            def get_hook(_self: AsyncMediator.Future, inputs: Any):
-
-                input = [*inputs[0], *inputs[1].values()][0]
-
-                return input
-
-            future.post_hook = get_hook
-
-            def set_hook(_self: AsyncMediator.Future):
-
-                inputs = yield from self.inputs.__await__()
-
-                value = _self.requester[1]
-
-                value = (value, *inputs[0][1:]), inputs[1]
-
-                _self.requester = (_self.requester[0], value)
-
-                return value
-
-            future.set_hook = set_hook
-
-            return future
 
         inputs = self.inputs
 
@@ -312,12 +284,6 @@ class Envoy(Batchable):
         Args:
             value: The new value for the first input
         """
-
-        if self._interleaver.asynchronous:
-
-            raise ValueError(
-                "Cannot set input of Envoy that is not asynchronous. Call `await module.input.set(value)` instead."
-            )
 
         inputs = self.inputs
 
@@ -1290,34 +1256,6 @@ class OperationEnvoy:
             The first input value
         """
 
-        if self._interleaver.asynchronous:
-
-            future = self.inputs
-
-            def get_hook(_self: AsyncMediator.Future, inputs: Any):
-
-                input = [*inputs[0], *inputs[1].values()][0]
-
-                return input
-
-            future.post_hook = get_hook
-
-            def set_hook(_self: AsyncMediator.Future):
-
-                inputs = yield from self.inputs.__await__()
-
-                value = _self.requester[1]
-
-                value = (value, *inputs[0][1:]), inputs[1]
-
-                _self.requester = (_self.requester[0], value)
-
-                return value
-
-            future.set_hook = set_hook
-
-            return future
-
         inputs = self.inputs
 
         return [*inputs[0], *inputs[1].values()][0]
@@ -1333,12 +1271,6 @@ class OperationEnvoy:
         Args:
             value: The new value for the first input
         """
-
-        if self._interleaver.asynchronous:
-
-            raise ValueError(
-                "Cannot set input of Envoy that is not asynchronous. Call `await operation.input.set(value)` instead."
-            )
 
         inputs = self.inputs
 
@@ -1359,7 +1291,6 @@ class OperationEnvoy:
         """
 
         if self._source is None:
-            # TODO does not work with async
             fn = self._interleaver.current.request(f"{self.name}.fn")
 
             # TODO maybe do something else here

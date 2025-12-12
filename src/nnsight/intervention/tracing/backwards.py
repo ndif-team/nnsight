@@ -1,9 +1,9 @@
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
 import torch
 
 from ...util import Patch
-from ..interleaver import Interleaver, Mediator, AsyncMediator
+from ..interleaver import Interleaver, Mediator
 from .invoker import Invoker
 
 
@@ -73,17 +73,6 @@ class BackwardsMediator(Mediator):
         return super().request(requester)
 
 
-class AsyncBackwardsMediator(AsyncMediator):
-    def request(self, requester: Any):
-
-        if not requester.endswith(".grad"):
-            raise ValueError(
-                f"Cannot request `{requester}` in a backwards tracer. You can only request `.grad`. Please define your Tensors before the Backwards Tracer and interact with their gradients within the Backwards Tracer."
-            )
-
-        return super().request(requester)
-
-
 class BackwardsTracer(Invoker):
 
     def __init__(
@@ -99,11 +88,9 @@ class BackwardsTracer(Invoker):
         self.tensor = tensor
         self.fn = fn
 
-    def _execute(self, fn: Callable):
+    def execute(self, fn: Callable):
 
-        mediator_type = AsyncMediator if self.asynchronous else BackwardsMediator
-
-        mediator = mediator_type(fn, self.info)
+        mediator = BackwardsMediator(fn, self.info)
 
         interleaver = Interleaver([mediator], self)
 
@@ -118,14 +105,3 @@ class BackwardsTracer(Invoker):
         finally:
             grad_patch.restore()
             interleaver.cancel()
-
-    async def async_execute(self, fn: Callable):
-
-        self._execute(fn)
-
-    def execute(self, fn: Callable):
-
-        if self.asynchronous:
-            return self.async_execute(fn)
-
-        return self._execute(fn)

@@ -15,10 +15,21 @@ class ApiConfigModel(BaseModel):
 
 
 class AppConfigModel(BaseModel):
+    """
+    REMOTE_LOGGING: Whether to enable remote logging updates for remote NDIF.
+    PYMOUNT: Whether to enable pymount. This allows calling .save() on values in a trace.
+        If False, use nnsight.save() instead. Pymounting has some performance cost.
+    DEBUG: Whether to enable debug mode. Errors within a trace will include inner nnsight stack traces.
+    CACHE_DIR: The directory to cache the model.
+    CROSS_INVOKER: Whether to enable cross-invoker. This allows you to refernce variable directly from one invoker to another.
+        This has some performance cost.
+    """
+
     REMOTE_LOGGING: bool = True
     PYMOUNT: bool = True
     DEBUG: bool = True
     CACHE_DIR: str = "~/.cache/nnsight/"
+    CROSS_INVOKER: bool = True
 
     def __setattr__(self, name, value):
         if name == "REMOTE_LOGGING":

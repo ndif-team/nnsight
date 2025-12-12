@@ -8,10 +8,10 @@ import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-from ... import util, CONFIG
+from ... import util
 from ..backends.base import Backend
 from ..batching import Batcher
-from ..interleaver import AsyncMediator, Events, Mediator
+from ..interleaver import Events, Mediator
 from .base import ExitTracingException, Tracer
 from .globals import Object
 from .invoker import Invoker
@@ -353,13 +353,6 @@ class InterleavingTracer(Tracer):
 
             for mediator in self.model._default_mediators:
 
-                async_mediator = isinstance(mediator, AsyncMediator)
-
-                if async_mediator != self.asynchronous:
-                    raise ValueError(
-                        "Asynchronous mode mismatch between tracer and edits. Use async with both or neither."
-                    )
-
                 self.mediators.append(mediator)
                 self.batcher.batch_groups.append((-1, -1))
 
@@ -376,10 +369,8 @@ class InterleavingTracer(Tracer):
                 f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"
             ]
 
-        asynchronous = "async " if self.asynchronous else ""
-
         self.info.source = [
-            f"{asynchronous}def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
             f"    {self.tracer_var_name}.pull()\n",
             *self.info.source,
             f"    {self.tracer_var_name}.get_frame()\n",
@@ -397,11 +388,13 @@ class InterleavingTracer(Tracer):
 
         return self._frame
 
-    def _execute(self):
+    def execute(self, fn: Callable):
         """
         First executes the parent Tracer's execute method to set up the context,
         then creates an Interleaver to manage the interventions during model execution.
         """
+
+        fn(self.info, self)
 
         args = self.batcher.batched_args
         kwargs = {**self.batcher.batched_kwargs, **self.kwargs}
@@ -422,27 +415,6 @@ class InterleavingTracer(Tracer):
         self.push(self._frame.f_locals)
 
         del self._frame
-
-    def execute(self, fn: Callable):
-        """
-        Execute the compiled function with interventions.
-
-        Args:
-            fn: The compiled function to execute
-        """
-
-        if self.asynchronous:
-            return self.async_execute(fn)
-
-        fn(self.info, self)
-
-        self._execute()
-
-    async def async_execute(self, fn: Callable):
-
-        await fn(self.info, self)
-
-        self._execute()
 
     ### Public API ####
 
@@ -601,7 +573,6 @@ class InterleavingTracer(Tracer):
         state["tracer_var_name"] = self.tracer_var_name
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
-        state["asynchronous"] = self.asynchronous
 
         return state
 
@@ -616,7 +587,6 @@ class InterleavingTracer(Tracer):
         self.batcher = state["batcher"]
         self.obj_var_name = None
         self.user_cache = list()
-        self.asynchronous = state["asynchronous"]
 
 
 class ScanningTracer(InterleavingTracer):
@@ -690,9 +660,6 @@ class Barrier:
 
     def __call__(self):
 
-        if self.model._interleaver.asynchronous:
-            return self
-
         mediator = self.model._interleaver.current
 
         self.participants.add(mediator.name)
@@ -703,16 +670,3 @@ class Barrier:
             mediator.send(Events.BARRIER, participants)
         else:
             mediator.send(Events.BARRIER, None)
-
-    def __await__(self):
-
-        mediator = self.model._interleaver.current
-
-        self.participants.add(mediator.name)
-
-        if len(self.participants) == self.n_participants:
-            participants = self.participants
-            self.participants = set()
-            yield from mediator.send(Events.BARRIER, participants)
-        else:
-            yield from mediator.send(Events.BARRIER, None)

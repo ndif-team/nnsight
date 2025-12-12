@@ -1,6 +1,6 @@
 from typing import Callable, TYPE_CHECKING, Any
 
-from ..interleaver import AsyncMediator, Mediator
+from ..interleaver import Mediator
 from .base import Tracer
 from .util import try_catch
 
@@ -49,15 +49,8 @@ class Invoker(Tracer):
             A callable intervention function
         """
 
-        asynchronous = (
-            "async "
-            if (self.tracer is not None and self.tracer.asynchronous)
-            or self.asynchronous
-            else ""
-        )
-
         self.info.source = [
-            f"{asynchronous}def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
+            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
             "    __nnsight_mediator__.pull()\n",
             *try_catch(
                 self.info.source,
@@ -68,7 +61,7 @@ class Invoker(Tracer):
 
         self.info.start_line -= 2
 
-    def _execute(self, fn: Callable):
+    def execute(self, fn: Callable):
         """
         Execute the compiled intervention function.
 
@@ -85,23 +78,6 @@ class Invoker(Tracer):
 
         self.inputs = inputs
 
-        mediator_type = AsyncMediator if self.tracer.asynchronous else Mediator
-
-        mediator = mediator_type(fn, self.info, batch_group=batch_group)
+        mediator = Mediator(fn, self.info, batch_group=batch_group)
 
         self.tracer.mediators.append(mediator)
-
-    async def async_execute(self, fn: Callable):
-        """
-        Execute the compiled intervention function asynchronously.
-        """
-        self._execute(fn)
-
-    def execute(self, fn: Callable):
-        """
-        Execute the compiled intervention function.
-        """
-        if self.asynchronous:
-            return self.async_execute(fn)
-
-        return self._execute(fn)
