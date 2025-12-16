@@ -48,6 +48,7 @@ class Invoker(Tracer):
         Returns:
             A callable intervention function
         """
+
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
             "    __nnsight_mediator__.pull()\n",

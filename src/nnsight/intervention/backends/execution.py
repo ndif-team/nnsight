@@ -18,7 +18,7 @@ class ExecutionBackend(Backend):
 
         try:
             Globals.enter()
-            tracer.execute(fn)
+            return tracer.execute(fn)
         except Exception as e:
 
             raise wrap_exception(e, tracer.info) from None

@@ -16,29 +16,30 @@ from typing import Callable, Dict, List
 from ..backends.base import Backend
 from ..backends.execution import ExecutionBackend
 from .globals import Globals
-from .util import (get_non_nnsight_frame,
-                   push_variables, suppress_all_output)
+from .util import get_non_nnsight_frame, push_variables, suppress_all_output
 from ...util import Patch, Patcher
 
 
 class ExitTracingException(Exception):
     """Exception raised to exit the tracing process.
 
-    This exception is used as a control flow mechanism to cleanly exit a with block 
-    without executing the code inside it. When the tracer detects that execution 
-    has reached the traced code block, it raises this exception to prevent normal 
+    This exception is used as a control flow mechanism to cleanly exit a with block
+    without executing the code inside it. When the tracer detects that execution
+    has reached the traced code block, it raises this exception to prevent normal
     execution and instead execute the code through the tracing backend.
     """
+
     pass
 
 
 class WithBlockNotFoundError(Exception):
     """Exception raised when a with block is not found in the source code.
 
-    This exception indicates that the AST parser could not locate a with block 
-    at the expected line number during the code capture process. This typically 
+    This exception indicates that the AST parser could not locate a with block
+    at the expected line number during the code capture process. This typically
     occurs when there are issues with source code parsing or line number mapping.
     """
+
     pass
 
 
@@ -46,14 +47,14 @@ class Tracer:
     """
     Captures and executes code within a tracing context.
 
-    This class provides a sophisticated mechanism for intercepting Python code blocks 
-    within 'with' statements, capturing their source code, and executing them in 
-    controlled environments. It's designed to enable dynamic code manipulation and 
+    This class provides a sophisticated mechanism for intercepting Python code blocks
+    within 'with' statements, capturing their source code, and executing them in
+    controlled environments. It's designed to enable dynamic code manipulation and
     execution with full access to the original context and variables.
 
     The tracing process follows four main steps:
     1. **Capture**: Finds and extracts the source code from the with block
-    2. **Parse**: Uses AST to identify the exact code boundaries within the block  
+    2. **Parse**: Uses AST to identify the exact code boundaries within the block
     3. **Compile**: Wraps the source code in a function definition for execution
     4. **Execute**: Runs the compiled function with appropriate context
 
@@ -67,13 +68,13 @@ class Tracer:
 
     The tracer supports various execution environments including:
     - Regular Python files
-    - IPython/Jupyter notebooks  
+    - IPython/Jupyter notebooks
     - Interactive consoles
     - Nested tracing contexts
-    
+
     Attributes:
         args: Arguments passed to the tracer for use during execution
-        kwargs: Keyword arguments passed to the tracer  
+        kwargs: Keyword arguments passed to the tracer
         backend: Backend implementation that handles the actual code execution
         info: Info object containing captured code metadata and context
     """
@@ -108,7 +109,7 @@ class Tracer:
             Args:
                 source: List of source code lines from the traced block
                 frame: Frame information from the call stack where tracing occurred
-                start_line: Line number where the traced code block begins  
+                start_line: Line number where the traced code block begins
                 node: AST node representing the with block
                 filename: Optional filename; generates unique identifier if None
             """
@@ -122,7 +123,7 @@ class Tracer:
 
         def copy(self):
             """Create a deep copy of this Info instance.
-            
+
             Returns:
                 A new Info instance with the same metadata
             """
@@ -132,7 +133,7 @@ class Tracer:
 
         def __getstate__(self):
             """Get the state of the info for serialization.
-            
+
             Returns:
                 Dict containing serializable state information
             """
@@ -145,10 +146,10 @@ class Tracer:
 
         def __setstate__(self, state):
             """Restore the state of the info from serialization.
-            
+
             Args:
                 state: Dictionary containing the serialized state
-                
+
             Note:
                 AST node is set to None as it cannot be serialized
             """
@@ -160,7 +161,7 @@ class Tracer:
             self.node = None
 
     # === Initialization ===
-    
+
     def __init__(self, *args, backend: Backend = None, _info: Info = None, **kwargs):
         """
         Initialize a Tracer instance.
@@ -183,29 +184,30 @@ class Tracer:
         # Initialize or use provided tracing info
         self.info = _info if _info is not None else None
 
+        self.asynchronous = False
+
         # If no pre-existing info, attempt to capture the code block
         if self.info is None:
             self.capture()
-        
 
     # === Core Tracing Methods ===
-    
+
     def capture(self):
         """
         Capture the code block within the 'with' statement.
 
-        This is step 1 of the tracing process. It walks up the call stack to find 
-        the frame outside of nnsight, extracts the source code of the 'with' block, 
-        and prepares it for later execution. The method handles various execution 
+        This is step 1 of the tracing process. It walks up the call stack to find
+        the frame outside of nnsight, extracts the source code of the 'with' block,
+        and prepares it for later execution. The method handles various execution
         environments including regular files, IPython notebooks, and interactive consoles.
-        
+
         The capture process:
         1. Identifies the execution context (file, notebook, console, nested trace)
         2. Extracts source code lines from the appropriate source
         3. Handles indentation normalization for proper AST parsing
         4. Calls parse() to identify the exact with block boundaries
         5. Stores all metadata in a Tracer.Info object
-        
+
         Raises:
             ValueError: If no source code can be found for the current context
         """
@@ -216,7 +218,7 @@ class Tracer:
         start_line = frame.f_lineno
 
         # Determine the execution context and extract source code accordingly
-        
+
         # CASE 1: Already inside another nnsight trace (nested tracing)
         if "__nnsight_tracing_info__" in frame.f_locals:
             # For dynamically generated code, get source from parent tracing info
@@ -236,11 +238,11 @@ class Tracer:
 
         # CASE 3: Regular Python file
         elif not frame.f_code.co_filename.startswith("<nnsight"):
-            
+
             def noop(*args, **kwargs):
                 """No-op function to prevent linecache from clearing during tracing."""
                 pass
-            
+
             # Prevent linecache from clearing cache during tracing to handle file edits
             with Patcher([Patch(linecache, noop, "checkcache")]):
                 # Extract source lines using inspect module
@@ -270,7 +272,7 @@ class Tracer:
             if line.strip():
                 first_non_blank = line
                 break
-        
+
         if first_non_blank is not None:
             # Calculate base indentation level (handles code inside functions/classes)
             stripped = first_non_blank.lstrip("\t ")
@@ -304,8 +306,8 @@ class Tracer:
         """
         Parse the source code to extract the with block contents.
 
-        This is step 2 of the tracing process. Uses the Abstract Syntax Tree (AST) 
-        to identify the exact boundaries of the with block and extract only the 
+        This is step 2 of the tracing process. Uses the Abstract Syntax Tree (AST)
+        to identify the exact boundaries of the with block and extract only the
         code that should be traced and executed later.
 
         Args:
@@ -317,7 +319,7 @@ class Tracer:
                 - start_line (int): Adjusted start line of the with block body
                 - source_lines (List[str]): Extracted source lines from the with block
                 - node (ast.With): AST node representing the with block
-                
+
         Raises:
             WithBlockNotFoundError: If no with block is found at the specified line
         """
@@ -325,7 +327,7 @@ class Tracer:
         tree = ast.parse("".join(source_lines))
 
         class WithBlockVisitor(ast.NodeVisitor):
-            """AST visitor to find the 'with' node at the specified line."""
+            """AST visitor to find the 'with' or 'async with' node at the specified line."""
 
             def __init__(self, target_line_no):
                 self.target = None
@@ -338,7 +340,18 @@ class Tracer:
                     if item_node.context_expr.lineno == self.line_no:
                         self.target = node
                         return
-                
+
+                # Continue visiting child nodes if this isn't the target
+                self.generic_visit(node)
+
+            def visit_AsyncWith(self, node):
+                """Visit async with statement nodes and check if they match our target line."""
+                # Check each context expression in the async with statement
+                for item_node in node.items:
+                    if item_node.context_expr.lineno == self.line_no:
+                        self.target = node
+                        return
+
                 # Continue visiting child nodes if this isn't the target
                 self.generic_visit(node)
 
@@ -352,12 +365,14 @@ class Tracer:
             context_start = max(0, start_line - 5)
             context_end = min(len(source_lines), start_line + 6)
             context_lines = source_lines[context_start:context_end]
-            
+
             # Mark the problematic line
             target_index = start_line - context_start - 1
             if 0 <= target_index < len(context_lines):
-                context_lines[target_index] = context_lines[target_index].rstrip('\n') + " <--- HERE\n"
-            
+                context_lines[target_index] = (
+                    context_lines[target_index].rstrip("\n") + " <--- HERE\n"
+                )
+
             context_str = "".join(context_lines)
             message = f"With block not found at line {start_line}\n"
             message += f"We looked here:\n\n{context_str}"
@@ -374,14 +389,14 @@ class Tracer:
         """
         Compile the captured source code into a callable function.
 
-        This is step 3 of the tracing process. Takes the captured and parsed source 
+        This is step 3 of the tracing process. Takes the captured and parsed source
         code and wraps it in a function definition with the necessary context parameters.
-        The resulting function can be executed with proper variable scoping and 
+        The resulting function can be executed with proper variable scoping and
         access to the original execution environment.
-        
+
         The compiled function signature is:
         `__nnsight_tracer_{id}__(__nnsight_tracer__, __nnsight_tracing_info__)`
-        
+
         The function includes:
         - A call to tracer.pull() to import variables from the original scope
         - The original traced code block
@@ -392,19 +407,20 @@ class Tracer:
         """
         # Wrap the captured code in a function definition with context parameters
         function_name = f"__nnsight_tracer_{id(self)}__"
-        
+
         # Build the complete function with:
         # 1. Function definition with tracer and info parameters
         # 2. Variable import from original scope (pull)
-        # 3. The original traced code block  
+        # 3. The original traced code block
         # 4. Variable export back to original scope (push)
+
         self.info.source = [
             f"def {function_name}(__nnsight_tracer__, __nnsight_tracing_info__):\n",
             "    __nnsight_tracer__.pull()\n",
             *self.info.source,
             "    __nnsight_tracer__.push()\n",
         ]
-        
+
         # Adjust the start line to account for the added function definition
         self.info.start_line -= 1
 
@@ -412,27 +428,27 @@ class Tracer:
         """
         Execute the compiled function with proper context.
 
-        This is step 4 of the tracing process. Runs the compiled function that was 
-        created in the compile() step, passing in the tracer instance and info object 
-        as context. This allows the traced code to access the original variables and 
+        This is step 4 of the tracing process. Runs the compiled function that was
+        created in the compile() step, passing in the tracer instance and info object
+        as context. This allows the traced code to access the original variables and
         execution environment.
 
         Args:
             fn: The compiled function to execute (created by compile() method)
         """
         # Execute the compiled function with tracer and info as context
-        fn(self, self.info)
+        return fn(self, self.info)
 
     # === Variable Management ===
-    
+
     def push(self, state: Dict = None):
         """
         Push local variables back to the original execution frame.
 
-        This method exports variables from the traced code execution back to the 
-        original scope where the tracer was created. This allows changes made 
+        This method exports variables from the traced code execution back to the
+        original scope where the tracer was created. This allows changes made
         during tracing to persist and affect the original execution environment.
-        
+
         The method handles variable filtering to only push non-nnsight variables,
         and includes special logic for nested tracing contexts using Globals.stack.
 
@@ -459,27 +475,30 @@ class Tracer:
             state = current_frame.f_locals
 
         # Filter out internal nnsight variables (they shouldn't be pushed back)
-        filtered_state = {k: v for k, v in state.items() if not k.startswith("__nnsight")}
-        
+        filtered_state = {
+            k: v for k, v in state.items() if not k.startswith("__nnsight")
+        }
+
         # Special handling for nested tracing contexts
         # When stack == 1, only push variables that were explicitly saved
         if Globals.stack == 1:
-            filtered_state = {k: v for k, v in filtered_state.items() if id(v) in Globals.saves}
+            filtered_state = {
+                k: v for k, v in filtered_state.items() if id(v) in Globals.saves
+            }
 
         # Push the filtered variables back to the original frame
         push_variables(target_frame, filtered_state)
 
-        
     def pull(self):
         """
         Pull variables from the original execution frame into the current context.
 
-        This method imports variables from the original scope where the tracer was 
-        created into the current traced code execution context. This ensures that 
-        the traced code has access to all variables that were available when the 
+        This method imports variables from the original scope where the tracer was
+        created into the current traced code execution context. This ensures that
+        the traced code has access to all variables that were available when the
         tracer was instantiated.
-        
-        This is the opposite operation of push() and is called at the beginning 
+
+        This is the opposite operation of push() and is called at the beginning
         of traced code execution.
         """
         # Find the current execution frame by walking up the call stack
@@ -495,27 +514,29 @@ class Tracer:
 
         # Get variables from the original frame where the tracer was created
         original_state = self.info.frame.f_locals
-        
+
         # Filter out internal nnsight variables
-        filtered_state = {k: v for k, v in original_state.items() if not k.startswith("__nnsight")}
-        
+        filtered_state = {
+            k: v for k, v in original_state.items() if not k.startswith("__nnsight")
+        }
+
         # Push the original variables into the current execution context
         push_variables(current_frame, filtered_state)
 
     # === Context Manager Methods ===
-    
+
     def __enter__(self):
         """
         Enter the tracing context.
 
-        This method is called when entering the 'with' statement. It sets up the 
-        tracing mechanism that will capture the code block and prevent its normal 
+        This method is called when entering the 'with' statement. It sets up the
+        tracing mechanism that will capture the code block and prevent its normal
         execution. Instead, the code will be executed later through the backend.
-        
+
         The method:
         1. Captures the code block if not already done
         2. Checks for empty code blocks (just 'pass' statements)
-        3. Sets up a trace function that raises ExitTracingException when the 
+        3. Sets up a trace function that raises ExitTracingException when the
            traced code is reached, preventing normal execution
 
         Returns:
@@ -535,10 +556,10 @@ class Tracer:
             """
             Trace function that intercepts execution and prevents normal code execution.
 
-            This function is called by Python's tracing mechanism. When execution 
-            reaches the captured code block, it raises ExitTracingException to 
+            This function is called by Python's tracing mechanism. When execution
+            reaches the captured code block, it raises ExitTracingException to
             prevent normal execution and trigger our custom backend execution instead.
-            
+
             Args:
                 frame: The current execution frame
                 event: The trace event type (we respond to all events)
@@ -559,13 +580,13 @@ class Tracer:
 
                 # Clear the frame-level trace function
                 self.info.frame.f_trace = None
-                
+
                 # Raise exception to exit normal execution flow
                 raise ExitTracingException()
 
         # Set up the trace function at both global and frame levels
         # This ensures our trace function intercepts execution when the traced code is reached
-        
+
         # Set global trace (suppress_all_output prevents Colab warnings)
         with suppress_all_output():
             sys.settrace(skip_traced_code)
@@ -579,8 +600,8 @@ class Tracer:
         """
         Exit the tracing context and execute the captured code.
 
-        This method is called when exiting the 'with' statement. It handles the 
-        execution of the captured code through the configured backend, and manages 
+        This method is called when exiting the 'with' statement. It handles the
+        execution of the captured code through the configured backend, and manages
         exception handling for the tracing mechanism.
 
         Args:
@@ -593,25 +614,39 @@ class Tracer:
             None otherwise (allows other exceptions to propagate)
         """
         # Handle the ExitTracingException (our control flow mechanism)
-        if exc_type is ExitTracingException:
+        if exc_type is ExitTracingException or exc_type is None:
+            with suppress_all_output():
+                sys.settrace(None)
+
+            # Clear the frame-level trace function
+            self.info.frame.f_trace = None
+
             # This is the expected case - the traced code was intercepted
             # Execute the captured code using the configured backend
+            if self.asynchronous:
+                return self.backend(self)
+
             self.backend(self)
-            
-            # Return True to suppress the ExitTracingException
+
             return True
 
-        # For any other case (no exception or different exception), 
-        # still execute the backend (handles edge cases)
-        self.backend(self)
-        
-        # Return None to allow other exceptions to propagate normally
+    async def __aenter__(self):
+
+        self.asynchronous = True
+
+        return self.__enter__()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+
+        await self.__exit__(exc_type, exc_val, exc_tb)
+
+        return True
 
     # === Serialization Methods ===
-    
+
     def __getstate__(self):
         """Get the state of the tracer for serialization.
-        
+
         Returns:
             Dict containing the serializable state of the tracer
         """
@@ -619,14 +654,15 @@ class Tracer:
             "args": self.args,
             "kwargs": self.kwargs,
             "info": self.info,
+            "asynchronous": self.asynchronous,
         }
 
     def __setstate__(self, state):
         """Restore the state of the tracer from serialization.
-        
+
         Args:
             state: Dictionary containing the serialized tracer state
-            
+
         Note:
             The backend is reset to ExecutionBackend and start_line is reset to 0
             since these cannot be reliably serialized across different contexts.
@@ -634,7 +670,8 @@ class Tracer:
         self.args = state["args"]
         self.kwargs = state["kwargs"]
         self.info = state["info"]
-        
+        self.asynchronous = state["asynchronous"]
+
         # Reset values that cannot be reliably serialized
         self.info.start_line = 0  # Line numbers may not be valid in new context
         self.backend = ExecutionBackend()  # Backend needs to be recreated
