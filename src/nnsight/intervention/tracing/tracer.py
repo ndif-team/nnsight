@@ -315,8 +315,6 @@ class InterleavingTracer(Tracer):
 
         self.batcher = Batcher()
 
-        self.user_cache: List[Cache] = list()
-
         self._frame = None
 
         super().__init__(*args, **kwargs, backend=backend)
@@ -405,7 +403,7 @@ class InterleavingTracer(Tracer):
         interleaver = self.model._interleaver
 
         interleaver.initialize(
-            self.mediators, self, batcher=self.batcher, user_cache=self.user_cache
+            self.mediators, self, batcher=self.batcher
         )
         try:
             self.model.interleave(self.fn, *args, **kwargs)
@@ -480,20 +478,7 @@ class InterleavingTracer(Tracer):
         alias_dict = {value: key for key, value in rename_dict.items()}
 
         if not self.model.interleaving:
-            self.user_cache.append(
-                Cache(
-                    modules,
-                    device,
-                    dtype,
-                    detach,
-                    include_output,
-                    include_inputs,
-                    rename_dict,
-                    alias_dict,
-                )
-            )
-
-            return self.user_cache[-1].cache
+            raise ValueError("Cannot create a cache outside an invoker.")
 
         self.model._interleaver.current.set_user_cache(
             Cache(
@@ -586,7 +571,6 @@ class InterleavingTracer(Tracer):
         self.mediators = state["mediators"]
         self.batcher = state["batcher"]
         self.obj_var_name = None
-        self.user_cache = list()
 
 
 class ScanningTracer(InterleavingTracer):

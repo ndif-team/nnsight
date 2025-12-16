@@ -69,33 +69,29 @@ class Interleaver:
 
     def __init__(
         self,
-        mediators: List[Mediator] = None,
+        mediators: List[Mediator] = [],
         tracer: InterleavingTracer = None,
         batcher: Batcher = None,
-        user_cache: Optional[Cache] = None,
     ):
-        self.initialize(mediators, tracer, batcher, user_cache)
+        self.initialize(mediators, tracer, batcher)
 
     def initialize(
         self,
         mediators: List[Mediator],
         tracer: InterleavingTracer,
         batcher: Batcher = None,
-        user_cache: Optional[Cache] = None,
     ):
         
-        self.mediators: Dict[str, Mediator] = {mediator.name: mediator for mediator in mediators}
+        self.mediators: List[Mediator] = mediators
 
         self.tracer = tracer
         self.batcher = batcher if batcher is not None else Batcher()
-        self.user_cache = user_cache
 
         self.default_all = None
 
         self.current = None
         
-        for mediator in self:
-            mediator.start(self)
+
 
     def cancel(self):
         """Cancel all intervention threads."""
@@ -106,7 +102,6 @@ class Interleaver:
         self.mediators = None
         self.tracer = None
         self.batcher = None
-        self.user_cache = None
 
         self.current = None
 
@@ -251,6 +246,9 @@ class Interleaver:
         self._interleaving = True
 
         try:
+                        
+            for mediator in self:
+                mediator.start(self)
 
             try:
                 self.handle()
@@ -259,6 +257,8 @@ class Interleaver:
         except:
             self._interleaving = False
             raise
+        
+        self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
         return self
 
@@ -275,6 +275,9 @@ class Interleaver:
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
         # Or their Envoy was not called.
         for mediator in self:
+            
+            if not mediator.alive:
+                continue
 
             if not mediator.event_queue.empty():
                 requested_event, requester = mediator.event_queue.get()
@@ -353,7 +356,7 @@ class Interleaver:
         skip_count = 0
         skip_values = []
 
-        for mediator in list(self.mediators.values()):
+        for mediator in self:
 
             with mediator:
                 
@@ -385,19 +388,11 @@ class Interleaver:
 
         self.batcher.current_value = original_value
 
-        if (
-            self.user_cache is not None
-            and len(self.user_cache) > 0
-            and provider is not None
-        ):
-            for cache in self.user_cache:
-                cache.add(provider, value)
-
         return value
     
     
     def __iter__(self):
-        return iter([mediator for mediator in self.mediators.values() if not mediator.cancelled])
+        return iter(self.mediators)
 
     ### Requester Methods ###
 
@@ -459,7 +454,6 @@ class Mediator:
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
         self.all_stop: Optional[int] = stop
-        self.cancelled = False
         self.args = list()
 
         self.original_globals = {}
@@ -517,9 +511,7 @@ class Mediator:
     def cancel(self):
         """Cancel the intervention thread and clear caches."""
         # TODO custom canceled error
-        
-        self.cancelled = True
-        
+                
         self.history.clear()
         self.iteration_tracker.clear()
 
@@ -570,6 +562,16 @@ class Mediator:
 
         if event == Events.END:
             self.handle_end_event()
+            
+        if len(self.user_cache) > 0 and provider is not None:
+
+            for cache in self.user_cache:
+                cache.add(
+                    provider,
+                    self.interleaver.batcher.narrow(
+                        self.batch_group, self.interleaver.batcher.current_value
+                    ),
+                )
 
     def handle_barrier_event(self, provider: Any, participants: Set[str]):
         """
