@@ -258,13 +258,15 @@ class Interleaver:
             self._interleaving = False
             raise
         
-        self.mediators = [mediator for mediator in self.mediators if mediator.alive]
+        
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
 
         self._interleaving = False
+        
+        self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
         # If execution was stopped early, ignore and do nothing
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
@@ -359,10 +361,9 @@ class Interleaver:
         for mediator in self:
 
             with mediator:
-                
+                                
                 if iterate:
-                    provider = self.iterate_provider(original_provider)
-                                        
+                    provider = self.iterate_provider(original_provider)                       
                 try:
                     mediator.handle(provider)
                 except SkipException as e:
@@ -562,14 +563,14 @@ class Mediator:
 
         if event == Events.END:
             self.handle_end_event()
-            
+                        
         if len(self.user_cache) > 0 and provider is not None:
 
             for cache in self.user_cache:
                 cache.add(
                     provider,
                     self.interleaver.batcher.narrow(
-                        self.batch_group, self.interleaver.batcher.current_value
+                        self.batch_group
                     ),
                 )
 
