@@ -89,7 +89,7 @@ class Interleaver:
         self.user_cache = user_cache
 
         self.mediators: Dict[str, Mediator] = {}
-        self.iteration_tracker = defaultdict(int)
+        
         self.default_all = None
         
     def cancel(self):
@@ -106,8 +106,10 @@ class Interleaver:
 
 
     def iterate_provider(self, provider: str):
+        
+        mediator = self.current
 
-        iteration = self.iteration_tracker[provider]
+        iteration = mediator.iteration_tracker[provider]
 
         return f"{provider}.i{iteration}"
     
@@ -119,7 +121,7 @@ class Interleaver:
         iteration = mediator.iteration
         
         if iteration is None:
-            iteration = self.iteration_tracker[requester]
+            iteration = mediator.iteration_tracker[requester]
         elif isinstance(iteration, tuple):
             iteration, mediator.iteration = iteration
 
@@ -362,8 +364,8 @@ class Interleaver:
                 skip_count += 1
                 skip_values.append(e.value)
                 
-        if iterate:
-            self.iteration_tracker[original_provider] += 1
+            if iterate:
+                mediator.iteration_tracker[original_provider] += 1
 
         if skip_count == len(self.invokers) and self.invokers:
 
@@ -450,6 +452,7 @@ class Mediator:
         self.interleaver = None
         self.history = set()
         self.user_cache: List["Cache"] = list()
+        self.iteration_tracker = defaultdict(int)
         self.iteration = 0
         self.all_stop: Optional[int] = stop
 
