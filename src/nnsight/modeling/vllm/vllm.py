@@ -22,7 +22,7 @@ from ...intervention.tracing.util import push_variables
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
-from ...intervention.tracing.globals import Globals
+from ... import save
 from .engines.engine import NNsightLLMEngine
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
@@ -67,10 +67,20 @@ class VLLM(RemoteableMixin):
 
         if not torch.distributed.is_initialized():
 
+            import socket
+
+            def get_free_port():
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind(("127.0.0.1", 0))
+                addr, port = s.getsockname()
+                s.close()
+                return port
+
+            port = get_free_port()
             init_distributed_environment(
                 1,
                 0,
-                "tcp://127.0.0.1:47303",
+                f"tcp://127.0.0.1:{port}",
                 0,
                 backend="gloo",
             )
@@ -147,7 +157,6 @@ class VLLM(RemoteableMixin):
             for i, prompt in enumerate(arg):
 
                 param = NNsightSamplingParams(
-                    interleaver_id=id(self._interleaver),
                     **kwargs,
                 )
 
@@ -165,18 +174,9 @@ class VLLM(RemoteableMixin):
 
         batch_size = len(prompts)
 
-        mediator_id = 0
-
-        if batched_inputs is not None:
-
-            mediator_id = batched_inputs[1].get("mediator_id")
-
-        for param in params:
-            param.mediator_id = mediator_id
-
         if batched_inputs is None:
 
-            return ((prompts, params), {**kwargs, "mediator_id": 1}), batch_size
+            return ((prompts, params), kwargs), batch_size
 
         batched_args = batched_inputs[0]
         batched_kwargs = batched_inputs[1]
@@ -185,7 +185,6 @@ class VLLM(RemoteableMixin):
         batched_args[1].extend(params)
 
         batched_kwargs.update(kwargs)
-        batched_kwargs["mediator_id"] = mediator_id + 1
 
         return batched_inputs, batch_size
 
@@ -198,49 +197,55 @@ class VLLM(RemoteableMixin):
 
         default_param = NNsightSamplingParams.from_optional()
 
-        kwargs.pop("mediator_id", None)
         kwargs.pop("hook", None)
 
-        max_max_tokens = 0
-        seen_mediators = set()
-        for param in params:
-            if param.mediator_id not in seen_mediators:
-                param.batch_group = self._interleaver.batcher.batch_groups[
-                    param.mediator_id
-                ]
-                param.mediator = self._interleaver.invokers[param.mediator_id]
-                seen_mediators.add(param.mediator_id)
-            param.needs_batching = self._interleaver.batcher.needs_batching
+        param_idx = 0
 
-            for attr, value in kwargs.items():
-                if hasattr(NNsightSamplingParams, attr) and getattr(
-                    param, attr
-                ) == getattr(default_param, attr):
-                    setattr(param, attr, value)
+        # Find the sampling params associated with each mediator
+        for mediator in self._interleaver:
 
-            max_max_tokens = (
-                param.max_tokens
-                if param.max_tokens > max_max_tokens
-                else max_max_tokens
-            )
+            batch_start, batch_size = mediator.batch_group
 
-        for mediator in self._interleaver.invokers:
-            if mediator.batch_group != None:
-                mediator.all_stop = params[
-                    self._interleaver.batcher.batch_groups[mediator.batch_group][0]
-                ].max_tokens
-            else:
-                mediator.all_stop = max_max_tokens
+            # If its the only invoker in the batch group, set the batch size to the total number of prompts
+            if batch_size == -1:
+                batch_size = len(params)
 
-        output = self.vllm_entrypoint.generate(prompts, sampling_params=params)
+            # For each prompt in the batch group associated with the mediator
+            for i in range(batch_size):
 
-        saves = output[0].saves
+                param = params[param_idx]
 
+                # If its the first prompt in the batch group, it will transfer the mediator to the workers
+                if i == 0:
+
+                    param.mediator = mediator
+
+                param_idx += 1
+
+                # Update the sampling params for each prompt with any kwargs passed to the root trace
+                for attr, value in kwargs.items():
+                    if hasattr(NNsightSamplingParams, attr) and getattr(
+                        param, attr
+                    ) == getattr(default_param, attr):
+                        setattr(param, attr, value)
+
+        # Do VLLM generation with NNsight
+        outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params)
+
+        saves = {}
+
+        # Some of the output objects will have a saves attribute, which contains the saved variables
+        for output in outputs:
+            if hasattr(output, "saves"):
+                saves.update(output.saves)
+
+        # Save the variables in our local environment
         for value in saves.values():
 
-            Globals.saves.add(id(value))
+            save(value)
 
-        push_variables(self._interleaver.invokers[0].info.frame, output[0].saves)
+        # Push the variables to the interleaver frame
+        push_variables(next(iter(self._interleaver)).info.frame, saves)
 
     def interleave(self, fn: Callable, *args, **kwargs):
 

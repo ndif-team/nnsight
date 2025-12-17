@@ -1,10 +1,10 @@
-
-
 import pickle
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor.abstract import UniProcExecutor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm import envs
+
+
 class NNsightLLMEngine(LLMEngine):
 
     def step(self):
@@ -36,6 +36,5 @@ class NNsightLLMEngine(LLMEngine):
                 )
 
             finished_requests[0].saves = saves
-                  
-        return request_outputs
 
+        return request_outputs

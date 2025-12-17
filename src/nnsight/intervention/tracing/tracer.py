@@ -352,7 +352,6 @@ class InterleavingTracer(Tracer):
             for mediator in self.model._default_mediators:
 
                 self.mediators.append(mediator)
-                self.batcher.batch_groups.append((-1, -1))
 
         # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
@@ -402,9 +401,7 @@ class InterleavingTracer(Tracer):
 
         interleaver = self.model._interleaver
 
-        interleaver.initialize(
-            self.mediators, self, batcher=self.batcher
-        )
+        interleaver.initialize(self.mediators, self, batcher=self.batcher)
         try:
             self.model.interleave(self.fn, *args, **kwargs)
         finally:

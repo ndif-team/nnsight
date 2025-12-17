@@ -17,8 +17,6 @@ class EditingBackend(Backend):
 
         fn = super().__call__(invoker)
 
-        mediator = Mediator(
-            fn, invoker.info, batch_group=len(tracer.model._default_mediators)
-        )
+        mediator = Mediator(fn, invoker.info)
 
         tracer.model._default_mediators = tracer.model._default_mediators + [mediator]
