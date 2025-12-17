@@ -1,11 +1,12 @@
-from typing import Optional, Union
-from .mixins import RemoteableMixin
 import json
-from huggingface_hub import HfApi
-from typing_extensions import Self
-from huggingface_hub.file_download import repo_folder_name
 import os
-from huggingface_hub import constants
+from typing import Optional, Union
+
+from huggingface_hub import HfApi, constants
+from huggingface_hub.file_download import repo_folder_name
+from typing_extensions import Self
+
+from .mixins import RemoteableMixin
 
 
 class HuggingFaceModel(RemoteableMixin):

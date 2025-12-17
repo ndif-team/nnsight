@@ -21,8 +21,6 @@ if TYPE_CHECKING:
 
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
-    from ....intervention.interleaver import Interleaver
-
 
 class NNsightGPUModelRunner(GPUModelRunner):
 
@@ -120,8 +118,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                     self.num_prompts_in_mediator[last_mediator] += 1
 
-            model._interleaver.batcher._total_batch_size = None
-
         def unflatten(self, model: VLLM):
 
             batch_start = 0
@@ -141,8 +137,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 batch_start += batch_size
 
             self.num_prompts_in_mediator.clear()
-
-            model._interleaver.batcher._total_batch_size = None
 
         def process_finished_reqs(
             self, finished_request_ids: Set[str], requests, model: VLLM
@@ -178,8 +172,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             else:
                 model._interleaver.batcher.last_batch_group = None
 
-            model._interleaver.batcher._total_batch_size = None
-
     def __init__(self, *args, **kwargs):
 
         from .. import VLLM
@@ -211,8 +203,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.nnsight_request_helper.process_new_reqs(
             scheduler_output.scheduled_new_reqs, self.nnsight_model
         )
-
-        self.nnsight_model._interleaver.batcher._total_batch_size = None
 
         self.nnsight_model._interleaver.batcher.needs_batching = (
             len(self.nnsight_model._interleaver.mediators) > 1

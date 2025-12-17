@@ -20,7 +20,6 @@ class VLLMBatcher(Batcher):
         self.parallel = False
         self.gathered = False
         self.type = None
-        self._total_batch_size = 0
 
     def wrap(self, model: Envoy):
 

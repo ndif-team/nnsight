@@ -31,16 +31,10 @@ class Batcher:
 
         self.current_value: Optional[Any] = None
 
-        self._total_batch_size = None
-
     @property
     def total_batch_size(self):
 
-        if self._total_batch_size is None:
-
-            self._total_batch_size = sum(self.last_batch_group)
-
-        return self._total_batch_size
+        return sum(self.last_batch_group)
 
     def batch(
         self, batchable: Batchable, *args, **kwargs
