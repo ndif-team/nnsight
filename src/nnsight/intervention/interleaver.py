@@ -663,7 +663,6 @@ class Mediator:
             self.response_queue.put(Cancelation())
 
         self.worker = None
-        self.interleaver = None
 
     def handle(self, provider: Optional[str] = None):
         """
@@ -816,7 +815,7 @@ class Mediator:
 
         return False
 
-     def handle_barrier_event(self, provider: Any, participants: Set[str]):
+    def handle_barrier_event(self, provider: Any, participants: Set[str]):
         """
         Handle a barrier event by setting a barrier.
         """
@@ -1019,8 +1018,6 @@ class Mediator:
                 state[key] = self.original_globals[key]
 
         push_variables(self.frame, state)
-
-    
 
     def set_user_cache(self, cache: "Cache"):
         """
