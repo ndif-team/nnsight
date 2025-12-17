@@ -28,10 +28,12 @@ class Invoker(Tracer):
             *args: Additional arguments to pass to the traced function
             **kwargs: Additional keyword arguments to pass to the traced function
         """
-        
+
         if tracer is not None and tracer.model.interleaving:
-            raise ValueError("Cannot invoke during an active model execution / interleaving.")
-        
+            raise ValueError(
+                "Cannot invoke during an active model execution / interleaving."
+            )
+
         self.tracer = tracer
 
         super().__init__(*args, **kwargs)
@@ -46,6 +48,7 @@ class Invoker(Tracer):
         Returns:
             A callable intervention function
         """
+
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__):\n",
             "    __nnsight_mediator__.pull()\n",
@@ -68,8 +71,10 @@ class Invoker(Tracer):
         Args:
             fn: The compiled intervention function
         """
-        
-        inputs, batch_group = self.tracer.batcher.batch(self.tracer.model, *self.args, **self.kwargs)
+
+        inputs, batch_group = self.tracer.batcher.batch(
+            self.tracer.model, *self.args, **self.kwargs
+        )
 
         self.inputs = inputs
 

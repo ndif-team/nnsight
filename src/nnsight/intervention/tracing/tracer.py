@@ -2,8 +2,7 @@ import copy
 import inspect
 import re
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
-                    Tuple, Union)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -48,7 +47,6 @@ class Cache:
             return [*self.inputs[0], *self.inputs[1].values()][0]
 
     class CacheDict(Dict):
-
         """
         A dictionary subclass that provides convenient access to cached module activations.
 
@@ -73,9 +71,9 @@ class Cache:
         """
 
         def __init__(
-            self, 
-            data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]", 
-            path: str = "", 
+            self,
+            data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]",
+            path: str = "",
             alias: Dict[str, str] = dict(),
             rename: Dict[str, str] = dict(),
             alias_paths: Dict[str, str] = dict(),
@@ -86,7 +84,7 @@ class Cache:
             self._alias_paths = alias_paths
 
             super().__init__(data)
-        
+
         @property
         def output(self):
             """
@@ -108,10 +106,10 @@ class Cache:
             """
             return dict.__getitem__(self, self._path).input
 
-        def keys(self, alias: bool=False):
+        def keys(self, alias: bool = False):
             if alias:
                 return self._alias_paths.keys()
-            
+
             return super().keys()
 
         def _add_alias_path(self, module_path):
@@ -121,11 +119,10 @@ class Cache:
                 for path, alias in self._rename.items():
                     path = path.removeprefix(".")
                     alias_path = alias_path.replace(path, alias)
-                    
-                if alias_path != module_path:
-                    self._alias_paths[alias_path] =  module_path
 
-        
+                if alias_path != module_path:
+                    self._alias_paths[alias_path] = module_path
+
         def __getitem__(self, key):
             name = self._alias.get(key, key)
 
@@ -134,28 +131,49 @@ class Cache:
 
                 path = self._path + "." + name if self._path != "" else name
                 return dict.__getitem__(self, path)
-            
+
             if isinstance(name, int):
                 path = self._path + "." + f"{name}"
-                
+
                 if any(key.startswith(path) for key in self):
-                    return Cache.CacheDict(self, path, rename=self._rename, alias=self._alias, alias_paths=self._alias_paths)
-                elif any(key.startswith(self._path + ".") and len(key) >= len(self._path) + 1 and key[len(self._path) + 1].isdigit() for key in self):
-                    raise IndexError(f"Index {key} is out of bounds for modulelist or module does not allow indexing.")
-                
+                    return Cache.CacheDict(
+                        self,
+                        path,
+                        rename=self._rename,
+                        alias=self._alias,
+                        alias_paths=self._alias_paths,
+                    )
+                elif any(
+                    key.startswith(self._path + ".")
+                    and len(key) >= len(self._path) + 1
+                    and key[len(self._path) + 1].isdigit()
+                    for key in self
+                ):
+                    raise IndexError(
+                        f"Index {key} is out of bounds for modulelist or module does not allow indexing."
+                    )
+
             return dict.__getitem__(self, key)
 
         def __getattr__(self, attr: str):
             path = self._path + "." + attr if self._path != "" else attr
 
             if any(key.startswith(path) for key in self):
-                return Cache.CacheDict(self, path, rename=self._rename, alias=self._alias, alias_paths=self._alias_paths)
+                return Cache.CacheDict(
+                    self,
+                    path,
+                    rename=self._rename,
+                    alias=self._alias,
+                    alias_paths=self._alias_paths,
+                )
             elif self._alias and attr in self._alias:
                 name = self._alias[attr]
                 name = name.removeprefix(".")
                 return self.__getattr__(name)
             else:
-                raise AttributeError(f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute.")
+                raise AttributeError(
+                    f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute."
+                )
 
     def __init__(
         self,
@@ -218,8 +236,10 @@ class Cache:
         if self.modules is not None:
             if module_path not in self.modules:
                 return
-            
-        if (key == "output" and not self.include_output) or (key == "inputs" and not self.include_inputs):
+
+        if (key == "output" and not self.include_output) or (
+            key == "inputs" and not self.include_inputs
+        ):
             return
 
         if self.detach:
@@ -271,7 +291,12 @@ class InterleavingTracer(Tracer):
     """
 
     def __init__(
-        self, fn: Callable, model: Envoy, *args, backend: Backend = None, **kwargs
+        self,
+        fn: Callable,
+        model: Envoy,
+        *args,
+        backend: Backend = None,
+        **kwargs,
     ):
         """
         Initialize an InterleavingTracer with a function and model.
@@ -290,18 +315,16 @@ class InterleavingTracer(Tracer):
 
         self.batcher = Batcher()
 
-        self.user_cache: List[Cache] = list()
-        
         self._frame = None
 
         super().__init__(*args, **kwargs, backend=backend)
-            
+
     def capture(self):
         """
         Capture the code block within the 'with' statement.
         """
         super().capture()
-        
+
         if not hasattr(self, "obj_var_name"):
             try:
                 self.obj_var_name = self.info.node.items[0].context_expr.func.value.id
@@ -314,7 +337,6 @@ class InterleavingTracer(Tracer):
                 if self.info.node.items[0].optional_vars is not None
                 else "__nnsight_tracer__"
             )
-        
 
     def compile(self) -> Callable:
         """
@@ -327,10 +349,9 @@ class InterleavingTracer(Tracer):
         # If Envoy has a default mediators ( created via Envoy.edit() ), add them
         if self.model._default_mediators:
 
-            for mediators in self.model._default_mediators:
+            for mediator in self.model._default_mediators:
 
-                self.mediators.append(mediators)
-                self.batcher.batch_groups.append((-1, -1))
+                self.mediators.append(mediator)
 
         # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
@@ -338,10 +359,12 @@ class InterleavingTracer(Tracer):
             invoker = self.invoke(*self.args, _info=self.info.copy())
 
             invoker.__exit__(ExitTracingException, None, None)
-            
+
             invoker.info.start_line = 0
 
-            self.info.source = [f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"]
+            self.info.source = [
+                f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"
+            ]
 
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
@@ -349,30 +372,25 @@ class InterleavingTracer(Tracer):
             *self.info.source,
             f"    {self.tracer_var_name}.get_frame()\n",
         ]
-        
+
         self.info.start_line -= 1
 
         self.args = tuple()
-        
-        
+
     def get_frame(self):
         """
         Get the frame of the tracer.
         """
         self._frame = inspect.currentframe().f_back
-        
+
         return self._frame
 
     def execute(self, fn: Callable):
         """
-        Execute the compiled function with interventions.
-
         First executes the parent Tracer's execute method to set up the context,
         then creates an Interleaver to manage the interventions during model execution.
-
-        Args:
-            fn: The compiled function to execute
         """
+
         fn(self.info, self)
 
         args = self.batcher.batched_args
@@ -380,21 +398,18 @@ class InterleavingTracer(Tracer):
 
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
-        
+
         interleaver = self.model._interleaver
-        interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
 
+        interleaver.initialize(self.mediators, self, batcher=self.batcher)
         try:
-
             self.model.interleave(self.fn, *args, **kwargs)
         finally:
             self.mediators.clear()
-            
-        self.push(self._frame.f_locals)
-        
-        del self._frame
 
-                
+        self.push(self._frame.f_locals)
+
+        del self._frame
 
     ### Public API ####
 
@@ -424,10 +439,10 @@ class InterleavingTracer(Tracer):
 
     def all(self):
         return self.iter[:]
-    
+
     def next(self, step: int = 1):
         self.model._interleaver.current.iteration += step
-        
+
         return self
 
     def cache(
@@ -437,7 +452,7 @@ class InterleavingTracer(Tracer):
         dtype: Optional[torch.dtype] = None,
         detach: Optional[bool] = True,
         include_output: bool = True,
-        include_inputs: bool = False
+        include_inputs: bool = False,
     ) -> Union[Dict, Object]:
         """
         Get or create a cache for storing intermediate values during tracing.
@@ -454,22 +469,29 @@ class InterleavingTracer(Tracer):
             A dictionary containing the cached values
         """
 
-        rename_dict = self.model._alias.rename if self.model._alias is not None else dict()
+        rename_dict = (
+            self.model._alias.rename if self.model._alias is not None else dict()
+        )
         alias_dict = {value: key for key, value in rename_dict.items()}
 
         if not self.model.interleaving:
-            self.user_cache.append(
-                Cache(modules, device, dtype, detach, include_output, include_inputs, rename_dict, alias_dict)
-            )
-
-            return self.user_cache[-1].cache
+            raise ValueError("Cannot create a cache outside an invoker.")
 
         self.model._interleaver.current.set_user_cache(
-            Cache(modules, device, dtype, detach, include_output, include_inputs, rename_dict, alias_dict)
+            Cache(
+                modules,
+                device,
+                dtype,
+                detach,
+                include_output,
+                include_inputs,
+                rename_dict,
+                alias_dict,
+            )
         )
 
         return self.model._interleaver.current.user_cache[-1].cache
-    
+
     def barrier(self, n_participants: int):
         """
         nnsight barrier: A synchronization primitive for coordinating multiple concurrent invocations in nnsight.
@@ -484,7 +506,7 @@ class InterleavingTracer(Tracer):
 
             with gpt2.generate(max_new_tokens=3) as tracer:
                 barrier = tracer.barrier(2)
-                
+
                 with tracer.invoke(MSG_prompt):
                     embeddings = gpt2.transformer.wte.output
                     barrier()
@@ -497,9 +519,9 @@ class InterleavingTracer(Tracer):
 
         In this example, both invocations will pause at the barrier until both have reached it, ensuring synchronization.
         """
-        
+
         return Barrier(self.model, n_participants)
-    
+
     @property
     def result(self) -> Object:
         """
@@ -519,15 +541,9 @@ class InterleavingTracer(Tracer):
 
         if self.model.interleaving:
 
-            return self.model._interleaver.current.request(
-                "result"
-            )
+            return self.model._interleaver.current.request("result")
         else:
-            raise ValueError(
-                "Cannot return result of Envoy that is not interleaving."
-            )
-        
-        
+            raise ValueError("Cannot return result of Envoy that is not interleaving.")
 
     ### Serialization ###
 
@@ -545,59 +561,58 @@ class InterleavingTracer(Tracer):
     def __setstate__(self, state):
         """Set the state of the tracer for deserialization."""
         super().__setstate__(state)
-        
+
         self.model = state["model"]
         self.fn = state["fn"]
         self.tracer_var_name = state["tracer_var_name"]
         self.mediators = state["mediators"]
         self.batcher = state["batcher"]
         self.obj_var_name = None
-        self.user_cache = list()
+
 
 class ScanningTracer(InterleavingTracer):
     """
     A tracer that runs the model in fake tensor mode to validate operations and inspect tensor shapes.
-    
+
     This tracer uses PyTorch's FakeTensorMode to run the model without actual computation,
-    allowing for shape validation and operation checking. It populates the _fake_inputs and 
+    allowing for shape validation and operation checking. It populates the _fake_inputs and
     _fake_output attributes on each Envoy to store the shapes and types of tensors that would
     flow through the model during a real forward pass.
     """
-    
+
     def execute(self, fn: Callable):
         """
         Execute the model in fake tensor mode.
-        
+
         This method:
         1. Registers forward hooks on all modules to capture fake input/output
         2. Runs the model in fake tensor mode to validate operations
         3. Stores the fake inputs/outputs on each Envoy for later inspection
-        
+
         Args:
             fn: The function to execute (typically the model's forward pass)
         """
         # Get all Envoys in the model
         envoys = self.model.modules()
-                        
+
         hooks = []
-        
+
         # Register hooks on each module to capture shapes
         for envoy in envoys:
+
             def _hook(
                 module: torch.nn.Module,
                 input: Any,
                 input_kwargs: Dict,
                 output: Any,
-                envoy=envoy
+                envoy=envoy,
             ):
                 # Store the shapes/types of inputs and outputs on the Envoy
                 envoy._fake_inputs = (input, input_kwargs)
                 envoy._fake_output = output
-                
-            hooks.append(envoy._module.register_forward_hook(
-                _hook, with_kwargs=True
-            ))
-        
+
+            hooks.append(envoy._module.register_forward_hook(_hook, with_kwargs=True))
+
         # Run the model in fake tensor mode
         with FakeTensorMode(
             allow_non_fake_inputs=True,  # Allow real tensors as input
@@ -607,31 +622,29 @@ class ScanningTracer(InterleavingTracer):
                 # Deep copy batched args/kwargs to avoid modifying originals
                 self.batcher.batched_args = copy.deepcopy(self.batcher.batched_args)
                 self.batcher.batched_kwargs = copy.deepcopy(self.batcher.batched_kwargs)
-        
+
                 # Execute the model in fake mode
                 super().execute(fn)
-                        
+
         # Clean up hooks
         for hook in hooks:
             hook.remove()
-            
-            
+
 
 class Barrier:
-    
+
     def __init__(self, model: Envoy, n_participants: int):
-        
+
         self.model = model
         self.n_participants = n_participants
         self.participants: Set[str] = set()
-        
+
     def __call__(self):
-        
-        
+
         mediator = self.model._interleaver.current
-        
+
         self.participants.add(mediator.name)
-         
+
         if len(self.participants) == self.n_participants:
             participants = self.participants
             self.participants = set()

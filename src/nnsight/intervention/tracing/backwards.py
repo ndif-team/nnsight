@@ -1,10 +1,11 @@
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
 import torch
 
 from ...util import Patch
 from ..interleaver import Interleaver, Mediator
 from .invoker import Invoker
+
 
 def wrap_grad(interleaver: Interleaver):
     """
@@ -28,7 +29,7 @@ def wrap_grad(interleaver: Interleaver):
 
         # On backwards for this tensor
         def inner(grad: torch.Tensor):
-            
+
             # Inject the grad value
             # Possibly editing it in the process
             try:
@@ -92,7 +93,7 @@ class BackwardsTracer(Invoker):
         mediator = BackwardsMediator(fn, self.info)
 
         interleaver = Interleaver([mediator], self)
-        
+
         grad_patch = Patch(torch.Tensor, wrap_grad(interleaver), "grad")
 
         try:
