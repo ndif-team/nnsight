@@ -1,5 +1,4 @@
 
-from typing import Optional
 from ..intervention.envoy import Envoy
 
 class NNsight(Envoy):
@@ -9,7 +8,5 @@ class NNsight(Envoy):
         # TODO: legacy
         self.__dict__['_model'] = self._module
         
-        self._session = None
-
         
         

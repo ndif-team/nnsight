@@ -150,7 +150,7 @@ class Envoy(Batchable):
         if self.interleaving:
 
             return self._interleaver.current.request(
-                self._interleaver.current.iterate(f"{self.path}.output")
+                self._interleaver.iterate_requester(f"{self.path}.output")
             )
         elif self._fake_output is not inspect._empty:
             return self._fake_output
@@ -177,7 +177,7 @@ class Envoy(Batchable):
         """
         if self.interleaving:
             self._interleaver.current.swap(
-                self._interleaver.current.iterate(f"{self.path}.output"), value
+                self._interleaver.iterate_requester(f"{self.path}.output"), value
             )
 
         else:
@@ -203,7 +203,7 @@ class Envoy(Batchable):
 
         if self.interleaving:
             return self._interleaver.current.request(
-                self._interleaver.current.iterate(f"{self.path}.input")
+                self._interleaver.iterate_requester(f"{self.path}.input")
             )
         elif self._fake_inputs is not inspect._empty:
             return self._fake_inputs
@@ -230,7 +230,7 @@ class Envoy(Batchable):
         """
         if self.interleaving:
             self._interleaver.current.swap(
-                self._interleaver.current.iterate(f"{self.path}.input"), value
+                self._interleaver.iterate_requester(f"{self.path}.input"), value
             )
         else:
             raise ValueError("Cannot set inputs of Envoy that is not interleaving.")
@@ -591,7 +591,7 @@ class Envoy(Batchable):
             replacement (Any): The replacement value to replace the module's output with.
         """
 
-        requester = self._interleaver.current.iterate(f"{self.path}.input")
+        requester = self._interleaver.iterate_requester(f"{self.path}.input")
 
         self._interleaver.current.skip(requester, replacement)
 
@@ -730,7 +730,9 @@ class Envoy(Batchable):
 
         try:
             with self._interleaver:
-                fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
+                
+                self._interleaver.handle("result", result)
                 
             self._interleaver.check_cache_full()
             self._interleaver.check_dangling_mediators()
@@ -1062,6 +1064,30 @@ class Envoy(Batchable):
             self._add_envoy(value, key)
         else:
             super().__setattr__(key, value)
+            
+    def __getstate__(self):
+        return {
+            "alias": self._alias,
+            "children": self._children,
+            "named_children": {key: value for key, value in self.__dict__.items() if isinstance(value, Envoy)},
+            "path": self.path,
+            "default_mediators": self._default_mediators,
+
+        }
+    
+    def __setstate__(self, state):
+        self._module = None
+        self._source = None
+        self.fake_inputs = None
+        self.fake_output = None
+        
+        self._alias = state["alias"]
+        self._children = state["children"]
+        self.__dict__.update(state["named_children"])
+        
+        self.path = state["path"]
+        self._default_mediators = state["default_mediators"]
+
 
 
 # TODO extend Envoy
@@ -1142,7 +1168,9 @@ class OperationEnvoy:
             The operation's output value(s)
         """
 
-        return self._interleaver.current.request(f"{self.name}.output")
+        return self._interleaver.current.request(
+            self._interleaver.iterate_requester(f"{self.name}.output")
+        )
 
     @output.setter
     def output(self, value: Any) -> None:
@@ -1155,7 +1183,9 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
-        self._interleaver.current.swap(f"{self.name}.output", value)
+        self._interleaver.current.swap(
+            self._interleaver.iterate_requester(f"{self.name}.output"), value
+        )
 
     @property
     def inputs(
@@ -1170,7 +1200,9 @@ class OperationEnvoy:
         Returns:
             The operation's input value(s)
         """
-        return self._interleaver.current.request(f"{self.name}.input")
+        return self._interleaver.current.request(
+            self._interleaver.iterate_requester(f"{self.name}.input")
+        )
 
     @inputs.setter
     def inputs(self, value: Any) -> None:
@@ -1183,7 +1215,9 @@ class OperationEnvoy:
         Args:
             value: The new input value(s)
         """
-        self._interleaver.current.swap(f"{self.name}.input", value)
+        self._interleaver.current.swap(
+            self._interleaver.iterate_requester(f"{self.name}.input"), value
+        )
 
     @inputs.deleter
     def inputs(self):

@@ -288,13 +288,13 @@ class InterleavingTracer(Tracer):
 
         self.mediators: List[Mediator] = []
 
-        self.batcher = Batcher(**kwargs)
+        self.batcher = Batcher()
 
         self.user_cache: List[Cache] = list()
         
         self._frame = None
 
-        super().__init__(*args, backend=backend)
+        super().__init__(*args, **kwargs, backend=backend)
             
     def capture(self):
         """
@@ -335,11 +335,13 @@ class InterleavingTracer(Tracer):
         # If positional arguments were passed directly to a tracer, assume one invoker
         if self.args:
 
-            invoker = self.invoke(*self.args, _info=self.info.copy(), **self.kwargs)
+            invoker = self.invoke(*self.args, _info=self.info.copy())
 
             invoker.__exit__(ExitTracingException, None, None)
+            
+            invoker.info.start_line = 0
 
-            self.info.source = [f"    {self.tracer_var_name}.mediators[0].info.frame = {self.tracer_var_name}.get_frame()\n"]
+            self.info.source = [f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"]
 
         self.info.source = [
             f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
@@ -374,7 +376,7 @@ class InterleavingTracer(Tracer):
         fn(self.info, self)
 
         args = self.batcher.batched_args
-        kwargs = self.batcher.batched_kwargs
+        kwargs = {**self.batcher.batched_kwargs, **self.kwargs}
 
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
@@ -382,9 +384,15 @@ class InterleavingTracer(Tracer):
         interleaver = self.model._interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher, user_cache=self.user_cache)
 
-        self.model.interleave(self.fn, *args, **kwargs)
+        try:
 
+            self.model.interleave(self.fn, *args, **kwargs)
+        finally:
+            self.mediators.clear()
+            
         self.push(self._frame.f_locals)
+        
+        del self._frame
 
                 
 
@@ -491,6 +499,35 @@ class InterleavingTracer(Tracer):
         """
         
         return Barrier(self.model, n_participants)
+    
+    @property
+    def result(self) -> Object:
+        """
+        Get the result of the method being traced.
+
+        This property allows access to the return values produced by the method being traced.
+
+        Example:
+            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
+            >>> with model.generate("Hello World") as tracer:
+            >>>     result = tracer.result.save()
+            >>> print(result)
+
+        Returns:
+            The result of the method being traced
+        """
+
+        if self.model.interleaving:
+
+            return self.model._interleaver.current.request(
+                "result"
+            )
+        else:
+            raise ValueError(
+                "Cannot return result of Envoy that is not interleaving."
+            )
+        
+        
 
     ### Serialization ###
 
@@ -502,22 +539,18 @@ class InterleavingTracer(Tracer):
         state["tracer_var_name"] = self.tracer_var_name
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
-        state["rename"] = self.model._alias.rename if self.model._alias is not None else None
 
         return state
 
     def __setstate__(self, state):
         """Set the state of the tracer for deserialization."""
         super().__setstate__(state)
-
         
         self.model = state["model"]
         self.fn = state["fn"]
         self.tracer_var_name = state["tracer_var_name"]
         self.mediators = state["mediators"]
         self.batcher = state["batcher"]
-        if state["rename"] is not None:
-            self.model._update_alias(state["rename"])
         self.obj_var_name = None
         self.user_cache = list()
 
@@ -600,8 +633,8 @@ class Barrier:
         self.participants.add(mediator.name)
          
         if len(self.participants) == self.n_participants:
-            
-            mediator.send(Events.BARRIER, self.participants)
+            participants = self.participants
             self.participants = set()
+            mediator.send(Events.BARRIER, participants)
         else:
             mediator.send(Events.BARRIER, None)

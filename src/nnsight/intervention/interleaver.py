@@ -1,25 +1,22 @@
 from __future__ import annotations
 
-import ctypes
 import inspect
-import re
 import threading
-import time
 import warnings
 from collections import defaultdict
 from enum import Enum
 from functools import wraps
-from queue import Queue
+from queue import SimpleQueue
 from threading import Thread
 from types import FrameType
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Union)
 
 import torch
 
 from ..util import applyn
 from .batching import Batcher
-from .tracing.util import wrap_exception, get_non_nnsight_frame, push_variables
+from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
 
 if TYPE_CHECKING:
     from .tracing.tracer import Cache, InterleavingTracer, Tracer
@@ -33,7 +30,6 @@ class Events(Enum):
     END = "end"  # Signal to end the execution
     EXCEPTION = "exception"  # Signal that an exception occurred
     SKIP = "skip"  # Signal that an operation should be skipped
-    REGISTER = "register"  # Signal that a child mediator should be registered
     BARRIER = "barrier"  # Signal that a barrier should be set
 
 
@@ -109,22 +105,41 @@ class Interleaver:
         self.invokers = None
 
 
-    def iterate(self, provider: str):
+    def iterate_provider(self, provider: str):
 
         iteration = self.iteration_tracker[provider]
 
-        self.iteration_tracker[provider] += 1
-
         return f"{provider}.i{iteration}"
+    
+    
+    def iterate_requester(self, requester: str):
+        
+        mediator = self.current
+        
+        iteration = mediator.iteration
+        
+        if iteration is None:
+            iteration = self.iteration_tracker[requester]
+        elif isinstance(iteration, tuple):
+            iteration, mediator.iteration = iteration
+
+        return f"{requester}.i{iteration}"
 
     def wrap_module(self, module: torch.nn.Module):
 
         skip = None
 
         forward = module.forward
+        
+        # If wrapping the same module more than once, we need to get the original forward function
+        pre_wrapped = hasattr(forward, "__nnsight_original_forward__")
+        if pre_wrapped:
+            forward.__nnsight_input_handle__.remove()
+            forward.__nnsight_output_handle__.remove()
+            forward = forward.__nnsight_original_forward__
 
-        @wraps(module.forward)
-        def skippable_forward(*args, **kwargs):
+        @wraps(forward)
+        def nnsight_forward(*args, **kwargs):
 
             nonlocal skip
 
@@ -135,8 +150,8 @@ class Interleaver:
                     skip = None
 
             return skip
-
-        module.forward = skippable_forward
+        
+        module.forward = nnsight_forward
 
         @torch._dynamo.disable
         def input_hook(module: torch.nn.Module, args, kwargs):
@@ -157,7 +172,7 @@ class Interleaver:
 
             return args, kwargs
 
-        module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
+        input_handle = module.register_forward_pre_hook(input_hook, with_kwargs=True, prepend=True)
 
         @torch._dynamo.disable
         def output_hook(module: torch.nn.Module, _, output: Any):
@@ -179,7 +194,11 @@ class Interleaver:
 
             return output
 
-        module.register_forward_hook(output_hook, prepend=True)
+        output_handle = module.register_forward_hook(output_hook, prepend=True)
+    
+        nnsight_forward.__nnsight_original_forward__ = forward
+        nnsight_forward.__nnsight_input_handle__ = input_handle
+        nnsight_forward.__nnsight_output_handle__ = output_handle
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
@@ -201,14 +220,14 @@ class Interleaver:
 
             fn = self.handle(f"{name}.fn", fn)
 
-            args, kwargs = self.handle(f"{name}.input", (args, kwargs))
+            args, kwargs = self.handle(f"{name}.input", (args, kwargs), iterate=True)
 
             if not inspect.ismethod(fn) and bound_obj is not None:
                 value = fn(bound_obj, *args, **kwargs)
             else:
                 value = fn(*args, **kwargs)
 
-            value = self.handle(f"{name}.output", value)
+            value = self.handle(f"{name}.output", value, iterate=True)
 
             return value
 
@@ -251,9 +270,7 @@ class Interleaver:
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
         # Or their Envoy was not called.
         for mediator in self.mediators.values():
-
-            if mediator.child is not None:
-                mediator = mediator.child
+            
 
             if not mediator.event_queue.empty():
                 requested_event, requester = mediator.event_queue.get()
@@ -268,14 +285,15 @@ class Interleaver:
                 )
                 mediator.wait()
 
-                if mediator.name.startswith("Iterator"):
+                if mediator.iteration != 0:
                     try:
                         mediator.handle()
                     except ValueError as e:
-                        msg = f"Execution complete but `{requester}` was not provided. This was in an Iterator at iteration {mediator.iteration} so likely this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
+                        msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {mediator.iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
                         warnings.warn(msg)
                 else:
                     mediator.handle()
+                    
                     
     def check_cache_full(self):
         """
@@ -323,9 +341,11 @@ class Interleaver:
         Returns:
             The original or modified value
         """
+        
+        original_provider = provider
 
         if iterate:
-            provider = self.iterate(provider)
+            provider = self.iterate_provider(provider)
 
         old = self.batcher.current_value
 
@@ -341,6 +361,9 @@ class Interleaver:
             except SkipException as e:
                 skip_count += 1
                 skip_values.append(e.value)
+                
+        if iterate:
+            self.iteration_tracker[original_provider] += 1
 
         if skip_count == len(self.invokers) and self.invokers:
 
@@ -416,14 +439,13 @@ class Mediator:
             stop: Optional number of times to execute this mediator
         """
         self.intervention = intervention
+        
         self.name = name if name else f"Mediator{id(self)}"
         self.info = info
         self.batch_group = batch_group
-        self.event_queue = Queue()
-        self.response_queue = Queue()
+        self.event_queue = SimpleQueue()
+        self.response_queue = SimpleQueue()
         
-        self.child: Mediator = None
-
         self.thread = None
         self.interleaver = None
         self.history = set()
@@ -432,6 +454,8 @@ class Mediator:
         self.all_stop: Optional[int] = stop
 
         self.args = list()
+        
+        self.original_globals = {}
 
     @property
     def alive(self):
@@ -447,7 +471,8 @@ class Mediator:
         self.interleaver = interleaver
 
         self.interleaver.mediators[self.name] = self
-
+        
+        self.original_globals = self.intervention.__globals__.copy()
         if not self.alive:
 
             self.thread = Thread(
@@ -464,9 +489,7 @@ class Mediator:
 
     def wait(self):
         """Wait for the next event to be set in the event queue."""
-        while self.event_queue.empty() and self.alive:
-            # Keep checking until there's an event in the queue
-            time.sleep(0.001)  # Small sleep to prevent CPU spinning
+        self.event_queue.put(self.event_queue.get())
 
     def cancel(self):
         """Cancel the intervention thread and clear caches."""
@@ -481,6 +504,7 @@ class Mediator:
         if self.alive:
             # TODO: cancel inactive threads at the end of the model's execution
             self.response_queue.put(Cancelation())
+            self.event_queue.put(None)
 
     def handle(self, provider: Optional[Any] = None):
         """
@@ -492,15 +516,7 @@ class Mediator:
         Returns:
             The original or modified value
         """
-        
-        if self.child is not None:
-            self.child.handle(provider)
-            
-            if not self.child.alive:
-                self.child = None
-                self.respond()
-            else:
-                return
+    
             
         process = not self.event_queue.empty()
 
@@ -526,8 +542,6 @@ class Mediator:
                         for cache in self.user_cache:
                             cache.add(provider, e.value)
                     raise e
-            elif event == Events.REGISTER:
-                process = self.handle_register_event(provider, data)
             elif event == Events.BARRIER:
                 process = self.handle_barrier_event(provider, data)
             elif event == Events.END:
@@ -547,13 +561,6 @@ class Mediator:
                     ),
                 )
                 
-    def handle_register_event(self, provider: Any, child:Mediator) -> bool:
-                
-        self.child = child
-        child.start(self.interleaver)
-        child.handle(provider)
-        
-        return False
 
     def handle_barrier_event(self, provider: Any, participants: Set[str]):
         """
@@ -563,20 +570,13 @@ class Mediator:
         if participants is not None:
         
             for mediator in self.interleaver.invokers:
-                
-                while mediator.child is not None:
-                    mediator = mediator.child
+            
                     
                 if mediator.name in participants:
                
                     mediator.respond()
         
                     mediator.handle(provider)
-
-                    
-                    
-                            
-
 
     def handle_end_event(self):
         """
@@ -726,22 +726,32 @@ class Mediator:
         frame = get_non_nnsight_frame()
 
         return frame
-
-    def iterate(self, requester: Any):
-
-        return f"{requester}.i{self.iteration}"
-
+    
     def push(self):
         """Push local variables to the interleaver state."""
         
-        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight")}
+        if self.info.frame is None:
+            return
+        
+        state = {k: v for k, v in self.frame.f_locals.items() if not k.startswith("__nnsight") and (v is not self.original_globals.get(k, None))}
+        
          # this does not handle the case of a fn thats called in an invoker. this will push vars directly to where the invoke was called not the fn. really we need to grad the f_back of the <nnsight> frame. If its in threading.py, then we use info.frame
         push_variables(self.info.frame, state)
+        
 
     def pull(self):
         """Pull variables from the interleaver state to the frame globals."""
-
-        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight") and k not in self.frame.f_locals}
+        
+        if self.info.frame is None:
+            return
+        
+        state = {k: v for k, v in self.info.frame.f_locals.items() if not k.startswith("__nnsight")}
+        
+        for key in {**state}:
+            if key in self.frame.f_locals:
+                del state[key]
+            elif key in self.original_globals:
+                state[key] = self.original_globals[key]
 
         push_variables(self.frame, state)
 
@@ -795,54 +805,6 @@ class Mediator:
 
         self.send(Events.SWAP, (requester, value))
 
-    def iter(self, mediator: Mediator, iteration: Union[int, slice]):
-        """
-        Iterate a mediator a specified number of times.
-
-        Args:
-            mediator: The mediator to iterate
-            iteration: The number of iterations
-        """
-
-        def do_iteration(iter: int):
-
-            mediator.iteration = iter
-            mediator.args = list([mediator.iteration])
-            
-            self.send(Events.REGISTER, mediator)
-
-        if isinstance(iteration, slice):
-
-            i = iteration.start if iteration.start is not None else self.iteration
-
-            stop = iteration.stop
-
-            while True:
-
-                do_iteration(i)
-
-                if stop is None:
-                    if self.all_stop is not None:
-                        stop = self.all_stop
-                
-                    elif self.interleaver.default_all is not None:
-                        stop = self.interleaver.default_all
-
-                i += 1
-
-                if stop is not None and i >= stop:
-                    break
-
-        elif isinstance(iteration, list):
-
-            iteration.sort()
-
-            for i in iteration:
-                do_iteration(i)
-
-        elif isinstance(iteration, int):
-
-            do_iteration(iteration)
 
     def stop(self):
         """Stop the execution of the model by raising an EarlyStopException."""
@@ -891,6 +853,7 @@ class Mediator:
             "info": self.info,
             "batch_group": self.batch_group,
             "intervention": self.intervention,
+            "all_stop": self.all_stop,
         }
 
     def __setstate__(self, state):
@@ -899,14 +862,15 @@ class Mediator:
         self.info = state["info"]
         self.batch_group = state["batch_group"]
         self.intervention = state["intervention"]
-
-        self.event_queue = Queue()
-        self.response_queue = Queue()
+        self.all_stop = state["all_stop"]
+        
+        self.event_queue = SimpleQueue()
+        self.response_queue = SimpleQueue()
 
         self.thread = None
         self.interleaver = None
-        self.child: Mediator = None
         self.history = set()
         self.user_cache: "Cache" = list()
         self.iteration = 0
         self.args = list()
+        self.original_globals = {}
