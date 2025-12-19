@@ -18,6 +18,7 @@ from ..backends.execution import ExecutionBackend
 from .globals import Globals
 from .util import get_non_nnsight_frame, push_variables, suppress_all_output
 from ...util import Patch, Patcher
+from ... import CONFIG
 
 
 class ExitTracingException(Exception):
@@ -217,6 +218,29 @@ class Tracer:
         # Get the line number where the tracer was created
         start_line = frame.f_lineno
 
+        cache_key = (
+            frame.f_code.co_filename,
+            start_line,
+            frame.f_code.co_name,
+            frame.f_code.co_firstlineno,
+        )
+
+        cached = Globals.cache.get(cache_key)
+
+        if CONFIG.APP.TRACE_CACHING and cached is not None:
+
+            source_lines, start_line, node, filename = cached
+
+            self.info = Tracer.Info(
+                source_lines,
+                frame,
+                start_line,
+                node,
+                filename,
+            )
+
+            return
+
         # Determine the execution context and extract source code accordingly
 
         # CASE 1: Already inside another nnsight trace (nested tracing)
@@ -301,6 +325,12 @@ class Tracer:
 
         # STEP 4: Store all captured information for later compilation and execution
         self.info = Tracer.Info(source_lines, frame, start_line, node)
+
+        if CONFIG.APP.TRACE_CACHING:
+            Globals.cache.add(
+                cache_key,
+                (source_lines, start_line, node, self.info.filename),
+            )
 
     def parse(self, source_lines: List[str], start_line: int):
         """
