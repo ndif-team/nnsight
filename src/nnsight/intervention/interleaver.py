@@ -731,6 +731,14 @@ class Mediator:
             elif event == Events.END:
                 process = self.handle_end_event()
 
+        if len(self.user_cache) > 0 and provider is not None:
+
+            for cache in self.user_cache:
+                cache.add(
+                    provider,
+                    self.interleaver.batcher.narrow(self.batch_group),
+                )
+
     def handle_value_event(self, requester: Any, provider: Any) -> bool:
         """
         Handle a value event by providing the requested value or recording a missed provider.
