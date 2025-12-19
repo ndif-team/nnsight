@@ -7,3 +7,6 @@ APP:
   CACHE_DIR: ~/.cache/nnsight/
   DEBUG: false
   REMOTE_LOGGING: true
+  PYMOUNT: true
+  CROSS_INVOKER: true
+  TRACE_CACHING: false

@@ -1,3 +1,4 @@
+from collections import defaultdict
 import io
 import pickle
 from builtins import open
@@ -12,12 +13,11 @@ from .envoy import Envoy
 class CustomCloudPickler(cloudpickle.Pickler):
     def persistent_id(self, obj):
         if isinstance(obj, FrameType):
-            return "FRAME"
+            return f"FRAME{id(obj)}"
 
         return None
 
 original_setstate = Envoy.__setstate__
-    
    
 
 class CustomCloudUnpickler(pickle.Unpickler):
@@ -25,6 +25,8 @@ class CustomCloudUnpickler(pickle.Unpickler):
         super().__init__(file)
         self.root = root
         self.frame = frame
+        
+        self.proxy_frames = defaultdict(dict)
         
     def load(self):
         
@@ -47,8 +49,8 @@ class CustomCloudUnpickler(pickle.Unpickler):
     def persistent_load(self, pid):
 
 
-        if pid == "FRAME":
-            return self.frame
+        if pid.startswith("FRAME"):
+            return self.proxy_frames[pid]
 
         raise pickle.UnpicklingError(f"Unknown persistent id: {pid}")
 

@@ -5,13 +5,23 @@ import os
 import warnings
 from functools import wraps
 from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import torch
 from torch.nn.modules.module import _addindent
 
 from .. import CONFIG, base_deprecation_message, deprecated, util
-from ..util import apply, Patch
+from ..util import apply
 
 from .batching import Batchable
 from .inject import convert as inject
@@ -20,8 +30,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver
-
+from .interleaver import Interleaver, Mediator
 
 
 def trace_only(fn: Callable):
@@ -87,7 +96,7 @@ class Envoy(Batchable):
         self._interleaver = interleaver if interleaver is not None else Interleaver()
         self._interleaver.wrap_module(module)
 
-        self._default_mediators: List[List[str]] = []
+        self._default_mediators: List[Mediator] = []
 
         self._children: List[Envoy] = []
 
@@ -148,7 +157,6 @@ class Envoy(Batchable):
         """
 
         if self.interleaving:
-
             return self._interleaver.current.request(
                 self._interleaver.iterate_requester(f"{self.path}.output")
             )
@@ -176,6 +184,7 @@ class Envoy(Batchable):
             value: The new output value to use.
         """
         if self.interleaving:
+
             self._interleaver.current.swap(
                 self._interleaver.iterate_requester(f"{self.path}.output"), value
             )
@@ -202,6 +211,7 @@ class Envoy(Batchable):
         """
 
         if self.interleaving:
+
             return self._interleaver.current.request(
                 self._interleaver.iterate_requester(f"{self.path}.input")
             )
@@ -229,6 +239,7 @@ class Envoy(Batchable):
             value: The new input value(s) to use, structured as a tuple of (args, kwargs)
         """
         if self.interleaving:
+
             self._interleaver.current.swap(
                 self._interleaver.iterate_requester(f"{self.path}.input"), value
             )
@@ -273,6 +284,7 @@ class Envoy(Batchable):
         Args:
             value: The new value for the first input
         """
+
         inputs = self.inputs
 
         value = (value, *inputs[0][1:]), inputs[1]
@@ -373,7 +385,12 @@ class Envoy(Batchable):
             )
             self._module.forward = MethodType(forward, self._module)
 
-            self._source = EnvoySource(self._module.__path__, source, line_numbers, interleaver=self._interleaver)
+            self._source = EnvoySource(
+                self._module.__path__,
+                source,
+                line_numbers,
+                interleaver=self._interleaver,
+            )
 
         return self._source
 
@@ -386,7 +403,14 @@ class Envoy(Batchable):
 
     #### Public methods ####
 
-    def trace(self, *args, fn: Optional[Callable] = None, trace: bool = None, tracer_cls: Type[InterleavingTracer] = InterleavingTracer, **kwargs):
+    def trace(
+        self,
+        *args,
+        fn: Optional[Callable] = None,
+        trace: bool = None,
+        tracer_cls: Type[InterleavingTracer] = InterleavingTracer,
+        **kwargs,
+    ):
         """
         Create a tracer for this module.
 
@@ -518,7 +542,7 @@ class Envoy(Batchable):
         export_dir = os.path.expanduser(os.path.join(export_dir, name))
 
         os.makedirs(export_dir, exist_ok=True)
-        
+
         from . import serialization
 
         serialization.save(
@@ -541,7 +565,7 @@ class Envoy(Batchable):
             export_dir = os.path.join(CONFIG.APP.CACHE_DIR, "exports")
 
         export_dir = os.path.expanduser(os.path.join(export_dir, name))
-        
+
         from . import serialization
 
         imported_mediators = serialization.load(
@@ -566,12 +590,12 @@ class Envoy(Batchable):
     @trace_only
     def all(self):
         return self.iter[:]
-    
+
     @deprecated(message="Use `tracer.next()` instead.")
     @trace_only
     def next(self, step: int = 1):
         self._interleaver.current.iteration += step
-        
+
         return self
 
     @trace_only
@@ -591,9 +615,9 @@ class Envoy(Batchable):
             replacement (Any): The replacement value to replace the module's output with.
         """
 
-        requester = self._interleaver.iterate_requester(f"{self.path}.input")
-
-        self._interleaver.current.skip(requester, replacement)
+        return self._interleaver.current.skip(
+            self._interleaver.iterate_requester(f"{self.path}.input"), replacement
+        )
 
     @trace_only
     def wait_for_input(self):
@@ -717,26 +741,26 @@ class Envoy(Batchable):
         """
         return util.fetch_attr(self, path)
 
-    def interleave(self,  fn: Union[Callable, str], *args, **kwargs):
+    def interleave(self, fn: Union[Callable, str], *args, **kwargs):
 
         device = self.device
 
         (args, kwargs) = apply(
             (args, kwargs), lambda tensor: tensor.to(device), torch.Tensor
         )
-        
+
         if isinstance(fn, str):
             fn = getattr(self, fn)
 
         try:
             with self._interleaver:
                 result = fn(*args, **kwargs)
-                
+
                 self._interleaver.handle("result", result)
-                
+
             self._interleaver.check_cache_full()
             self._interleaver.check_dangling_mediators()
-            
+
         finally:
             self._interleaver.cancel()
 
@@ -759,7 +783,7 @@ class Envoy(Batchable):
             module,
             path=module_path,
             rename=self._alias.rename if self._alias is not None else None,
-            interleaver=self._interleaver
+            interleaver=self._interleaver,
         )
 
         self._children.append(envoy)
@@ -876,8 +900,6 @@ class Envoy(Batchable):
 
             for envoy in self._children:
                 envoy._update_alias(alias)
-
-
 
     def _shallow_copy(self) -> Envoy:
         """Creates a new instance copy of the same class with the all the attributes of the original instance.
@@ -1018,7 +1040,7 @@ class Envoy(Batchable):
             value = getattr(self._module, name)
 
             # It's a method bound to the module, create an interleaver for it
-            if isinstance(
+            if not self._interleaver.interleaving and isinstance(
                 value,
                 (FunctionType, MethodType, BuiltinFunctionType, BuiltinMethodType),
             ):
@@ -1064,30 +1086,32 @@ class Envoy(Batchable):
             self._add_envoy(value, key)
         else:
             super().__setattr__(key, value)
-            
+
     def __getstate__(self):
         return {
             "alias": self._alias,
             "children": self._children,
-            "named_children": {key: value for key, value in self.__dict__.items() if isinstance(value, Envoy)},
+            "named_children": {
+                key: value
+                for key, value in self.__dict__.items()
+                if isinstance(value, Envoy)
+            },
             "path": self.path,
             "default_mediators": self._default_mediators,
-
         }
-    
+
     def __setstate__(self, state):
         self._module = None
         self._source = None
         self.fake_inputs = None
         self.fake_output = None
-        
+
         self._alias = state["alias"]
         self._children = state["children"]
         self.__dict__.update(state["named_children"])
-        
+
         self.path = state["path"]
         self._default_mediators = state["default_mediators"]
-
 
 
 # TODO extend Envoy
@@ -1183,6 +1207,7 @@ class OperationEnvoy:
         Args:
             value: The new output value
         """
+
         self._interleaver.current.swap(
             self._interleaver.iterate_requester(f"{self.name}.output"), value
         )
@@ -1219,16 +1244,6 @@ class OperationEnvoy:
             self._interleaver.iterate_requester(f"{self.name}.input"), value
         )
 
-    @inputs.deleter
-    def inputs(self):
-        """
-        Clear the cached input value.
-
-        This removes any stored input values, forcing them to be recomputed
-        on the next access.
-        """
-        self._input = None
-
     @property
     def input(self) -> Union[Any, torch.Tensor]:
         """
@@ -1256,6 +1271,7 @@ class OperationEnvoy:
         Args:
             value: The new value for the first input
         """
+
         inputs = self.inputs
 
         value = (value, *inputs[0][1:]), inputs[1]
@@ -1308,17 +1324,6 @@ class OperationEnvoy:
             self._interleaver.current.swap(f"{self.name}.fn", self._fn)
 
         return self._source
-
-    # @input.setter
-    # def input(self, value: Any):
-    #     #TODO would need await...
-    #     inputs = self._input
-    #     self._input = ((value, *inputs[0]), inputs[1])
-    #     self.interleaver.set_swap(self._input, (self.module, self.name), Events.INPUT)
-
-    # @input.deleter
-    # def input(self):
-    #     self._input = None
 
 
 class EnvoySource:
@@ -1417,8 +1422,6 @@ class EnvoySource:
         source = "\n".join(formatted_lines)
 
         return source
-
-
 
     def __getattribute__(self, name: str) -> Union[OperationEnvoy]:
 

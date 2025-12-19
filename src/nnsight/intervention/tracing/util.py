@@ -146,7 +146,7 @@ class ExceptionWrapper(Exception):
         
         for info in reversed(self.infos):
             
-            if not info.frame.f_code.co_filename.startswith("<nnsight"):
+            if isinstance(info.frame, FrameType) and not info.frame.f_code.co_filename.startswith("<nnsight"):
             
                 accumulator = info.frame.f_code.co_firstlineno - 1
                 filename = info.frame.f_code.co_filename
