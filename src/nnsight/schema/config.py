@@ -30,6 +30,7 @@ class AppConfigModel(BaseModel):
     DEBUG: bool = True
     CACHE_DIR: str = "~/.cache/nnsight/"
     CROSS_INVOKER: bool = True
+    TRACE_CACHING: bool = False
 
     def __setattr__(self, name, value):
         if name == "REMOTE_LOGGING":

@@ -1,4 +1,4 @@
-from typing import Any, Callable, Union
+from typing import Any, Callable, Tuple, Union
 
 import torch
 from typing_extensions import Self
@@ -55,11 +55,31 @@ class Object(torch.Tensor):
         return super().__call__(*args, **kwargs)
 
 
+class TracingCache:
+
+    def __init__(self):
+        self.cache = {}
+
+    def get(self, cache_key: Tuple):
+        """
+        Check if the given filename and lineno is in the cache.
+        """
+        return self.cache.get(cache_key, None)
+
+    def add(self, cache_key: Tuple, value: Any):
+        """
+        Add the given value to the cache.
+        """
+        self.cache[cache_key] = value
+
+
 class Globals:
 
     stack = 0
 
     saves = set()
+
+    cache = TracingCache()
 
     @staticmethod
     def enter():
