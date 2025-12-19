@@ -85,13 +85,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                     last_mediator = mediator
 
-                    # Start the intervention thread
+                    model._interleaver.mediators.append(mediator)
+
                     mediator.start(model._interleaver)
-
-                    # If the internvetniion thread didnt immediately complete, add it to the mediators
-                    if mediator.alive:
-
-                        model._interleaver.mediators[mediator.name] = mediator
 
                     batch_start = 0
 
@@ -122,7 +118,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             batch_start = 0
 
-            for mediator in model._interleaver:
+            for mediator in model._interleaver.mediators:
 
                 batch_group = mediator.batch_group
 
@@ -192,7 +188,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model.tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.nnsight_model._interleaver.mediators = {}
+        self.nnsight_model._interleaver.mediators = []
 
         self.nnsight_model._interleaver.batcher = VLLMBatcher()
 

@@ -30,7 +30,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver
+from .interleaver import Interleaver, Mediator
 
 
 def trace_only(fn: Callable):
@@ -96,7 +96,7 @@ class Envoy(Batchable):
         self._interleaver = interleaver if interleaver is not None else Interleaver()
         self._interleaver.wrap_module(module)
 
-        self._default_mediators: List[List[str]] = []
+        self._default_mediators: List[Mediator] = []
 
         self._children: List[Envoy] = []
 

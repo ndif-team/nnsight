@@ -202,7 +202,7 @@ class VLLM(RemoteableMixin):
         param_idx = 0
 
         # Find the sampling params associated with each mediator
-        for mediator in self._interleaver:
+        for mediator in self._interleaver.mediators:
 
             batch_start, batch_size = mediator.batch_group
 
@@ -245,7 +245,7 @@ class VLLM(RemoteableMixin):
             save(value)
 
         # Push the variables to the interleaver frame
-        push_variables(next(iter(self._interleaver)).info.frame, saves)
+        push_variables(self._interleaver.mediators[0].info.frame, saves)
 
     def interleave(self, fn: Callable, *args, **kwargs):
 

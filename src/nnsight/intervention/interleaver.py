@@ -21,6 +21,8 @@ from typing import (
     Iterator,
 )
 
+import _thread
+
 import torch
 
 from .. import CONFIG
@@ -107,9 +109,7 @@ class Interleaver:
         batcher: Batcher = None,
     ):
 
-        self.mediators: Dict[str, Mediator] = {
-            mediator.name: mediator for mediator in mediators
-        }
+        self.mediators: List[Mediator] = mediators
 
         self.tracer = tracer
         self.batcher = batcher if batcher is not None else Batcher()
@@ -121,7 +121,7 @@ class Interleaver:
     def cancel(self):
         """Cancel all mediators / intervention threads."""
 
-        for mediator in self:
+        for mediator in self.mediators:
             mediator.cancel()
 
         self.mediators = None
@@ -349,16 +349,12 @@ class Interleaver:
         self._interleaving = True
 
         try:
-
             # Start all the mediators to begin their intervention threads amd wait for their first event.
-            for mediator in self:
+            for mediator in self.mediators:
+                if mediator.alive:
+                    continue
                 mediator.start(self)
 
-            # Handle the first event for each mediator to clear mediators that already ended.
-            try:
-                self.handle()
-            except EarlyStopException:
-                pass
         except:
             # Clear the interleaving flag on error.
             self._interleaving = False
@@ -372,11 +368,7 @@ class Interleaver:
         self._interleaving = False
 
         # Clear the mediators that are no longer alive.
-        self.mediators = {
-            name: mediator
-            for name, mediator in self.mediators.items()
-            if mediator.alive
-        }
+        self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
         # Ignore EarlyStopException errors.
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
@@ -386,9 +378,9 @@ class Interleaver:
 
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
         # Or their Envoy was not called.
-        for mediator in self:
+        for mediator in self.mediators:
 
-            if not mediator.event_queue.empty():
+            if mediator.alive:
                 requested_event, requester = mediator.event_queue.get()
 
                 if isinstance(requester, tuple):
@@ -396,27 +388,28 @@ class Interleaver:
 
                 mediator.respond(
                     ValueError(
-                        f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called?"
+                        f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called."
                     )
                 )
-                mediator.wait()
 
-                if mediator.iteration != 0:
+                iteration = mediator.iteration
+
+                if iteration != 0:
                     try:
                         mediator.handle()
                     except ValueError as e:
-                        msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {mediator.iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
+                        msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
                         warnings.warn(msg)
                 else:
                     mediator.handle()
 
-            # TODO also clear dead mediators here
+        self.mediators = []
 
     def check_cache_full(self):
         """
         Print a warning if a module to be cached was missed.
         """
-        for invoker in self:
+        for invoker in self.mediators:
             for cache in invoker.user_cache:
                 if cache.modules:
                     if cache.include_inputs and cache.include_output:
@@ -472,48 +465,45 @@ class Interleaver:
         skip_count = 0
         skip_values = []
 
-        for mediator in self:
+        original_current = self.current
 
-            with mediator:
+        for mediator in self.mediators:
 
-                if iterate:
-                    provider = self.iterate_provider(original_provider)
-                try:
-                    mediator.handle(provider)
-                except SkipException as e:
-                    skip_count += 1
-                    skip_values.append(e.value)
+            self.current = mediator
 
-                if iterate and mediator.alive:
-                    mediator.iteration_tracker[original_provider] += 1
+            if iterate:
+                provider = self.iterate_provider(original_provider)
+            try:
+                mediator.handle(provider)
+            except SkipException as e:
+                skip_count += 1
+                skip_values.append(e.value)
 
-        if self.mediators and skip_count == len(self.mediators):
+            if iterate and mediator.alive:
+                mediator.iteration_tracker[original_provider] += 1
 
-            def _swap(*args):
-                return torch.cat(args, dim=0)
-
-            skip_value = applyn(skip_values, _swap, torch.Tensor)
-            raise SkipException(skip_value)
-        elif skip_count > 0 and skip_count < len(self.mediators):
-            raise ValueError(
-                f"A module skip must be applied to all the invokers defined in the tracer!"
-            )
+        self.current = original_current
 
         value = self.batcher.current_value
 
         # Restore the original current value.
         self.batcher.current_value = original_value
 
+        if skip_count:
+
+            if skip_count == len(self.mediators):
+
+                def _swap(*args):
+                    return torch.cat(args, dim=0)
+
+                skip_value = applyn(skip_values, _swap, torch.Tensor)
+                raise SkipException(skip_value)
+            else:
+                raise ValueError(
+                    f"A module skip must be applied to all the invokers defined in the tracer!"
+                )
+
         return value
-
-    def __iter__(self) -> Iterator[Mediator]:
-        """
-        Iterate over the mediators.
-
-        Returns:
-            Iterator[Mediator]: An iterator over the mediators in the order they were added.
-        """
-        return iter(list(self.mediators.values()))
 
     ### Serialization ###
 
@@ -553,6 +543,36 @@ class Mediator:
 
         pass
 
+    class Value:
+
+        def __init__(self):
+            self.value = None
+            self.lock = _thread.allocate_lock()
+            self.lock.acquire()
+            self.has_value = False
+
+        def get(self):
+
+            value = self.value
+            self.value = None
+
+            self.has_value = False
+
+            return value
+
+        def wait(self):
+            self.lock.acquire()
+
+        def put(self, value: Any):
+            self.value = value
+            self.has_value = True
+
+            self.lock.release()
+
+        def restore(self, value: Any):
+            self.value = value
+            self.has_value = True
+
     def __init__(
         self,
         intervention: Callable,
@@ -578,8 +598,8 @@ class Mediator:
 
         self.interleaver = None
 
-        self.event_queue = SimpleQueue()
-        self.response_queue = SimpleQueue()
+        self.event_queue = Mediator.Value()
+        self.response_queue = Mediator.Value()
 
         self.worker = None
 
@@ -589,10 +609,16 @@ class Mediator:
         self.iteration = 0
         self.all_stop: Optional[int] = stop
         self.args = list()
+        self.cross_invoker = None
 
         self.original_globals = {}
 
         self._prev = None
+
+    @property
+    def alive(self):
+
+        return self.worker is not None
 
     def __enter__(self):
 
@@ -608,12 +634,6 @@ class Mediator:
         # Restore the previous mediator to be running after this mediator is done.
         self.interleaver.current = self._prev
 
-    @property
-    def alive(self):
-
-        # The mediator is alive if the worker thread is running and the thread is still alive (hasnt been cancelled).
-        return self.worker is not None and self.worker.is_alive()
-
     def start(self, interleaver: Interleaver):
         """
         Start the mediator's intervention thread.
@@ -625,44 +645,46 @@ class Mediator:
 
         self.original_globals = self.intervention.__globals__.copy()
 
-        # Only start if the mediator is not already alive.
-        if not self.alive:
+        self.cross_invoker = (
+            len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER
+        )
 
-            # Start the worker thread.
-            self.worker = Thread(
-                target=self.intervention,
-                args=(self, self.info, *self.args),
-                daemon=True,
-                name=self.name,
-            )
+        # Start the worker thread.
+        self.worker = Thread(
+            target=self.intervention,
+            args=(self, self.info, *self.args),
+            daemon=True,
+            name=self.name,
+        )
 
-            # Start and wait for the mediator to reach its first event.
-            with self:
+        self.interleaver.current = self
+        self.worker.start()
+        self.event_queue.wait()
 
-                self.worker.start()
+        # Handle the first event for each mediator to clear mediators that already ended.
+        try:
+            self.handle()
+        except EarlyStopException:
+            pass
 
-                self.wait()
+        self.interleaver.current = None
 
     ### Provider Methods ###
-
-    def wait(self):
-        """Wait for the next event to be set in the event queue."""
-
-        self.event_queue.put(self.event_queue.get())
 
     def cancel(self):
         """Cancel the intervention thread and its ephemeral state."""
 
-        self.history.clear()
-        self.iteration_tracker.clear()
+        self.history = set()
+        self.iteration_tracker = defaultdict(int)
         self.iteration = 0
-
-        # If the mediator is alive, which means its waiting on a response (potentially an out of order error) or stuck in a loop, try and solve the former option by putting a Cancelation exception in the response queue.
-        if self.alive:
-            # TODO: cancel inactive threads at the end of the model's execution
-            self.response_queue.put(Cancelation())
-
         self.worker = None
+
+        if self.event_queue.has_value:
+            self.handle()
+            if self.event_queue.has_value:
+                self.event_queue.get()
+                self.response_queue.put(Cancelation())
+                self.event_queue.get()
 
     def handle(self, provider: Optional[str] = None):
         """
@@ -679,9 +701,8 @@ class Mediator:
             provider (Optional[str]): The identifier of the provider
 
         """
-
         # Check to see if this mediator has an unprocessed eventto start.
-        process = not self.event_queue.empty()
+        process = self.event_queue.has_value
 
         event = None
 
@@ -708,18 +729,7 @@ class Mediator:
             elif event == Events.BARRIER:
                 process = self.handle_barrier_event(provider, data)
             elif event == Events.END:
-                process = False
-
-        if event == Events.END:
-            self.handle_end_event()
-
-        if len(self.user_cache) > 0 and provider is not None:
-
-            for cache in self.user_cache:
-                cache.add(
-                    provider,
-                    self.interleaver.batcher.narrow(self.batch_group),
-                )
+                process = self.handle_end_event()
 
     def handle_value_event(self, requester: Any, provider: Any) -> bool:
         """
@@ -750,7 +760,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the value event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.put((Events.VALUE, requester))
+                self.event_queue.restore((Events.VALUE, requester))
 
                 return False
 
@@ -788,7 +798,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the swap event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.put((Events.SWAP, (requester, swap_value)))
+                self.event_queue.restore((Events.SWAP, (requester, swap_value)))
 
                 return False
 
@@ -804,6 +814,8 @@ class Mediator:
         Returns:
             bool: Flag to stop processing events.
         """
+
+        self.cancel()
 
         # Cancelation is okay
         if not isinstance(exception, Cancelation):
@@ -822,21 +834,29 @@ class Mediator:
 
         if participants is not None:
 
-            for mediator in self.interleaver:
+            original_current = self.interleaver.current
+
+            for mediator in self.interleaver.mediators:
 
                 if mediator.name in participants:
 
-                    with mediator:
+                    self.interleaver.current = mediator
 
-                        mediator.respond()
+                    mediator.respond()
 
-                        mediator.handle(provider)
+                    mediator.handle(provider)
+
+            self.interleaver.current = original_current
+
+        return False
 
     def handle_end_event(self):
         """
         Handle an end event by stopping the mediator.
         """
         self.cancel()
+
+        return False
 
     def handle_skip_event(self, provider: Any, requester: Any, value: Any):
 
@@ -859,7 +879,7 @@ class Mediator:
                 return True
             else:
                 self.history.add(provider)
-                self.event_queue.put((Events.SKIP, (requester, value)))
+                self.event_queue.restore((Events.SKIP, (requester, value)))
 
                 return False
 
@@ -873,9 +893,7 @@ class Mediator:
 
         # Respond and resume the mediator thread.
         self.response_queue.put(value)
-
-        # Wait for the mediator to reach its next event.
-        self.wait()
+        self.event_queue.wait()
 
     ### Requester Methods ###
 
@@ -893,21 +911,22 @@ class Mediator:
 
         # In multi invoke scenarios, one invoke might reference variables from another invoke. So we need to push and pull the variables to the shared state to make them available to the other invoke.
         # TODO find a way to only push if there are multiple invokers AND they share the same parent frame
-        if len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER:
+        if self.cross_invoker:
             self.push()
 
         # Send the event
         self.event_queue.put((event, requester))
 
         # Wait for the interleaver to process the event and respond with the value.
+        self.response_queue.wait()
         response = self.response_queue.get()
-
-        if len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER:
-            self.pull()
 
         # If the response is an exception, raise it.
         if isinstance(response, Exception):
             raise response
+
+        if self.cross_invoker:
+            self.pull()
 
         return response
 
@@ -1051,8 +1070,8 @@ class Mediator:
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
         self.iteration_tracker = state["iteration_tracker"]
-        self.event_queue = SimpleQueue()
-        self.response_queue = SimpleQueue()
+        self.event_queue = Mediator.Value()
+        self.response_queue = Mediator.Value()
 
         self.worker = None
         self.interleaver = None
@@ -1061,3 +1080,4 @@ class Mediator:
         self.iteration = 0
         self.args = list()
         self.original_globals = {}
+        self.cross_invoker = None
