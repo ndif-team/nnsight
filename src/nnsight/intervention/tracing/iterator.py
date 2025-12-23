@@ -41,7 +41,7 @@ class IteratorTracer(Tracer):
 
         # Wrap the captured code in a function definition with appropriate parameters
         self.info.source = [
-            f"def __nnsight_tracer_{id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {iteration_var_name}):\n",
+            f"def __nnsight_tracer_{abs(self.info.cache_key) if self.info.cache_key is not None else id(self)}__(__nnsight_mediator__, __nnsight_tracing_info__, {iteration_var_name}):\n",
             "    __nnsight_mediator__.pull()\n",
             *self.info.source,
             "    __nnsight_mediator__.push()\n",
