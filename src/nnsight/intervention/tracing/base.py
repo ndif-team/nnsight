@@ -103,6 +103,7 @@ class Tracer:
             start_line: int,
             node: ast.With,
             filename: str = None,
+            cache_key: int = None,
         ):
             """
             Initialize Info with captured code metadata.
@@ -119,8 +120,9 @@ class Tracer:
             self.start_line = start_line
             self.node = node
             self.filename = (
-                filename if filename is not None else f"<nnsight {id(self)}>"
+                filename if filename is not None else f"<nnsight {abs(cache_key) if cache_key is not None else id(self)}>"
             )
+            self.cache_key = cache_key
 
         def copy(self):
             """Create a deep copy of this Info instance.
@@ -129,7 +131,7 @@ class Tracer:
                 A new Info instance with the same metadata
             """
             return Tracer.Info(
-                self.source, self.frame, self.start_line, self.node, self.filename
+                self.source, self.frame, self.start_line, self.node, self.filename, self.cache_key
             )
 
         def __getstate__(self):
@@ -143,6 +145,7 @@ class Tracer:
                 "start_line": self.start_line,
                 "filename": self.filename,
                 "frame": self.frame,
+                "cache_key": self.cache_key,
             }
 
         def __setstate__(self, state):
@@ -158,8 +161,10 @@ class Tracer:
             self.start_line = state["start_line"]
             self.filename = state["filename"]
             self.frame = state["frame"]
+            self.cache_key = state["cache_key"]
             # AST nodes cannot be serialized, so we reset to None
             self.node = None
+            
 
     # === Initialization ===
 
@@ -218,12 +223,12 @@ class Tracer:
         # Get the line number where the tracer was created
         start_line = frame.f_lineno
 
-        cache_key = (
+        cache_key = hash((
             frame.f_code.co_filename,
             start_line,
             frame.f_code.co_name,
             frame.f_code.co_firstlineno,
-        )
+        ))
 
         cached = Globals.cache.get(cache_key)
 
@@ -237,10 +242,11 @@ class Tracer:
                 start_line,
                 node,
                 filename,
+                cache_key,
             )
 
             return
-
+                
         # Determine the execution context and extract source code accordingly
 
         # CASE 1: Already inside another nnsight trace (nested tracing)
@@ -324,7 +330,7 @@ class Tracer:
             ]
 
         # STEP 4: Store all captured information for later compilation and execution
-        self.info = Tracer.Info(source_lines, frame, start_line, node)
+        self.info = Tracer.Info(source_lines, frame, start_line, node, cache_key=cache_key)
 
         if CONFIG.APP.TRACE_CACHING:
             Globals.cache.add(
@@ -436,7 +442,7 @@ class Tracer:
             A callable function that executes the captured code block with proper context
         """
         # Wrap the captured code in a function definition with context parameters
-        function_name = f"__nnsight_tracer_{id(self)}__"
+        function_name = f"__nnsight_tracer_{abs(self.info.cache_key) if self.info.cache_key is not None else id(self)}__"
 
         # Build the complete function with:
         # 1. Function definition with tracer and info parameters
