@@ -178,6 +178,11 @@ class LanguageModel(TransformersModel):
         ],
         **kwargs,
     ):
+        
+        if isinstance(inputs, torch.Tensor):
+            if inputs.ndim == 1:
+                inputs = inputs.unsqueeze(0)
+            return BatchEncoding({"input_ids": inputs})
 
         if self.tokenizer is None:
             if self.repo_id is not None:
@@ -192,8 +197,7 @@ class LanguageModel(TransformersModel):
         ):
             inputs = [inputs]
 
-        if isinstance(inputs, torch.Tensor) and inputs.ndim == 1:
-            inputs = inputs.unsqueeze(0)
+        
 
         if not isinstance(inputs[0], str):
             inputs = [{"input_ids": ids} for ids in inputs]
@@ -220,9 +224,10 @@ class LanguageModel(TransformersModel):
             List[int], List[List[int]], torch.Tensor, List[torch.Tensor]
         ] = None,
         labels: Any = None,
+        attention_mask: Any = None,
         **kwargs,
     ) -> Tuple[BatchEncoding, int]:
-
+        
         if input_ids is not None:
 
             assert len(inputs) == 0
@@ -243,6 +248,9 @@ class LanguageModel(TransformersModel):
 
             if labels is not None:
                 labels = self._tokenize(labels, **kwargs)["input_ids"]
+        
+        if attention_mask is not None:
+            inputs["attention_mask"] = attention_mask
 
         return tuple(), {**inputs, "labels": labels}
 
@@ -275,18 +283,20 @@ class LanguageModel(TransformersModel):
         if labels is not None:
 
             batched_labels = torch.cat((batched_labels, labels))
+            
+        if attention_mask is not None:
 
-        if self.tokenizer.padding_side == "left":
+            if self.tokenizer.padding_side == "left":
 
-            new_batched_inputs["attention_mask"][
-                : attention_mask.shape[0], -attention_mask.shape[1] :
-            ] = attention_mask
+                new_batched_inputs["attention_mask"][
+                    : attention_mask.shape[0], -attention_mask.shape[1] :
+                ] = attention_mask
 
-        else:
+            else:
 
-            new_batched_inputs["attention_mask"][
-                : attention_mask.shape[0], : attention_mask.shape[1]
-            ] = attention_mask
+                new_batched_inputs["attention_mask"][
+                    : attention_mask.shape[0], : attention_mask.shape[1]
+                ] = attention_mask
 
         batched_inputs.pop("input_ids", None)
         batched_inputs.pop("attention_mask", None)
