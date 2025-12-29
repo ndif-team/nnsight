@@ -29,8 +29,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "transformers",
-    "astor", 
+    "transformers==5.0.0rc1",
+    "astor",
     "cloudpickle",
     "httpx",
     "python-socketio[client]",
