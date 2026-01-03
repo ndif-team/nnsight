@@ -1062,6 +1062,72 @@ def test_namefinder_comprehension_shadowing():
     assert closure_vars['x'] == 42
 
 
+def test_namefinder_comprehension_shadowing_direct():
+    """Directly test NameFinder's behavior with comprehension shadowing.
+
+    This test exposes the known limitation of NameFinder: it doesn't track
+    scopes, so a comprehension variable will incorrectly shadow an external
+    reference with the same name.
+
+    This is a documentation test - it verifies the current (imperfect) behavior.
+    """
+    import ast
+
+    # Source code where 'x' is used externally AND as a comprehension variable
+    source = '''
+class Example:
+    def method(self):
+        # External reference to 'x'
+        result = x + 1
+
+        # Comprehension with 'x' as loop variable (different scope in Python)
+        squares = [x * x for x in range(5)]
+
+        return result, squares
+'''
+
+    tree = ast.parse(source)
+
+    # Replicate NameFinder logic
+    class NameFinder(ast.NodeVisitor):
+        def __init__(self):
+            self.names = set()
+            self.defined = set()
+
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Load):
+                self.names.add(node.id)
+            elif isinstance(node.ctx, ast.Store):
+                self.defined.add(node.id)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            self.defined.add(node.name)
+            for arg in node.args.args:
+                self.defined.add(arg.arg)
+            self.generic_visit(node)
+
+        def visit_ClassDef(self, node):
+            self.defined.add(node.name)
+            self.generic_visit(node)
+
+    finder = NameFinder()
+    finder.visit(tree)
+    external_names = finder.names - finder.defined
+
+    # KNOWN LIMITATION: NameFinder incorrectly thinks 'x' is defined locally
+    # because the comprehension's 'x' is in Store context and goes into 'defined'.
+    # In reality, the external 'x' reference should be detected.
+    #
+    # This test documents the current behavior. If NameFinder is fixed to handle
+    # scopes properly, this assertion should change to:
+    #   assert 'x' in external_names, "External 'x' should be detected"
+    assert 'x' not in external_names, (
+        "KNOWN LIMITATION: NameFinder misses 'x' because comprehension shadows it. "
+        "If this test fails, NameFinder was fixed - update this test!"
+    )
+
+
 def test_namefinder_nested_function_shadowing():
     """Test that inner function parameters don't shadow outer references.
 

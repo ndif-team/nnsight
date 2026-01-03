@@ -794,6 +794,9 @@ def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
 
     if tree:
         # Find names used in the class that aren't defined locally
+        # Note: We use a simple NameFinder here rather than ReferenceCollector because
+        # ReferenceCollector doesn't visit decorator_list, so it misses @property etc.
+        # The simpler approach also handles edge cases better for this use case.
         class NameFinder(ast.NodeVisitor):
             def __init__(self):
                 self.names = set()
@@ -829,9 +832,6 @@ def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
 
         finder = NameFinder()
         finder.visit(tree)
-        # Note: We don't subtract builtins here since external_names is used to
-        # look up values from the class module. Builtins won't be found there,
-        # and even if a builtin is overridden at module level, we want to detect it.
         external_names = finder.names - finder.defined
 
     # Resolve external names from the class's module
