@@ -28,6 +28,24 @@ class MyAnalyzer:
 - Libraries like nnterp work without NDIF server installation
 - Validation at import time, not mysterious runtime failures
 
+## Implementation Status & Roadmap
+
+**✅ Implemented**
+*   `@nnsight.remote` decorator with import-time validation.
+*   AST validation for allowed modules and attribute chains.
+*   Basic source serialization for functions, classes, and instances.
+*   Capture of module-level constants and callable references (`__callable_ref__`).
+*   Heuristics for identifying the Model and internal variables.
+
+**🚧 To Do (Pending Implementation)**
+1.  **Binary Sidecars**: Update serialization to extract Tensors/Arrays into binary buffers instead of raising errors.
+2.  **Flat Graph**: Refactor JSON structure to use a flat `objects` map to support circular references and shared objects.
+3.  **Closures**: Extend variable extraction to walk `__closure__` and `co_freevars`.
+4.  **Pickle Hooks**: Add support for `__getstate__` / `__setstate__` on remote objects.
+5.  **Source Hashing**: Implement client-side hashing and server-side verification logic.
+6.  **Notebook Support**: Add fallback to IPython history for source extraction.
+7.  **Error Mapping**: Add file/line metadata to the source payload for server-side error mapping.
+
 ---
 
 ## Motivation: The Cloudpickle Problem
@@ -1015,6 +1033,36 @@ Lambda functions present a significant challenge because Python's `inspect.getso
 1.  Attempt to support lambdas via AST parsing of the returned source line.
 2.  **Exhaustive testing** is required to identify failure modes (e.g., lambdas inside list comprehensions, multi-line lambdas).
 3.  **Fallback**: If testing reveals too much fragility, the validator will explicitly reject `lambda` expressions and require users to define named functions (which are robust).
+
+### 5. Security Model (Critical)
+
+**AST Validation != Security**
+The AST validation described in this document acts as a **linter** to prevent accidental usage of unsupported features. It is **NOT** a security boundary.
+*   Dynamic code execution (e.g., `getattr(os, "sys"+"tem")`) can bypass static analysis.
+*   **Requirement:** The NDIF server must execute user code in a **hard sandbox** (e.g., gVisor, ephemeral containers, restricted user namespaces) with no network access and read-only filesystem access (except for temp buffers).
+*   **Trust:** The server treats all serialized source code as untrusted user input.
+
+### 6. Robustness Details
+
+**Closures & Free Variables**
+Serialization must extend beyond local variables to include **closure variables**.
+*   If a `@nnsight.remote` function is defined inside another function and captures variables, the serializer must inspect `func.__closure__` and `func.__code__.co_freevars` to serialize those captured values recursively.
+
+**Serialization Hierarchy & Strictness**
+We do **not** support arbitrary pickle-able objects, as this reintroduces version fragility. The serialization follows a strict hierarchy:
+
+1.  **Primitives**: `int`, `str`, `list`, `dict`, etc. (Pass-through).
+2.  **Binary Sidecars**: `torch.Tensor`, `numpy.ndarray` (Extracted to buffers).
+3.  **Model References**: Explicit `Envoy` / `LanguageModel` types (Serialized as reference).
+4.  **@nnsight.remote Objects**:
+    *   We ship the source code.
+    *   We serialize the state.
+    *   **Protocol**: We check for `__getstate__`/`__setstate__` to allow custom logic *for these specific decorated classes*. If missing, we default to `__dict__`.
+5.  **Everything Else**: **Error**. "Object of type X is not serializable. Mark it `@nnsight.remote` or convert to primitive."
+
+**Notebook & REPL Support**
+`inspect.getsource` is brittle in interactive environments.
+*   **Strategy**: If standard source extraction fails, the system will attempt to retrieve source code from the IPython history manager (if available) or use robust third-party helpers (like `dill.source`) to locate the definition.
 
 ---
 
