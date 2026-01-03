@@ -238,13 +238,22 @@ Not all Python code can be safely serialized and reconstructed on a server. Cons
 
 1. **Source must be available**: We need to send the actual source text, which means the code must be in `.py` files (not dynamically generated or from C extensions).
 
-2. **Only certain imports are allowed**: The server has `torch`, `numpy`, and `math`, but not `pandas`, `sklearn`, or arbitrary libraries.
+2. **Only certain imports are allowed**: The server has `torch`, `numpy`, `math`, `collections`, `itertools`, `functools`, and `operator`, but not `pandas`, `sklearn`, or arbitrary libraries.
 
 3. **No side effects**: Code that opens files, makes network requests, or spawns processes would behave unpredictably on the server.
 
 4. **References must be resolvable**: If your code uses a module-level constant like `TOP_K = 10`, we need to capture that value. But if it references a complex object, we can't serialize it.
 
 The `@nnsight.remote` decorator performs **validation at import time**. When you decorate a class or function, the decorator immediately checks all these constraints and raises a clear error if any are violated. This is much better than discovering problems at runtime when the trace executes on the server.
+
+### Validating Attribute Chains
+
+To strike a balance between safety and expressiveness, the validator checks **attribute chains** instead of just banning modules.
+
+- **Blocked**: `os.system()`, `subprocess.run()`, `pathlib.Path.read_text()`
+- **Allowed**: `os.path.join()`, `pathlib.Path('foo')`
+
+This nuance allows users to use benign parts of standard libraries (like path manipulation) while strictly preventing dangerous operations (like command execution or file I/O).
 
 ### Design Choice: One Decorator for Everything
 
@@ -432,6 +441,7 @@ ImportError: @nnsight.remote validation failed for 'MyClass':
 ### Implementation Sketch
 
 ```python
+```python
 # nnsight/remote.py
 
 import ast
@@ -439,104 +449,17 @@ import inspect
 import sys
 from typing import Union, Type, Callable
 
-ALLOWED_MODULES = {'torch', 'numpy', 'math', 'builtins'}
+ALLOWED_MODULES = {
+    'torch', 'numpy', 'math', 'builtins',
+    'collections', 'itertools', 'functools', 'operator'
+}
 DISALLOWED_CALLS = {'open', 'exec', 'eval', 'compile', 'input'}
+DISALLOWED_ATTR_PATTERNS = {
+    ('os', 'system'), ('subprocess', 'run'), ('pathlib', 'Path', 'read_text')
+}
 
 def remote(obj: Union[Type, Callable]) -> Union[Type, Callable]:
-    """Decorator that marks a function or class as safe for NDIF remote execution."""
-
-    # Step 1: Verify source is available
-    try:
-        source = inspect.getsource(obj)
-    except OSError:
-        raise ImportError(
-            f"@nnsight.remote requires source code for '{obj.__name__}'. "
-            f"Ensure .py files are included in your package distribution."
-        )
-
-    # Step 2: Parse AST
-    tree = ast.parse(source)
-
-    # Step 3: Find module-level references and validate
-    module = sys.modules.get(obj.__module__)
-    external_names = find_external_references(tree, obj)
-    module_refs, errors = resolve_module_references(external_names, module)
-
-    # Step 4: Validate AST for disallowed patterns
-    errors.extend(validate_ast(tree, obj.__name__))
-
-    # Step 5: For classes, additional validation
-    if isinstance(obj, type):
-        errors.extend(validate_class(obj))
-
-    if errors:
-        raise ImportError(format_validation_errors(obj.__name__, errors))
-
-    # Step 6: Store metadata for serialization
-    obj._remote_source = source
-    obj._remote_module_refs = module_refs
-    obj._remote_validated = True
-
-    return obj
-
-
-def find_external_references(tree: ast.AST, obj) -> set:
-    """Find names referenced but not defined locally."""
-    # ... AST analysis to find Name nodes not in local scope
-    pass
-
-
-def resolve_module_references(names: set, obj) -> tuple:
-    """
-    Resolve external names to their values from the function/class globals.
-    Returns (captured_refs, errors).
-
-    Handles three cases:
-    1. Module aliases (np, F, torch) -> skip if allowed module
-    2. JSON-serializable constants (TOP_K = 10) -> capture
-    3. Non-serializable objects -> error
-    """
-    import types
-    captured = {}
-    errors = []
-
-    for name in names:
-        # Skip builtins
-        if name in dir(__builtins__):
-            continue
-
-        # Get the actual value from globals
-        value = obj.__globals__.get(name)
-
-        if value is None:
-            errors.append(f"Unknown reference '{name}'")
-            continue
-
-        # Case 1: Module or module alias (np, F, torch, etc.)
-        if isinstance(value, types.ModuleType):
-            root = value.__name__.split('.')[0]
-            if root in ALLOWED_MODULES:
-                continue  # Available on server, no need to capture
-            else:
-                errors.append(
-                    f"Module '{name}' ({value.__name__}) not available on NDIF server. "
-                    f"Allowed: torch, numpy, math"
-                )
-            continue
-
-        # Case 2: JSON-serializable constant
-        if is_json_serializable(value):
-            captured[name] = value
-            continue
-
-        # Case 3: Non-serializable object
-        errors.append(
-            f"Reference '{name}' (type '{type(value).__name__}') "
-            f"is not JSON-serializable"
-        )
-
-    return captured, errors
-
+# ... (omitted for brevity)
 
 def validate_ast(tree: ast.AST, name: str) -> list:
     """Validate AST for disallowed patterns."""
@@ -555,13 +478,30 @@ def validate_ast(tree: ast.AST, name: str) -> list:
                 errors.append((node.lineno, f"imports from '{node.module}'"))
 
         def visit_Call(self, node):
+            # Check function calls
             if isinstance(node.func, ast.Name):
                 if node.func.id in DISALLOWED_CALLS:
                     errors.append((node.lineno, f"calls '{node.func.id}()'"))
+            
+            # Check attribute chains (e.g. os.system)
+            if isinstance(node.func, ast.Attribute):
+                chain = self._get_attr_chain(node.func)
+                for pattern in DISALLOWED_ATTR_PATTERNS:
+                    if len(chain) >= len(pattern) and chain[:len(pattern)] == pattern:
+                        errors.append((node.lineno, f"calls '{'.'.join(chain)}()'"))
+            
             self.generic_visit(node)
+
+        def _get_attr_chain(self, node):
+            if isinstance(node, ast.Attribute):
+                return self._get_attr_chain(node.value) + (node.attr,)
+            elif isinstance(node, ast.Name):
+                return (node.id,)
+            return ()
 
     Validator().visit(tree)
     return errors
+```
 
 
 def validate_class(cls: type) -> list:
@@ -587,6 +527,14 @@ def validate_class(cls: type) -> list:
 ---
 
 ## Serialization Changes
+
+The serialization logic has been refined with several key behaviors:
+
+1.  **Internal Variable Filtering**: Local variables starting with `_nnsight` or `nnsight` are automatically filtered out. This keeps the serialized payload clean of internal tracer state.
+
+2.  **Strict Model Reference Heuristics**: To avoid circular imports and ambiguity, "model access" is strictly defined. A variable is treated as a model reference only if its type is explicitly `Envoy`, `NNsight`, or `LanguageModel`. Custom wrappers must be marked `@nnsight.remote` to be serialized correctly.
+
+3.  **Callable References**: Users can assign functions from allowed modules to instance attributes (e.g., `self.activation = torch.nn.functional.relu`). These are serialized as a special `__callable_ref__` string pointer, which the server resolves back to the actual function.
 
 ### New serialization.py
 
@@ -628,11 +576,16 @@ def extract_variables(locals_dict: Dict[str, Any]) -> Dict[str, Any]:
         if name.startswith('__'):
             continue
 
+        # Filter internal nnsight variables
+        if name.startswith('_nnsight') or name.startswith('nnsight'):
+            continue
+
         if is_json_serializable(value):
             result[name] = value
         elif is_remote_object(value):
             result[name] = {"__remote_ref__": id(value)}
         elif is_model_reference(value):
+            # Check for Envoy, NNsight, or LanguageModel types
             result[name] = {"__model_ref__": True}
         else:
             raise SerializationError(
@@ -709,6 +662,9 @@ def serialize_instance_state(obj: Any) -> Dict[str, Any]:
             state[key] = {"__model_ref__": True}
         elif is_remote_object(value):
             state[key] = {"__remote_ref__": id(value)}
+        elif is_allowed_function(value):
+            # e.g. self.act = torch.nn.functional.relu
+            state[key] = {"__callable_ref__": f"{value.__module__}.{value.__name__}"}
         else:
             raise SerializationError(
                 f"Instance attribute '{key}' of type '{type(value).__name__}' "
@@ -769,7 +725,7 @@ def deserialize_and_execute(payload: bytes, model) -> Any:
     return namespace.get('__nnsight_result__')
 
 
-def reconstruct_state(state: dict, namespace: dict) -> dict:
+def reconstruct_state(state: dict, namespace: dict, reconstructed_ids: dict) -> dict:
     """Reconstruct instance state, resolving references."""
     result = {}
     for key, value in state.items():
@@ -777,8 +733,14 @@ def reconstruct_state(state: dict, namespace: dict) -> dict:
             if '__model_ref__' in value:
                 result[key] = namespace['model']
             elif '__remote_ref__' in value:
-                # Reference to another remote object, resolve by id
-                result[key] = value  # TODO: proper resolution
+                # Resolve reference to other remote object
+                ref_id = str(value['__remote_ref__'])
+                result[key] = reconstructed_ids.get(ref_id, value)
+            elif '__callable_ref__' in value:
+                # Resolve function reference (e.g. "torch.nn.functional.relu")
+                mod_name, func_name = value['__callable_ref__'].rsplit('.', 1)
+                mod = __import__(mod_name, fromlist=[func_name])
+                result[key] = getattr(mod, func_name)
             else:
                 result[key] = value
         else:
@@ -1085,13 +1047,69 @@ def test_remote_function_in_trace():
     assert result is not None
 ```
 
+## Exhaustive Test Plan
+
+To ensure the robustness of the source-based serialization, the following test cases must be implemented.
+
+### 1. Validation Logic (Unit Tests)
+**`validate_ast` & Decorator Logic**
+*   **Allowed Imports**: Verify `torch`, `numpy`, `math`, `collections`, `itertools`, `functools`, `operator` are accepted.
+*   **Disallowed Imports**: Verify `pandas`, `sklearn`, `requests` raise `ImportError` with correct line number.
+*   **Allowed Attribute Chains**: Verify `os.path.join`, `pathlib.Path("x")`, `random.randint` (if allowed) are accepted.
+*   **Disallowed Attribute Chains**: Verify `os.system`, `subprocess.run`, `pathlib.Path.read_text` raise errors.
+*   **Disallowed Calls**: Verify `open()`, `exec()`, `eval()` raise errors.
+*   **Class Validation**:
+    *   Verify inheritance from `object` or another `@nnsight.remote` class is allowed.
+    *   Verify inheritance from a non-decorated class raises an error.
+    *   Verify usage of metaclasses or `__slots__` raises an error.
+*   **Module References**:
+    *   Verify capturing simple constants (`TOP_K = 10`).
+    *   Verify rejection of complex non-serializable constants (`CONFIG = ComplexObj()`).
+    *   Verify ignoring aliases to allowed modules (`import numpy as np`).
+
+### 2. Serialization Logic (Unit Tests)
+**`extract_variables` & `serialize_instance_state`**
+*   **Internal Filtering**: Ensure variables starting with `_nnsight` or `nnsight` are NOT present in the serialized output.
+*   **Model Heuristics**:
+    *   Pass a mock object named `Envoy` -> Verify serialized as `{"__model_ref__": True}`.
+    *   Pass a mock object with module `nnsight.modeling.LanguageModel` -> Verify serialized as `{"__model_ref__": True}`.
+    *   Pass a random object -> Verify `SerializationError` or fallback behavior.
+*   **Callable References**:
+    *   Assign `self.act = torch.nn.functional.relu` -> Verify serialized as `{"__callable_ref__": "torch.nn.functional.relu"}`.
+    *   Assign `self.act = custom_func` (undecorated) -> Verify error.
+*   **Nested Remote Objects**:
+    *   Create `ClassA` holding instance of `ClassB` (both decorated). Verify `ClassA` state contains `{"__remote_ref__": ID_OF_B}`.
+    *   Create `ClassA` holding instance of `ClassC` (undecorated). Verify `SerializationError`.
+*   **Circular References**: (If supported) Create two instances referencing each other. Verify no infinite recursion in serialization (though JSON dump might fail if not handled).
+
+### 3. Server-Side Reconstruction (Unit Tests)
+**`deserialize_and_execute` & `reconstruct_state`**
+*   **Callable Resolution**: Verify `{"__callable_ref__": "torch.nn.functional.relu"}` resolves to the actual function.
+*   **Model Injection**: Verify `{"__model_ref__": True}` is replaced by the actual model object passed to the deserializer.
+*   **Shared Instances**:
+    *   Serialize two variables pointing to the same `@nnsight.remote` instance.
+    *   Deserialize and verify `var1 is var2` (identity preservation).
+*   **Module Scope**: Verify that reconstructed classes have access to their captured module-level constants (e.g., `TOP_K`).
+
+### 4. Integration Tests (End-to-End)
+*   **Simple Function**: Trace using a `@nnsight.remote` function. Verify execution on "server" (mocked).
+*   **Simple Class**: Trace using a `@nnsight.remote` class instance.
+*   **Library Simulation**:
+    *   Define a "library" module with version metadata.
+    *   Use it in a trace.
+    *   Verify serialization includes library/version info.
+*   **Complex Flow**:
+    *   Trace using `itertools.chain`, `functools.partial`, and `collections.namedtuple` (allowed modules).
+    *   Verify correct execution.
+*   **Standard Library Usage**: Use `os.path.join` inside a remote function. Verify it works.
+
 ---
 
 ## Open Questions
 
 1. **Tensor serialization**: How do we handle tensors passed as variables? Use numpy array serialization? torch.save to bytes?
 
-2. **Nested @nnsight.remote**: If class A contains an instance of class B, both need to be @nnsight.remote. How do we validate this at import time vs runtime?
+2. **Nested @nnsight.remote**: If class A contains an instance of class B, both need to be @nnsight.remote. **Resolution:** This is handled via runtime checks during serialization. `serialize_instance_state` recursively checks attributes; if a nested object isn't decorated, a `SourceSerializationError` is raised at trace time.
 
 3. **Lambda handling**: Should we support lambdas via source extraction? Or require explicit functions?
 
@@ -1119,6 +1137,10 @@ def test_remote_function_in_trace():
 - `torch.*`
 - `numpy.*` (including alias `np`)
 - `math.*`
+- `collections.*`
+- `itertools.*`
+- `functools.*`
+- `operator.*`
 
 ### Disallowed
 - File I/O (`open`, `Path.read_text`, etc.)
