@@ -102,28 +102,28 @@ Since Python source code is version-independent (unlike bytecode), this eliminat
 The serialization system spans two execution environments:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         CLIENT SIDE                              │
-│                                                                  │
-│   User Code              Serialization              Network     │
-│  ┌─────────────┐        ┌─────────────┐         ┌──────────┐   │
-│  │ @remote     │───────▶│ extract_all │────────▶│ JSON     │───┼──▶
-│  │ classes     │        │ serialize   │         │ payload  │   │
-│  │ & functions │        └─────────────┘         └──────────┘   │
-│  └─────────────┘                                                │
-└─────────────────────────────────────────────────────────────────┘
-                                 │
-                                 ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         SERVER SIDE                              │
-│                                                                  │
-│   Network          Deserialization            Execution          │
-│  ┌──────────┐     ┌─────────────────┐     ┌─────────────────┐   │
-│  │ JSON     │────▶│ deserialize_    │────▶│ Reconstructed   │   │
-│  │ payload  │     │ source_based    │     │ classes/funcs   │   │
-│  └──────────┘     └─────────────────┘     │ + namespace     │   │
-│                                            └─────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                         CLIENT SIDE                           │
+│                                                               │
+│  User Code            Serialization              Network      │
+│  ┌─────────────┐     ┌─────────────┐        ┌──────────┐     │
+│  │ @remote     │────▶│ extract_all │───────▶│ JSON     │─────┼──▶
+│  │ classes     │     │ serialize   │        │ payload  │     │
+│  │ & functions │     └─────────────┘        └──────────┘     │
+│  └─────────────┘                                              │
+└───────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌───────────────────────────────────────────────────────────────┐
+│                         SERVER SIDE                           │
+│                                                               │
+│  Network            Deserialization            Execution      │
+│  ┌──────────┐     ┌─────────────────┐     ┌───────────────┐  │
+│  │ JSON     │────▶│ deserialize_    │────▶│ Reconstructed │  │
+│  │ payload  │     │ source_based    │     │ classes/funcs │  │
+│  └──────────┘     └─────────────────┘     │ + namespace   │  │
+│                                           └───────────────┘  │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Components
