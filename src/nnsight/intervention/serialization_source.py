@@ -638,6 +638,152 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
     }
 
 
+def is_nn_parameter(value: Any) -> bool:
+    """Check if value is a torch.nn.Parameter."""
+    type_name = type(value).__name__
+    module = getattr(type(value), '__module__', '')
+    return type_name == 'Parameter' and 'torch' in module
+
+
+def is_nn_module(value: Any) -> bool:
+    """Check if value is a torch.nn.Module instance."""
+    # Check by inheritance to handle all nn.Module subclasses
+    try:
+        import torch.nn
+        return isinstance(value, torch.nn.Module)
+    except ImportError:
+        return False
+
+
+def serialize_nn_module(value: Any, key: str, seen: set) -> Dict[str, Any]:
+    """
+    Serialize a torch.nn.Module instance using object.__new__() + __dict__ approach.
+
+    All nn.Module subclasses (both built-in and custom) store their state in __dict__,
+    including _parameters, _buffers, _modules dicts. We recursively serialize __dict__.
+    """
+    cls = type(value)
+    module_path = cls.__module__
+    class_name = cls.__name__
+
+    # For ALL nn.Module instances (built-in torch, @remote, or other),
+    # serialize via class path + __dict__
+    # This works because all nn.Module subclasses store state in __dict__
+    if module_path.startswith('torch') or getattr(cls, '_remote_validated', False):
+        # Recursively serialize __dict__
+        serialized_dict = {}
+        for k, v in value.__dict__.items():
+            serialized_dict[k] = serialize_value(v, f"{key}.{k}", seen)
+
+        return {
+            "__nn_module__": f"{module_path}.{class_name}",
+            "__dict__": serialized_dict,
+        }
+
+    # Unknown module type (not torch, not @remote)
+    raise SourceSerializationError(
+        f"Instance attribute '{key}' is nn.Module '{class_name}' from '{module_path}' "
+        f"which cannot be serialized. Use @nnsight.remote to mark custom modules."
+    )
+
+
+def serialize_value(value: Any, key: str, seen: set) -> Any:
+    """
+    Serialize a single value for instance state.
+
+    Args:
+        value: The value to serialize
+        key: The attribute key (for error messages)
+        seen: Set of already-seen object ids
+
+    Returns:
+        Serialized representation of the value
+    """
+    # Handle model references
+    if is_model_reference(value):
+        return {"__model_ref__": True}
+
+    # Handle nn.Module instances FIRST (both built-in torch and @remote)
+    # This must come before is_remote_object since @remote nn.Module should use __dict__ serialization
+    if is_nn_module(value):
+        return serialize_nn_module(value, key, seen)
+
+    # Handle other @remote instances (non-nn.Module classes)
+    if is_remote_object(value):
+        return {"__remote_ref__": id(value), "__remote_type__": type(value).__name__}
+
+    # Handle nn.Parameter (must check before is_tensor since Parameter is a Tensor subclass)
+    if is_nn_parameter(value):
+        tensor_data = serialize_tensor(value.data)
+        tensor_data["__nn_parameter__"] = True
+        tensor_data["requires_grad"] = value.requires_grad
+        return tensor_data
+
+    # Handle tensors
+    if is_tensor(value):
+        return serialize_tensor(value)
+
+    # Handle nested dicts (like nn.Module's _parameters, _buffers, _modules)
+    if isinstance(value, dict):
+        # Check if the dict is fully JSON-serializable - if so, return as-is
+        if is_json_serializable(value):
+            return value
+        # Otherwise, serialize recursively with wrapper
+        serialized_dict = {}
+        for k, v in value.items():
+            serialized_dict[k] = serialize_value(v, f"{key}.{k}", seen)
+        return {"__dict__": serialized_dict}
+
+    # Handle lists/tuples
+    if isinstance(value, (list, tuple)):
+        # Check if all items are JSON-serializable - if so, return as-is
+        if all(is_json_serializable(item) for item in value):
+            return list(value) if isinstance(value, tuple) else value
+        # Otherwise, serialize recursively with wrapper
+        serialized_list = [serialize_value(item, f"{key}[{i}]", seen) for i, item in enumerate(value)]
+        return {"__list__": serialized_list, "__tuple__": isinstance(value, tuple)}
+
+    # Handle sets
+    if isinstance(value, set):
+        # Sets can only contain JSON-serializable values
+        if all(is_json_serializable(item) for item in value):
+            return {"__set__": list(value)}
+        raise SourceSerializationError(
+            f"Set attribute '{key}' contains non-JSON-serializable values."
+        )
+
+    # JSON-serializable values
+    if is_json_serializable(value):
+        return value
+
+    # Functions from allowed modules
+    if callable(value):
+        callable_ref = get_callable_reference(value)
+        if callable_ref:
+            return {"__callable_ref__": callable_ref}
+
+    # Weakrefs - internal torch state, serialize as None (will be rebuilt)
+    import weakref
+    if isinstance(value, weakref.ReferenceType):
+        return {"__weakref__": True}
+
+    # Type references (like torch.float32)
+    if isinstance(value, type):
+        module = getattr(value, '__module__', '')
+        root = module.split('.')[0] if module else ''
+        if root in ALLOWED_MODULES or module == 'builtins':
+            return {"__type_ref__": f"{module}.{value.__name__}"}
+
+    raise SourceSerializationError(
+        f"Instance attribute '{key}' of type '{type(value).__name__}' "
+        f"cannot be serialized for remote execution.\n"
+        f"Options:\n"
+        f"  - Use a JSON-serializable type (int, float, str, list, dict)\n"
+        f"  - Mark it with @nnsight.remote if it's a custom class\n"
+        f"  - Use functions from allowed modules (torch, numpy, etc.)"
+    )
+
+
 def serialize_instance_state(obj: Any, seen: set = None) -> Dict[str, Any]:
     """
     Serialize a @nnsight.remote instance's __dict__.
@@ -667,41 +813,7 @@ def serialize_instance_state(obj: Any, seen: set = None) -> Dict[str, Any]:
     state = {}
 
     for key, value in obj.__dict__.items():
-        # Handle model references
-        if is_model_reference(value):
-            state[key] = {"__model_ref__": True}
-            continue
-
-        # Handle other @remote instances
-        if is_remote_object(value):
-            state[key] = {"__remote_ref__": id(value), "__remote_type__": type(value).__name__}
-            continue
-
-        # Handle tensors
-        if is_tensor(value):
-            state[key] = serialize_tensor(value)
-            continue
-
-        # JSON-serializable values
-        if is_json_serializable(value):
-            state[key] = value
-            continue
-
-        # Functions from allowed modules (including nested attributes like torch.nn.functional.relu)
-        if callable(value):
-            callable_ref = get_callable_reference(value)
-            if callable_ref:
-                state[key] = {"__callable_ref__": callable_ref}
-                continue
-
-        raise SourceSerializationError(
-            f"Instance attribute '{key}' of type '{type(value).__name__}' "
-            f"cannot be serialized for remote execution.\n"
-            f"Options:\n"
-            f"  - Use a JSON-serializable type (int, float, str, list, dict)\n"
-            f"  - Mark it with @nnsight.remote if it's a custom class\n"
-            f"  - Use functions from allowed modules (torch, numpy, etc.)"
-        )
+        state[key] = serialize_value(value, key, seen)
 
     return state
 
@@ -904,6 +1016,130 @@ def deserialize_source_based(
     return namespace
 
 
+def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: dict) -> Any:
+    """
+    Reconstruct a single serialized value.
+
+    Args:
+        value: The serialized value
+        namespace: Current namespace
+        model: The model object
+        reconstructed: Dict of already reconstructed instances by id
+
+    Returns:
+        Reconstructed value
+    """
+    if not isinstance(value, dict):
+        return value
+
+    # Model reference
+    if '__model_ref__' in value:
+        return model
+
+    # Remote object reference
+    if '__remote_ref__' in value:
+        ref_id = str(value['__remote_ref__'])
+        if ref_id in reconstructed:
+            return reconstructed[ref_id]
+        # Placeholder, will be resolved later if needed
+        return value
+
+    # Callable reference
+    if '__callable_ref__' in value:
+        ref = value['__callable_ref__']
+        parts = ref.rsplit('.', 1)
+        if len(parts) == 2:
+            mod_name, func_name = parts
+            import importlib
+            try:
+                mod = importlib.import_module(mod_name)
+                return getattr(mod, func_name)
+            except (ImportError, AttributeError):
+                return value
+        return value
+
+    # Type reference
+    if '__type_ref__' in value:
+        ref = value['__type_ref__']
+        parts = ref.rsplit('.', 1)
+        if len(parts) == 2:
+            mod_name, type_name = parts
+            import importlib
+            try:
+                mod = importlib.import_module(mod_name)
+                return getattr(mod, type_name)
+            except (ImportError, AttributeError):
+                return value
+        return value
+
+    # nn.Module (built-in torch modules or @remote modules)
+    if '__nn_module__' in value:
+        import importlib
+        module_class_path = value['__nn_module__']
+        parts = module_class_path.rsplit('.', 1)
+        if len(parts) == 2:
+            mod_name, class_name = parts
+
+            # First check if class is in namespace (for @remote modules)
+            cls = namespace.get(class_name)
+
+            if cls is None:
+                # Try to import (for torch built-in modules)
+                try:
+                    mod = importlib.import_module(mod_name)
+                    cls = getattr(mod, class_name)
+                except (ImportError, AttributeError) as e:
+                    raise ValueError(f"Cannot reconstruct nn.Module '{module_class_path}': {e}")
+
+            # Use object.__new__() + __dict__ approach
+            instance = object.__new__(cls)
+
+            # Reconstruct __dict__
+            if '__dict__' in value:
+                reconstructed_dict = {}
+                for k, v in value['__dict__'].items():
+                    reconstructed_dict[k] = reconstruct_value(v, namespace, model, reconstructed)
+                instance.__dict__.update(reconstructed_dict)
+
+            return instance
+        return value
+
+    # nn.Parameter
+    if '__tensor__' in value and value.get('__nn_parameter__'):
+        import torch
+        tensor = deserialize_tensor(value)
+        return torch.nn.Parameter(tensor, requires_grad=value.get('requires_grad', True))
+
+    # Regular tensor
+    if '__tensor__' in value:
+        return deserialize_tensor(value)
+
+    # Nested dict
+    if '__dict__' in value:
+        return {
+            k: reconstruct_value(v, namespace, model, reconstructed)
+            for k, v in value['__dict__'].items()
+        }
+
+    # List/tuple
+    if '__list__' in value:
+        items = [reconstruct_value(item, namespace, model, reconstructed) for item in value['__list__']]
+        if value.get('__tuple__'):
+            return tuple(items)
+        return items
+
+    # Set
+    if '__set__' in value:
+        return set(value['__set__'])
+
+    # Weakref - return None (will be rebuilt by torch)
+    if '__weakref__' in value:
+        return None
+
+    # Unknown dict - return as-is
+    return value
+
+
 def reconstruct_state(
     state: dict,
     namespace: dict,
@@ -925,37 +1161,6 @@ def reconstruct_state(
     result = {}
 
     for key, value in state.items():
-        if isinstance(value, dict):
-            if '__model_ref__' in value:
-                result[key] = model
-            elif '__remote_ref__' in value:
-                # Reference to another remote object
-                ref_id = str(value['__remote_ref__'])
-                if ref_id in reconstructed:
-                    result[key] = reconstructed[ref_id]
-                else:
-                    # Placeholder, will be resolved later if needed
-                    result[key] = value
-            elif '__callable_ref__' in value:
-                # Reference to a function from allowed modules
-                ref = value['__callable_ref__']
-                parts = ref.rsplit('.', 1)
-                if len(parts) == 2:
-                    mod_name, func_name = parts
-                    import importlib
-                    try:
-                        mod = importlib.import_module(mod_name)
-                        result[key] = getattr(mod, func_name)
-                    except (ImportError, AttributeError):
-                        result[key] = value
-                else:
-                    result[key] = value
-            elif '__tensor__' in value:
-                # Tensor data
-                result[key] = deserialize_tensor(value)
-            else:
-                result[key] = value
-        else:
-            result[key] = value
+        result[key] = reconstruct_value(value, namespace, model, reconstructed)
 
     return result

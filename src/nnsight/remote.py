@@ -76,6 +76,19 @@ DISALLOWED_ATTR_PATTERNS = {
 # Builtin names that don't need to be captured
 BUILTIN_NAMES = set(dir(builtins))
 
+# Trusted base classes from allowed modules (don't require @remote)
+# These are well-known classes whose __dict__ contains all necessary state
+ALLOWED_BASE_CLASSES = {
+    # torch.nn module
+    'torch.nn.Module',
+    'torch.nn.modules.module.Module',
+    # torch.utils.data module
+    'torch.utils.data.Dataset',
+    'torch.utils.data.IterableDataset',
+    'torch.utils.data.dataset.Dataset',
+    'torch.utils.data.dataset.IterableDataset',
+}
+
 
 class RemoteValidationError(ImportError):
     """Raised when @nnsight.remote validation fails."""
@@ -634,8 +647,8 @@ def validate_class(cls: type) -> List[str]:
     Additional validation for classes.
 
     Checks:
-    - Base classes are @nnsight.remote or object
-    - No metaclass
+    - Base classes are @nnsight.remote, object, or in ALLOWED_BASE_CLASSES
+    - No metaclass (except for allowed base classes like nn.Module)
     - No __slots__
     """
     errors = []
@@ -643,6 +656,10 @@ def validate_class(cls: type) -> List[str]:
     # Check base classes
     for base in cls.__bases__:
         if base is object:
+            continue
+        # Check if base is in allowed base classes
+        base_fullname = f"{base.__module__}.{base.__name__}"
+        if base_fullname in ALLOWED_BASE_CLASSES:
             continue
         if not getattr(base, '_remote_validated', False):
             errors.append(

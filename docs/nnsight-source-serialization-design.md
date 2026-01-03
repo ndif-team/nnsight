@@ -251,6 +251,26 @@ To support **binary attachments** (like tensors) and **circular references**, th
 
 ## The @nnsight.remote Decorator
 
+### When is @remote Required?
+
+**Simple rule: If you wrote it, decorate it.**
+
+`@nnsight.remote` is **required** for any user-defined code used in traces:
+
+| What you use in a trace | @remote needed? |
+|------------------------|----------------|
+| Built-in torch modules (`nn.Linear`, `nn.Conv2d`) | No - works automatically |
+| Built-in torch/numpy functions (`torch.relu`, `np.mean`) | No - works automatically |
+| JSON-serializable values (`int`, `str`, `list`, `dict`) | No - passes through |
+| **Your custom `nn.Module` subclass** | **Yes - required** |
+| **Your custom class** | **Yes - required** |
+| **Your custom function** | **Yes - required** |
+
+Without `@remote`, user-defined code cannot be validated or serialized for remote execution. The decorator:
+1. **Validates at import time** - catches disallowed imports, unsafe operations, non-serializable references
+2. **Captures source code** - enables serialization without cloudpickle
+3. **Signals intent** - makes it explicit which code runs remotely
+
 ### Why a Decorator?
 
 Not all Python code can be safely serialized and reconstructed on a server. Consider these constraints:
@@ -1265,13 +1285,70 @@ Serialization must extend beyond local variables to include **closure variables*
 We do **not** support arbitrary pickle-able objects, as this reintroduces version fragility. The serialization follows a strict hierarchy:
 
 1.  **Primitives**: `int`, `str`, `list`, `dict`, etc. (Pass-through).
-2.  **Binary Sidecars**: `torch.Tensor`, `numpy.ndarray` (Extracted to buffers).
+2.  **Tensors**: `torch.Tensor`, `numpy.ndarray` (Base64 + optional zlib compression).
 3.  **Model References**: Explicit `Envoy` / `LanguageModel` types (Serialized as reference).
 4.  **@nnsight.remote Objects**:
     *   We ship the source code.
-    *   We serialize the state.
-    *   **Protocol**: We check for `__getstate__`/`__setstate__` to allow custom logic *for these specific decorated classes*. If missing, we default to `__dict__`.
+    *   We serialize `__dict__` recursively (handles nested dicts, tensors, child modules).
+    *   Reconstruction uses `object.__new__()` + `__dict__` population.
 5.  **Everything Else**: **Error**. "Object of type X is not serializable. Mark it `@nnsight.remote` or convert to primitive."
+
+**Instance Reconstruction via `object.__new__()` + `__dict__`**
+
+All Python classes (including `torch.nn.Module` subclasses) store their state in `__dict__`. We reconstruct instances by:
+
+1. Creating an empty instance with `object.__new__(cls)` (bypasses `__init__`)
+2. Populating `__dict__` with the deserialized state
+
+```python
+# Serialization
+state = serialize_instance_state(obj)  # Recursively serialize __dict__
+
+# Deserialization
+restored = object.__new__(cls)
+restored.__dict__ = reconstruct_state(state, namespace, model, {})
+```
+
+**Why this works for `nn.Module`:**
+
+While `nn.Module` stores parameters in special attributes like `_parameters` and `_buffers`, these ARE in `__dict__`:
+
+```python
+model.__dict__ = {
+    '_parameters': {'weight': Parameter(...), 'bias': Parameter(...)},
+    '_buffers': {},
+    '_modules': {'layer1': Linear(...)},
+    'training': True,
+    ...
+}
+```
+
+The recursive serialization handles nested dicts, `nn.Parameter` objects, and child `nn.Module` instances automatically.
+
+**torch.nn.Module Support**
+
+`@nnsight.remote` allows `torch.nn.Module` as a base class:
+
+```python
+@nnsight.remote
+class MyModule(torch.nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+```
+
+**Serialization handles:**
+- `nn.Parameter` objects (serialized with `requires_grad` flag)
+- Nested `_parameters`, `_buffers`, `_modules` dicts
+- Built-in torch modules like `nn.Linear` (class path + `__dict__`)
+- Training mode (`training` attribute)
+
+**This approach:**
+- **Works automatically** - No special code required from users
+- **Preserves trained weights** - Parameters serialized with tensor data
+- **Handles nested modules** - Recursive `__dict__` serialization
+- **Supports custom modules** - Any `nn.Module` subclass works
+- **No `__init__` arg capture** - Simpler, more robust
 
 **Notebook & REPL Support**
 `inspect.getsource` is brittle in interactive environments.
@@ -1585,3 +1662,5 @@ The following features from the design document have been implemented:
 11. **Backward compatibility** - Falls back to cloudpickle with deprecation warning
 12. **Lambda support** - Single-line lambdas with AST + bytecode matching, closure variable capture, clear errors for unsupported patterns (multi-line, nested inner, identical on same line)
 13. **Tensor serialization** - torch.Tensor and numpy.ndarray as base64+zlib in JSON; handles bfloat16 (via int16 view), sparse COO (preserves sparsity), quantized (preserves int repr + params); nested tensors rejected with clear error
+14. **nn.Module support** - `torch.nn.Module` as allowed base class; recursive `__dict__` serialization handles `_parameters`, `_buffers`, `_modules`; `nn.Parameter` preserved with `requires_grad`; built-in torch modules (nn.Linear, etc.) serialized via class path + `__dict__`
+15. **nn.Parameter handling** - Serialized with tensor data + `requires_grad` flag; properly reconstructed as `torch.nn.Parameter` on deserialization
