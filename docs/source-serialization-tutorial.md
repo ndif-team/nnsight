@@ -49,16 +49,32 @@ with model.trace("Hello world", remote=True):
 
 The challenge: **How do you send Python code to a remote server?**
 
-### The Cloudpickle Era (Legacy)
+### Why Not Just Use Pickle?
 
-Previously, nnsight used cloudpickle, which serializes Python bytecode. This had severe limitations:
+Python's built-in `pickle` module can serialize objects, but it has fundamental limitations for remote code execution:
+
+**Traditional pickle** serializes object *state*, not *behavior*. When you pickle a class instance, pickle stores the instance's data and a reference to the class by name. To unpickle, the *same class must already exist* on the receiving end. Pickle doesn't transmit the class definition—it assumes the class is importable.
+
+```python
+# If MyClass isn't installed on the server, this fails:
+pickle.dumps(MyClass())  # Works locally
+pickle.loads(data)       # Fails: "ModuleNotFoundError: No module named 'my_module'"
+```
+
+This makes pickle unsuitable for our use case: we want users to define custom helper classes that execute on servers where those classes aren't installed.
+
+### The Cloudpickle Alternative
+
+**Cloudpickle** extends pickle to serialize functions and classes by capturing their bytecode. This *does* transmit behavior, not just state. However, it introduces severe problems:
 
 | Problem | Impact |
 |---------|--------|
-| **Version lock-in** | Client and server must run identical Python versions (3.10 bytecode won't run on 3.12) |
-| **Library installation** | Every library used in traces must be installed on NDIF servers |
-| **Mysterious failures** | Code that serializes fine may fail at runtime with cryptic errors |
-| **No validation** | Problems only surface when code actually runs |
+| **Version lock-in** | Python bytecode is version-specific—code pickled on Python 3.10 may not run on Python 3.12 |
+| **Library installation** | Dependencies referenced by the bytecode must still be installed on the server |
+| **Mysterious failures** | Bytecode may serialize successfully but fail at runtime with cryptic errors |
+| **No validation** | Problems only surface when code actually runs on the server |
+
+nnsight's original implementation used cloudpickle, but these limitations created constant friction. Users couldn't use helper libraries unless those libraries were pre-installed on NDIF servers—and even then, version mismatches caused subtle bugs.
 
 ### The Third-Party Library Problem
 
@@ -139,15 +155,16 @@ The serialization system spans two execution environments:
 
 ## The `@remote` Decorator
 
-### What It Does
+### What Users Need to Know
 
-The `@remote` decorator is the user-facing API for source serialization:
+The `@remote` decorator is how users mark helper classes and functions for transport to remote servers. Any class or function used inside a trace that isn't part of the standard library or nnsight itself must be decorated with `@remote`:
 
 ```python
 from nnsight import remote
 
 @remote
 class MyAnalyzer:
+    """This class will be transported to NDIF servers."""
     def __init__(self, top_k=10):
         self.top_k = top_k
 
@@ -155,7 +172,15 @@ class MyAnalyzer:
         return hidden.topk(self.top_k)
 ```
 
-When Python imports this module, the decorator:
+The decorator serves as an explicit contract: "This code is designed to run remotely." This explicitness has several benefits:
+
+1. **Clarity**: Users know which code will be serialized and sent over the network
+2. **Validation**: The decorator checks the code at import time, catching problems early
+3. **Documentation**: The codebase clearly shows what's meant for remote execution
+
+### How It Works Under the Hood
+
+When Python imports a module containing `@remote`, the decorator:
 
 1. **Extracts source code** using `inspect.getsource()`
 2. **Validates the AST** for prohibited patterns (relative imports, `exec`, `eval`)
