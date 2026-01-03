@@ -456,6 +456,38 @@ def get_coauthor_flags(commit_hash: str, repo_root: str) -> Dict[str, bool]:
         return {'claudeCoauthored': False, 'geminiCoauthored': False, 'codexCoauthored': False}
 
 
+def get_merge_base(repo_root: str) -> Optional[str]:
+    """Get the merge-base commit between current branch and main."""
+    try:
+        result = subprocess.run(
+            ['git', 'merge-base', 'main', 'HEAD'],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def get_baseline_nodes(repo_root: str, source_files: List[str], merge_base: str) -> Set[str]:
+    """Get the set of node IDs that existed at the merge-base with main."""
+    if not merge_base:
+        return set()
+
+    all_node_ids = set()
+    for source_file in source_files:
+        content = get_file_at_commit(merge_base, source_file, repo_root)
+        if content:
+            file_base = os.path.basename(source_file).replace('.py', '')
+            result = extract_dataflow(content)
+            for node in result['nodes']:
+                all_node_ids.add(f"{file_base}:{node['id']}")
+
+    return all_node_ids
+
+
 def main():
     print('Extracting data flow history for nnsight source serialization...')
 
@@ -466,6 +498,11 @@ def main():
     if not commits:
         print('No commits found')
         return
+
+    # Get baseline nodes from main branch (for marking new-to-branch nodes)
+    merge_base = get_merge_base(repo_root)
+    baseline_nodes = get_baseline_nodes(repo_root, SOURCE_FILES, merge_base)
+    print(f'Baseline has {len(baseline_nodes)} nodes')
 
     snapshots = []
 
@@ -486,10 +523,11 @@ def main():
                 file_base = os.path.basename(source_file).replace('.py', '')
                 result = extract_dataflow(content)
 
-                # Prefix nodes with file name
+                # Prefix nodes with file name and mark if new to branch
                 for node in result['nodes']:
                     node['id'] = f"{file_base}:{node['id']}"
                     node['file'] = source_file
+                    node['isNewToBranch'] = node['id'] not in baseline_nodes
                     all_nodes.append(node)
 
                 # Prefix edges

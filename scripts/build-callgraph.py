@@ -568,6 +568,42 @@ def hash_content(text: str) -> str:
     return hashlib.sha1(text.encode()).hexdigest()
 
 
+def get_merge_base(repo_root: str) -> Optional[str]:
+    """Get the merge-base commit between current branch and main."""
+    try:
+        result = subprocess.run(
+            ['git', 'merge-base', 'main', 'HEAD'],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def get_baseline_nodes(repo_root: str, source_files: List[str], merge_base: str) -> Set[str]:
+    """Get the set of node IDs that existed at the merge-base with main."""
+    if not merge_base:
+        return set()
+
+    all_sources = []
+    for source_file in source_files:
+        content = get_file_at_commit(merge_base, source_file, repo_root)
+        if content:
+            all_sources.append((source_file, content))
+
+    if not all_sources:
+        return set()
+
+    try:
+        nodes, _ = extract_callgraph_multi_file(all_sources)
+        return {node['id'] for node in nodes}
+    except Exception:
+        return set()
+
+
 def main():
     print('Extracting call graph history for nnsight source serialization...')
 
@@ -582,6 +618,11 @@ def main():
     # Get commit history
     commits = get_commit_history(repo_root, SOURCE_FILES)
     print(f'Found {len(commits)} commits')
+
+    # Get baseline nodes from main branch (for marking new-to-branch nodes)
+    merge_base = get_merge_base(repo_root)
+    baseline_nodes = get_baseline_nodes(repo_root, SOURCE_FILES, merge_base)
+    print(f'Baseline has {len(baseline_nodes)} nodes')
 
     timeline = []
     graph_cache = {}  # content_hash -> (nodes, edges, line_count)
@@ -619,6 +660,10 @@ def main():
             line_count = total_lines
             graph_cache[combined_hash] = (nodes, edges, line_count)
 
+        # Mark nodes that are new to this branch (not in main baseline)
+        for node in nodes:
+            node['isNewToBranch'] = node['id'] not in baseline_nodes
+
         # Get coauthor flags
         coauthors = get_coauthor_flags(hash_val, repo_root)
 
@@ -636,7 +681,7 @@ def main():
             'testCount': test_count,
             'nodeCount': len(nodes),
             'edgeCount': len(edges),
-            'nodes': nodes,
+            'nodes': [dict(n) for n in nodes],  # Copy to avoid mutation issues
             'edges': edges,
         })
 
