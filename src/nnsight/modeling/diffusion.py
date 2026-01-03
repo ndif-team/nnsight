@@ -1,68 +1,65 @@
 from __future__ import annotations
 
-import inspect
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
-from diffusers import pipelines
+import json
 from diffusers import DiffusionPipeline
-from transformers import BatchEncoding, PreTrainedTokenizerBase
+from transformers import BatchEncoding
+from typing_extensions import Self
+from transformers import PreTrainedTokenizerBase
 
 from .. import util
-from .huggingface import HuggingFaceModel
-from typing import Type
+from .mixins import RemoteableMixin
 
 
 class Diffuser(util.WrapperModule):
-    def __init__(
-        self, automodel: Type[DiffusionPipeline] = DiffusionPipeline, *args, **kwargs
-    ) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__()
 
-        self.pipeline = automodel.from_pretrained(*args, **kwargs)
-
+        self.pipeline = DiffusionPipeline.from_pretrained(*args, **kwargs)
+        
         for key, value in self.pipeline.__dict__.items():
-            if isinstance(value, torch.nn.Module) or isinstance(
-                value, PreTrainedTokenizerBase
-            ):
+            if isinstance(value, torch.nn.Module) or isinstance(value, PreTrainedTokenizerBase):
                 setattr(self, key, value)
 
+        self.config = self.pipeline.config
+                
     def generate(self, *args, **kwargs):
         return self.pipeline.generate(*args, **kwargs)
 
 
-class DiffusionModel(HuggingFaceModel):
+class DiffusionModel(RemoteableMixin):
+    
+    def __init__(self, repo_id: str, *args, **kwargs) -> None:
 
-    def __init__(
-        self, *args, automodel: Type[DiffusionPipeline] = DiffusionPipeline, **kwargs
-    ) -> None:
-
-        self.automodel = (
-            automodel
-            if not isinstance(automodel, str)
-            else getattr(pipelines, automodel)
-        )
+        self.repo_id = repo_id
+        self.revision: str = kwargs.get('revision', 'main')
 
         self._model: Diffuser = None
 
-        super().__init__(*args, **kwargs)
+        super().__init__(repo_id, *args, **kwargs)
+        
+    def _load_meta(self, repo_id:str, **kwargs):
 
-    def _load_meta(self, repo_id: str, revision: Optional[str] = None, **kwargs):
-
+        kwargs = kwargs.copy()
+        kwargs['device_map'] = None
+        
         model = Diffuser(
-            self.automodel,
             repo_id,
-            revision=revision,
-            device_map=None,
             low_cpu_mem_usage=False,
             **kwargs,
         )
 
         return model
+        
 
-    def _load(self, repo_id: str, revision: Optional[str] = None, device_map=None, **kwargs) -> Diffuser:
+    def _load(self, repo_id: str, device_map=None, **kwargs) -> Diffuser:
 
-        model = Diffuser(self.automodel, repo_id, revision=revision, device_map=device_map, **kwargs)
+        # https://github.com/huggingface/diffusers/issues/11555
+        device_map = "balanced" if device_map == "auto" else device_map
+
+        model = Diffuser(repo_id, device_map=device_map, **kwargs)
 
         return model
 
@@ -83,9 +80,9 @@ class DiffusionModel(HuggingFaceModel):
     ) -> torch.Tensor:
         if batched_inputs is None:
 
-            return ((prepared_inputs,), {})
+            return ((prepared_inputs, ), {})
 
-        return (batched_inputs + prepared_inputs,)
+        return (batched_inputs + prepared_inputs, )
 
     def __call__(self, prepared_inputs: Any, *args, **kwargs):
 
@@ -98,18 +95,9 @@ class DiffusionModel(HuggingFaceModel):
     def __nnsight_generate__(
         self, prepared_inputs: Any, *args, seed: int = None, **kwargs
     ):
-
+        
+        steps = kwargs.get("num_inference_steps")
         if self._interleaver is not None:
-            steps = kwargs.get("num_inference_steps")
-            if steps is None:
-                try:
-                    steps = (
-                        inspect.signature(self.pipeline.generate)
-                        .parameters["num_inference_steps"]
-                        .default
-                    )
-                except:
-                    steps = 50
             self._interleaver.default_all = steps
 
         generator = torch.Generator(self.device)
@@ -117,25 +105,35 @@ class DiffusionModel(HuggingFaceModel):
         if seed is not None:
 
             if isinstance(prepared_inputs, list) and len(prepared_inputs) > 1:
-                generator = [
-                    torch.Generator(self.device).manual_seed(seed + offset)
-                    for offset in range(
-                        len(prepared_inputs) * kwargs.get("num_images_per_prompt", 1)
-                    )
-                ]
+                generator = [torch.Generator(self.device).manual_seed(seed + offset) for offset in range(len(prepared_inputs) * kwargs.get('num_images_per_prompt', 1))]
             else:
                 generator = generator.manual_seed(seed)
-
+            
         output = self._model.pipeline(
             prepared_inputs, *args, generator=generator, **kwargs
         )
-
+        
         if self._interleaver is not None:
             self._interleaver.default_all = None
 
         output = self._model(output)
 
         return output
+    
+
+    def _remoteable_model_key(self) -> str:
+        return json.dumps(
+            {"repo_id": self.repo_id}  # , "torch_dtype": str(self._model.dtype)}
+        )
+
+    @classmethod
+    def _remoteable_from_model_key(cls, model_key: str, **kwargs) -> Self:
+
+        kwargs = {**json.loads(model_key), **kwargs}
+
+        repo_id = kwargs.pop("repo_id")
+
+        return DiffusionModel(repo_id, **kwargs)
 
 
 if TYPE_CHECKING:
