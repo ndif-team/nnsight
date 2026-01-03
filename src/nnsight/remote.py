@@ -17,7 +17,7 @@ import inspect
 import json
 import sys
 import types
-from typing import Any, Callable, Dict, List, Set, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 # Modules that are available on NDIF servers and don't need to be serialized
 ALLOWED_MODULES = {
@@ -366,6 +366,63 @@ def find_external_references(tree: ast.AST, obj: Union[Type, Callable]) -> Set[s
     return external
 
 
+class ValueClassification:
+    """Result of classifying a value for remote execution."""
+    CAPTURE = "capture"      # Value should be captured (JSON-serializable)
+    SKIP = "skip"            # Value available on server, no action needed
+    ERROR = "error"          # Value cannot be serialized, validation error
+
+
+def classify_reference_value(name: str, value: Any) -> Tuple[str, Optional[Any], Optional[str]]:
+    """
+    Classify a referenced value for remote execution.
+
+    This is the shared logic for both module-level references and closure variables.
+
+    Args:
+        name: The variable name (for error messages)
+        value: The actual value to classify
+
+    Returns:
+        (classification, captured_value, error_detail) where:
+        - classification is one of ValueClassification.CAPTURE/SKIP/ERROR
+        - captured_value is the value to capture (only if CAPTURE)
+        - error_detail is additional context for errors (only if ERROR)
+    """
+    # Case 1: Module or module alias (np, F, torch, etc.)
+    if isinstance(value, types.ModuleType):
+        root = value.__name__.split('.')[0]
+        if root in ALLOWED_MODULES:
+            return ValueClassification.SKIP, None, None
+        else:
+            return ValueClassification.ERROR, None, f"module '{value.__name__}' not available on NDIF server"
+
+    # Case 2: @remote-decorated function/class (will be serialized separately)
+    if getattr(value, '_remote_validated', False):
+        return ValueClassification.SKIP, None, None
+
+    # Case 3: JSON-serializable constants
+    if is_json_serializable(value):
+        return ValueClassification.CAPTURE, value, None
+
+    # Case 4: Type references from builtins/typing
+    if isinstance(value, type):
+        if value.__module__ in ('builtins', 'typing'):
+            return ValueClassification.SKIP, None, None
+        # Non-builtin type that's not @remote
+        return ValueClassification.ERROR, None, f"type '{value.__name__}' from module '{value.__module__}' is not @nnsight.remote decorated"
+
+    # Case 5: Functions/callables from allowed modules
+    if callable(value) and hasattr(value, '__module__'):
+        root = value.__module__.split('.')[0] if value.__module__ else ''
+        if root in ALLOWED_MODULES:
+            return ValueClassification.SKIP, None, None
+
+    # Case 6: Non-serializable value
+    type_name = type(value).__name__
+    return ValueClassification.ERROR, None, f"type '{type_name}' is not JSON-serializable"
+
+
 def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tuple[Dict[str, Any], List[str]]:
     """
     Resolve external names to their values from the function/class globals.
@@ -374,11 +431,6 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
         (captured_refs, errors) where:
         - captured_refs: dict of JSON-serializable module-level constants
         - errors: list of error messages for non-serializable references
-
-    Handles three cases:
-    1. Module aliases (np, F, torch) -> skip if allowed module
-    2. JSON-serializable constants (TOP_K = 10) -> capture
-    3. Non-serializable objects -> error
     """
     captured = {}
     errors = []
@@ -403,59 +455,18 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
             continue
 
         value = obj_globals[name]
+        classification, captured_value, error_detail = classify_reference_value(name, value)
 
-        # Case 1: Module or module alias (np, F, torch, etc.)
-        if isinstance(value, types.ModuleType):
-            root = value.__name__.split('.')[0]
-            if root in ALLOWED_MODULES:
-                # Available on server, no need to capture
-                continue
-            else:
-                errors.append(
-                    f"Module '{name}' ({value.__name__}) not available on NDIF server. "
-                    f"Allowed: {', '.join(sorted(ALLOWED_MODULES))}"
-                )
-            continue
-
-        # Case 2: Check if it's a @remote-decorated function/class
-        if getattr(value, '_remote_validated', False):
-            # Will be serialized separately, skip here
-            continue
-
-        # Case 3: Try to JSON-serialize
-        if is_json_serializable(value):
-            captured[name] = value
-            continue
-
-        # Case 4: Type references (like int, str, list, etc.)
-        if isinstance(value, type):
-            if value.__module__ in ('builtins', 'typing'):
-                continue
-            # Check if it's a @remote class
-            if getattr(value, '_remote_validated', False):
-                continue
+        if classification == ValueClassification.CAPTURE:
+            captured[name] = captured_value
+        elif classification == ValueClassification.ERROR:
             errors.append(
-                f"Reference '{name}' (type '{value.__name__}' from module '{value.__module__}') "
-                f"is not @nnsight.remote decorated and cannot be serialized"
+                f"Reference '{name}' ({error_detail}).\n"
+                f"  Options:\n"
+                f"    - Make it a class/instance attribute instead\n"
+                f"    - Pass it as a function/method argument\n"
+                f"    - Use a JSON-serializable type (int, float, str, list, dict, bool, None)"
             )
-            continue
-
-        # Case 5: Functions from allowed modules
-        if callable(value):
-            if hasattr(value, '__module__'):
-                root = value.__module__.split('.')[0] if value.__module__ else ''
-                if root in ALLOWED_MODULES:
-                    continue
-
-        # Case 6: Non-serializable object
-        type_name = type(value).__name__
-        errors.append(
-            f"Reference '{name}' (type '{type_name}') is not JSON-serializable.\n"
-            f"  Options:\n"
-            f"    - Make it a class/instance attribute instead\n"
-            f"    - Pass it as a function/method argument\n"
-            f"    - Use a JSON-serializable type (int, float, str, list, dict, bool, None)"
-        )
 
     return captured, errors
 
@@ -555,47 +566,19 @@ def _extract_closure_from_function(func: Callable, context_name: str) -> Tuple[D
         if name == '__class__':
             continue
 
-        # Case 1: Module or module alias
-        if isinstance(value, types.ModuleType):
-            root = value.__name__.split('.')[0]
-            if root in ALLOWED_MODULES:
-                continue  # Available on server
-            else:
-                errors.append(
-                    f"In '{context_name}': closure variable '{name}' references module '{value.__name__}' "
-                    f"which is not available on NDIF server."
-                )
-            continue
+        # Use shared classification logic
+        classification, captured_value, error_detail = classify_reference_value(name, value)
 
-        # Case 2: @remote-decorated function/class
-        if getattr(value, '_remote_validated', False):
-            continue  # Will be serialized separately
-
-        # Case 3: JSON-serializable
-        if is_json_serializable(value):
-            captured[name] = value
-            continue
-
-        # Case 4: Type references from builtins
-        if isinstance(value, type) and value.__module__ in ('builtins', 'typing'):
-            continue
-
-        # Case 5: Functions from allowed modules
-        if callable(value):
-            if hasattr(value, '__module__'):
-                root = value.__module__.split('.')[0] if value.__module__ else ''
-                if root in ALLOWED_MODULES:
-                    continue
-
-        # Case 6: Non-serializable closure variable
-        type_name = type(value).__name__
-        errors.append(
-            f"In '{context_name}': closure variable '{name}' (type '{type_name}') is not JSON-serializable.\n"
-            f"  Options:\n"
-            f"    - Pass it as a function argument instead\n"
-            f"    - Use a JSON-serializable type (int, float, str, list, dict, bool, None)\n"
-            f"    - Mark it with @nnsight.remote if it's a custom function/class"
-        )
+        if classification == ValueClassification.CAPTURE:
+            captured[name] = captured_value
+        elif classification == ValueClassification.ERROR:
+            errors.append(
+                f"In '{context_name}': closure variable '{name}' ({error_detail}).\n"
+                f"  Options:\n"
+                f"    - Pass it as a function argument instead\n"
+                f"    - Use a JSON-serializable type (int, float, str, list, dict, bool, None)\n"
+                f"    - Mark it with @nnsight.remote if it's a custom function/class"
+            )
 
     return captured, errors
 

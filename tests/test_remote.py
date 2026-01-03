@@ -194,14 +194,21 @@ def test_remote_allows_remote_base():
     assert DerivedClass._remote_validated is True
 
 
-def test_remote_rejects_slots():
-    """Test that classes with __slots__ are rejected."""
-    with pytest.raises(RemoteValidationError) as exc_info:
-        @remote
-        class SlottedClass:
-            __slots__ = ['x', 'y']
+def test_remote_accepts_slots():
+    """Test that classes with __slots__ are accepted (supported via special serialization)."""
+    @remote
+    class SlottedClass:
+        __slots__ = ['x', 'y']
 
-    assert "__slots__" in str(exc_info.value)
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    # Should be successfully decorated
+    assert hasattr(SlottedClass, '_remote_validated')
+    assert SlottedClass._remote_validated is True
+    assert hasattr(SlottedClass, '_remote_source')
+    assert '__slots__' in SlottedClass._remote_source
 
 
 # =============================================================================
