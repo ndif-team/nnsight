@@ -486,8 +486,7 @@ def classify_reference_value(name: str, value: Any) -> Tuple[str, Optional[Any],
     """
     # Case 1: Module or module alias (np, F, torch, etc.)
     if isinstance(value, types.ModuleType):
-        root = value.__name__.split('.')[0]
-        if root in ALLOWED_MODULES:
+        if is_server_available_module(value.__name__):
             return ValueClassification.SKIP, None, None
         else:
             return ValueClassification.ERROR, None, f"module '{value.__name__}' not available on NDIF server"
@@ -514,8 +513,7 @@ def classify_reference_value(name: str, value: Any) -> Tuple[str, Optional[Any],
 
     # Case 5: Functions/callables from allowed modules
     if callable(value) and hasattr(value, '__module__'):
-        root = value.__module__.split('.')[0] if value.__module__ else ''
-        if root in ALLOWED_MODULES:
+        if is_server_available_module(value.__module__ or ''):
             return ValueClassification.SKIP, None, None
 
     # Case 6: Non-serializable value
@@ -732,14 +730,12 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
     class Validator(ast.NodeVisitor):
         def visit_Import(self, node):
             for alias in node.names:
-                module = alias.name.split('.')[0]
-                if module not in ALLOWED_MODULES:
+                if not is_server_available_module(alias.name):
                     errors.append(f"Line {node.lineno}: imports '{alias.name}' (not available on NDIF server)")
             self.generic_visit(node)
 
         def visit_ImportFrom(self, node):
-            module = (node.module or '').split('.')[0]
-            if module not in ALLOWED_MODULES:
+            if not is_server_available_module(node.module or ''):
                 errors.append(f"Line {node.lineno}: imports from '{node.module}' (not available on NDIF server)")
             self.generic_visit(node)
 
@@ -997,6 +993,19 @@ def validate_lambda_for_remote(func: Callable) -> Tuple[str, List[str]]:
     return source, errors
 
 
+def is_remote_object(obj: Any) -> bool:
+    """Check if obj is a @nnsight.remote function/class or instance thereof."""
+    # Check if it's a decorated function or class
+    if callable(obj) and getattr(obj, '_remote_validated', False):
+        return True
+
+    # Check if it's an instance of a decorated class
+    if getattr(type(obj), '_remote_validated', False):
+        return True
+
+    return False
+
+
 # Re-export for convenient access
 __all__ = [
     'remote', 'RemoteValidationError', 'is_json_serializable',
@@ -1004,6 +1013,8 @@ __all__ = [
     'STDLIB_MODULES', 'ML_LIBRARY_MODULES', 'SERVER_AVAILABLE_MODULES',
     'ALLOWED_MODULES',  # Backwards compatibility alias
     'is_server_available_module',
+    # Remote object utilities
+    'is_remote_object',
     # Lambda utilities
     'extract_lambda_source', 'LambdaExtractionError', 'is_lambda', 'validate_lambda_for_remote',
 ]

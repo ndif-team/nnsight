@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 from ..remote import (
     is_json_serializable, ALLOWED_MODULES, ALLOWED_BASE_CLASSES,
-    SERVER_AVAILABLE_MODULES, is_server_available_module,
+    SERVER_AVAILABLE_MODULES, is_server_available_module, is_remote_object,
     is_lambda, extract_lambda_source, LambdaExtractionError, validate_lambda_for_remote,
     find_external_references, resolve_module_references, validate_ast,
 )
@@ -61,13 +61,11 @@ def can_auto_discover(cls: type) -> bool:
     # Check module - skip core allowed modules
     module = getattr(cls, '__module__', '')
     if module:
-        root = module.split('.')[0]
-        # Skip torch, numpy, etc. - these are available on server
-        if root in ALLOWED_MODULES:
-            return False
-        # Skip nnsight internals (except modeling subclasses)
-        if root == 'nnsight' and 'modeling' not in module:
-            return False
+        # Skip server-available modules (torch, numpy, etc.)
+        # But allow nnsight.modeling subclasses (they need serialization)
+        if is_server_available_module(module):
+            if not ('nnsight' in module and 'modeling' in module):
+                return False
 
     # Check if source is available
     try:
@@ -649,8 +647,7 @@ def extract_all(locals_dict: Dict[str, Any], seen: set = None, traced_model: Any
 
         # Skip module references (they'll be available on server)
         if isinstance(value, types.ModuleType):
-            root = value.__name__.split('.')[0]
-            if root in ALLOWED_MODULES:
+            if is_server_available_module(value.__name__):
                 continue
             raise SourceSerializationError(
                 f"Variable '{name}' references module '{value.__name__}' "
@@ -659,8 +656,7 @@ def extract_all(locals_dict: Dict[str, Any], seen: set = None, traced_model: Any
 
         # Skip functions from allowed modules
         if callable(value) and hasattr(value, '__module__'):
-            root = value.__module__.split('.')[0] if value.__module__ else ''
-            if root in ALLOWED_MODULES:
+            if is_server_available_module(value.__module__ or ''):
                 continue
 
         # Skip type references from builtins
@@ -1056,19 +1052,6 @@ def is_the_traced_model(value: Any, traced_model: Any) -> bool:
     return value is traced_model
 
 
-def is_remote_object(obj: Any) -> bool:
-    """Check if obj is a @nnsight.remote function/class or instance thereof."""
-    # Check if it's a decorated function or class
-    if callable(obj) and getattr(obj, '_remote_validated', False):
-        return True
-
-    # Check if it's an instance of a decorated class
-    if getattr(type(obj), '_remote_validated', False):
-        return True
-
-    return False
-
-
 def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any], traced_model: Any = None) -> None:
     """
     Extract a @nnsight.remote object (function, class, or instance) for serialization.
@@ -1181,8 +1164,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
 
             # Skip modules from allowed list (available on server)
             if isinstance(value, types.ModuleType):
-                root = value.__name__.split('.')[0]
-                if root in ALLOWED_MODULES:
+                if is_server_available_module(value.__name__):
                     continue
                 raise SourceSerializationError(
                     f"Lambda '{var_name}' captures module '{value.__name__}' "
@@ -1207,8 +1189,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
 
             # Functions from allowed modules (skip - available on server)
             if callable(value) and hasattr(value, '__module__'):
-                root = value.__module__.split('.')[0] if value.__module__ else ''
-                if root in ALLOWED_MODULES:
+                if is_server_available_module(value.__module__ or ''):
                     continue
 
             # Non-serializable closure variable - error!
@@ -1448,8 +1429,7 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
     # Type references (like torch.float32)
     if isinstance(value, type):
         module = getattr(value, '__module__', '')
-        root = module.split('.')[0] if module else ''
-        if root in ALLOWED_MODULES or module == 'builtins':
+        if is_server_available_module(module) or module == 'builtins':
             return {"__type_ref__": f"{module}.{value.__name__}"}
 
     raise SourceSerializationError(
@@ -1538,12 +1518,9 @@ def get_callable_reference(value: Any) -> Optional[str]:
         return None
 
     module = value.__module__
-    if not module:
-        return None
 
-    # Check if it's from an allowed module
-    root = module.split('.')[0]
-    if root not in ALLOWED_MODULES:
+    # Check if it's from a server-available module
+    if not is_server_available_module(module):
         return None
 
     # Handle special cases for qualified names (like methods)
