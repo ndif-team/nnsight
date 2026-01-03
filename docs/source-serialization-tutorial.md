@@ -80,13 +80,14 @@ With cloudpickle, this only works if nnterp is installed on NDIF servers. Every 
 
 The breakthrough comes from understanding what helper libraries actually do inside traces: **they're query generators, not runtime computation**.
 
-When `st.get_hidden(10)` runs inside a trace, it's not actually fetching hidden states—it's building a symbolic graph. The `StandardizedTransformer` class is a DSL for constructing these graphs.
+When `st.get_hidden(10)` runs inside a trace, it's not actually fetching hidden states—it's building a symbolic graph. All the Python code used by the trace, along with its dependencies, acts as a DSL for constructing these graphs.
 
 This means we can:
-1. Extract the **source code** of helper classes
-2. Send that source to the server
-3. Reconstruct the classes there
-4. Execute the trace using the reconstructed classes
+1. **Identify** all the needed helper classes and functions
+2. **Extract** the source code of those dependencies
+3. **Send** that source to the server
+4. **Reconstruct** the classes there
+5. **Execute** the trace using the reconstructed classes
 
 Since Python source code is version-independent (unlike bytecode), this eliminates version lock-in. And since we're sending source, third-party libraries work without server installation.
 
