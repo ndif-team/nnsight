@@ -780,7 +780,10 @@ def test_error_message_includes_line_number():
             return x + y
 
     error_msg = str(exc_info.value)
-    assert "Line" in error_msg or "imports 'pandas'" in error_msg
+    # Error should mention the pandas import
+    assert "pandas" in error_msg, f"Error should mention pandas: {error_msg}"
+    # Error should include line number information
+    assert "Line" in error_msg, f"Error should include line number: {error_msg}"
 
 
 # Module-level non-serializable object for error message test
@@ -798,8 +801,12 @@ def test_error_message_suggests_alternatives():
             return _NOT_SERIALIZABLE_OBJ
 
     error_msg = str(exc_info.value)
-    # Should mention that it's not serializable
-    assert "not JSON-serializable" in error_msg or "_NotSerializableClass" in error_msg or "Options" in error_msg
+    # Should mention the class name
+    assert "_NotSerializableClass" in error_msg, f"Error should mention the class: {error_msg}"
+    # Should indicate it's not serializable
+    assert "not JSON-serializable" in error_msg, f"Error should say not JSON-serializable: {error_msg}"
+    # Should suggest alternatives
+    assert "Options" in error_msg, f"Error should suggest options: {error_msg}"
 
 
 # =============================================================================
@@ -912,7 +919,13 @@ def test_remote_captures_closure_primitives():
 
     func = make_func()
     assert func._remote_validated is True
-    assert 'captured_value' in func._remote_module_refs or 'captured_value' in getattr(func, '_remote_closure_vars', {})
+
+    # Closure variables should be in _remote_closure_vars
+    closure_vars = getattr(func, '_remote_closure_vars', {})
+    assert 'captured_value' in closure_vars, f"captured_value should be in closure_vars: {closure_vars}"
+    assert 'captured_name' in closure_vars, f"captured_name should be in closure_vars: {closure_vars}"
+    assert closure_vars['captured_value'] == 42
+    assert closure_vars['captured_name'] == "test"
 
 
 def test_remote_captures_closure_list():
@@ -928,6 +941,11 @@ def test_remote_captures_closure_list():
 
     func = make_func()
     assert func._remote_validated is True
+
+    # List should be captured in closure_vars
+    closure_vars = getattr(func, '_remote_closure_vars', {})
+    assert 'items' in closure_vars, f"items should be in closure_vars: {closure_vars}"
+    assert closure_vars['items'] == [1, 2, 3, 4, 5]
 
 
 def test_remote_rejects_non_serializable_closure():
@@ -945,7 +963,11 @@ def test_remote_rejects_non_serializable_closure():
             return inner
         make_func()
 
-    assert "Closure variable" in str(exc_info.value) or "not JSON-serializable" in str(exc_info.value)
+    error_msg = str(exc_info.value)
+    # Error should mention it's a closure variable
+    assert "closure variable" in error_msg.lower(), f"Error should mention closure variable: {error_msg}"
+    # Error should mention it's not serializable
+    assert "not JSON-serializable" in error_msg, f"Error should say not JSON-serializable: {error_msg}"
 
 
 # =============================================================================

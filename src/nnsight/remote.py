@@ -691,21 +691,33 @@ def _extract_closure_from_function(func: Callable, context_name: str) -> Tuple[D
     return captured, errors
 
 
-def is_json_serializable(value: Any) -> bool:
+def is_json_serializable(value: Any, _seen: set = None) -> bool:
     """
     Check if a value can be JSON-serialized.
 
     Allows: None, bool, int, float, str, list/tuple (of serializable), dict (str keys, serializable values)
+
+    Handles circular references by tracking seen object ids.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
         return True
 
+    # Track seen objects to handle circular references
+    if _seen is None:
+        _seen = set()
+
+    obj_id = id(value)
+    if obj_id in _seen:
+        # Circular reference - not JSON serializable (would cause infinite recursion)
+        return False
+    _seen.add(obj_id)
+
     if isinstance(value, (list, tuple)):
-        return all(is_json_serializable(item) for item in value)
+        return all(is_json_serializable(item, _seen) for item in value)
 
     if isinstance(value, dict):
         return all(
-            isinstance(k, str) and is_json_serializable(v)
+            isinstance(k, str) and is_json_serializable(v, _seen)
             for k, v in value.items()
         )
 
@@ -713,7 +725,7 @@ def is_json_serializable(value: Any) -> bool:
     try:
         json.dumps(value)
         return True
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return False
 
 
