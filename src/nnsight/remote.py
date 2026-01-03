@@ -19,12 +19,60 @@ import sys
 import types
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
-# Modules that are available on NDIF servers and don't need to be serialized
-ALLOWED_MODULES = {
-    'torch', 'numpy', 'math', 'builtins',
-    'collections', 'itertools', 'functools', 'operator',
-    'os', 'pathlib', 'random',  # Safe when restricted (no I/O operations)
+# =============================================================================
+# Server-available modules (single source of truth)
+# =============================================================================
+# These modules are available on NDIF servers and don't need to be serialized.
+# Code referencing these modules can be reconstructed server-side.
+
+# Python standard library modules (safe subset)
+STDLIB_MODULES = {
+    # Core builtins and typing
+    'builtins', 'abc', 'typing', 'types',
+    # Collections and functional
+    'collections', 'functools', 'itertools', 'operator',
+    # Data structures and serialization
+    'enum', 'dataclasses', 'copy', 'pickle', 'json',
+    # Math and numbers
+    'math', 'numbers', 'random',
+    # String processing
+    're', 'string', 'textwrap',
+    # Utilities
+    'warnings', 'contextlib', 'weakref', 'inspect',
+    # I/O (restricted on server - no actual file operations)
+    'io', 'os', 'sys', 'pathlib',
 }
+
+# Machine learning libraries available on server
+ML_LIBRARY_MODULES = {
+    # Core ML
+    'torch', 'numpy', 'scipy', 'sklearn',
+    # Hugging Face ecosystem
+    'transformers', 'huggingface_hub', 'tokenizers', 'safetensors', 'accelerate',
+    # Other common libraries
+    'einops',
+}
+
+# Combined set of all server-available modules
+SERVER_AVAILABLE_MODULES = STDLIB_MODULES | ML_LIBRARY_MODULES
+
+# Backwards compatibility alias
+ALLOWED_MODULES = SERVER_AVAILABLE_MODULES
+
+
+def is_server_available_module(module_name: str) -> bool:
+    """Check if a module is available on NDIF servers.
+
+    Args:
+        module_name: Full module name (e.g., 'torch.nn.functional')
+
+    Returns:
+        True if the module's root package is available on server
+    """
+    if not module_name:
+        return False
+    root = module_name.split('.')[0]
+    return root in SERVER_AVAILABLE_MODULES or 'nnsight' in module_name
 
 # Function calls that are never allowed in @remote code
 DISALLOWED_CALLS = {
@@ -901,6 +949,11 @@ def validate_lambda_for_remote(func: Callable) -> Tuple[str, List[str]]:
 
 # Re-export for convenient access
 __all__ = [
-    'remote', 'RemoteValidationError', 'is_json_serializable', 'ALLOWED_MODULES',
+    'remote', 'RemoteValidationError', 'is_json_serializable',
+    # Module constants (single source of truth for server-available modules)
+    'STDLIB_MODULES', 'ML_LIBRARY_MODULES', 'SERVER_AVAILABLE_MODULES',
+    'ALLOWED_MODULES',  # Backwards compatibility alias
+    'is_server_available_module',
+    # Lambda utilities
     'extract_lambda_source', 'LambdaExtractionError', 'is_lambda', 'validate_lambda_for_remote',
 ]

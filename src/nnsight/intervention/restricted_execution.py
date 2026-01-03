@@ -256,12 +256,11 @@ def create_guarded_builtins(user_id: str, job_id: str, audit: bool = True) -> Ca
 # Restricted Namespace Builder
 # =============================================================================
 
-# Default allowed modules for NDIF
-DEFAULT_ALLOWED_MODULES: Set[str] = {
-    'torch', 'numpy', 'math', 'random', 'collections', 'functools',
-    'itertools', 'operator', 'typing', 'dataclasses', 'enum',
-    'copy', 'json', 're', 'string', 'textwrap',
-}
+# Import server-available modules from the single source of truth
+from ..remote import SERVER_AVAILABLE_MODULES
+
+# Default allowed modules for NDIF (uses consolidated constant)
+DEFAULT_ALLOWED_MODULES: Set[str] = SERVER_AVAILABLE_MODULES
 
 
 def create_restricted_builtins(user_id: str, job_id: str, audit: bool = True) -> Dict[str, Any]:

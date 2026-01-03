@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 from ..remote import (
     is_json_serializable, ALLOWED_MODULES, ALLOWED_BASE_CLASSES,
+    SERVER_AVAILABLE_MODULES, is_server_available_module,
     is_lambda, extract_lambda_source, LambdaExtractionError, validate_lambda_for_remote,
     find_external_references, resolve_module_references, validate_ast,
 )
@@ -736,31 +737,7 @@ def is_server_available_class(cls: type) -> bool:
     module = getattr(cls, '__module__', '')
     if not module:
         return True  # Unknown module, assume available
-
-    # Get root module
-    root = module.split('.')[0]
-
-    # nnsight classes are on the server
-    if 'nnsight' in module:
-        return True
-
-    # Standard library modules
-    if root in {'builtins', 'abc', 'enum', 'typing', 'collections', 'functools',
-                'itertools', 'operator', 'copy', 'pickle', 'json', 'math',
-                'numbers', 'dataclasses', 're', 'string', 'types', 'warnings',
-                'contextlib', 'weakref', 'inspect', 'io', 'os', 'sys', 'pathlib'}:
-        return True
-
-    # Major ML libraries that are available on the server
-    if root in {'torch', 'numpy', 'transformers', 'einops', 'scipy', 'sklearn',
-                'huggingface_hub', 'tokenizers', 'safetensors', 'accelerate'}:
-        return True
-
-    # nnsight's allowed modules
-    if root in ALLOWED_MODULES:
-        return True
-
-    return False
+    return is_server_available_module(module)
 
 
 def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
@@ -878,33 +855,15 @@ def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
                 # Record server-available functions/decorators (like dataclass, abstractmethod)
                 if callable(value) and hasattr(value, '__module__'):
                     func_module = getattr(value, '__module__', '')
-                    if func_module:
-                        root = func_module.split('.')[0]
-                        if root in ALLOWED_MODULES or root in {
-                            'torch', 'numpy', 'transformers', 'einops', 'scipy', 'sklearn',
-                            'huggingface_hub', 'tokenizers', 'safetensors', 'accelerate',
-                            'builtins', 'abc', 'enum', 'typing', 'collections', 'functools',
-                            'itertools', 'operator', 'copy', 'pickle', 'json', 'math',
-                            'numbers', 'dataclasses', 're', 'string', 'types', 'warnings',
-                            'contextlib', 'weakref', 'inspect', 'io', 'os', 'sys', 'pathlib'
-                        }:
-                            func_name = getattr(value, '__name__', name)
-                            server_imports[name] = {"type": "callable", "module": func_module, "name": func_name}
-                            continue
+                    if func_module and is_server_available_module(func_module):
+                        func_name = getattr(value, '__name__', name)
+                        server_imports[name] = {"type": "callable", "module": func_module, "name": func_name}
+                        continue
 
                 # Record server-available modules
                 if isinstance(value, types.ModuleType):
                     mod_name = value.__name__
-                    root = mod_name.split('.')[0]
-                    # Check against server-available modules
-                    if root in ALLOWED_MODULES or root in {
-                        'torch', 'numpy', 'transformers', 'einops', 'scipy', 'sklearn',
-                        'huggingface_hub', 'tokenizers', 'safetensors', 'accelerate',
-                        'builtins', 'abc', 'enum', 'typing', 'collections', 'functools',
-                        'itertools', 'operator', 'copy', 'pickle', 'json', 'math',
-                        'numbers', 'dataclasses', 're', 'string', 'types', 'warnings',
-                        'contextlib', 'weakref', 'inspect', 'io', 'os', 'sys', 'pathlib'
-                    }:
+                    if is_server_available_module(mod_name):
                         server_imports[name] = {"type": "module", "module": mod_name}
                         continue
 

@@ -1026,5 +1026,87 @@ def test_module_variable_overrides_builtin_with_remote_function():
     assert obj.get_length() == 6  # 3 items * 2 = 6
 
 
+# =============================================================================
+# Test 28: NameFinder edge cases (potential bugs in simpler AST visitor)
+# =============================================================================
+
+def test_namefinder_comprehension_shadowing():
+    """Test that comprehension variables don't incorrectly shadow external names.
+
+    This test exposes a potential bug in simpler AST visitors that don't track
+    scopes properly. If the visitor doesn't distinguish between comprehension
+    scope and class scope, it might think 'x' is defined locally when it's
+    actually an external reference that happens to share a name with the
+    comprehension variable.
+
+    The correct behavior: 'x' used OUTSIDE the comprehension should be recognized
+    as external, even if 'x' is also used as a loop variable inside a comprehension.
+    """
+    # Module-level x that should be captured
+    x = 42
+
+    @remote
+    class UsesExternalAndComprehension:
+        def method(self):
+            # 'x' here refers to module-level x (external)
+            external_value = x
+
+            # 'x' here is a comprehension-local variable (different scope)
+            squares = [x * x for x in range(5)]
+
+            return external_value, squares
+
+    # The external 'x' should be captured
+    closure_vars = getattr(UsesExternalAndComprehension, '_remote_closure_vars', {})
+    assert 'x' in closure_vars, f"External 'x' should be captured, got: {closure_vars}"
+    assert closure_vars['x'] == 42
+
+
+def test_namefinder_nested_function_shadowing():
+    """Test that inner function parameters don't shadow outer references.
+
+    Similar to comprehension shadowing - an inner function's parameter shouldn't
+    cause the outer reference to be missed.
+    """
+    multiplier = 3
+
+    @remote
+    class UsesExternalWithInnerFunction:
+        def method(self):
+            # Uses external 'multiplier'
+            base = multiplier * 10
+
+            # Inner function has its own 'multiplier' parameter
+            def inner(multiplier):
+                return multiplier * 2
+
+            return base, inner(5)
+
+    # The external 'multiplier' should be captured
+    closure_vars = getattr(UsesExternalWithInnerFunction, '_remote_closure_vars', {})
+    assert 'multiplier' in closure_vars, f"External 'multiplier' should be captured, got: {closure_vars}"
+    assert closure_vars['multiplier'] == 3
+
+
+def test_namefinder_import_shadowing():
+    """Test that import statements are recognized as defining names locally.
+
+    If a name is imported inside the class, it shouldn't be treated as external.
+    """
+    @remote
+    class HasLocalImport:
+        def method(self):
+            import json  # Local import
+            return json.dumps([1, 2, 3])
+
+    # 'json' is imported locally, shouldn't need to be captured
+    closure_vars = getattr(HasLocalImport, '_remote_closure_vars', {})
+    module_refs = getattr(HasLocalImport, '_remote_module_refs', {})
+
+    # json shouldn't be in closure_vars (it's imported locally)
+    # Note: It might be in module_refs if the system decides to track server imports
+    assert 'json' not in closure_vars, f"'json' should not be in closure_vars: {closure_vars}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
