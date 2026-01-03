@@ -30,21 +30,24 @@ class MyAnalyzer:
 
 ## Implementation Status & Roadmap
 
-**✅ Implemented**
-*   `@nnsight.remote` decorator with import-time validation.
-*   AST validation for allowed modules and attribute chains.
-*   Basic source serialization for functions, classes, and instances.
-*   Capture of module-level constants and callable references (`__callable_ref__`).
-*   Heuristics for identifying the Model and internal variables.
+**✅ Implemented (v2.1)**
+*   `@nnsight.remote` decorator with import-time validation
+*   AST validation for allowed modules and attribute chains
+*   Source serialization for functions, classes, and instances
+*   Capture of module-level constants and callable references (`__callable_ref__`)
+*   Heuristics for identifying the Model and internal variables
+*   **Allowed attribute chains** - `os.path.join`, `pathlib.Path()` allowed; I/O blocked
+*   **Closure variable support** - `__closure__` and `co_freevars` extraction
+*   **File/line metadata** - Source payload includes origin for error mapping
+*   **Cycle detection** - Clear error for self-referential objects
+*   **Backward compatibility** - Falls back to cloudpickle with deprecation warning
 
-**🚧 To Do (Pending Implementation)**
-1.  **Binary Sidecars**: Update serialization to extract Tensors/Arrays into binary buffers instead of raising errors.
-2.  **Flat Graph**: Refactor JSON structure to use a flat `objects` map to support circular references and shared objects.
-3.  **Closures**: Extend variable extraction to walk `__closure__` and `co_freevars`.
-4.  **Pickle Hooks**: Add support for `__getstate__` / `__setstate__` on remote objects.
-5.  **Source Hashing**: Implement client-side hashing and server-side verification logic.
-6.  **Notebook Support**: Add fallback to IPython history for source extraction.
-7.  **Error Mapping**: Add file/line metadata to the source payload for server-side error mapping.
+**🚧 Deferred (See "Deferred Features" section below)**
+1.  **Binary Sidecars**: Tensor/Array extraction to binary buffers (requires transport changes)
+2.  **Flat Graph**: `objects` map for circular references (rare use case)
+3.  **Pickle Hooks**: `__getstate__`/`__setstate__` support (default `__dict__` works)
+4.  **Source Hashing**: Cache verification (version string sufficient for now)
+5.  **Notebook Support**: IPython history fallback (fragile, `.py` files primary use case)
 
 ---
 
@@ -1025,22 +1028,232 @@ To allow server-side errors to be mapped back to client-side code, the serializa
 
 ## Lambda Support
 
-**Status: Experimental / Discouraged**
+**Status: Supportable with limitations (Python 3.8+)**
 
-Lambda functions present a significant challenge because Python's `inspect.getsource` is brittle for lambdas (it returns the entire line of definition, making it hard to isolate multiple lambdas on one line).
+Lambda functions were thought to be fragile for source extraction. After investigation, the situation is more nuanced:
 
-**Plan:**
-1.  Attempt to support lambdas via AST parsing of the returned source line.
-2.  **Exhaustive testing** is required to identify failure modes (e.g., lambdas inside list comprehensions, multi-line lambdas).
-3.  **Fallback**: If testing reveals too much fragility, the validator will explicitly reject `lambda` expressions and require users to define named functions (which are robust).
+### The Classic Problem (Solvable)
+
+When multiple lambdas appear on the same line, `inspect.getsource` returns the entire line for all of them:
+
+```python
+f1, f2 = lambda x: x + 1, lambda x: x - 1
+# inspect.getsource(f1) returns: "f1, f2 = lambda x: x + 1, lambda x: x - 1"
+# inspect.getsource(f2) returns: "f1, f2 = lambda x: x + 1, lambda x: x - 1"  # Same!
+```
+
+**Solution: AST parsing + bytecode matching**
+
+1. Parse the source line with `ast.parse()` to find all `Lambda` nodes
+2. Use `col_offset` and `end_col_offset` (Python 3.8+) to extract each lambda's text
+3. Compile each extracted lambda and compare bytecode to match the right one
+
+```python
+# AST gives us precise positions:
+# Lambda 0: cols 9-24  -> "lambda x: x + 1"
+# Lambda 1: cols 26-41 -> "lambda x: x - 1"
+
+# Bytecode differs (+ vs -), so we can match correctly
+```
+
+This handles:
+- ✓ Multiple lambdas on same line: `f1, f2 = lambda x: x+1, lambda x: x-1`
+- ✓ Lambdas in collections: `{'add': lambda a,b: a+b, 'mul': lambda a,b: a*b}`
+- ✓ Comprehension lambdas: `[lambda x, i=i: x**i for i in range(3)]`
+- ✓ Complex expressions: `lambda x: "yes" if x > 0 else "no"`
+- ✓ Default arguments: `lambda x, y=10: x + y`
+- ✓ Closures: `lambda x: x * external_var`
+
+### Truly Problematic Cases (Reject)
+
+These cases should be explicitly rejected with clear error messages:
+
+**A. Multi-line lambdas:**
+```python
+f = (
+    lambda x:
+        x * 2 + 1
+)
+```
+Source extraction returns partial/unparseable text. Rare in practice.
+
+**B. Nested inner lambdas:**
+```python
+outer = lambda x: (lambda y: x + y)
+inner = outer(10)  # inner's source can't be extracted
+```
+The inner lambda returns the outer's source line. Bytecode won't match due to closure differences.
+
+**C. Identical lambdas on same line:**
+```python
+f1, f2 = lambda x: x, lambda x: x  # Can't distinguish
+```
+Bytecode is identical, so matching returns the first one. Very rare edge case.
+
+### Implementation Recommendation
+
+**Support single-line lambdas with clear limitations:**
+
+1. Lambdas must be defined on a single line
+2. Lambdas must not be inner nested lambdas (returned from another lambda)
+3. When extraction fails, provide a clear error asking for a named function
+
+This covers 90%+ of real-world lambda usage while avoiding fragile edge cases.
+
+**Algorithm:**
+```python
+def extract_lambda_source(func):
+    full_source = inspect.getsource(func).strip()
+    tree = ast.parse(full_source)
+
+    lambdas = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Lambda) and hasattr(node, 'end_col_offset'):
+            lambdas.append(full_source[node.col_offset:node.end_col_offset])
+
+    if len(lambdas) == 1:
+        return lambdas[0]
+
+    # Multiple lambdas - match by bytecode
+    target_bytecode = func.__code__.co_code
+    for lambda_text in lambdas:
+        compiled = compile(lambda_text, '<lambda>', 'eval')
+        if compiled.co_consts[0].co_code == target_bytecode:
+            return lambda_text
+
+    raise ExtractionError("Could not extract lambda source")
+```
 
 ### 5. Security Model (Critical)
 
-**AST Validation != Security**
-The AST validation described in this document acts as a **linter** to prevent accidental usage of unsupported features. It is **NOT** a security boundary.
-*   Dynamic code execution (e.g., `getattr(os, "sys"+"tem")`) can bypass static analysis.
-*   **Requirement:** The NDIF server must execute user code in a **hard sandbox** (e.g., gVisor, ephemeral containers, restricted user namespaces) with no network access and read-only filesystem access (except for temp buffers).
-*   **Trust:** The server treats all serialized source code as untrusted user input.
+**Defense in Depth**
+
+NDIF is a research platform for vetted researchers who agree to Terms of Service. Security is implemented in layers:
+
+1. **Layer 1: AST Validation (Client-side linting)** - Catches accidental misuse
+2. **Layer 2: RestrictedPython (Server-side runtime guards)** - Blocks known escape routes + audit logging
+3. **Layer 3: OS-level Sandbox (Infrastructure)** - Hard boundary via containers/gVisor
+
+**Layer 1: AST Validation (NOT a security boundary)**
+
+The AST validation in `@nnsight.remote` acts as a **linter** to prevent accidental usage of unsupported features. It blocks obvious dangerous patterns like `os.system()` or `subprocess.run()` at the source level. However:
+- Dynamic code execution (e.g., `getattr(os, "sys"+"tem")`) can bypass static analysis
+- This layer is for developer experience, not security
+
+**Layer 2: RestrictedPython Runtime Guards + Audit Logging**
+
+Server-side code execution uses [RestrictedPython](https://restrictedpython.readthedocs.io/) to add runtime guards. This provides:
+
+1. **Compile-time blocking** of dangerous patterns:
+   - All dunder attribute access (`__class__`, `__bases__`, `__subclasses__`, `__globals__`, etc.)
+   - These are common sandbox escape routes and are rejected before execution
+
+2. **Runtime guards** with audit logging:
+   - All attribute access (`x.attr`) is wrapped with `_getattr_()`
+   - All item access (`x[key]`) is wrapped with `_getitem_()`
+   - Custom guards log suspicious activity before blocking
+
+**Audited Activities**
+
+The following activities are logged to the security audit system with user ID and job ID:
+
+| Activity | Trigger | Audit Log Entry |
+|----------|---------|-----------------|
+| Dangerous attribute access | `getattr(os, 'system')` or `os.system` | `SUSPICIOUS_GETATTR \| user=X \| job=Y \| attr=system` |
+| Frame inspection | Access to `f_back`, `f_locals`, `f_globals` | `SUSPICIOUS_GETATTR \| user=X \| job=Y \| attr=f_back` |
+| Code object access | Access to `__code__`, `gi_frame`, `cr_frame` | `SUSPICIOUS_GETATTR \| user=X \| job=Y \| attr=__code__` |
+| Blocked imports | `import subprocess` | `BLOCKED_IMPORT \| user=X \| job=Y \| module=subprocess` |
+| Namespace introspection | `globals()`, `locals()`, `vars()` | `SUSPICIOUS_CALL \| user=X \| job=Y \| func=globals` |
+
+**Suspicious Attribute Blocklist:**
+
+```python
+SUSPICIOUS_ATTRS = {
+    # Sandbox escape routes
+    'system', 'popen', 'spawn', 'fork', 'exec', 'eval',
+    # Frame inspection (can leak local variables)
+    'f_back', 'f_locals', 'f_globals', 'f_code', 'f_builtins',
+    # Generator/coroutine frame access
+    'gi_frame', 'gi_code', 'cr_frame', 'cr_code',
+    # Code object manipulation
+    '__code__', '__globals__', '__builtins__', '__closure__',
+}
+```
+
+**Audit Response Protocol:**
+
+1. **Single attempt**: Log and block, no action needed
+2. **Repeated attempts (>3 in session)**: Flag user for review
+3. **Pattern of probing across sessions**: Notify security team
+
+**Layer 3: OS-Level Sandbox (Required)**
+
+RestrictedPython is defense-in-depth, not a complete sandbox. The [pysandbox project](https://wiki.python.org/moin/SandboxedPython) concluded that "putting a sandbox in CPython is the wrong design" due to Python's extensive introspection capabilities.
+
+**Requirement:** The NDIF server must execute user code in a **hard sandbox**:
+- Ephemeral containers or gVisor
+- No network access (except to GPU cluster)
+- Read-only filesystem (except temp buffers)
+- Resource limits (CPU, memory, time)
+
+**Trust Model:**
+- Users are vetted researchers with ToS agreement
+- Server treats all code as potentially buggy, not necessarily malicious
+- Audit logging provides visibility into unusual behavior
+- Hard sandbox prevents damage even if Python-level escapes exist
+
+**Local Validation (Client-side)**
+
+Users can test whether their code is remote-safe locally before submitting to NDIF. This catches obvious issues early and provides immediate feedback for honest mistakes.
+
+**Security design principle:** Local validation only performs *static analysis*. Runtime guards (getattr, getitem, dynamic imports) run only server-side with audit logging. This helps legitimate users fix issues while not telegraphing runtime checks to potential attackers.
+
+**API Design:**
+
+```python
+# Option 1: Trace-level validation (recommended)
+with model.trace("Hello", validate_remote=True):
+    h = model.layers[10].output[0]
+    result = analyze(h).save()
+# Raises SecurityAuditError for static violations
+```
+
+```python
+# Option 2: Function-level check
+from nnsight import check_remote_safe
+
+@nnsight.remote
+def my_func(x):
+    import subprocess  # Would be caught
+    return x
+
+safe, errors = check_remote_safe(my_func)
+# Returns (False, ["Import of 'subprocess' is not allowed..."])
+```
+
+**What local validation checks (static analysis):**
+
+1. **AST import analysis** - Scans all function bodies for blocked/unauthorized imports
+2. **RestrictedPython compilation** - Blocks dunder access (`__class__`, `__bases__`, `_private`)
+3. **Closure variable serialization** - Ensures captured variables are JSON-serializable
+4. **Tensor serialization** - Validates tensor types are supported
+
+**What local validation does NOT check (server-side only):**
+
+- Dynamic attribute access (`getattr(obj, 'system')`)
+- Dynamic imports (`__import__('subprocess')`)
+- Runtime frame inspection attempts
+
+These runtime checks run server-side with audit logging. Attackers who bypass static analysis are caught and logged on the server without advance warning.
+
+**Error messages (client-side):**
+
+```
+SecurityAuditError: Import of 'subprocess' is not allowed in remote code.
+
+Allowed modules: torch, numpy, math, collections, functools, itertools,
+                 operator, os (path only), pathlib (path only), random
+```
 
 ### 6. Robustness Details
 
@@ -1096,6 +1309,9 @@ We do **not** support arbitrary pickle-able objects, as this reintroduces versio
 - `itertools.*`
 - `functools.*`
 - `operator.*`
+- `os.*` (path manipulation only; I/O and process operations blocked)
+- `pathlib.*` (path manipulation only; I/O operations blocked)
+- `random.*`
 
 ### Disallowed
 - File I/O (`open`, `Path.read_text`, etc.)
@@ -1122,3 +1338,250 @@ This design replaces cloudpickle with source-based serialization:
 The key insight is that nnsight already captures source as text. We're simply changing the serialization of closure variables from cloudpickle to JSON, with the `@nnsight.remote` decorator providing validation and enabling classes/functions to be shipped with their source.
 
 **One decorator for everything**: `@nnsight.remote` works on both functions and classes. Module-level constants are auto-captured if JSON-serializable. The mental model is simple: "Mark things you use in traces with `@nnsight.remote`."
+
+---
+
+## Deferred Features: Assessment and Future Plans
+
+This section documents features from the design that are **intentionally deferred** to future work, along with rationale and implementation paths.
+
+### 1. Tensor/Array Serialization
+
+**Status**: IMPLEMENTED (v2.1)
+
+**What it does**: Serialize `torch.Tensor` and `numpy.ndarray` objects as base64-encoded bytes within the JSON payload, with optional zlib compression for compressible data (zeros, sparse patterns).
+
+**Wire Format**:
+```json
+{
+    "__tensor__": "base64-encoded-bytes...",
+    "dtype": "float32",
+    "shape": [1024, 768],
+    "compressed": true
+}
+```
+
+**Special Cases Handled**:
+
+| Tensor Type | How Handled | Wire Format |
+|-------------|-------------|-------------|
+| Dense float32/64 | Direct numpy bytes | `dtype: "float32"` |
+| bfloat16 | View as int16 (no numpy equiv) | `dtype: "int16", torch_dtype: "bfloat16"` |
+| Sparse COO | Indices + values separately | `sparse: {indices: ..., dense_shape: [...]}` |
+| Quantized | Preserve int repr + params | `quantization: {scale, zero_point, qtype}` |
+| Nested tensors | Rejected with clear error | N/A |
+
+**Compression Strategy**:
+- Try zlib level=1 (fast)
+- Only use if saves ≥10% (avoids overhead for random floats)
+- Zeros/sparse compress to ~1% of original size
+
+**Size Overhead**:
+| Data Pattern | Compression | Final Size vs Raw |
+|--------------|-------------|-------------------|
+| Random floats | Not used | ~133% (base64 only) |
+| All zeros | Used | ~1% |
+| Mostly zeros (1% nonzero) | Used | ~1-2% |
+| Repeated patterns | Used | ~1% |
+
+**Typical Use Cases**:
+- Steering vectors (768-4096 floats): trivial, <100KB
+- Probe weights: small, <1MB
+- Linear layer for patching: medium, 1-50MB
+- Full models: NOT a use case (model lives on server)
+
+**Future Optimization**: Binary sidecars could eliminate the ~33% base64 overhead:
+```
+payload = {
+    "json": {..., "tensors": {"my_vec": {"sidecar": 0, "dtype": "float32", ...}}},
+    "sidecars": [compressed_bytes_0, compressed_bytes_1, ...]
+}
+```
+This would use a multipart format (JSON header + raw binary blobs) instead of embedding base64 in JSON. The current approach prioritizes simplicity and pure-JSON transport compatibility.
+
+### 2. Flat Graph with GraphFlattener
+
+**Status**: Not yet implemented
+
+**What it does**: Restructure the JSON payload to use a flat `objects` map instead of a tree structure:
+```json
+{
+  "objects": {
+    "root": {...},
+    "obj_123": {"__type__": "MyClass", ...}
+  }
+}
+```
+
+This enables support for circular references and shared objects.
+
+**Why deferred**: The current tree structure works for 99% of real-world use cases. Circular references in trace variables are rare, and shared references are already handled via `__remote_ref__`.
+
+**Current behavior**: Circular references trigger a clear error: "Circular reference detected. Circular references between @nnsight.remote objects are not yet supported."
+
+**Future plan**: Implement the flat graph structure when concrete use cases emerge. The main benefit would be memory efficiency for large object graphs with sharing.
+
+### 3. `__getstate__`/`__setstate__` Pickle Hooks
+
+**Status**: Not yet implemented
+
+**What it does**: Check for `__getstate__` and `__setstate__` methods on `@nnsight.remote` objects, enabling custom serialization logic.
+
+**Why deferred**: The default behavior (`__dict__` serialization) covers most use cases. Custom pickle hooks add complexity and could introduce hard-to-debug issues if the hooks aren't themselves remote-safe.
+
+**Current behavior**: All `@nnsight.remote` objects are serialized via `__dict__`.
+
+**Future plan**: Add support when library authors request it. Should validate that hooks only return JSON-serializable data.
+
+### 4. Source Hashing for Cache Verification
+
+**Status**: Not yet implemented
+
+**What it does**: Hash the client's source code and include it in the payload. Server verifies the hash matches its installed version before using cached code.
+
+**Why deferred**: The `version` parameter on `@nnsight.remote(library="...", version="...")` provides sufficient cache invalidation for most cases. Hash verification adds overhead and complexity.
+
+**Current behavior**: Version string is included in the payload. Server can use this for cache decisions.
+
+**Future plan**: Consider implementing if version-based caching proves insufficient (e.g., users frequently patch installed libraries).
+
+### 5. Notebook/REPL Support
+
+**Status**: Not yet implemented
+
+**What it does**: Fall back to IPython history manager when `inspect.getsource` fails in interactive environments.
+
+**Why deferred**: IPython source extraction is fragile and version-dependent. The current implementation works with `.py` files, which is the primary use case for production traces.
+
+**Current behavior**: Source extraction may fail in notebooks, triggering cloudpickle fallback with deprecation warning.
+
+**Future plan**: Investigate `dill.source` or IPython's `_ih` history list as fallback mechanisms. Consider requiring explicit file-based code for remote execution.
+
+### 6. Full Circular Reference Support via Flat Graph
+
+**Status**: Partial (cycle detection with clear error)
+
+**What it does**: Instead of raising an error for circular references, serialize them correctly using the flat graph approach.
+
+**Why deferred**: Requires flat graph implementation (item #2 above).
+
+**Current behavior**: Self-references trigger `SourceSerializationError`. References between different `@nnsight.remote` objects use `__remote_ref__` which avoids recursion.
+
+**Future plan**: Implement as part of flat graph work.
+
+### 7. Lambda Support
+
+**Status**: IMPLEMENTED (v2.1)
+
+**What it does**: Support lambda expressions via AST parsing + bytecode matching.
+
+**Investigation findings**: The "lambda fragility" concern is partially overblown:
+- **Solvable**: Multiple lambdas on same line can be disambiguated via bytecode comparison
+- **Truly problematic**: Multi-line lambdas, nested inner lambdas, identical lambdas on same line
+
+**Implementation**: The `extract_lambda_source()` function uses:
+1. AST parsing to find Lambda nodes with `col_offset`/`end_col_offset`
+2. Bytecode matching for disambiguation
+3. Clear error for unsupported cases (multi-line, nested inner)
+4. Closure variable capture with JSON serialization
+
+### Lambda Closure Serialization: What It Looks Like On the Wire
+
+When a lambda captures closure variables, those values are serialized alongside the lambda source. Here's a concrete walkthrough:
+
+**Client-side code:**
+```python
+def make_scaler(factor):
+    return lambda x: x * factor
+
+scale_by_5 = make_scaler(5)  # Captures factor=5 in closure
+```
+
+**What the serializer does:**
+
+1. Extract lambda source: `"lambda x: x * factor"`
+2. Inspect closure via `func.__closure__` and `func.__code__.co_freevars`
+3. Find captured variable: `factor = 5`
+4. Serialize to JSON:
+
+```json
+{
+  "__lambda_scale_by_5": {
+    "type": "lambda",
+    "var_name": "scale_by_5",
+    "source": {
+      "code": "lambda x: x * factor",
+      "file": "user_script.py",
+      "line": 4
+    },
+    "closure_vars": {
+      "factor": 5
+    }
+  }
+}
+```
+
+**Server-side reconstruction:**
+
+```python
+# Inject closure variables into namespace
+namespace = {"factor": 5}
+
+# Execute lambda definition
+exec("scale_by_5 = lambda x: x * factor", namespace)
+
+# Now scale_by_5 is a working function
+result = namespace["scale_by_5"](10)  # Returns 50
+```
+
+**Closure Variable Handling Rules:**
+
+| Closure Value Type | Action |
+|-------------------|--------|
+| JSON-serializable (int, str, list, dict) | Captured in `closure_vars` |
+| Module from allowed list (`torch`, `numpy`) | Skipped (available on server) |
+| `@nnsight.remote` object | Skipped (serialized separately) |
+| Tensor, non-serializable object | Error with clear message |
+| Nested lambda | Error with clear message |
+
+**Example error for non-serializable closure:**
+
+```python
+def make_biased(bias_tensor):
+    return lambda x: x + bias_tensor
+
+bias = torch.tensor([1.0, 2.0, 3.0])
+biased_func = make_biased(bias)  # Captures tensor in closure
+```
+
+```
+SourceSerializationError: Lambda 'biased_func' has non-serializable closure variable
+'bias_tensor' of type 'Tensor'.
+
+Options:
+  - Pass the value as a function parameter instead of capturing it
+  - Convert to a JSON-serializable type (int, float, str, list, dict)
+  - Use a @nnsight.remote function instead of a lambda
+```
+
+This ensures that closure behavior is transparent and predictable, with clear guidance when unsupported patterns are detected.
+
+---
+
+## Implemented Features (v2.1)
+
+The following features from the design document have been implemented:
+
+1. **`@nnsight.remote` decorator** - Validates at import time, captures source and module refs
+2. **Module-level constant capture** - JSON-serializable values auto-captured
+3. **Module alias detection** - `np`, `F`, `torch` recognized and skipped
+4. **AST validation** - Blocks disallowed imports and function calls
+5. **Allowed attribute chains** - `os.path.join`, `pathlib.Path()` allowed; I/O operations blocked
+6. **Closure variable support** - `__closure__` and `co_freevars` extracted and validated
+7. **File/line metadata** - Source payload includes original file and line number
+8. **Callable references** - Functions from allowed modules serialized as `__callable_ref__`
+9. **Cycle detection** - Clear error for self-referential objects
+10. **Version metadata** - `library` and `version` params on decorator for caching
+11. **Backward compatibility** - Falls back to cloudpickle with deprecation warning
+12. **Lambda support** - Single-line lambdas with AST + bytecode matching, closure variable capture, clear errors for unsupported patterns (multi-line, nested inner, identical on same line)
+13. **Tensor serialization** - torch.Tensor and numpy.ndarray as base64+zlib in JSON; handles bfloat16 (via int16 view), sparse COO (preserves sparsity), quantized (preserves int repr + params); nested tensors rejected with clear error

@@ -20,7 +20,11 @@ import types
 from typing import Any, Callable, Dict, List, Set, Tuple, Type, Union
 
 # Modules that are available on NDIF servers and don't need to be serialized
-ALLOWED_MODULES = {'torch', 'numpy', 'math', 'builtins', 'collections', 'itertools', 'functools', 'operator'}
+ALLOWED_MODULES = {
+    'torch', 'numpy', 'math', 'builtins',
+    'collections', 'itertools', 'functools', 'operator',
+    'os', 'pathlib', 'random',  # Safe when restricted (no I/O operations)
+}
 
 # Function calls that are never allowed in @remote code
 DISALLOWED_CALLS = {
@@ -28,12 +32,45 @@ DISALLOWED_CALLS = {
     '__import__',
 }
 
-# Attribute chains that indicate file/network/subprocess operations
+# Attribute chains that indicate dangerous operations (file I/O, network, subprocess, etc.)
+# Format: tuple of attribute names forming the chain. Matching is prefix-based.
 DISALLOWED_ATTR_PATTERNS = {
-    ('os', 'system'), ('os', 'popen'), ('os', 'spawn'),
+    # os module - block process and filesystem operations
+    ('os', 'system'), ('os', 'popen'), ('os', 'spawn'), ('os', 'spawnl'),
+    ('os', 'spawnle'), ('os', 'spawnlp'), ('os', 'spawnlpe'), ('os', 'spawnv'),
+    ('os', 'spawnve'), ('os', 'spawnvp'), ('os', 'spawnvpe'),
+    ('os', 'exec'), ('os', 'execl'), ('os', 'execle'), ('os', 'execlp'),
+    ('os', 'execlpe'), ('os', 'execv'), ('os', 'execve'), ('os', 'execvp'),
+    ('os', 'execvpe'),
+    ('os', 'fork'), ('os', 'forkpty'), ('os', 'kill'), ('os', 'killpg'),
+    ('os', 'remove'), ('os', 'unlink'), ('os', 'rmdir'), ('os', 'removedirs'),
+    ('os', 'rename'), ('os', 'renames'), ('os', 'replace'),
+    ('os', 'mkdir'), ('os', 'makedirs'), ('os', 'symlink'), ('os', 'link'),
+    ('os', 'chdir'), ('os', 'chroot'), ('os', 'chmod'), ('os', 'chown'),
+    ('os', 'lchown'), ('os', 'chflags'), ('os', 'lchflags'),
+    ('os', 'open'), ('os', 'fdopen'), ('os', 'read'), ('os', 'write'),
+    ('os', 'truncate'), ('os', 'ftruncate'),
+    # subprocess module
     ('subprocess', 'run'), ('subprocess', 'call'), ('subprocess', 'Popen'),
-    ('socket',), ('urllib',), ('requests',),
+    ('subprocess', 'check_call'), ('subprocess', 'check_output'),
+    ('subprocess', 'getoutput'), ('subprocess', 'getstatusoutput'),
+    # socket module
+    ('socket',),
+    # urllib module
+    ('urllib',),
+    # requests module
+    ('requests',),
+    # pathlib - block I/O operations but allow path manipulation
     ('pathlib', 'Path', 'read_text'), ('pathlib', 'Path', 'write_text'),
+    ('pathlib', 'Path', 'read_bytes'), ('pathlib', 'Path', 'write_bytes'),
+    ('pathlib', 'Path', 'open'), ('pathlib', 'Path', 'unlink'),
+    ('pathlib', 'Path', 'rmdir'), ('pathlib', 'Path', 'rename'),
+    ('pathlib', 'Path', 'replace'), ('pathlib', 'Path', 'symlink_to'),
+    ('pathlib', 'Path', 'link_to'), ('pathlib', 'Path', 'mkdir'),
+    ('pathlib', 'Path', 'touch'), ('pathlib', 'Path', 'chmod'),
+    ('pathlib', 'Path', 'lchmod'),
+    # shutil module (file operations)
+    ('shutil',),
 }
 
 # Builtin names that don't need to be captured
@@ -135,23 +172,28 @@ def _apply_remote(obj: Union[Type, Callable], version: str = None, library: str 
     # Step 4: Resolve module-level references and validate them
     module_refs, resolution_errors = resolve_module_references(external_names, obj)
 
-    # Step 5: Validate AST for disallowed patterns
+    # Step 5: Extract and validate closure variables (for nested functions)
+    closure_vars, closure_errors = extract_closure_variables(obj)
+    module_refs.update(closure_vars)  # Merge closure vars into module refs
+
+    # Step 6: Validate AST for disallowed patterns
     ast_errors = validate_ast(tree, obj.__name__)
 
-    # Step 6: For classes, additional validation
+    # Step 7: For classes, additional validation
     class_errors = []
     if isinstance(obj, type):
         class_errors = validate_class(obj)
 
     # Collect all errors
-    all_errors = resolution_errors + ast_errors + class_errors
+    all_errors = resolution_errors + closure_errors + ast_errors + class_errors
 
     if all_errors:
         raise RemoteValidationError(format_validation_errors(obj.__name__, all_errors))
 
-    # Step 7: Store metadata for serialization
+    # Step 8: Store metadata for serialization
     obj._remote_source = dedented_source  # Use dedented source for clean serialization
     obj._remote_module_refs = module_refs
+    obj._remote_closure_vars = closure_vars  # Store closure vars separately for clarity
     obj._remote_validated = True
     obj._remote_library = library  # Package name, e.g., "nnterp"
     obj._remote_version = version  # Package version, e.g., "0.1.0"
@@ -405,6 +447,99 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
     return captured, errors
 
 
+def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any], List[str]]:
+    """
+    Extract and validate closure variables from a function.
+
+    When a function is defined inside another function and captures variables
+    from the enclosing scope, those variables are stored in __closure__ and
+    their names in __code__.co_freevars.
+
+    Args:
+        obj: The function or class to extract closure variables from
+
+    Returns:
+        (captured_vars, errors) where:
+        - captured_vars: dict of JSON-serializable closure variables
+        - errors: list of error messages for non-serializable closure variables
+    """
+    captured = {}
+    errors = []
+
+    # Classes don't have closures in the same way
+    if isinstance(obj, type):
+        return captured, errors
+
+    # Check if the function has closure variables
+    if not hasattr(obj, '__closure__') or obj.__closure__ is None:
+        return captured, errors
+
+    if not hasattr(obj, '__code__') or not hasattr(obj.__code__, 'co_freevars'):
+        return captured, errors
+
+    # Get the names and values of closure variables
+    freevars = obj.__code__.co_freevars
+    closure_cells = obj.__closure__
+
+    if len(freevars) != len(closure_cells):
+        return captured, errors  # Shouldn't happen, but be safe
+
+    for name, cell in zip(freevars, closure_cells):
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            # Cell is empty (variable was deleted or never assigned)
+            continue
+
+        # Skip if it's a builtin
+        if name in BUILTIN_NAMES:
+            continue
+
+        # Case 1: Module or module alias
+        if isinstance(value, types.ModuleType):
+            root = value.__name__.split('.')[0]
+            if root in ALLOWED_MODULES:
+                continue  # Available on server
+            else:
+                errors.append(
+                    f"Closure variable '{name}' references module '{value.__name__}' "
+                    f"which is not available on NDIF server."
+                )
+            continue
+
+        # Case 2: @remote-decorated function/class
+        if getattr(value, '_remote_validated', False):
+            continue  # Will be serialized separately
+
+        # Case 3: JSON-serializable
+        if is_json_serializable(value):
+            captured[name] = value
+            continue
+
+        # Case 4: Type references from builtins
+        if isinstance(value, type) and value.__module__ in ('builtins', 'typing'):
+            continue
+
+        # Case 5: Functions from allowed modules
+        if callable(value):
+            if hasattr(value, '__module__'):
+                root = value.__module__.split('.')[0] if value.__module__ else ''
+                if root in ALLOWED_MODULES:
+                    continue
+
+        # Case 6: Non-serializable closure variable
+        type_name = type(value).__name__
+        errors.append(
+            f"Closure variable '{name}' (type '{type_name}') is not JSON-serializable.\n"
+            f"  Options:\n"
+            f"    - Pass it as a function argument instead\n"
+            f"    - Use a JSON-serializable type (int, float, str, list, dict, bool, None)\n"
+            f"    - Mark it with @nnsight.remote if it's a custom function/class"
+        )
+
+    return captured, errors
+
+
 def is_json_serializable(value: Any) -> bool:
     """
     Check if a value can be JSON-serialized.
@@ -473,12 +608,20 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
             self.generic_visit(node)
 
         def _get_attr_chain(self, node) -> Tuple[str, ...]:
-            """Get the chain of attribute names (e.g., os.path.join -> ('os', 'path', 'join'))"""
+            """Get the chain of attribute names (e.g., os.path.join -> ('os', 'path', 'join'))
+
+            Also handles cases like pathlib.Path("x").read_text() where we need to
+            follow through Call nodes to get ('pathlib', 'Path', 'read_text').
+            """
             if isinstance(node, ast.Attribute):
                 parent_chain = self._get_attr_chain(node.value)
                 return parent_chain + (node.attr,)
             elif isinstance(node, ast.Name):
                 return (node.id,)
+            elif isinstance(node, ast.Call):
+                # Follow through call nodes, e.g., Path("x").read_text()
+                # Get the chain from the call's func (the thing being called)
+                return self._get_attr_chain(node.func)
             else:
                 return ()
 
@@ -538,5 +681,171 @@ def format_validation_errors(name: str, errors: List[str]) -> str:
     )
 
 
+# =============================================================================
+# Lambda source extraction
+# =============================================================================
+
+class LambdaExtractionError(Exception):
+    """Raised when lambda source cannot be reliably extracted."""
+    pass
+
+
+def extract_lambda_source(func: Callable) -> str:
+    """
+    Extract the exact source of a lambda function, even when multiple
+    lambdas appear on the same line.
+
+    Uses AST parsing + bytecode matching to disambiguate lambdas.
+
+    Args:
+        func: A lambda function
+
+    Returns:
+        The source code of just the lambda expression (e.g., "lambda x: x + 1")
+
+    Raises:
+        LambdaExtractionError: If the lambda source cannot be reliably extracted
+    """
+    # Verify it's a lambda
+    if not callable(func) or func.__name__ != '<lambda>':
+        raise LambdaExtractionError(
+            f"Expected a lambda function, got {type(func).__name__}"
+        )
+
+    # Get the full source line(s)
+    try:
+        full_source = inspect.getsource(func)
+    except OSError as e:
+        raise LambdaExtractionError(
+            f"Could not get source for lambda. "
+            f"Lambda must be defined in a .py file, not interactively. "
+            f"Consider using a named function instead."
+        ) from e
+
+    # Check for multi-line lambda (problematic)
+    lines = full_source.strip().split('\n')
+    if len(lines) > 1:
+        # Try to detect if this is a multi-line lambda expression
+        # Multi-line lambdas are rare and problematic
+        joined = ' '.join(line.strip() for line in lines)
+        try:
+            tree = ast.parse(joined)
+        except SyntaxError:
+            raise LambdaExtractionError(
+                f"Multi-line lambda expressions are not supported for remote execution. "
+                f"Please convert to a named function:\n\n"
+                f"  # Instead of:\n"
+                f"  f = (\n"
+                f"      lambda x:\n"
+                f"          x * 2\n"
+                f"  )\n\n"
+                f"  # Use:\n"
+                f"  @nnsight.remote\n"
+                f"  def f(x):\n"
+                f"      return x * 2"
+            )
+        full_source = joined
+
+    # Parse to find all lambda nodes
+    try:
+        tree = ast.parse(full_source.strip())
+    except SyntaxError as e:
+        raise LambdaExtractionError(
+            f"Could not parse lambda source: {e}"
+        ) from e
+
+    # Collect all lambda nodes with their positions
+    lambdas = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Lambda):
+            if not hasattr(node, 'end_col_offset'):
+                raise LambdaExtractionError(
+                    f"Lambda extraction requires Python 3.8+. "
+                    f"Please convert to a named function."
+                )
+            text = full_source.strip()[node.col_offset:node.end_col_offset]
+            lambdas.append(text)
+
+    if len(lambdas) == 0:
+        raise LambdaExtractionError(
+            f"No lambda found in source. This may be a nested inner lambda, "
+            f"which is not supported. Please convert to a named function."
+        )
+
+    if len(lambdas) == 1:
+        # Easy case: only one lambda on the line
+        return lambdas[0]
+
+    # Multiple lambdas on same line - disambiguate by bytecode
+    target_bytecode = func.__code__.co_code
+
+    for lambda_text in lambdas:
+        try:
+            compiled = compile(lambda_text, '<lambda>', 'eval')
+            # The compiled code has the lambda as a constant
+            if compiled.co_consts and hasattr(compiled.co_consts[0], 'co_code'):
+                lambda_code = compiled.co_consts[0]
+                if lambda_code.co_code == target_bytecode:
+                    return lambda_text
+        except Exception:
+            continue
+
+    # Could not match - might be identical lambdas or a closure issue
+    raise LambdaExtractionError(
+        f"Could not disambiguate lambda from {len(lambdas)} lambdas on the same line. "
+        f"This can happen with:\n"
+        f"  - Identical lambdas: `f1, f2 = lambda x: x, lambda x: x`\n"
+        f"  - Lambdas with different closure bindings\n\n"
+        f"Please convert to named functions:\n\n"
+        f"  @nnsight.remote\n"
+        f"  def my_func(x):\n"
+        f"      return x"
+    )
+
+
+def is_lambda(func: Any) -> bool:
+    """Check if an object is a lambda function."""
+    return callable(func) and getattr(func, '__name__', None) == '<lambda>'
+
+
+def validate_lambda_for_remote(func: Callable) -> Tuple[str, List[str]]:
+    """
+    Validate a lambda function for remote execution and extract its source.
+
+    Args:
+        func: A lambda function to validate
+
+    Returns:
+        (source, errors) tuple where source is the extracted lambda source
+        and errors is a list of validation error messages
+
+    Note:
+        This performs the same validation as @nnsight.remote but for lambdas.
+    """
+    errors = []
+
+    # Try to extract source
+    try:
+        source = extract_lambda_source(func)
+    except LambdaExtractionError as e:
+        return "", [str(e)]
+
+    # Parse and validate AST
+    try:
+        # Wrap in expression for parsing
+        tree = ast.parse(source, mode='eval')
+    except SyntaxError as e:
+        return source, [f"Could not parse lambda: {e}"]
+
+    # Validate AST for disallowed patterns
+    ast_errors = validate_ast(tree, '<lambda>')
+    errors.extend(ast_errors)
+
+    return source, errors
+
+
 # Re-export for convenient access
-__all__ = ['remote', 'RemoteValidationError', 'is_json_serializable', 'ALLOWED_MODULES']
+__all__ = [
+    'remote', 'RemoteValidationError', 'is_json_serializable', 'ALLOWED_MODULES',
+    'extract_lambda_source', 'LambdaExtractionError', 'is_lambda', 'validate_lambda_for_remote',
+]
