@@ -831,7 +831,20 @@ def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
 
             def visit_FunctionDef(self, node):
                 self.defined.add(node.name)
+                # Track function parameters as defined names
+                for arg in node.args.args:
+                    self.defined.add(arg.arg)
+                for arg in node.args.posonlyargs:
+                    self.defined.add(arg.arg)
+                for arg in node.args.kwonlyargs:
+                    self.defined.add(arg.arg)
+                if node.args.vararg:
+                    self.defined.add(node.args.vararg.arg)
+                if node.args.kwarg:
+                    self.defined.add(node.args.kwarg.arg)
                 self.generic_visit(node)
+
+            visit_AsyncFunctionDef = visit_FunctionDef
 
             def visit_ClassDef(self, node):
                 self.defined.add(node.name)
@@ -839,7 +852,10 @@ def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
 
         finder = NameFinder()
         finder.visit(tree)
-        external_names = finder.names - finder.defined - {'self', 'cls', 'super'}
+        # Note: We don't subtract builtins here since external_names is used to
+        # look up values from the class module. Builtins won't be found there,
+        # and even if a builtin is overridden at module level, we want to detect it.
+        external_names = finder.names - finder.defined
 
     # Resolve external names from the class's module
     # Track server-available imports so they can be resolved during reconstruction

@@ -360,8 +360,10 @@ def find_external_references(tree: ast.AST, obj: Union[Type, Callable]) -> Set[s
     collector.visit(tree)
 
     # Return names that are referenced but not defined locally
-    # Filter out builtins - they don't need to be captured
-    external = collector.referenced - BUILTIN_NAMES
+    # Note: We don't filter builtins here because they might be overridden
+    # at module level. resolve_module_references will check if the actual
+    # value differs from the builtin.
+    external = collector.referenced
 
     return external
 
@@ -444,17 +446,24 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
         obj_globals = getattr(module, '__dict__', {}) if module else {}
 
     for name in names:
-        # Skip if it's a builtin
-        if name in BUILTIN_NAMES:
-            continue
-
         # Get the actual value from globals
         if name not in obj_globals:
+            # Name not in globals - skip if it's a builtin (will use default)
+            if name in BUILTIN_NAMES:
+                continue
             # Could be a nested scope variable or truly undefined
             # We'll let Python's runtime handle truly undefined names
             continue
 
         value = obj_globals[name]
+
+        # Skip if it's a builtin AND the value is the same as the builtin
+        # (if overridden with a different value, we need to capture it)
+        if name in BUILTIN_NAMES:
+            builtin_value = getattr(builtins, name, None)
+            if value is builtin_value:
+                continue
+
         classification, captured_value, error_detail = classify_reference_value(name, value)
 
         if classification == ValueClassification.CAPTURE:
@@ -558,9 +567,12 @@ def _extract_closure_from_function(func: Callable, context_name: str) -> Tuple[D
             # Cell is empty (variable was deleted or never assigned)
             continue
 
-        # Skip if it's a builtin
+        # Skip if it's a builtin AND the value is the same as the builtin
+        # (if overridden with a different value, we need to capture it)
         if name in BUILTIN_NAMES:
-            continue
+            builtin_value = getattr(builtins, name, None)
+            if value is builtin_value:
+                continue
 
         # Skip __class__ (implicit closure from super() calls)
         if name == '__class__':

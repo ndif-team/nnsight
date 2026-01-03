@@ -949,6 +949,57 @@ def test_remote_rejects_non_serializable_closure():
 
 
 # =============================================================================
+# Test: Builtin override detection
+# =============================================================================
+
+def test_remote_detects_overridden_builtin_closure():
+    """Test that overridden builtins in closure scope are detected and captured.
+
+    Python allows shadowing builtins with local variables. The @remote decorator
+    must detect when a builtin name refers to a different value and capture it.
+    """
+    # Override 'len' with a constant in local scope
+    len = 42  # Shadow the builtin
+
+    def make_func():
+        @remote
+        def inner(x):
+            # This 'len' refers to the local override, not the builtin
+            return len
+
+        return inner
+
+    func = make_func()
+    assert func._remote_validated is True
+
+    # The override should be captured
+    closure_vars = getattr(func, '_remote_closure_vars', {})
+    assert 'len' in closure_vars
+    assert closure_vars['len'] == 42
+
+
+def test_remote_skips_unmodified_builtin():
+    """Test that builtins are skipped when NOT overridden.
+
+    If a name refers to the actual builtin value, it should not be captured
+    since builtins are available by default during execution.
+    """
+    @remote
+    def uses_builtins(x):
+        # These are actual builtins, not overridden
+        return len(x) + sum(x)
+
+    # No builtins should be captured (they're available by default)
+    module_refs = getattr(uses_builtins, '_remote_module_refs', {})
+    closure_vars = getattr(uses_builtins, '_remote_closure_vars', {})
+
+    assert 'len' not in module_refs
+    assert 'len' not in closure_vars
+    assert 'sum' not in module_refs
+    assert 'sum' not in closure_vars
+
+
+# =============================================================================
 # Test: File/line metadata
 # =============================================================================
 

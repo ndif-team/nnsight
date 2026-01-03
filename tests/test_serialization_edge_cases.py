@@ -893,5 +893,138 @@ def test_pickle_hooks_current_behavior():
     # assert 'large' not in state, "Future behavior: __getstate__ should be honored"
 
 
+# =============================================================================
+# Test 25: Unconventional 'self' usage
+# =============================================================================
+
+def test_unconventional_self():
+    """Test that 'self' as a module variable (not a parameter) is handled correctly.
+
+    Python convention uses 'self' as the first parameter of instance methods,
+    but 'self' is not a keyword - it can be used as a regular variable name.
+    This test verifies such unconventional usage is handled properly.
+    """
+    # Define 'self' as a module-level variable with a value
+    self = {"config": "global_config", "value": 42}
+
+    @remote
+    class UnconventionalSelf:
+        def __init__(this, x):  # Using 'this' instead of 'self'
+            this.x = x
+
+        def get_global_self(this):
+            # Access the module-level 'self' variable
+            return self["config"]
+
+        def compute(this):
+            return this.x + self["value"]
+
+    # Verify the closure captured module-level 'self'
+    assert 'self' in UnconventionalSelf._remote_closure_vars
+    assert UnconventionalSelf._remote_closure_vars['self']['config'] == 'global_config'
+
+    obj = UnconventionalSelf(10)
+
+    # Test that methods work correctly
+    assert obj.get_global_self() == "global_config"
+    assert obj.compute() == 52  # 10 + 42
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    namespace.update(UnconventionalSelf._remote_closure_vars)
+    exec(obj._remote_source, namespace)
+
+    ReconClass = namespace['UnconventionalSelf']
+    restored = ReconClass(20)
+
+    assert restored.get_global_self() == "global_config"
+    assert restored.compute() == 62  # 20 + 42
+
+
+# =============================================================================
+# Test 26: Module variable overriding builtin
+# =============================================================================
+
+def test_module_variable_overrides_builtin():
+    """Test that module variables overriding builtins are correctly captured.
+
+    Python allows shadowing builtins with module-level variables. For example,
+    a module can define `list = SomeClass` which shadows the builtin `list`.
+    The serialization system must capture these overridden values rather than
+    assuming they refer to builtins.
+
+    This test uses a JSON-serializable value to override a builtin, since
+    non-serializable values (like functions) would need to be @remote decorated.
+    """
+    # Override 'len' with a constant (simulating a config value that shadows a builtin)
+    # Note: In real code, overriding builtins with constants is unusual but legal
+    CUSTOM_LENGTH = 42
+    len = CUSTOM_LENGTH  # Shadow the builtin with a constant
+
+    @remote
+    class UsesOverriddenBuiltin:
+        def __init__(self, data):
+            self.data = data
+
+        def get_length(self):
+            # This should use the overridden 'len' (a constant), not the builtin
+            return len
+
+    # Verify that 'len' was captured as a closure variable
+    assert 'len' in UsesOverriddenBuiltin._remote_closure_vars
+    assert UsesOverriddenBuiltin._remote_closure_vars['len'] == CUSTOM_LENGTH
+
+    obj = UsesOverriddenBuiltin([1, 2, 3])
+
+    # Should use the overridden len (returns the constant)
+    assert obj.get_length() == 42
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    namespace.update(UsesOverriddenBuiltin._remote_closure_vars)
+    exec(obj._remote_source, namespace)
+
+    ReconClass = namespace['UsesOverriddenBuiltin']
+    restored = ReconClass([1, 2, 3, 4, 5])
+
+    # Should still use the overridden len
+    assert restored.get_length() == 42
+
+
+def test_module_variable_overrides_builtin_with_remote_function():
+    """Test overriding a builtin with a @remote-decorated function.
+
+    This is a more realistic case where someone defines a custom implementation
+    of a builtin function and uses @remote to make it serializable.
+    """
+    @remote
+    def custom_len(x):
+        # Custom implementation that doubles the length
+        result = 0
+        for _ in x:
+            result += 2
+        return result
+
+    len = custom_len  # Shadow the builtin
+
+    @remote
+    class UsesRemoteOverride:
+        def __init__(self, data):
+            self.data = data
+
+        def get_length(self):
+            # This should use the @remote custom_len, not the builtin
+            return len(self.data)
+
+    # Since custom_len is @remote decorated, it should be skipped (not captured)
+    # because @remote functions are serialized separately
+    assert 'len' not in UsesRemoteOverride._remote_closure_vars
+
+    obj = UsesRemoteOverride([1, 2, 3])
+
+    # Should use the custom len
+    assert obj.get_length() == 6  # 3 items * 2 = 6
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
