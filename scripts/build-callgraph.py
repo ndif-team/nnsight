@@ -291,10 +291,105 @@ class CallGraphExtractor(ast.NodeVisitor):
         return None
 
 
-def extract_callgraph_from_source(source: str, filename: str) -> Tuple[List[Dict], List[Dict]]:
-    """Extract call graph from Python source code."""
+def extract_callgraph_from_source(source: str, filename: str) -> Tuple[List[Dict], List[Dict], Dict[str, Set[str]]]:
+    """Extract call graph from Python source code.
+
+    Returns (nodes, edges, raw_calls) where raw_calls maps function names to
+    the set of all names they call (for cross-file resolution).
+    """
     extractor = CallGraphExtractor(source, filename)
-    return extractor.extract()
+    nodes, edges = extractor.extract()
+
+    # Collect raw calls for cross-file resolution
+    raw_calls = {}
+    for func_name, data in extractor.functions.items():
+        raw_calls[func_name] = data.get('calls', set())
+
+    return nodes, edges, raw_calls
+
+
+def extract_callgraph_multi_file(sources: List[Tuple[str, str]]) -> Tuple[List[Dict], List[Dict]]:
+    """Extract call graph from multiple source files with cross-file call resolution.
+
+    Args:
+        sources: List of (filename, content) tuples
+
+    Returns:
+        (nodes, edges) with cross-file calls resolved
+    """
+    all_nodes = []
+    all_raw_calls = {}  # func_name -> set of callee names
+    all_defined = set()  # All defined function/class names
+
+    # First pass: extract from each file
+    for filename, content in sources:
+        extractor = CallGraphExtractor(content, filename)
+        nodes, _ = extractor.extract()
+        all_nodes.extend(nodes)
+
+        # Collect defined names
+        for node in nodes:
+            all_defined.add(node['id'])
+
+        # Collect raw calls
+        for func_name, data in extractor.functions.items():
+            all_raw_calls[func_name] = data.get('calls', set())
+
+    # Second pass: resolve cross-file edges
+    all_edges = []
+    seen_edges = set()
+
+    for source_func, callees in all_raw_calls.items():
+        for callee in callees:
+            # Check if callee is defined anywhere in the analyzed files
+            if callee in all_defined:
+                edge_key = (source_func, callee, 'calls')
+                if edge_key not in seen_edges:
+                    seen_edges.add(edge_key)
+                    all_edges.append({
+                        'source': source_func,
+                        'target': callee,
+                        'type': 'calls'
+                    })
+
+    # Also add inheritance edges
+    for filename, content in sources:
+        try:
+            tree = ast.parse(content)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    class_name = node.name
+                    for base in node.bases:
+                        base_name = None
+                        if isinstance(base, ast.Name):
+                            base_name = base.id
+                        elif isinstance(base, ast.Attribute):
+                            base_name = base.attr
+
+                        if base_name and base_name in all_defined:
+                            edge_key = (class_name, base_name, 'extends')
+                            if edge_key not in seen_edges:
+                                seen_edges.add(edge_key)
+                                all_edges.append({
+                                    'source': class_name,
+                                    'target': base_name,
+                                    'type': 'extends'
+                                })
+        except SyntaxError:
+            pass
+
+    # Deduplicate nodes
+    seen_nodes = {}
+    for node in all_nodes:
+        node_id = node['id']
+        if node_id not in seen_nodes:
+            seen_nodes[node_id] = node
+        else:
+            existing = seen_nodes[node_id]
+            if node.get('decorators') and not existing.get('decorators'):
+                seen_nodes[node_id] = node
+
+    return list(seen_nodes.values()), all_edges
 
 
 def merge_callgraphs(all_nodes: List[Dict], all_edges: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
@@ -364,8 +459,9 @@ def get_commit_history(repo_root: str, source_files: List[str]) -> List[Dict[str
     for branch in branches:
         for source_file in source_files:
             try:
+                # Use ISO format for proper time ordering
                 result = subprocess.run(
-                    ['git', 'log', branch, '--format=%H|%ad|%s', '--date=short', '--follow', '--', source_file],
+                    ['git', 'log', branch, '--format=%H|%aI|%ad|%s', '--date=short', '--follow', '--', source_file],
                     cwd=repo_root,
                     capture_output=True,
                     text=True,
@@ -374,21 +470,22 @@ def get_commit_history(repo_root: str, source_files: List[str]) -> List[Dict[str
                 for line in result.stdout.strip().split('\n'):
                     if not line:
                         continue
-                    parts = line.split('|', 2)
-                    if len(parts) >= 3:
-                        hash_val, date, message = parts
+                    parts = line.split('|', 3)
+                    if len(parts) >= 4:
+                        hash_val, iso_time, date, message = parts
                         if hash_val not in commits_set:
                             commits_set.add(hash_val)
                             commits_list.append({
                                 'hash': hash_val,
-                                'date': date,
+                                'iso_time': iso_time,  # For sorting
+                                'date': date,  # For display
                                 'message': message
                             })
             except subprocess.CalledProcessError:
                 pass
 
-    # Sort by date (primary) and hash (secondary for stable ordering)
-    commits_list.sort(key=lambda x: (x['date'], x['hash']))
+    # Sort by ISO timestamp for proper chronological ordering
+    commits_list.sort(key=lambda x: x['iso_time'])
     return commits_list
 
 
@@ -505,19 +602,13 @@ def main():
         if combined_hash in graph_cache:
             nodes, edges, line_count = graph_cache[combined_hash]
         else:
-            # Extract callgraph from all files
-            all_nodes = []
-            all_edges = []
+            # Extract callgraph from all files with cross-file resolution
+            try:
+                nodes, edges = extract_callgraph_multi_file(all_sources)
+            except Exception as e:
+                print(f'\n  Error processing: {e}')
+                nodes, edges = [], []
 
-            for filename, content in all_sources:
-                try:
-                    nodes, edges = extract_callgraph_from_source(content, filename)
-                    all_nodes.extend(nodes)
-                    all_edges.extend(edges)
-                except Exception as e:
-                    print(f'\n  Error processing {filename}: {e}')
-
-            nodes, edges = merge_callgraphs(all_nodes, all_edges)
             line_count = total_lines
             graph_cache[combined_hash] = (nodes, edges, line_count)
 
