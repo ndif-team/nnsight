@@ -291,17 +291,39 @@ def find_external_references(tree: ast.AST, obj: Union[Type, Callable]) -> Set[s
             return any(name in scope for scope in self.scopes)
 
         def visit_FunctionDef(self, node):
+            # Visit decorators BEFORE defining the function (they're in outer scope)
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+
             # Function name is defined in outer scope
             self.define(node.name)
+
+            # Visit default argument values (in outer scope, before parameters)
+            for default in node.args.defaults:
+                self.visit(default)
+            for default in node.args.kw_defaults:
+                if default is not None:
+                    self.visit(default)
 
             # Function parameters are defined in inner scope
             self.push_scope()
             for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
                 self.define(arg.arg)
+                # Visit argument annotations
+                if arg.annotation:
+                    self.visit(arg.annotation)
             if node.args.vararg:
                 self.define(node.args.vararg.arg)
+                if node.args.vararg.annotation:
+                    self.visit(node.args.vararg.annotation)
             if node.args.kwarg:
                 self.define(node.args.kwarg.arg)
+                if node.args.kwarg.annotation:
+                    self.visit(node.args.kwarg.annotation)
+
+            # Visit return annotation
+            if node.returns:
+                self.visit(node.returns)
 
             # Visit function body
             for child in node.body:
@@ -314,6 +336,16 @@ def find_external_references(tree: ast.AST, obj: Union[Type, Callable]) -> Set[s
             self.visit_FunctionDef(node)
 
         def visit_ClassDef(self, node):
+            # Visit decorators BEFORE defining the class (they're in outer scope)
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+
+            # Visit base classes and keywords (in outer scope)
+            for base in node.bases:
+                self.visit(base)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+
             # Class name is defined in outer scope
             self.define(node.name)
 
@@ -373,6 +405,19 @@ def find_external_references(tree: ast.AST, obj: Union[Type, Callable]) -> Set[s
             for gen in node.generators:
                 self.visit_comprehension(gen)
             self.visit(node.elt)
+            self.pop_scope()
+
+        def visit_Lambda(self, node):
+            # Lambda parameters are in their own scope
+            self.push_scope()
+            for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                self.define(arg.arg)
+            if node.args.vararg:
+                self.define(node.args.vararg.arg)
+            if node.args.kwarg:
+                self.define(node.args.kwarg.arg)
+            # Visit lambda body
+            self.visit(node.body)
             self.pop_scope()
 
         def visit_Import(self, node):
@@ -450,6 +495,11 @@ def classify_reference_value(name: str, value: Any) -> Tuple[str, Optional[Any],
     # Case 2: @remote-decorated function/class (will be serialized separately)
     if getattr(value, '_remote_validated', False):
         return ValueClassification.SKIP, None, None
+
+    # Case 2b: The @remote decorator itself or other nnsight internals
+    if callable(value) and hasattr(value, '__module__'):
+        if value.__module__ and 'nnsight' in value.__module__:
+            return ValueClassification.SKIP, None, None
 
     # Case 3: JSON-serializable constants
     if is_json_serializable(value):

@@ -1062,16 +1062,16 @@ def test_namefinder_comprehension_shadowing():
     assert closure_vars['x'] == 42
 
 
-def test_namefinder_comprehension_shadowing_direct():
-    """Directly test NameFinder's behavior with comprehension shadowing.
+def test_reference_collector_handles_comprehension_shadowing():
+    """Test that the unified ReferenceCollector correctly handles comprehension shadowing.
 
-    This test exposes the known limitation of NameFinder: it doesn't track
-    scopes, so a comprehension variable will incorrectly shadow an external
-    reference with the same name.
+    The ReferenceCollector properly tracks scopes, so a comprehension variable
+    does NOT incorrectly shadow an external reference with the same name.
 
-    This is a documentation test - it verifies the current (imperfect) behavior.
+    This was previously a limitation of the simpler NameFinder, but is now
+    handled correctly by using ReferenceCollector for all external name detection.
     """
-    import ast
+    from nnsight.remote import find_external_references
 
     # Source code where 'x' is used externally AND as a comprehension variable
     source = '''
@@ -1086,46 +1086,79 @@ class Example:
         return result, squares
 '''
 
+    import ast
     tree = ast.parse(source)
 
-    # Replicate NameFinder logic
-    class NameFinder(ast.NodeVisitor):
-        def __init__(self):
-            self.names = set()
-            self.defined = set()
+    class MockClass:
+        __module__ = '__main__'
 
-        def visit_Name(self, node):
-            if isinstance(node.ctx, ast.Load):
-                self.names.add(node.id)
-            elif isinstance(node.ctx, ast.Store):
-                self.defined.add(node.id)
-            self.generic_visit(node)
+    external_names = find_external_references(tree, MockClass)
 
-        def visit_FunctionDef(self, node):
-            self.defined.add(node.name)
-            for arg in node.args.args:
-                self.defined.add(arg.arg)
-            self.generic_visit(node)
-
-        def visit_ClassDef(self, node):
-            self.defined.add(node.name)
-            self.generic_visit(node)
-
-    finder = NameFinder()
-    finder.visit(tree)
-    external_names = finder.names - finder.defined
-
-    # KNOWN LIMITATION: NameFinder incorrectly thinks 'x' is defined locally
-    # because the comprehension's 'x' is in Store context and goes into 'defined'.
-    # In reality, the external 'x' reference should be detected.
-    #
-    # This test documents the current behavior. If NameFinder is fixed to handle
-    # scopes properly, this assertion should change to:
-    #   assert 'x' in external_names, "External 'x' should be detected"
-    assert 'x' not in external_names, (
-        "KNOWN LIMITATION: NameFinder misses 'x' because comprehension shadows it. "
-        "If this test fails, NameFinder was fixed - update this test!"
+    # ReferenceCollector correctly identifies 'x' as external despite
+    # the comprehension variable shadowing it in inner scope
+    assert 'x' in external_names, (
+        f"External 'x' should be detected even with comprehension shadowing. "
+        f"Got: {external_names}"
     )
+
+
+def test_reference_collector_handles_lambda_parameters():
+    """Test that lambda parameters are correctly scoped.
+
+    Lambda parameters should not be reported as external references.
+    The 'x' inside 'lambda x: x * 2' is a parameter, not an external.
+    """
+    from nnsight.remote import find_external_references
+    import ast
+
+    # Lambda parameter should NOT be external
+    source = '''
+class Example:
+    def method(self):
+        fn = lambda x: x * 2
+        return fn
+'''
+
+    tree = ast.parse(source)
+
+    class MockClass:
+        __module__ = '__main__'
+
+    external_names = find_external_references(tree, MockClass)
+
+    # 'x' is a lambda parameter, not external
+    assert 'x' not in external_names, (
+        f"Lambda parameter 'x' should not be external. Got: {external_names}"
+    )
+
+
+def test_reference_collector_lambda_with_external():
+    """Test lambda that uses both parameters and external references."""
+    from nnsight.remote import find_external_references
+    import ast
+
+    source = '''
+class Example:
+    def method(self):
+        # External reference
+        result = multiplier * 2
+
+        # Lambda with its own 'x', but also using external 'multiplier'
+        fn = lambda x: x * multiplier
+
+        return result, fn
+'''
+
+    tree = ast.parse(source)
+
+    class MockClass:
+        __module__ = '__main__'
+
+    external_names = find_external_references(tree, MockClass)
+
+    # 'multiplier' is external, 'x' is lambda parameter
+    assert 'multiplier' in external_names, f"'multiplier' should be external. Got: {external_names}"
+    assert 'x' not in external_names, f"Lambda param 'x' should not be external. Got: {external_names}"
 
 
 def test_namefinder_nested_function_shadowing():

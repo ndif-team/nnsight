@@ -794,45 +794,9 @@ def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
 
     if tree:
         # Find names used in the class that aren't defined locally
-        # Note: We use a simple NameFinder here rather than ReferenceCollector because
-        # ReferenceCollector doesn't visit decorator_list, so it misses @property etc.
-        # The simpler approach also handles edge cases better for this use case.
-        class NameFinder(ast.NodeVisitor):
-            def __init__(self):
-                self.names = set()
-                self.defined = set()
-
-            def visit_Name(self, node):
-                if isinstance(node.ctx, ast.Load):
-                    self.names.add(node.id)
-                elif isinstance(node.ctx, ast.Store):
-                    self.defined.add(node.id)
-                self.generic_visit(node)
-
-            def visit_FunctionDef(self, node):
-                self.defined.add(node.name)
-                # Track function parameters as defined names
-                for arg in node.args.args:
-                    self.defined.add(arg.arg)
-                for arg in node.args.posonlyargs:
-                    self.defined.add(arg.arg)
-                for arg in node.args.kwonlyargs:
-                    self.defined.add(arg.arg)
-                if node.args.vararg:
-                    self.defined.add(node.args.vararg.arg)
-                if node.args.kwarg:
-                    self.defined.add(node.args.kwarg.arg)
-                self.generic_visit(node)
-
-            visit_AsyncFunctionDef = visit_FunctionDef
-
-            def visit_ClassDef(self, node):
-                self.defined.add(node.name)
-                self.generic_visit(node)
-
-        finder = NameFinder()
-        finder.visit(tree)
-        external_names = finder.names - finder.defined
+        # Uses the unified ReferenceCollector which properly handles scopes,
+        # decorators, default arguments, and annotations
+        external_names = find_external_references(tree, cls)
 
     # Resolve external names from the class's module
     # Track server-available imports so they can be resolved during reconstruction
