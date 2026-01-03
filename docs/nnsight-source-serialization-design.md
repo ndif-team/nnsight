@@ -1645,6 +1645,427 @@ This ensures that closure behavior is transparent and predictable, with clear gu
 
 ---
 
+## LanguageModel Subclasses and Remote Execution
+
+### The Problem: Third-Party Model Wrappers
+
+Libraries like **nnterp** provide `LanguageModel` subclasses that add convenience features:
+
+```python
+from nnterp import StandardizedTransformer
+
+model = StandardizedTransformer("gpt2")
+
+# Standardized accessors (nnterp-specific)
+model.layers[5]       # Access any layer uniformly
+model.num_layers      # Get layer count
+model.hidden_size     # Get hidden dimension
+layer.self_attn       # Standardized attention accessor
+layer.mlp             # Standardized MLP accessor
+```
+
+**Challenge**: How can this code work remotely when the server doesn't have nnterp installed?
+
+### Solution: Full Subclass Serialization
+
+The solution automatically serializes the entire LanguageModel subclass (including helper classes and all dependencies) so it can be reconstructed on the server:
+
+1. **Auto-discovery** finds all classes needed to reconstruct the subclass
+2. **Server imports tracking** records module-level references by name and module path
+3. **Instance state** captures custom attributes (distinguishing server-provided vs custom)
+4. **Reconstruction** creates a working subclass instance on the server
+
+#### How It Works
+
+When a trace uses a `LanguageModel` subclass, the serialization system:
+
+1. **Detects** the subclass via `is_languagemodel_subclass()`
+2. **Auto-discovers** the class source and all non-server-available dependencies
+3. **Records server imports** - maps variable names to their module paths
+4. **Serializes instance state** - custom attributes that aren't server-provided
+5. **Sends** the class definitions + state + model key to server
+
+```python
+# Client-side serialization
+subclass_data = serialize_model_subclass(model)
+# Returns: {
+#   "class_name": "StandardizedTransformer",
+#   "discovered_classes": {...},  # 8 classes with source code
+#   "state": {...},               # Custom instance attributes
+#   "model_key": "..."            # For base model reconstruction
+# }
+```
+
+#### Server-Available Classes
+
+The system distinguishes between classes that need serialization and those already on the server:
+
+```python
+def is_server_available_class(cls: type) -> bool:
+    """Check if a class is from a module available on the server."""
+    root = cls.__module__.split('.')[0]
+
+    # nnsight classes are on the server
+    if 'nnsight' in cls.__module__:
+        return True
+
+    # Standard library
+    if root in {'builtins', 'abc', 'enum', 'typing', 'collections',
+                'functools', 'dataclasses', ...}:
+        return True
+
+    # Major ML libraries on server
+    if root in {'torch', 'numpy', 'transformers', 'einops', ...}:
+        return True
+
+    return False
+```
+
+Classes from nnterp, user code, or other third-party libraries are NOT server-available and must be serialized.
+
+#### Server Imports Tracking
+
+A key insight: discovered classes reference types, functions, and modules from server-available packages. These references must be recorded **by their name in the source code** (handling aliases correctly):
+
+```python
+# If nnterp has: import torch as th
+# And uses: th.Tensor
+# We record: {"th": {"type": "module", "module": "torch"}}
+
+# If it has: from abc import ABC
+# And uses: class Foo(ABC):
+# We record: {"ABC": {"type": "class", "module": "abc", "name": "ABC"}}
+```
+
+**Server imports captured for StandardizedTransformer:**
+
+| Class | Count | Imports |
+|-------|-------|---------|
+| StandardizedTransformer | 7 | `th` (torch module), `Module`, `Size`, `LanguageModel`, `TraceTensor`, `AutoTokenizer`, `PreTrainedTokenizerBase` |
+| AttentionProbabilitiesAccessor | 5 | `th`, `TraceTensor`, `GPT2LMHeadModel`, `GPTJForCausalLM`, `BloomForCausalLM` |
+| AttnProbFunction | 2 | `ABC`, `abstractmethod` |
+| LayerAccessor | 2 | `Envoy`, `TraceTensor` |
+| RenameConfig | 1 | `dataclass` |
+| IOType | 1 | `Enum` |
+| DummyCache | 0 | — |
+| RenamingError | 0 | — |
+
+**Total: 18 server imports across 8 classes**
+
+#### Server-Side Reconstruction
+
+On the server, `reconstruct_model_subclass()`:
+
+1. Resolves server imports via `importlib` (using recorded module paths)
+2. Executes discovered class definitions in order
+3. Creates instance with `object.__new__(cls)` (bypasses `__init__`)
+4. Copies server-provided attributes from the base model
+5. Overrides with custom state from serialized data
+
+```python
+def reconstruct_model_subclass(subclass_data, server_model, namespace, exec_func):
+    # 1. Execute class definitions with resolved imports
+    for cls_name, cls_data in discovered_classes.items():
+        # Resolve server imports (handles aliases correctly)
+        for ref_name, import_info in cls_data['server_imports'].items():
+            if import_info['type'] == 'module':
+                namespace[ref_name] = importlib.import_module(import_info['module'])
+            elif import_info['type'] in ('class', 'callable'):
+                mod = importlib.import_module(import_info['module'])
+                namespace[ref_name] = getattr(mod, import_info['name'])
+
+        # Execute class definition
+        exec_func(cls_data['source']['code'], namespace)
+
+    # 2. Create instance and populate state
+    subclass = namespace[class_name]
+    reconstructed = object.__new__(subclass)
+
+    # Copy server-provided attrs from base model
+    for key, value in server_model.__dict__.items():
+        reconstructed.__dict__[key] = value
+
+    # Override with custom state
+    for key, value in custom_state.items():
+        if not value.get('__server_provided__'):
+            reconstructed.__dict__[key] = value
+
+    return reconstructed
+```
+
+### Rename Dicts (Complementary Mechanism)
+
+In addition to class serialization, StandardizedTransformer uses **rename dicts** to map model-specific names to standardized names:
+
+```python
+# Included in model_key, sent to server
+{
+    "h": "layers",           # GPT2's layer list
+    "attn": "self_attn",     # Attention module
+    "ln_f": "ln_final",      # Final layer norm
+    ...  # 36 mappings total for GPT-2
+}
+```
+
+The server reconstructs the base model with this rename dict, enabling `model.layers`, `layer.self_attn`, etc.
+
+### The `_server_provided` Attribute
+
+The class hierarchy uses `_server_provided` to mark which attributes come from server infrastructure:
+
+```python
+class Envoy:
+    _server_provided: frozenset = frozenset({
+        '_module', '_source', '_interleaver', '_default_mediators',
+        '_children', '_alias', '_fake_inputs', '_fake_output',
+    })
+
+class NNsight(Envoy):
+    _server_provided = Envoy._server_provided | frozenset({'_model'})
+
+class HuggingFaceModel(NNsight):
+    _server_provided = NNsight._server_provided | frozenset({'repo_id', 'revision'})
+
+class LanguageModel(HuggingFaceModel):
+    _server_provided = HuggingFaceModel._server_provided | frozenset({'tokenizer', 'generator'})
+```
+
+**Purpose**: When serializing, `_server_provided` identifies which attributes:
+- Should NOT be serialized (they come from server's model)
+- Should be replaced with server's values on reconstruction
+
+### Identity-Based Model Reference Detection
+
+When serializing instance state that contains references to the traced model (e.g., `self.model = model`), we use **identity checking**:
+
+```python
+def is_the_traced_model(value: Any, traced_model: Any) -> bool:
+    """Check if value IS the specific model being traced (by identity)."""
+    return traced_model is not None and value is traced_model
+```
+
+This ensures `self.model` serializes as `{"__model_ref__": True}` and gets replaced with the server's model.
+
+### Serialization Overhead
+
+For nnterp's StandardizedTransformer with GPT-2:
+
+| Component | Size |
+|-----------|------|
+| **Total JSON size** | **~33.6 KB** |
+| `discovered_classes` (8 classes) | 30,716 bytes |
+| `state` (35 attributes) | 1,508 bytes |
+| `model_key` (rename dict, etc.) | 1,179 bytes |
+
+**Per-class breakdown:**
+
+| Class | Source Size | Imports |
+|-------|-------------|---------|
+| StandardizedTransformer | 13.0 KB | 7 |
+| AttentionProbabilitiesAccessor | 6.9 KB | 5 |
+| RenameConfig | 3.2 KB | 1 |
+| LayerAccessor | 2.6 KB | 2 |
+| AttnProbFunction | 0.6 KB | 2 |
+| IOType | 0.1 KB | 1 |
+| RenamingError | 0.1 KB | 0 |
+| DummyCache | 0.1 KB | 0 |
+
+This is a one-time cost per model type. ~33KB to transmit an entire third-party library's model wrapper (8 classes, 18 import references) is reasonable overhead.
+
+### End-to-End Tests
+
+The implementation is validated by `tests/test_e2e_remote_nnterp.py` which runs **8 tests** (~3 minutes total). Each test spawns a subprocess with nnterp blocked via import hook, simulating a server without nnterp installed:
+
+**Test 1: Rename Dict Accessors**
+1. Client creates `StandardizedTransformer("gpt2")`
+2. Client extracts model_key (includes rename dict with 36 mappings)
+3. Server (subprocess with nnterp **blocked**) reconstructs base model
+4. Tests: `model.layers`, `layer.self_attn`, `layer.mlp` all work
+
+**Test 2: Full Subclass Reconstruction**
+1. Client serializes StandardizedTransformer class and state
+2. Server reconstructs the full subclass without nnterp
+3. Tests custom properties work:
+   - `model.num_layers` returns 12 ✓
+   - `model.hidden_size` returns 768 ✓
+   - `model.num_heads` returns 12 ✓
+   - `model.vocab_size` returns 50257 ✓
+4. Tests trace execution with custom properties ✓
+
+**Test 3: Logit Lens Pattern**
+1. Client serializes StandardizedTransformer for logit lens analysis
+2. Server iterates all layers using `model.num_layers` and `model.layers[i]`
+3. Applies final norm via `model.ln_final` and projection via `model.lm_head`
+4. Simulates the exact pattern used in neural-mechanics course notebooks ✓
+
+**Test 4: Probe Training Workflow**
+1. Client creates StandardizedTransformer and probe configuration
+2. Server extracts hidden states using:
+   - `model.layers[layer_idx].output[0]` for layer outputs
+   - `model.hidden_size` for probe input dimension
+3. Trains a linear probe classifier on extracted hidden states
+4. Verifies training happened (weights changed, accuracy improved) ✓
+
+This test validates a realistic research workflow where:
+- Model wrappers (nnterp) provide standardized accessors
+- Hidden states are extracted from specific layers
+- External classifiers are trained on those representations
+- All without nnterp installed on the server
+
+**Test 5: Steering Vectors**
+1. Client creates a steering vector (768-dim tensor)
+2. Server applies steering to hidden states: `layer_output[:] += scale * steering_vec`
+3. Verifies output changes when steering is applied ✓
+
+**Test 6: Lambda Closures Over Model**
+1. Tests lambda patterns: `get_layer = lambda i: model.layers[i].output[0]`
+2. Tests closures with variables: `scale_output = lambda h: h * scale_factor`
+3. Tests lambdas using model properties: `lambda: model.layers[model.num_layers // 2]`
+4. Tests multi-layer extraction in loops ✓
+
+**Test 7: @remote Probe with Trained Weights**
+1. Client defines `@nnsight.remote class SentimentProbe(nn.Module)`
+2. Probe weights are set to specific values (simulating training)
+3. Server reconstructs probe class and instance with weights
+4. Verifies weights transferred correctly and inference works ✓
+
+**Test 8: Gradient Computation**
+1. Tests extracting hidden states with gradient tracking enabled
+2. Tests saliency map pattern: `torch.randn(..., requires_grad=True)`
+3. Tests model properties in gradient context ✓
+
+### Test Cases Verified ✓
+
+| Test Case | Status | Notes |
+|-----------|--------|-------|
+| **Steering vectors** | ✓ Tested | `h[:] = h + steering_vec` works |
+| **Lambda closures over model** | ✓ Tested | All common patterns work |
+| **@remote probe class** | ✓ Tested | Weights serialize/deserialize correctly |
+| **Gradient computation** | ✓ Tested | Tensors are gradient-ready |
+| **Multi-model traces** | ✗ Not supported | See limitation below |
+| **Attention patterns** | Untested | Low risk |
+| **Activation patching** | Untested | Medium risk |
+| **Dataclass with tensors** | Untested | Medium risk |
+| **collect_residuals()** | Untested | Low risk |
+| **Batched prompts** | Untested | Low risk |
+
+### Limitation: Single Model Context
+
+The current implementation assumes a **single model context** per trace session. Multi-model traces (using two different LanguageModels in the same session) are **not supported**.
+
+```python
+# NOT SUPPORTED
+model1 = StandardizedTransformer("gpt2")
+model2 = StandardizedTransformer("gpt2-medium")
+
+with model1.trace("Hello"):
+    h1 = model1.layers[5].output[0]
+    # Cannot reference model2 here - only one model per trace
+```
+
+**Why**: The `__model_ref__` serialization mechanism identifies model references by identity (`value is traced_model`). When serializing instance state, any reference to the traced model is replaced with `{"__model_ref__": True}`, which the server replaces with its reconstructed model. This assumes exactly one model is being traced.
+
+**Workaround**: Run separate traces for each model:
+```python
+with model1.trace("Hello"):
+    h1 = model1.layers[5].output[0].save()
+
+with model2.trace("Hello"):
+    h2 = model2.layers[5].output[0].save()
+```
+
+**Already Covered** (by existing tests):
+- Layer iteration (Test 3, 4)
+- Custom properties (Test 2)
+- Rename dict accessors (Test 1)
+- Nested class dependencies (8 classes auto-discovered)
+
+### What Works
+
+| Feature | Status | Mechanism |
+|---------|--------|-----------|
+| `model.layers` accessor | ✓ Works | Rename dict |
+| `model.layers[i].self_attn` | ✓ Works | Rename dict |
+| `model.num_layers` property | ✓ Works | Subclass reconstruction |
+| `model.hidden_size` property | ✓ Works | Subclass reconstruction |
+| `model.vocab_size` property | ✓ Works | Subclass reconstruction |
+| Custom methods | ✓ Works | Subclass reconstruction |
+| Full trace with properties | ✓ Works | Combined mechanisms |
+
+### Implementation Notes
+
+**No `@nnsight.remote` Required**: LanguageModel subclasses are automatically detected and serialized without requiring the `@nnsight.remote` decorator. This means third-party libraries like nnterp work without modification.
+
+**Alias Handling**: The `server_imports` mechanism correctly handles module aliases. If nnterp uses `import torch as th`, the serialization records `{"th": {"type": "module", "module": "torch"}}` and the server imports torch under the name `th`.
+
+**Dependency Chain**: The auto-discovery recursively finds all non-server-available dependencies. For StandardizedTransformer, this includes helper classes like `RenameConfig`, `LayerAccessor`, `AttnProbFunction`, etc.
+
+**Graceful Degradation**: If class serialization fails for any reason, the system falls back to just using rename dicts (accessors work, but custom methods/properties don't).
+
+### Potential Optimization: Server-Side Library Detection
+
+**Current Behavior**: The system always transmits source code for:
+- LanguageModel subclasses (like nnterp's StandardizedTransformer)
+- `@nnsight.remote` decorated code (even with `library=` and `version=` metadata)
+
+This works reliably but has ~33KB overhead per subclass, even if the library is already installed server-side.
+
+**The Optimization**: If the server has the library installed with a compatible version, skip transmission:
+
+```python
+# Hypothetical future behavior
+if server_has_library("nnterp", version=">=0.1.0"):
+    # Fast path: just send import reference
+    return {"type": "import", "path": "nnterp.StandardizedTransformer"}
+else:
+    # Current path: serialize full source
+    return serialize_model_subclass(model)
+```
+
+**What's Needed**:
+
+1. **Server package manifest**: The NDIF API would expose installed packages:
+   ```json
+   GET /api/packages
+   {"nnterp": "0.1.5", "einops": "0.6.1", ...}
+   ```
+
+2. **Client-side check before serialize**: Query the manifest and skip serialization when package exists
+
+3. **Version compatibility**: Handle cases where client has newer/older version than server
+
+4. **Source hash verification** (optional): Even with matching versions, verify source hash to detect local patches
+
+**Same Issue for `@nnsight.remote`**:
+
+The `@nnsight.remote(library="mylib", version="1.0.0")` decorator already captures version metadata:
+
+```python
+@nnsight.remote(library="nnterp", version="0.1.0")
+class StandardizedTransformer:
+    ...
+```
+
+The serialization includes this metadata but always sends the source anyway. With server-side detection, we could:
+1. Check if `nnterp==0.1.0` is on server
+2. If yes, send just `{"import": "nnterp.StandardizedTransformer"}`
+3. If no (or version mismatch), send full source
+
+**Trade-offs**:
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Always transmit source (current) | Simple, reliable, client version always used | ~33KB overhead even when unnecessary |
+| Detect server availability | Minimal overhead when library exists | Requires API changes, version compat logic |
+| Hash verification | Catches local patches | Requires computing/comparing hashes |
+
+**Recommendation**: The current "always transmit" approach is acceptable for now (~33KB is trivial compared to model weights). Consider the optimization when:
+- The package manifest API exists in NDIF
+- Users request faster execution for library-heavy workflows
+- Bandwidth becomes a concern for high-volume usage
+
+---
+
 ## Implemented Features (v2.1)
 
 The following features from the design document have been implemented:

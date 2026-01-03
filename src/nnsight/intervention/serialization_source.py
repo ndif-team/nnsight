@@ -6,28 +6,249 @@ cloudpickle bytecode. This enables:
 - Python version independence (3.10 client can work with 3.12 server)
 - Third-party libraries decorated with @nnsight.remote work without server installation
 - Clear, early errors instead of mysterious runtime failures
+- Auto-discovery of dependencies (classes used by LanguageModel subclasses)
 """
 
 from __future__ import annotations
 
+import ast
 import base64
+import inspect
 import json
+import sys
+import textwrap
 import types
 import zlib
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..intervention.tracing.base import Tracer
 
 from ..remote import (
-    is_json_serializable, ALLOWED_MODULES,
+    is_json_serializable, ALLOWED_MODULES, ALLOWED_BASE_CLASSES,
     is_lambda, extract_lambda_source, LambdaExtractionError, validate_lambda_for_remote,
+    find_external_references, resolve_module_references, validate_ast,
 )
 
 
 class SourceSerializationError(Exception):
     """Raised when source-based serialization fails."""
     pass
+
+
+# =============================================================================
+# Auto-Discovery of Dependencies
+# =============================================================================
+
+# Cache of auto-discovered classes to avoid re-processing
+_auto_discovered_cache: Dict[type, Dict[str, Any]] = {}
+
+
+def can_auto_discover(cls: type) -> bool:
+    """
+    Check if a class can be auto-discovered for remote serialization.
+
+    A class can be auto-discovered if:
+    1. It has available source code (via inspect.getsource)
+    2. It's not from a core allowed module (torch, numpy, etc.)
+    3. It's not already @remote decorated
+    """
+    # Already decorated
+    if getattr(cls, '_remote_validated', False):
+        return True  # Use existing metadata
+
+    # Check module - skip core allowed modules
+    module = getattr(cls, '__module__', '')
+    if module:
+        root = module.split('.')[0]
+        # Skip torch, numpy, etc. - these are available on server
+        if root in ALLOWED_MODULES:
+            return False
+        # Skip nnsight internals (except modeling subclasses)
+        if root == 'nnsight' and 'modeling' not in module:
+            return False
+
+    # Check if source is available
+    try:
+        inspect.getsource(cls)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Auto-discover a class for remote serialization.
+
+    This does the same work as @remote but at serialization time,
+    allowing third-party classes (like nnterp's LayerAccessor) to be
+    automatically serialized without requiring decoration.
+
+    Args:
+        cls: The class to discover
+        discovered: Dict to accumulate discovered classes (for recursion)
+
+    Returns:
+        Dict with source, module_refs, and type info
+    """
+    if discovered is None:
+        discovered = {}
+
+    cls_name = cls.__name__
+
+    # Check cache first
+    if cls in _auto_discovered_cache:
+        cached = _auto_discovered_cache[cls]
+        if cls_name not in discovered:
+            discovered[cls_name] = cached
+        return cached
+
+    # Already @remote decorated - use existing metadata
+    if getattr(cls, '_remote_validated', False):
+        result = {
+            "source": {
+                "code": getattr(cls, '_remote_source', ''),
+                "file": inspect.getfile(cls) if hasattr(cls, '__module__') else "<unknown>",
+                "line": 1,
+            },
+            "module_refs": getattr(cls, '_remote_module_refs', {}),
+            "closure_vars": getattr(cls, '_remote_closure_vars', {}),
+            "type": "class",
+            "instances": {},
+            "library": getattr(cls, '_remote_library', None),
+            "version": getattr(cls, '_remote_version', None),
+        }
+        _auto_discovered_cache[cls] = result
+        discovered[cls_name] = result
+        return result
+
+    # Extract source
+    try:
+        source = inspect.getsource(cls)
+        dedented_source = textwrap.dedent(source)
+    except (OSError, TypeError) as e:
+        raise SourceSerializationError(
+            f"Cannot auto-discover class '{cls_name}': source not available. {e}"
+        )
+
+    # Get file/line info
+    try:
+        source_file = inspect.getfile(cls)
+        _, start_line = inspect.getsourcelines(cls)
+    except (OSError, TypeError):
+        source_file = "<unknown>"
+        start_line = 1
+
+    # Parse AST and find external references
+    try:
+        tree = ast.parse(dedented_source)
+    except SyntaxError as e:
+        raise SourceSerializationError(
+            f"Cannot parse source for '{cls_name}': {e}"
+        )
+
+    # Find external references
+    external_names = find_external_references(tree, cls)
+
+    # Get globals to resolve references
+    import sys
+    obj_globals = {}
+    if hasattr(cls, '__module__'):
+        module = sys.modules.get(cls.__module__)
+        obj_globals = getattr(module, '__dict__', {}) if module else {}
+
+    # Resolve module references, but also track type references for auto-discovery
+    module_refs, resolution_errors = resolve_module_references(external_names, cls)
+
+    # Find type references that need auto-discovery
+    types_to_discover = []
+    filtered_errors = []
+    for error in resolution_errors:
+        # Check if error is about a type reference we can auto-discover
+        # Error format: "Reference 'X' (type 'X' from module 'Y') is not @nnsight.remote..."
+        if "is not @nnsight.remote decorated" in error:
+            # Try to find the type in globals
+            for name in external_names:
+                if name in obj_globals:
+                    value = obj_globals[name]
+                    if isinstance(value, type) and can_auto_discover(value):
+                        types_to_discover.append(value)
+                        break
+            else:
+                filtered_errors.append(error)
+        else:
+            filtered_errors.append(error)
+
+    # Validate AST (warnings only for auto-discovered - don't block)
+    ast_errors = validate_ast(tree, cls_name)
+
+    # For auto-discovered classes, we're more lenient - just warn
+    if filtered_errors or ast_errors:
+        import warnings
+        all_errors = filtered_errors + ast_errors
+        if all_errors:
+            warnings.warn(
+                f"Auto-discovered class '{cls_name}' has potential issues:\n" +
+                "\n".join(f"  - {e}" for e in all_errors[:3])
+            )
+
+    # Auto-detect library/version
+    library = None
+    version = None
+    if hasattr(cls, '__module__') and cls.__module__:
+        root_package = cls.__module__.split('.')[0]
+        try:
+            from importlib.metadata import version as get_version
+            version = get_version(root_package)
+            library = root_package
+        except Exception:
+            pass
+
+    result = {
+        "source": {
+            "code": dedented_source,
+            "file": source_file,
+            "line": start_line,
+        },
+        "module_refs": module_refs,
+        "closure_vars": {},
+        "type": "class",
+        "instances": {},
+        "library": library,
+        "version": version,
+    }
+
+    # Cache and record
+    _auto_discovered_cache[cls] = result
+    discovered[cls_name] = result
+
+    # Recursively discover base classes (except object and allowed bases)
+    for base in cls.__bases__:
+        if base is object:
+            continue
+        base_fullname = f"{base.__module__}.{base.__name__}"
+        if base_fullname in ALLOWED_BASE_CLASSES:
+            continue
+        if can_auto_discover(base):
+            auto_discover_class(base, discovered)
+
+    # Recursively discover type references found in the source
+    for dep_type in types_to_discover:
+        if dep_type.__name__ not in discovered:
+            auto_discover_class(dep_type, discovered)
+
+    return result
+
+
+def is_auto_discoverable_instance(value: Any) -> bool:
+    """Check if a value is an instance of an auto-discoverable class."""
+    if value is None:
+        return False
+    cls = type(value)
+    # Skip basic types
+    if cls.__module__ == 'builtins':
+        return False
+    return can_auto_discover(cls)
 
 
 # =============================================================================
@@ -299,19 +520,36 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
     frame = tracer.info.frame
     frame_locals = frame.f_locals if frame else {}
 
+    # Find the traced model from frame locals (for identity-based model ref detection)
+    traced_model = None
+    for value in frame_locals.values():
+        if is_model_reference(value):
+            traced_model = value
+            break
+
     # Extract file/line metadata for error mapping
     source_metadata = extract_source_metadata(tracer)
 
     # Extract variables and remote objects
-    variables, remote_objects, model_refs = extract_all(frame_locals)
+    variables, remote_objects, model_refs = extract_all(frame_locals, traced_model=traced_model)
 
     payload = {
-        "version": "2.1",  # Bumped for metadata support
+        "version": "2.2",  # Bumped for model_subclass support
         "source": source_metadata,  # Now includes file/line info
         "variables": variables,
         "remote_objects": remote_objects,
         "model_refs": model_refs,
     }
+
+    # Check if the model is a LanguageModel subclass that needs its source sent
+    if traced_model is not None and is_languagemodel_subclass(traced_model):
+        try:
+            model_subclass_data = serialize_model_subclass(traced_model)
+            payload["model_subclass"] = model_subclass_data
+        except SourceSerializationError:
+            # If we can't auto-discover the subclass, fall back to just using model_key
+            # The server will create a plain LanguageModel with the rename dict
+            pass
 
     return json.dumps(payload).encode('utf-8')
 
@@ -352,13 +590,14 @@ def extract_source_metadata(tracer: "Tracer") -> Dict[str, Any]:
     return result
 
 
-def extract_all(locals_dict: Dict[str, Any], seen: set = None) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+def extract_all(locals_dict: Dict[str, Any], seen: set = None, traced_model: Any = None) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
     """
     Extract all serializable data from locals.
 
     Args:
         locals_dict: Dictionary of local variables
         seen: Set of already-seen object ids (for cycle detection)
+        traced_model: The model being traced (for identity-based model ref detection)
 
     Returns:
         (variables, remote_objects, model_refs) where:
@@ -389,7 +628,7 @@ def extract_all(locals_dict: Dict[str, Any], seen: set = None) -> Tuple[Dict[str
 
         # Check for @nnsight.remote decorated functions/classes or instances
         if is_remote_object(value):
-            extract_remote_object(name, value, remote_objects)
+            extract_remote_object(name, value, remote_objects, traced_model=traced_model)
             continue
 
         # Check for lambda functions (extract and validate)
@@ -441,7 +680,11 @@ def extract_all(locals_dict: Dict[str, Any], seen: set = None) -> Tuple[Dict[str
 
 
 def is_model_reference(value: Any) -> bool:
-    """Check if value is a reference to the model (Envoy or NNsight)."""
+    """Check if value is a reference to the model (Envoy or NNsight types).
+
+    Note: This is a type-based heuristic used in extract_all for frame locals.
+    For precise model identity checking during serialization, use is_the_traced_model().
+    """
     # Check by type name to avoid circular imports
     type_name = type(value).__name__
     if type_name in ('Envoy', 'NNsight', 'LanguageModel'):
@@ -457,6 +700,423 @@ def is_model_reference(value: Any) -> bool:
     return False
 
 
+def is_languagemodel_subclass(value: Any) -> bool:
+    """Check if value is an instance of a LanguageModel SUBCLASS (not LanguageModel itself).
+
+    This is used to detect third-party model wrappers like nnterp's StandardizedTransformer
+    that need their class source sent to the server.
+    """
+    cls = type(value)
+    cls_name = cls.__name__
+
+    # Not a subclass if it's exactly LanguageModel or a base nnsight class
+    if cls_name in ('LanguageModel', 'TransformersModel', 'HuggingFaceModel', 'NNsight', 'Envoy'):
+        return False
+
+    # Check if it inherits from a nnsight modeling class
+    module = getattr(cls, '__module__', '')
+
+    # Walk the MRO to see if any base is a nnsight modeling class
+    for base in cls.__mro__[1:]:  # Skip the class itself
+        base_module = getattr(base, '__module__', '')
+        if base_module and 'nnsight' in base_module and 'modeling' in base_module:
+            return True
+
+    return False
+
+
+def is_nnsight_class(cls: type) -> bool:
+    """Check if a class is part of nnsight (and thus available on server)."""
+    module = getattr(cls, '__module__', '')
+    return module and 'nnsight' in module
+
+
+def is_server_available_class(cls: type) -> bool:
+    """Check if a class is from a module that's available on the server."""
+    module = getattr(cls, '__module__', '')
+    if not module:
+        return True  # Unknown module, assume available
+
+    # Get root module
+    root = module.split('.')[0]
+
+    # nnsight classes are on the server
+    if 'nnsight' in module:
+        return True
+
+    # Standard library modules
+    if root in {'builtins', 'abc', 'enum', 'typing', 'collections', 'functools',
+                'itertools', 'operator', 'copy', 'pickle', 'json', 'math',
+                'numbers', 'dataclasses', 're', 'string', 'types', 'warnings',
+                'contextlib', 'weakref', 'inspect', 'io', 'os', 'sys', 'pathlib'}:
+        return True
+
+    # Major ML libraries that are available on the server
+    if root in {'torch', 'numpy', 'transformers', 'einops', 'scipy', 'sklearn',
+                'huggingface_hub', 'tokenizers', 'safetensors', 'accelerate'}:
+        return True
+
+    # nnsight's allowed modules
+    if root in ALLOWED_MODULES:
+        return True
+
+    return False
+
+
+def auto_discover_model_subclass(cls: type, discovered: Dict[str, Any]) -> None:
+    """
+    Auto-discover a LanguageModel subclass for remote serialization.
+
+    Unlike auto_discover_class, this function:
+    - Only discovers the subclass itself (not nnsight base classes)
+    - Discovers non-nnsight dependencies (like nnterp helper classes)
+    - Stops recursion at nnsight/server-available classes
+
+    Args:
+        cls: The LanguageModel subclass to discover
+        discovered: Dict to accumulate discovered classes
+    """
+    import inspect
+
+    cls_name = cls.__name__
+
+    # Skip if already discovered (or in progress)
+    if cls_name in discovered:
+        return
+
+    # Skip classes that are already available on the server
+    if is_server_available_class(cls):
+        return
+
+    # Mark as in progress to prevent cycles
+    discovered[cls_name] = None
+
+    # Get the source
+    try:
+        source = inspect.getsource(cls)
+    except (OSError, TypeError):
+        # Can't get source, skip this class
+        return
+
+    # Get file/line metadata
+    try:
+        source_file = inspect.getfile(cls)
+        source_lines, start_line = inspect.getsourcelines(cls)
+    except (OSError, TypeError):
+        source_file = "<unknown>"
+        start_line = 1
+
+    # Find module-level references in the source
+    module_refs = {}
+    external_names = set()
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        tree = None
+
+    if tree:
+        # Find names used in the class that aren't defined locally
+        class NameFinder(ast.NodeVisitor):
+            def __init__(self):
+                self.names = set()
+                self.defined = set()
+
+            def visit_Name(self, node):
+                if isinstance(node.ctx, ast.Load):
+                    self.names.add(node.id)
+                elif isinstance(node.ctx, ast.Store):
+                    self.defined.add(node.id)
+                self.generic_visit(node)
+
+            def visit_FunctionDef(self, node):
+                self.defined.add(node.name)
+                self.generic_visit(node)
+
+            def visit_ClassDef(self, node):
+                self.defined.add(node.name)
+                self.generic_visit(node)
+
+        finder = NameFinder()
+        finder.visit(tree)
+        external_names = finder.names - finder.defined - {'self', 'cls', 'super'}
+
+    # Resolve external names from the class's module
+    # Track server-available imports so they can be resolved during reconstruction
+    server_imports = {}
+
+    cls_module = sys.modules.get(cls.__module__)
+    if cls_module:
+        for name in external_names:
+            if hasattr(cls_module, name):
+                value = getattr(cls_module, name)
+
+                # Record server-available types with their module path
+                if isinstance(value, type) and is_server_available_class(value):
+                    type_module = getattr(value, '__module__', '')
+                    type_name = value.__name__
+                    if type_module:
+                        server_imports[name] = {"type": "class", "module": type_module, "name": type_name}
+                    continue
+
+                # Record server-available functions/decorators (like dataclass, abstractmethod)
+                if callable(value) and hasattr(value, '__module__'):
+                    func_module = getattr(value, '__module__', '')
+                    if func_module:
+                        root = func_module.split('.')[0]
+                        if root in ALLOWED_MODULES or root in {
+                            'torch', 'numpy', 'transformers', 'einops', 'scipy', 'sklearn',
+                            'huggingface_hub', 'tokenizers', 'safetensors', 'accelerate',
+                            'builtins', 'abc', 'enum', 'typing', 'collections', 'functools',
+                            'itertools', 'operator', 'copy', 'pickle', 'json', 'math',
+                            'numbers', 'dataclasses', 're', 'string', 'types', 'warnings',
+                            'contextlib', 'weakref', 'inspect', 'io', 'os', 'sys', 'pathlib'
+                        }:
+                            func_name = getattr(value, '__name__', name)
+                            server_imports[name] = {"type": "callable", "module": func_module, "name": func_name}
+                            continue
+
+                # Record server-available modules
+                if isinstance(value, types.ModuleType):
+                    mod_name = value.__name__
+                    root = mod_name.split('.')[0]
+                    # Check against server-available modules
+                    if root in ALLOWED_MODULES or root in {
+                        'torch', 'numpy', 'transformers', 'einops', 'scipy', 'sklearn',
+                        'huggingface_hub', 'tokenizers', 'safetensors', 'accelerate',
+                        'builtins', 'abc', 'enum', 'typing', 'collections', 'functools',
+                        'itertools', 'operator', 'copy', 'pickle', 'json', 'math',
+                        'numbers', 'dataclasses', 're', 'string', 'types', 'warnings',
+                        'contextlib', 'weakref', 'inspect', 'io', 'os', 'sys', 'pathlib'
+                    }:
+                        server_imports[name] = {"type": "module", "module": mod_name}
+                        continue
+
+                # Capture JSON-serializable values
+                if value is None or isinstance(value, (bool, int, float, str)):
+                    module_refs[name] = value
+                elif isinstance(value, (list, tuple, dict)):
+                    try:
+                        json.dumps(value)
+                        module_refs[name] = value
+                    except (TypeError, ValueError):
+                        pass
+
+                # Discover non-server-available type dependencies
+                if isinstance(value, type) and not is_server_available_class(value):
+                    if can_auto_discover(value):
+                        auto_discover_model_subclass(value, discovered)
+
+    # Add this class to discovered
+    discovered[cls_name] = {
+        "source": {
+            "code": source,
+            "file": source_file,
+            "line": start_line,
+        },
+        "module_refs": module_refs,
+        "server_imports": server_imports,
+        "type": "class",
+    }
+
+    # Discover non-server-available base classes
+    for base in cls.__bases__:
+        if base is object:
+            continue
+        if not is_server_available_class(base) and can_auto_discover(base):
+            auto_discover_model_subclass(base, discovered)
+
+
+def serialize_model_subclass(model: Any, discovered_classes: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Serialize a LanguageModel subclass for remote reconstruction.
+
+    This enables third-party model wrappers (like nnterp's StandardizedTransformer)
+    to work on servers that don't have the library installed.
+
+    Args:
+        model: The LanguageModel subclass instance
+        discovered_classes: Dict to accumulate auto-discovered classes
+
+    Returns:
+        Dict containing:
+        - class_name: Name of the subclass
+        - source: Auto-discovered class source with dependencies
+        - state: Serialized non-server-provided instance state
+        - model_key: The model key for server-side model creation
+    """
+    if discovered_classes is None:
+        discovered_classes = {}
+
+    cls = type(model)
+    cls_name = cls.__name__
+
+    # Check if class can be auto-discovered
+    if not can_auto_discover(cls):
+        raise SourceSerializationError(
+            f"LanguageModel subclass '{cls_name}' cannot be auto-discovered for remote execution. "
+            f"Ensure the class source is available (in a .py file, not dynamically generated)."
+        )
+
+    # Auto-discover ONLY the subclass itself (not nnsight base classes)
+    # nnsight classes are already available on the server
+    auto_discover_model_subclass(cls, discovered_classes)
+
+    # Get server-provided attributes from the class hierarchy
+    server_provided = getattr(cls, '_server_provided', frozenset())
+
+    # Serialize non-server-provided instance state
+    custom_state = {}
+    for key, value in model.__dict__.items():
+        if key in server_provided:
+            # Mark as server-provided (will be substituted on server)
+            custom_state[key] = {"__server_provided__": True}
+        elif key.startswith('_'):
+            # Skip private attributes (likely internal state)
+            custom_state[key] = {"__server_provided__": True}
+        else:
+            # Try to serialize the value
+            try:
+                # Check if JSON-serializable
+                if value is None or isinstance(value, (bool, int, float, str)):
+                    custom_state[key] = value
+                elif isinstance(value, (list, tuple)):
+                    json.dumps(value)  # Validate
+                    custom_state[key] = list(value) if isinstance(value, tuple) else value
+                elif isinstance(value, dict):
+                    json.dumps(value)  # Validate
+                    custom_state[key] = value
+                else:
+                    # Non-serializable, mark as server-provided
+                    custom_state[key] = {"__server_provided__": True}
+            except (TypeError, ValueError):
+                custom_state[key] = {"__server_provided__": True}
+
+    # Get the model key for server-side model creation
+    model_key = None
+    if hasattr(model, '_remoteable_model_key'):
+        model_key = model._remoteable_model_key()
+
+    return {
+        "class_name": cls_name,
+        "discovered_classes": discovered_classes,
+        "state": custom_state,
+        "model_key": model_key,
+    }
+
+
+def reconstruct_model_subclass(
+    subclass_data: Dict[str, Any],
+    server_model: Any,
+    namespace: dict,
+    exec_func: callable,
+) -> Any:
+    """
+    Reconstruct a LanguageModel subclass on the server.
+
+    This enables third-party model wrappers (like nnterp's StandardizedTransformer)
+    to work on servers that don't have the library installed.
+
+    Args:
+        subclass_data: Dict containing class_name, discovered_classes, state, model_key
+        server_model: The server's base LanguageModel instance
+        namespace: Current execution namespace
+        exec_func: Function to execute code (handles restricted mode)
+
+    Returns:
+        Reconstructed model as an instance of the subclass
+    """
+    class_name = subclass_data.get('class_name')
+    discovered_classes = subclass_data.get('discovered_classes', {})
+    custom_state = subclass_data.get('state', {})
+
+    # First, execute all discovered class definitions
+    # Sort by dependency order if needed (base classes first)
+    # For simplicity, we execute them in the order they were discovered
+    for cls_name, cls_data in discovered_classes.items():
+        source_data = cls_data.get('source', '')
+        if isinstance(source_data, dict):
+            source_code = source_data.get('code', '')
+        else:
+            source_code = source_data
+
+        # Add module references (JSON-serializable values) to namespace
+        module_refs = cls_data.get('module_refs', {})
+        for ref_name, ref_value in module_refs.items():
+            if ref_name not in namespace:
+                namespace[ref_name] = ref_value
+
+        # Resolve server-available imports (types and modules)
+        server_imports = cls_data.get('server_imports', {})
+        for ref_name, import_info in server_imports.items():
+            if ref_name in namespace:
+                continue
+            try:
+                import importlib
+                import_type = import_info.get('type')
+                mod_name = import_info.get('module', '')
+                obj_name = import_info.get('name', '')
+
+                if import_type == 'module':
+                    # Import the module
+                    if mod_name:
+                        namespace[ref_name] = importlib.import_module(mod_name)
+                elif import_type in ('class', 'callable'):
+                    # Import the class or callable from its module
+                    if mod_name and obj_name:
+                        mod = importlib.import_module(mod_name)
+                        namespace[ref_name] = getattr(mod, obj_name)
+            except (ImportError, AttributeError):
+                # If import fails, continue (might be handled elsewhere)
+                pass
+
+        # Execute the class definition
+        if source_code:
+            try:
+                exec_func(source_code, namespace)
+            except Exception:
+                # If a class fails to define, continue with others
+                # (might be a base class that's already available)
+                pass
+
+    # Get the target subclass from namespace
+    if class_name not in namespace:
+        raise ValueError(
+            f"LanguageModel subclass '{class_name}' could not be reconstructed. "
+            f"Class definition may have failed to execute."
+        )
+
+    subclass = namespace[class_name]
+
+    # Create instance without calling __init__
+    reconstructed = object.__new__(subclass)
+
+    # Get server-provided attributes from the class hierarchy
+    server_provided = getattr(subclass, '_server_provided', frozenset())
+
+    # Copy all attributes from server_model first (as base)
+    for key, value in server_model.__dict__.items():
+        reconstructed.__dict__[key] = value
+
+    # Override with custom state (non-server-provided attributes)
+    for key, value in custom_state.items():
+        if isinstance(value, dict) and value.get('__server_provided__'):
+            # Keep the server's value (already copied above)
+            pass
+        else:
+            # Use the serialized value
+            reconstructed.__dict__[key] = value
+
+    return reconstructed
+
+
+def is_the_traced_model(value: Any, traced_model: Any) -> bool:
+    """Check if value IS the specific model being traced (by identity)."""
+    if traced_model is None:
+        return False
+    return value is traced_model
+
+
 def is_remote_object(obj: Any) -> bool:
     """Check if obj is a @nnsight.remote function/class or instance thereof."""
     # Check if it's a decorated function or class
@@ -470,7 +1130,7 @@ def is_remote_object(obj: Any) -> bool:
     return False
 
 
-def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any]) -> None:
+def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any], traced_model: Any = None) -> None:
     """
     Extract a @nnsight.remote object (function, class, or instance) for serialization.
 
@@ -478,6 +1138,7 @@ def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any]) -> 
         var_name: The variable name in the trace
         value: The @nnsight.remote decorated object or instance
         result: Dict to add the extracted data to
+        traced_model: The model being traced (for identity-based model ref detection)
     """
     import inspect
 
@@ -524,7 +1185,8 @@ def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any]) -> 
 
     # For instances, serialize their state
     if is_instance:
-        instance_state = serialize_instance_state(value)
+        # Pass result as discovered_classes so any new dependencies get added
+        instance_state = serialize_instance_state(value, discovered_classes=result, traced_model=traced_model)
         result[cls_name]["instances"][str(id(value))] = {
             "var_name": var_name,
             "state": instance_state
@@ -655,13 +1317,16 @@ def is_nn_module(value: Any) -> bool:
         return False
 
 
-def serialize_nn_module(value: Any, key: str, memo: dict) -> Dict[str, Any]:
+def serialize_nn_module(value: Any, key: str, memo: dict, discovered_classes: Dict[str, Any] = None, traced_model: Any = None) -> Dict[str, Any]:
     """
     Serialize a torch.nn.Module instance using object.__new__() + __dict__ approach.
 
     All nn.Module subclasses (both built-in and custom) store their state in __dict__,
     including _parameters, _buffers, _modules dicts. We recursively serialize __dict__.
     """
+    if discovered_classes is None:
+        discovered_classes = {}
+
     cls = type(value)
     module_path = cls.__module__
     class_name = cls.__name__
@@ -683,7 +1348,7 @@ def serialize_nn_module(value: Any, key: str, memo: dict) -> Dict[str, Any]:
 
         # Recursively serialize __dict__
         for k, v in value.__dict__.items():
-            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo)
+            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
 
         return result
 
@@ -694,7 +1359,7 @@ def serialize_nn_module(value: Any, key: str, memo: dict) -> Dict[str, Any]:
     )
 
 
-def serialize_value(value: Any, key: str, memo: dict) -> Any:
+def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[str, Any] = None, traced_model: Any = None) -> Any:
     """
     Serialize a single value for instance state.
 
@@ -702,10 +1367,15 @@ def serialize_value(value: Any, key: str, memo: dict) -> Any:
         value: The value to serialize
         key: The attribute key (for error messages)
         memo: Dict mapping id(obj) -> (ref_id, serialized) for deduplication
+        discovered_classes: Dict to accumulate auto-discovered classes
+        traced_model: The model being traced (for identity-based model ref detection)
 
     Returns:
         Serialized representation of the value
     """
+    if discovered_classes is None:
+        discovered_classes = {}
+
     # Primitives don't need deduplication
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -716,18 +1386,43 @@ def serialize_value(value: Any, key: str, memo: dict) -> Any:
         ref_id, _ = memo[obj_id]
         return {"__ref__": ref_id}
 
-    # Handle model references
-    if is_model_reference(value):
+    # Handle THE traced model (by identity)
+    if is_the_traced_model(value, traced_model):
         return {"__model_ref__": True}
 
     # Handle nn.Module instances FIRST (both built-in torch and @remote)
     # This must come before is_remote_object since @remote nn.Module should use __dict__ serialization
     if is_nn_module(value):
-        return serialize_nn_module(value, key, memo)
+        return serialize_nn_module(value, key, memo, discovered_classes, traced_model)
 
     # Handle other @remote instances (non-nn.Module classes)
     if is_remote_object(value):
         return {"__remote_ref__": id(value), "__remote_type__": type(value).__name__}
+
+    # Handle auto-discoverable instances (third-party classes like nnterp's LayerAccessor)
+    if is_auto_discoverable_instance(value):
+        cls = type(value)
+        cls_name = cls.__name__
+
+        # Auto-discover the class if not already discovered
+        if cls_name not in discovered_classes:
+            auto_discover_class(cls, discovered_classes)
+
+        # Serialize like a @remote instance
+        ref_id = f"auto_{obj_id}"
+        instance_state = {}
+        result = {
+            "__auto_instance__": cls_name,
+            "__state__": instance_state,
+            "__id__": ref_id,
+        }
+        memo[obj_id] = (ref_id, result)
+
+        # Recursively serialize __dict__
+        for k, v in value.__dict__.items():
+            instance_state[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
+
+        return result
 
     # Handle nn.Parameter (must check before is_tensor since Parameter is a Tensor subclass)
     if is_nn_parameter(value):
@@ -760,7 +1455,7 @@ def serialize_value(value: Any, key: str, memo: dict) -> Any:
         result = {"__dict__": serialized_dict, "__id__": ref_id}
         memo[obj_id] = (ref_id, result)
         for k, v in value.items():
-            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo)
+            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
         return result
 
     # Handle lists/tuples
@@ -774,7 +1469,7 @@ def serialize_value(value: Any, key: str, memo: dict) -> Any:
         result = {"__list__": serialized_list, "__tuple__": isinstance(value, tuple), "__id__": ref_id}
         memo[obj_id] = (ref_id, result)
         for i, item in enumerate(value):
-            serialized_list.append(serialize_value(item, f"{key}[{i}]", memo))
+            serialized_list.append(serialize_value(item, f"{key}[{i}]", memo, discovered_classes, traced_model))
         return result
 
     # Handle sets
@@ -818,13 +1513,15 @@ def serialize_value(value: Any, key: str, memo: dict) -> Any:
     )
 
 
-def serialize_instance_state(obj: Any, memo: dict = None) -> Dict[str, Any]:
+def serialize_instance_state(obj: Any, memo: dict = None, discovered_classes: Dict[str, Any] = None, traced_model: Any = None) -> Dict[str, Any]:
     """
     Serialize a @nnsight.remote instance's __dict__.
 
     Args:
         obj: Instance of a @nnsight.remote class
         memo: Dict mapping id(obj) -> (ref_id, serialized) for deduplication
+        discovered_classes: Dict to accumulate auto-discovered classes
+        traced_model: The model being traced (for identity-based model ref detection)
 
     Returns:
         Dict containing the serialized state
@@ -834,11 +1531,13 @@ def serialize_instance_state(obj: Any, memo: dict = None) -> Dict[str, Any]:
     """
     if memo is None:
         memo = {}
+    if discovered_classes is None:
+        discovered_classes = {}
 
     state = {}
 
     for key, value in obj.__dict__.items():
-        state[key] = serialize_value(value, key, memo)
+        state[key] = serialize_value(value, key, memo, discovered_classes, traced_model)
 
     return state
 
@@ -890,7 +1589,13 @@ def can_serialize_source_based(tracer: "Tracer") -> Tuple[bool, Optional[str]]:
     """
     try:
         frame_locals = tracer.info.frame.f_locals if tracer.info.frame else {}
-        extract_all(frame_locals)
+        # Find the traced model from frame locals (for identity-based model ref detection)
+        traced_model = None
+        for value in frame_locals.values():
+            if is_model_reference(value):
+                traced_model = value
+                break
+        extract_all(frame_locals, traced_model=traced_model)
         return True, None
     except SourceSerializationError as e:
         return False, str(e)
@@ -984,6 +1689,20 @@ def deserialize_source_based(
     # Track reconstructed remote objects for cross-referencing
     reconstructed_instances = {}
 
+    # Handle LanguageModel subclass reconstruction
+    # This enables third-party model wrappers (like nnterp's StandardizedTransformer)
+    # to work on servers that don't have the library installed
+    model_subclass_data = data.get('model_subclass')
+    if model_subclass_data:
+        model = reconstruct_model_subclass(
+            model_subclass_data,
+            model,
+            namespace,
+            exec_func
+        )
+        # Update the model reference in namespace
+        namespace['model'] = model
+
     # Reconstruct @nnsight.remote functions and classes
     for obj_name, obj_data in data.get('remote_objects', {}).items():
         # Add captured module-level references
@@ -1075,6 +1794,29 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
             return reconstructed[ref_id]
         # Placeholder, will be resolved later if needed
         return value
+
+    # Auto-discovered instance (from third-party packages like nnterp)
+    if '__auto_instance__' in value:
+        cls_name = value['__auto_instance__']
+
+        # Get class from namespace (should have been exec'd from source)
+        cls = namespace.get(cls_name)
+        if cls is None:
+            raise ValueError(f"Auto-discovered class '{cls_name}' not found in namespace")
+
+        # Create instance without __init__
+        instance = object.__new__(cls)
+
+        # Register BEFORE recursing (handles circular refs)
+        if '__id__' in value:
+            reconstructed[value['__id__']] = instance
+
+        # Reconstruct __dict__ from __state__
+        if '__state__' in value:
+            for k, v in value['__state__'].items():
+                setattr(instance, k, reconstruct_value(v, namespace, model, reconstructed))
+
+        return instance
 
     # Callable reference
     if '__callable_ref__' in value:

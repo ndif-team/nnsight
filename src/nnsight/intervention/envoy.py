@@ -66,6 +66,13 @@ class Envoy(Batchable):
         _alias (Aliaser): Aliaser object for managing aliases
     """
 
+    # Attributes that are server-provided infrastructure and should not be serialized
+    # for remote execution. Subclasses can extend this set.
+    _server_provided: frozenset = frozenset({
+        '_module', '_source', '_interleaver', '_default_mediators',
+        '_children', '_alias', '_fake_inputs', '_fake_output',
+    })
+
     def __init__(
         self,
         module: torch.nn.Module,
