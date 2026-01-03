@@ -191,41 +191,39 @@ This is where closure variables get transferred. Currently they're cloudpickled;
 └─────────────────────────────────────────────────────┘
 ```
 
-### New Serialization Format
+### New Serialization Format: Flat Graph + Buffers
+
+To support **binary attachments** (like tensors) and **circular references**, the format uses a "flat graph" approach alongside sidecar binary buffers.
 
 ```python
+# Returns: Tuple[json_payload, List[bytes]]
+# json_payload:
 {
-    "version": "2.0",
+    "version": "2.1",
     "source": [
-        "def __nnsight_tracer_12345__(...):\n",
-        "    __nnsight_tracer__.pull()\n",
-        "    h = model.layers[10].output[0]\n",
-        "    result = (h @ model.lm_head.weight.T).topk(10).save()\n",
-        "    __nnsight_tracer__.push()\n"
+        {"code": "def ...", "file": "user_script.py", "line": 10},
+        ...
     ],
-    "variables": {
-        "threshold": 0.5,
-        "layers": [10, 15, 20],
-        "top_k": 10
-    },
-    "remote_objects": {
-        "LogitLensKit": {
-            "source": "class LogitLensKit:\n    ...",
-            "module_refs": {"DEFAULT_TOP_K": 10},
-            "instances": {
-                "kit_12345": {
-                    "var_name": "kit",
-                    "state": {"top_k": 10, "layers": [10, 15, 20]}
-                }
-            }
+    # Flat object graph
+    "objects": {
+        "root": {
+            "top_k": 10,
+            "bias_vector": {"__tensor_ref__": 0},  # Index into buffers
+            "analyzer": {"__ref__": "obj_123"}
         },
-        "normalize": {
-            "source": "def normalize(x):\n    return x / x.norm()",
-            "module_refs": {}
+        "obj_123": {
+            "__type__": "LogitLensKit",
+            "top_k": 10,
+            "parent": {"__ref__": "root"}  # Circular reference handled
         }
     },
-    "model_refs": ["model", "kit.model"]
+    "remote_objects": { ... },
+    "model_refs": [...]
 }
+
+# buffers: [
+#    b'...binary tensor data...'
+# ]
 ```
 
 ---
@@ -296,51 +294,24 @@ class StandardizedTransformer:
     ...
 ```
 
-### Version-Aware Serialization
+### Version-Aware Serialization & Source Hashing
 
-Library authors can specify version metadata to enable server-side caching:
+Library authors can specify version metadata. To handle cases where a client might use a **patched or modified version** of a standard library, we include a hash of the client's source code.
 
 ```python
 @nnsight.remote(library="nnterp", version="0.1.0")
 class StandardizedTransformer:
-    def __init__(self, model):
-        self.model = model
-        # ... architecture detection logic
+    ...
 ```
 
-**Auto-detection**: If `library` and `version` aren't specified, the decorator automatically detects them from the package's installed metadata using `importlib.metadata`.
+**Resolution Logic (Server-Side):**
+1. Check if `library` (e.g., "nnterp") and `version` (e.g., "0.1.0") are installed.
+2. If installed, compute the hash of the **installed class's source**.
+3. Compare with the **client's provided source hash**.
+4. **Match:** Use the server's installed class (Fast path, safe).
+5. **Mismatch:** Use the client's transmitted source code (Slow path, flexible).
 
-**How it works**:
-
-1. **Client-side serialization**:
-   - Objects with library+version metadata are serialized as references first
-   - Full source is included as fallback in case server doesn't have that version
-
-2. **Server-side deserialization**:
-   - Server checks if it has the specified library version installed
-   - If yes: uses installed version (no source reconstruction needed)
-   - If no: reconstructs from the source sent in the request
-
-**Benefits**:
-- Installed libraries (nnterp, logitlenskit) don't resend source with every request
-- New library versions work immediately via source fallback
-- Users can pip install updates and use them right away
-
-**Serialization format with version info**:
-```json
-{
-    "remote_objects": {
-        "StandardizedTransformer": {
-            "library": "nnterp",
-            "version": "0.1.0",
-            "source": "class StandardizedTransformer:\n    ...",
-            "module_refs": {},
-            "type": "class",
-            "instances": {...}
-        }
-    }
-}
-```
+This ensures that even if versions nominally match, local patches by researchers are respected.
 
 ### Import-Time Validation
 
@@ -530,148 +501,67 @@ def validate_class(cls: type) -> list:
 
 The serialization logic has been refined with several key behaviors:
 
-1.  **Internal Variable Filtering**: Local variables starting with `_nnsight` or `nnsight` are automatically filtered out. This keeps the serialized payload clean of internal tracer state.
-
-2.  **Strict Model Reference Heuristics**: To avoid circular imports and ambiguity, "model access" is strictly defined. A variable is treated as a model reference only if its type is explicitly `Envoy`, `NNsight`, or `LanguageModel`. Custom wrappers must be marked `@nnsight.remote` to be serialized correctly.
-
-3.  **Callable References**: Users can assign functions from allowed modules to instance attributes (e.g., `self.activation = torch.nn.functional.relu`). These are serialized as a special `__callable_ref__` string pointer, which the server resolves back to the actual function.
+1.  **Flattened Object Graph**: To handle circular references and shared objects, variables are not serialized as a tree but as a flat map of objects.
+2.  **Binary Attachments**: Tensors and Numpy arrays are extracted into a separate list of binary buffers. The JSON payload references them by index (`__tensor_ref__`).
+3.  **Internal Variable Filtering**: Local variables starting with `_nnsight` or `nnsight` are automatically filtered out.
+4.  **Strict Model Heuristics**: "Model access" is strictly defined by type checking to avoid ambiguity.
 
 ### New serialization.py
 
 ```python
-# nnsight/intervention/serialization_v2.py
-
-import ast
-import inspect
-import json
-from typing import Any, Dict, Union, Callable
-
-class SerializationError(Exception):
-    """Raised when an object cannot be serialized for remote execution."""
-    pass
-
-
-def serialize_for_remote(tracer) -> bytes:
-    """Serialize a tracer for remote execution using source + JSON."""
-
-    source = tracer.info.source
-    variables = extract_variables(tracer.info.frame.f_locals)
-    remote_objects = extract_remote_objects(tracer.info.frame.f_locals)
-
+def serialize_for_remote(tracer) -> Tuple[str, List[bytes]]:
+    """
+    Serialize source + variables + buffers.
+    Returns: (json_payload, list_of_buffers)
+    """
+    source = tracer.info.source  # Now includes file/line info
+    
+    # Flatten variables into a graph and extract binary buffers
+    flattener = GraphFlattener()
+    root_id = flattener.add(tracer.info.frame.f_locals)
+    
     payload = {
-        "version": "2.0",
+        "version": "2.1",
         "source": source,
-        "variables": variables,
-        "remote_objects": remote_objects,
+        "root": root_id,
+        "objects": flattener.objects,  # Flat map {id: state}
+        "remote_objects": flattener.remote_objects,
     }
+    
+    return json.dumps(payload), flattener.buffers
 
-    return json.dumps(payload).encode('utf-8')
+class GraphFlattener:
+    def __init__(self):
+        self.objects = {}
+        self.buffers = []
+        self.memo = {} # id -> ref_id
 
-
-def extract_variables(locals_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract JSON-serializable variables from locals."""
-    result = {}
-
-    for name, value in locals_dict.items():
-        if name.startswith('__'):
-            continue
-
-        # Filter internal nnsight variables
-        if name.startswith('_nnsight') or name.startswith('nnsight'):
-            continue
-
-        if is_json_serializable(value):
-            result[name] = value
-        elif is_remote_object(value):
-            result[name] = {"__remote_ref__": id(value)}
-        elif is_model_reference(value):
-            # Check for Envoy, NNsight, or LanguageModel types
-            result[name] = {"__model_ref__": True}
-        else:
-            raise SerializationError(
-                f"Variable '{name}' of type '{type(value).__name__}' "
-                f"cannot be serialized.\n"
-                f"Options:\n"
-                f"  - Use JSON-serializable type (int, float, str, list, dict)\n"
-                f"  - Mark with @nnsight.remote\n"
-                f"  - Compute inside the trace block"
-            )
-
-    return result
-
-
-def is_remote_object(obj: Any) -> bool:
-    """Check if obj is a @nnsight.remote function/class or instance thereof."""
-    if callable(obj) and getattr(obj, '_remote_validated', False):
-        return True
-    if getattr(type(obj), '_remote_validated', False):
-        return True
-    return False
-
-
-def extract_remote_objects(locals_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract @nnsight.remote functions, classes, and instances."""
-    result = {}
-
-    for name, value in locals_dict.items():
-        if not is_remote_object(value):
-            continue
-
-        # Get the class or function
-        if isinstance(value, type):
-            # It's a class itself
-            cls = value
-            is_instance = False
-        elif callable(value) and hasattr(value, '_remote_source'):
-            # It's a function
-            cls = value
-            is_instance = False
-        else:
-            # It's an instance
-            cls = type(value)
-            is_instance = True
-
-        cls_name = cls.__name__
-
-        if cls_name not in result:
-            result[cls_name] = {
-                "source": cls._remote_source,
-                "module_refs": cls._remote_module_refs,
-                "type": "class" if isinstance(cls, type) else "function",
-                "instances": {}
-            }
-
-        if is_instance:
-            instance_state = serialize_instance_state(value)
-            result[cls_name]["instances"][str(id(value))] = {
-                "var_name": name,
-                "state": instance_state
-            }
-
-    return result
-
-
-def serialize_instance_state(obj: Any) -> Dict[str, Any]:
-    """Serialize a @nnsight.remote instance's __dict__."""
-    state = {}
-
-    for key, value in obj.__dict__.items():
-        if is_json_serializable(value):
-            state[key] = value
-        elif is_model_reference(value):
-            state[key] = {"__model_ref__": True}
-        elif is_remote_object(value):
-            state[key] = {"__remote_ref__": id(value)}
-        elif is_allowed_function(value):
-            # e.g. self.act = torch.nn.functional.relu
-            state[key] = {"__callable_ref__": f"{value.__module__}.{value.__name__}"}
-        else:
-            raise SerializationError(
-                f"Instance attribute '{key}' of type '{type(value).__name__}' "
-                f"cannot be serialized."
-            )
-
-    return state
+    def add(self, obj):
+        if id(obj) in self.memo:
+            return {"__ref__": self.memo[id(obj)]}
+        
+        # Handle Tensors/Numpy (Binary)
+        if is_tensor(obj):
+            self.buffers.append(save_tensor_bytes(obj))
+            return {"__tensor_ref__": len(self.buffers) - 1}
+            
+        # Handle Primitives (pass through)
+        if is_json_serializable(obj):
+            return obj
+            
+        # Handle Complex Objects
+        ref_id = str(id(obj))
+        self.memo[id(obj)] = ref_id
+        
+        if isinstance(obj, dict):
+            state = {k: self.add(v) for k, v in obj.items() if not is_internal(k)}
+            self.objects[ref_id] = state
+        elif is_remote_object(obj):
+            state = {k: self.add(v) for k, v in obj.__dict__.items()}
+            self.objects[ref_id] = {"__type__": type(obj).__name__, "state": state}
+            # ... capture remote class source ...
+            
+        return {"__ref__": ref_id}
 ```
 
 ---
@@ -1103,21 +993,38 @@ To ensure the robustness of the source-based serialization, the following test c
     *   Verify correct execution.
 *   **Standard Library Usage**: Use `os.path.join` inside a remote function. Verify it works.
 
+## Error Handling & Source Mapping
+
+To allow server-side errors to be mapped back to client-side code, the serialization format tracks origin information.
+
+1.  **Client-Side**: When capturing source, we annotate each block with its filename and starting line number.
+    ```json
+    "source": [
+        {"code": "def foo():...", "file": "myscript.py", "line": 42}
+    ]
+    ```
+2.  **Server-Side**: The execution engine wraps user code in a `try/except` block. If an exception occurs, it inspects the traceback, finds the line number in the generated server code, maps it back to the client's original file/line using the metadata, and re-raises the exception with the corrected location.
+
+## Lambda Support
+
+**Status: Experimental / Discouraged**
+
+Lambda functions present a significant challenge because Python's `inspect.getsource` is brittle for lambdas (it returns the entire line of definition, making it hard to isolate multiple lambdas on one line).
+
+**Plan:**
+1.  Attempt to support lambdas via AST parsing of the returned source line.
+2.  **Exhaustive testing** is required to identify failure modes (e.g., lambdas inside list comprehensions, multi-line lambdas).
+3.  **Fallback**: If testing reveals too much fragility, the validator will explicitly reject `lambda` expressions and require users to define named functions (which are robust).
+
 ---
 
 ## Open Questions
 
-1. **Tensor serialization**: How do we handle tensors passed as variables? Use numpy array serialization? torch.save to bytes?
+1. **Lambda handling**: Should we support lambdas via source extraction? Or require explicit functions? (See "Lambda Support" section above - currently proceeding with caution).
 
-2. **Nested @nnsight.remote**: If class A contains an instance of class B, both need to be @nnsight.remote. **Resolution:** This is handled via runtime checks during serialization. `serialize_instance_state` recursively checks attributes; if a nested object isn't decorated, a `SourceSerializationError` is raised at trace time.
+2. **Async support**: Does the design need to change to support `async/await` in remote traces?
 
-3. **Lambda handling**: Should we support lambdas via source extraction? Or require explicit functions?
-
-4. **Error recovery**: If server-side execution fails, how much context can we provide given we only have source?
-
-5. **Caching**: Can we cache compiled class/function definitions on the server to avoid re-parsing?
-
-6. **Versioning**: How do we handle @nnsight.remote code that changes between library versions?
+3. **Global state**: How do we handle libraries that depend on global state (e.g., `torch.set_grad_enabled`)? Should we reset state between requests?
 
 ---
 
