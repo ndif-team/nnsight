@@ -2067,10 +2067,14 @@ This test validates a realistic research workflow where:
 | **Attention patterns** | Untested | Low risk |
 | **Activation patching** | ✓ Tested | Edge case test suite |
 | **Dataclass with tensors** | ✓ Tested | Edge case test suite |
+| **Async functions** | ✓ Tested | Source captured, server behavior undefined |
+| **Generator functions** | ✓ Tested | Source captured, server behavior undefined |
+| **Weak references** | ✓ Tested | Serialize as marker, deserialize to None |
+| **Pickle hooks** | ✓ Tested | `__getstate__`/`__setstate__` NOT honored (documented) |
 | **collect_residuals()** | Untested | Low risk |
 | **Batched prompts** | Untested | Low risk |
 
-### Edge Case Unit Tests (20 tests)
+### Edge Case Unit Tests (24 tests)
 
 In addition to the E2E tests, `tests/test_serialization_edge_cases.py` provides comprehensive unit test coverage for serialization edge cases:
 
@@ -2080,7 +2084,7 @@ In addition to the E2E tests, `tests/test_serialization_edge_cases.py` provides 
 | `test_model_in_container` | Model references in lists/dicts detected correctly |
 | `test_numpy_array_serialization` | numpy arrays serialize as tensors |
 | `test_properties_not_in_dict` | Properties excluded from state (recomputed on access) |
-| `test_custom_pickle_protocol` | `__getstate__`/`__setstate__` honored if present |
+| `test_custom_pickle_protocol` | Documents `__getstate__`/`__setstate__` behavior |
 | `test_closure_in_method` | Closures in methods detected and documented |
 | `test_staticmethod_classmethod` | Static/class methods work in reconstructed classes |
 | `test_metaclass` | Metaclasses rejected with clear error |
@@ -2096,6 +2100,10 @@ In addition to the E2E tests, `tests/test_serialization_edge_cases.py` provides 
 | `test_dataclass_serialization` | Dataclasses serialize via `__dict__` |
 | `test_enum_in_state` | Enum instances serialize as class+member |
 | `test_mixed_tensor_types` | Mixed torch/numpy tensors work |
+| `test_async_function` | `async def` functions/methods: source captured correctly |
+| `test_generator_function` | Generator functions with `yield`: source captured correctly |
+| `test_weakref_serialization` | `weakref.ref` serializes as marker, deserializes to None |
+| `test_pickle_hooks_current_behavior` | Documents that `__getstate__` is NOT currently honored |
 
 ### Limitation: Single Model Context
 

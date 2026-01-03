@@ -706,5 +706,192 @@ def test_mixed_tensor_types():
     np.testing.assert_array_almost_equal(numpy_restored, [4.0, 5.0, 6.0])
 
 
+# =============================================================================
+# Test 21: Async functions
+# =============================================================================
+
+def test_async_function():
+    """Test behavior with async functions.
+
+    Async functions are a gap in current support. This test documents
+    the current behavior and what should happen.
+    """
+    import asyncio
+
+    # Test 1: Can we decorate an async function?
+    try:
+        @remote
+        async def async_analyze(x):
+            return x * 2
+
+        decorated = True
+        has_source = hasattr(async_analyze, '_remote_source')
+    except Exception as e:
+        decorated = False
+        has_source = False
+
+    # Document current behavior
+    assert decorated, "Async functions should be decoratable with @remote"
+    assert has_source, "Async functions should have _remote_source"
+
+    # Verify source contains 'async def'
+    if has_source:
+        assert 'async def' in async_analyze._remote_source
+
+    # Test 2: Async method in a class
+    @remote
+    class AsyncAnalyzer:
+        async def process(self, x):
+            return x + 1
+
+    assert 'async def process' in AsyncAnalyzer._remote_source
+
+    # Note: Actually awaiting these would require server-side async support
+    # which is documented as a gap in the design doc
+
+
+# =============================================================================
+# Test 22: Generator functions
+# =============================================================================
+
+def test_generator_function():
+    """Test behavior with generator functions (yield).
+
+    Generator functions are a gap in current support. This test documents
+    the current behavior.
+    """
+    # Test 1: Can we decorate a generator function?
+    try:
+        @remote
+        def generate_layers(n):
+            for i in range(n):
+                yield i
+
+        decorated = True
+        has_source = hasattr(generate_layers, '_remote_source')
+    except Exception as e:
+        decorated = False
+        has_source = False
+
+    # Document current behavior
+    assert decorated, "Generator functions should be decoratable with @remote"
+    assert has_source, "Generator functions should have _remote_source"
+
+    # Verify source contains 'yield'
+    if has_source:
+        assert 'yield' in generate_layers._remote_source
+
+    # Test 2: Generator method in a class
+    @remote
+    class LayerIterator:
+        def __init__(self, n):
+            self.n = n
+
+        def iterate(self):
+            for i in range(self.n):
+                yield i
+
+    assert 'yield' in LayerIterator._remote_source
+
+    # Note: Server-side behavior for generators is undefined
+    # (does it return a list? a generator? lazy eval?)
+
+
+# =============================================================================
+# Test 23: Weak references
+# =============================================================================
+
+def test_weakref_serialization():
+    """Test serialization of objects containing weak references.
+
+    Current behavior: weakrefs serialize as {"__weakref__": True} which
+    deserializes to None. This test verifies that behavior doesn't cause errors.
+    """
+    import weakref
+
+    # Create a simple object to hold a weakref
+    # We don't use @remote here to avoid the closure issue with weakref module
+    class Target:
+        def __init__(self, value):
+            self.value = value
+
+    class Holder:
+        pass
+
+    target = Target(42)
+    holder = Holder()
+    holder.target_ref = weakref.ref(target)
+    holder.name = "holder"
+
+    # Verify weakref works locally
+    assert holder.target_ref() is target
+    assert holder.target_ref().value == 42
+
+    # Serialize - should not raise
+    state = serialize_instance_state(holder)
+
+    # Document current behavior: weakrefs become {"__weakref__": True}
+    # which deserializes to None
+    assert '__weakref__' in state.get('target_ref', {}), \
+        "Weakrefs should serialize as __weakref__ marker"
+
+    # The name should serialize normally
+    assert state.get('name') == "holder"
+
+    # Test deserialization - weakref becomes None
+    from nnsight.intervention.serialization_source import deserialize_source_based
+
+    # Create minimal data structure for reconstruction
+    namespace = {}
+    model = None
+    reconstructed = {}
+
+    # Import reconstruct_value directly
+    from nnsight.intervention.serialization_source import reconstruct_value
+    restored_ref = reconstruct_value(state['target_ref'], namespace, model, reconstructed)
+
+    # Weakref deserializes to None
+    assert restored_ref is None, "Weakrefs should deserialize to None"
+
+
+# =============================================================================
+# Test 24: Pickle hooks behavior documentation
+# =============================================================================
+
+def test_pickle_hooks_current_behavior():
+    """Document that __getstate__/__setstate__ are NOT currently honored.
+
+    This is a known limitation documented in the design doc. The test
+    verifies the current behavior so we know if it changes.
+    """
+    @remote
+    class ExcludesLargeData:
+        def __init__(self):
+            self.small = "keep me"
+            self.large = "x" * 10000  # Would be excluded by __getstate__
+
+        def __getstate__(self):
+            # Exclude large data from serialization
+            return {'small': self.small}
+
+        def __setstate__(self, state):
+            self.__dict__.update(state)
+            self.large = ""  # Would be reinitialized
+
+    obj = ExcludesLargeData()
+    state = serialize_instance_state(obj)
+
+    # CURRENT BEHAVIOR: __getstate__ is IGNORED
+    # Both small and large are serialized
+    assert 'small' in state
+    assert 'large' in state, "Current behavior: __getstate__ is NOT used, large data IS serialized"
+
+    # Verify the large data is actually there
+    assert len(state['large']) == 10000
+
+    # TODO: When pickle hooks are implemented, this test should change:
+    # assert 'large' not in state, "Future behavior: __getstate__ should be honored"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
