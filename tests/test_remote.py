@@ -1081,6 +1081,169 @@ def test_serialize_allows_shared_reference():
 
 
 # =============================================================================
+# Test: nn.Module and Dataset training flow (integration)
+# =============================================================================
+
+from nnsight.intervention.serialization_source import (
+    reconstruct_state,
+)
+
+
+def test_nn_module_subclass_roundtrip():
+    """Test that @remote nn.Module subclasses serialize and deserialize correctly."""
+    import torch.nn as nn
+
+    @remote
+    class ProbeClassifier(nn.Module):
+        """Linear probe with optional bias and temperature."""
+
+        def __init__(self, hidden_size, num_classes, use_bias=True, temperature=1.0):
+            super().__init__()
+            self.linear = nn.Linear(hidden_size, num_classes, bias=use_bias)
+            self.temperature = temperature
+            self.trained = False
+
+        def forward(self, hidden_states):
+            logits = self.linear(hidden_states) / self.temperature
+            return logits
+
+        def predict(self, hidden_states):
+            return self.forward(hidden_states).argmax(dim=-1)
+
+        def mark_trained(self):
+            self.trained = True
+
+    # Create classifier
+    classifier = ProbeClassifier(768, 3, temperature=0.5)
+    assert classifier.trained is False
+
+    # Serialize
+    state = serialize_instance_state(classifier)
+    json_str = json.dumps(state)
+
+    # Deserialize
+    restored = object.__new__(ProbeClassifier)
+    restored.__dict__ = reconstruct_state(json.loads(json_str), {}, None, {})
+
+    # Verify state
+    assert restored.temperature == 0.5
+    assert restored.trained is False
+
+    # Verify forward works
+    x = torch.randn(2, 768)
+    y = restored(x)
+    assert y.shape == (2, 3)
+
+
+def test_dataset_subclass_roundtrip():
+    """Test that @remote dataset-like classes serialize and deserialize correctly."""
+
+    @remote
+    class ClassifiedStringsDataset:
+        """Custom dataset holding classified strings in memory."""
+
+        def __init__(self, strings, labels):
+            self.strings = strings
+            self.labels = torch.tensor(labels)
+
+        def __len__(self):
+            return len(self.strings)
+
+        def __getitem__(self, idx):
+            return self.strings[idx], self.labels[idx]
+
+        def get_all_labels(self):
+            return self.labels
+
+    # Create dataset
+    strings = [f"Example sentence {i}" for i in range(100)]
+    labels = [i % 3 for i in range(100)]
+    dataset = ClassifiedStringsDataset(strings, labels)
+
+    # Serialize
+    state = serialize_instance_state(dataset)
+    json_str = json.dumps(state)
+
+    # Deserialize
+    restored = object.__new__(ClassifiedStringsDataset)
+    restored.__dict__ = reconstruct_state(json.loads(json_str), {}, None, {})
+
+    # Verify state
+    assert len(restored) == 100
+    assert restored.strings[0] == "Example sentence 0"
+    assert torch.equal(restored.labels, dataset.labels)
+
+
+def test_training_flow_simulation():
+    """Test full training flow: serialize, train on 'server', return trained model."""
+    import torch.nn as nn
+
+    @remote
+    class ProbeClassifier(nn.Module):
+        def __init__(self, hidden_size, num_classes):
+            super().__init__()
+            self.linear = nn.Linear(hidden_size, num_classes)
+            self.trained = False
+
+        def forward(self, x):
+            return self.linear(x)
+
+        def mark_trained(self):
+            self.trained = True
+
+    # 1. CLIENT: Create classifier
+    classifier = ProbeClassifier(64, 3)
+    original_weight = classifier.linear.weight[0, 0].item()
+    assert classifier.trained is False
+
+    # 2. CLIENT: Serialize
+    state = serialize_instance_state(classifier)
+    wire_data = json.dumps(state)
+
+    # 3. SERVER: Reconstruct
+    server_classifier = object.__new__(ProbeClassifier)
+    server_classifier.__dict__ = reconstruct_state(
+        json.loads(wire_data), {}, None, {}
+    )
+
+    # 4. SERVER: Train (simulate)
+    fake_data = torch.randn(100, 64)
+    fake_labels = torch.randint(0, 3, (100,))
+    optimizer = torch.optim.Adam(server_classifier.parameters(), lr=0.1)
+    criterion = nn.CrossEntropyLoss()
+
+    for _ in range(10):
+        optimizer.zero_grad()
+        logits = server_classifier(fake_data)
+        loss = criterion(logits, fake_labels)
+        loss.backward()
+        optimizer.step()
+
+    server_classifier.mark_trained()
+
+    # 5. SERVER: Serialize trained model
+    trained_state = serialize_instance_state(server_classifier)
+    trained_wire = json.dumps(trained_state)
+
+    # 6. CLIENT: Receive trained model
+    client_classifier = object.__new__(ProbeClassifier)
+    client_classifier.__dict__ = reconstruct_state(
+        json.loads(trained_wire), {}, None, {}
+    )
+
+    # 7. Verify training happened
+    assert client_classifier.trained is True
+    trained_weight = client_classifier.linear.weight[0, 0].item()
+    assert trained_weight != original_weight, "Weights should have changed after training"
+
+    # Verify weights match server
+    assert torch.allclose(
+        server_classifier.linear.weight,
+        client_classifier.linear.weight
+    ), "Client and server weights should match"
+
+
+# =============================================================================
 # Test: Improved callable reference detection
 # =============================================================================
 
