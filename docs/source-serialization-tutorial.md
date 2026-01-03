@@ -10,15 +10,16 @@ This document is a tutorial introduction to nnsight's source-based serialization
 2. [The Key Insight](#the-key-insight)
 3. [Architecture Overview](#architecture-overview)
 4. [The `@remote` Decorator](#the-remote-decorator)
-5. [Serialization Format](#serialization-format)
-6. [The Serialization Pipeline](#the-serialization-pipeline)
-7. [The Deserialization Pipeline](#the-deserialization-pipeline)
-8. [Handling Special Cases](#handling-special-cases)
-9. [Design Decisions and Trade-offs](#design-decisions-and-trade-offs)
-10. [Code Layout](#code-layout)
-11. [Testing Strategy](#testing-strategy)
-12. [Common Patterns and Idioms](#common-patterns-and-idioms)
-13. [Debugging Tips](#debugging-tips)
+5. [How Code Discovery Works](#how-code-discovery-works)
+6. [Serialization Format](#serialization-format)
+7. [The Serialization Pipeline](#the-serialization-pipeline)
+8. [The Deserialization Pipeline](#the-deserialization-pipeline)
+9. [Handling Special Cases](#handling-special-cases)
+10. [Design Decisions and Trade-offs](#design-decisions-and-trade-offs)
+11. [Code Layout](#code-layout)
+12. [Testing Strategy](#testing-strategy)
+13. [Common Patterns and Idioms](#common-patterns-and-idioms)
+14. [Debugging Tips](#debugging-tips)
 
 ---
 
@@ -216,6 +217,308 @@ This is why the decorator raises exceptions for things like:
 - Relative imports (`from .utils import helper`)
 - Dynamic code (`exec()`, `eval()`)
 - Closures over non-serializable values
+
+---
+
+## How Code Discovery Works
+
+A key question for source serialization: **how does the system figure out which code to serialize?** This section explains the discovery algorithm step by step.
+
+### The Starting Point: Frame Locals
+
+When a user calls `model.trace(..., remote=True)`, the system captures the **frame locals**—all the variables in scope at the trace site:
+
+```python
+threshold = 0.5
+analyzer = MyAnalyzer(top_k=10)
+
+with model.trace("Hello", remote=True):
+    h = model.layers[10].output[0]
+    result = analyzer.analyze(h)  # Uses threshold internally
+```
+
+At serialization time, the frame locals include `threshold`, `analyzer`, and `model`. The entry point is `serialize_source_based()` in `serialization_source.py`, which calls `extract_all()` to walk through these locals.
+
+### Classification: What Kind of Value Is This?
+
+For each variable in frame locals, `extract_all()` must decide: **what is this, and how should I handle it?**
+
+```
+extract_all(frame_locals, traced_model)
+    │
+    ├── Is it the traced model itself?
+    │   └── Record in model_refs (injected server-side)
+    │
+    ├── Is it a @remote decorated object?
+    │   └── Call extract_remote_object() to get source + metadata
+    │
+    ├── Is it a lambda function?
+    │   └── Call extract_lambda_object() to extract lambda source
+    │
+    ├── Is it JSON-serializable (int, float, str, list, dict)?
+    │   └── Store directly in variables
+    │
+    ├── Is it a tensor (torch.Tensor, numpy.ndarray)?
+    │   └── Call serialize_tensor() → base64 encoded data
+    │
+    ├── Is it from an allowed module (torch, numpy, etc.)?
+    │   └── Skip (available on server)
+    │
+    └── Otherwise?
+        └── Raise SourceSerializationError
+```
+
+### Extracting @remote Objects: Source + Dependencies
+
+When `extract_all()` finds a `@remote` decorated class or function, it calls `extract_remote_object()`. This function retrieves the metadata that was captured at decoration time:
+
+```python
+def extract_remote_object(var_name, value, result, traced_model):
+    # Get pre-validated metadata from the decorator
+    metadata = _get_remote_metadata(value)
+
+    # metadata contains:
+    #   _remote_source: The source code
+    #   _remote_module_refs: {"np": "numpy", "F": "torch.nn.functional"}
+    #   _remote_closure_vars: {"threshold": 0.5}
+    #   _remote_validated: True (passed import-time validation)
+
+    # For instances, also serialize the instance state
+    if is_instance_of_remote_class(value):
+        state = serialize_instance_state(value, ...)
+```
+
+The key insight: **most of the work happened at decoration time**. By the time we serialize, we're just retrieving pre-computed metadata.
+
+### Recursive Instance State Serialization
+
+When a `@remote` class instance is found, we need to serialize not just the class but the instance's state (`__dict__`). This can contain arbitrarily nested objects:
+
+```python
+def serialize_instance_state(obj, memo, discovered_classes, traced_model):
+    state = {}
+    for key, value in obj.__dict__.items():
+        state[key] = serialize_value(value, memo, discovered_classes, traced_model)
+    return state
+```
+
+The `serialize_value()` function handles recursive cases:
+- **Tensors** → base64 encoded
+- **Nested `@remote` instances** → recurse
+- **Collections (list, dict, tuple)** → recurse into elements
+- **nn.Modules** → serialize class path + state dict
+- **Circular references** → use `memo` dict to detect and emit `__ref__` markers
+
+### Auto-Discovery: Third-Party Classes
+
+What about classes that aren't decorated with `@remote`? When a `LanguageModel` subclass (like nnterp's `StandardizedTransformer`) is used, the system **auto-discovers** its dependencies:
+
+```python
+def auto_discover_class(cls, discovered):
+    # Skip if already discovered or server-available
+    if cls.__name__ in discovered or is_server_available(cls):
+        return
+
+    # 1. Get source code
+    source = inspect.getsource(cls)
+    tree = ast.parse(source)
+
+    # 2. Find all external names used in the source
+    external_names = find_external_references(tree, cls)
+
+    # 3. Resolve each name to a value
+    for name in external_names:
+        value = resolve_in_globals(name, cls)
+        classification = classify_reference_value(name, value)
+
+        if classification == ValueClassification.CAPTURE:
+            # JSON-serializable constant → include in payload
+            discovered['module_refs'][name] = value
+        elif classification == ValueClassification.SKIP:
+            # Available on server → just import it there
+            pass
+        elif classification == ValueClassification.ERROR:
+            # Can't serialize → raise error
+            raise SourceSerializationError(f"Cannot serialize {name}")
+
+    # 4. Recursively discover base classes
+    for base in cls.__bases__:
+        if needs_discovery(base):
+            auto_discover_class(base, discovered)
+
+    # 5. Add this class to discovered
+    discovered[cls.__name__] = {
+        'source': source,
+        'module_refs': ...,
+        'closure_vars': ...
+    }
+```
+
+### Finding External References via AST
+
+The `find_external_references()` function uses AST analysis to find all names that aren't locally defined:
+
+```python
+class ReferenceCollector(ast.NodeVisitor):
+    def __init__(self):
+        self.scope_stack = [set()]  # Track local definitions
+        self.external_refs = set()
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Load):
+            # This name is being read
+            if not self.is_locally_defined(node.id):
+                self.external_refs.add(node.id)
+
+    def visit_FunctionDef(self, node):
+        # Parameters are local to the function
+        self.scope_stack.append(set(arg.arg for arg in node.args.args))
+        self.generic_visit(node)
+        self.scope_stack.pop()
+```
+
+For example, given:
+```python
+class MyAnalyzer:
+    def analyze(self, x, threshold=DEFAULT_THRESHOLD):
+        return F.softmax(x) if x.max() > threshold else x
+```
+
+The collector identifies external references: `DEFAULT_THRESHOLD`, `F` (for `torch.nn.functional`).
+
+### Value Classification: Skip, Capture, or Error?
+
+Once external names are found, `classify_reference_value()` decides what to do with each:
+
+```python
+def classify_reference_value(name, value):
+    # Modules from server-available list → SKIP
+    if is_module(value) and module_name(value) in SERVER_AVAILABLE_MODULES:
+        return ValueClassification.SKIP
+
+    # @remote decorated → SKIP (serialized separately)
+    if is_remote_object(value):
+        return ValueClassification.SKIP
+
+    # JSON-serializable constants → CAPTURE
+    if is_json_serializable(value):
+        return ValueClassification.CAPTURE
+
+    # Callable from allowed modules → SKIP
+    if callable(value) and is_from_allowed_module(value):
+        return ValueClassification.SKIP
+
+    # Everything else → ERROR
+    return ValueClassification.ERROR
+```
+
+### When Data vs Code Is Serialized
+
+The system distinguishes between **code** (source to be exec'd) and **data** (values to be reconstructed):
+
+| Type | Serialized As | Function |
+|------|---------------|----------|
+| `@remote` class/function | Source code + metadata | `extract_remote_object()` |
+| Lambda expression | Extracted source | `extract_lambda_object()` |
+| Auto-discovered class | Source code + dependencies | `auto_discover_class()` |
+| `torch.Tensor` | Base64 bytes + dtype/shape | `serialize_tensor()` |
+| `nn.Module` | Class path + state dict | `serialize_nn_module()` |
+| Primitives (int, str, etc.) | JSON value | Direct |
+| Collections | Recursive with markers | `serialize_value()` |
+| Instance state | Recursive `__dict__` | `serialize_instance_state()` |
+
+### When Serialization Is Complete
+
+Serialization completes when `serialize_source_based()` has processed all frame locals and built the final payload:
+
+```python
+def serialize_source_based(tracer):
+    # 1. Extract source metadata (file, line info)
+    source_metadata = extract_source_metadata(tracer)
+
+    # 2. Categorize all frame locals
+    variables, remote_objects, model_refs = extract_all(
+        tracer.frame_locals,
+        tracer.model
+    )
+
+    # 3. Handle LanguageModel subclasses (if any)
+    model_subclass = None
+    if is_language_model_subclass(tracer.model):
+        model_subclass = serialize_model_subclass(tracer.model)
+
+    # 4. Build final payload
+    payload = {
+        "version": SERIALIZATION_VERSION,
+        "source": source_metadata,
+        "variables": variables,
+        "remote_objects": remote_objects,
+        "model_refs": model_refs,
+    }
+    if model_subclass:
+        payload["model_subclass"] = model_subclass
+
+    # 5. Return JSON bytes
+    return json.dumps(payload).encode('utf-8')
+```
+
+The system knows it's done when:
+1. All frame locals have been classified and processed
+2. All external references have been resolved (no unresolved names)
+3. All auto-discovered dependencies have been accumulated
+4. The JSON payload is complete and valid
+
+### Summary: The Discovery Flow
+
+```
+User code with model.trace(remote=True)
+           │
+           ▼
+    ┌──────────────────┐
+    │ serialize_source │  Entry point
+    │     _based()     │
+    └────────┬─────────┘
+             │
+             ▼
+    ┌──────────────────┐
+    │   extract_all()  │  Walk frame locals
+    └────────┬─────────┘
+             │
+    ┌────────┼────────┬────────────┬─────────────┐
+    ▼        ▼        ▼            ▼             ▼
+ Model   @remote   Lambda      Tensor      Primitive
+  ref    object   function      data         JSON
+    │        │        │            │             │
+    │        ▼        │            │             │
+    │  ┌───────────┐  │            │             │
+    │  │ extract_  │  │            │             │
+    │  │  remote_  │  │            │             │
+    │  │  object() │  │            │             │
+    │  └─────┬─────┘  │            │             │
+    │        │        │            │             │
+    │        ▼        │            │             │
+    │  Instance?──────┼────────────┼─────────────┤
+    │  Yes │ No       │            │             │
+    │      ▼          │            │             │
+    │  ┌───────────┐  │            │             │
+    │  │serialize_ │  │            │             │
+    │  │ instance_ │  │            │             │
+    │  │  state()  │  │            │             │
+    │  └─────┬─────┘  │            │             │
+    │        │        │            │             │
+    │        ▼        ▼            ▼             ▼
+    │   ┌─────────────────────────────────────────┐
+    │   │           serialize_value()             │
+    │   │  (recursive, handles nested objects)    │
+    │   └─────────────────────────────────────────┘
+    │                      │
+    └──────────────────────┼──────────────────────┘
+                           ▼
+                  ┌──────────────────┐
+                  │  Build payload   │
+                  │  JSON → bytes    │
+                  └──────────────────┘
+```
 
 ---
 
