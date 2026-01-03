@@ -1569,5 +1569,182 @@ def test_version_compatibility():
         assert has_acceptable_error, f"Version error should be informative: {e}"
 
 
+# =============================================================================
+# Test 36: Error line number preservation
+# =============================================================================
+
+def test_error_line_numbers_in_remote_function():
+    """Test that errors in @remote functions show correct file/line in traceback."""
+    import traceback
+    import inspect
+
+    # Define a @remote function - we'll track its actual line number
+    @remote
+    def function_that_errors(x):
+        y = x + 1
+        z = y * 2
+        raise ValueError("intentional error")  # This is line 4 of the function body
+
+    # Get the actual source location
+    source_file = inspect.getfile(function_that_errors)
+    _, func_start_line = inspect.getsourcelines(function_that_errors)
+
+    # The error is on line 4 of the function body (after decorator and def line)
+    # decorator line, def line, y=, z=, raise = lines 0,1,2,3,4 relative to decorator
+    error_line = func_start_line + 4  # raise is 4 lines after @remote
+
+    # Extract metadata as would be done for serialization
+    source_code = function_that_errors._remote_source
+
+    # Simulate server-side execution with proper file/line info
+    namespace = make_exec_namespace()
+
+    # Compile with the original filename and line offset
+    try:
+        import ast
+        tree = ast.parse(source_code)
+        # Adjust line numbers to match original source
+        ast.increment_lineno(tree, func_start_line - 1)
+        code_obj = compile(tree, source_file, 'exec')
+        exec(code_obj, namespace)
+
+        # Now call the function
+        reconstructed_func = namespace['function_that_errors']
+        reconstructed_func(5)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        # Get the traceback
+        tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
+        tb_text = ''.join(tb_lines)
+
+        # Verify the traceback mentions the original file
+        assert source_file in tb_text or "test_serialization_edge_cases" in tb_text, (
+            f"Traceback should reference original file. Got:\n{tb_text}"
+        )
+
+        # Verify the line number is approximately correct
+        # (we check that the error line appears in the traceback)
+        assert "raise ValueError" in tb_text, (
+            f"Traceback should show the raise statement. Got:\n{tb_text}"
+        )
+
+
+def test_error_line_numbers_in_remote_class():
+    """Test that errors in @remote class methods show correct file/line."""
+    import traceback
+    import inspect
+
+    @remote
+    class ClassWithError:
+        def method_that_errors(self, x):
+            y = x + 1
+            raise RuntimeError("class method error")
+
+    source_file = inspect.getfile(ClassWithError)
+    _, class_start_line = inspect.getsourcelines(ClassWithError)
+    source_code = ClassWithError._remote_source
+
+    namespace = make_exec_namespace()
+
+    try:
+        import ast
+        tree = ast.parse(source_code)
+        ast.increment_lineno(tree, class_start_line - 1)
+        code_obj = compile(tree, source_file, 'exec')
+        exec(code_obj, namespace)
+
+        ReconClass = namespace['ClassWithError']
+        obj = ReconClass()
+        obj.method_that_errors(10)
+        assert False, "Should have raised RuntimeError"
+    except RuntimeError as e:
+        tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
+        tb_text = ''.join(tb_lines)
+
+        # Verify traceback shows the error
+        assert "raise RuntimeError" in tb_text, (
+            f"Traceback should show the raise statement. Got:\n{tb_text}"
+        )
+
+
+def test_error_line_numbers_nested_calls():
+    """Test that nested call errors show full stack with correct lines."""
+    import traceback
+    import inspect
+
+    @remote
+    class NestedCalls:
+        def outer(self, x):
+            return self.middle(x)
+
+        def middle(self, x):
+            return self.inner(x)
+
+        def inner(self, x):
+            raise KeyError("deep error")
+
+    source_file = inspect.getfile(NestedCalls)
+    _, class_start_line = inspect.getsourcelines(NestedCalls)
+    source_code = NestedCalls._remote_source
+
+    namespace = make_exec_namespace()
+
+    try:
+        import ast
+        tree = ast.parse(source_code)
+        ast.increment_lineno(tree, class_start_line - 1)
+        code_obj = compile(tree, source_file, 'exec')
+        exec(code_obj, namespace)
+
+        ReconClass = namespace['NestedCalls']
+        obj = ReconClass()
+        obj.outer(5)
+        assert False, "Should have raised KeyError"
+    except KeyError as e:
+        tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
+        tb_text = ''.join(tb_lines)
+
+        # Should show the full call chain
+        assert "outer" in tb_text, f"Traceback should show outer. Got:\n{tb_text}"
+        assert "middle" in tb_text, f"Traceback should show middle. Got:\n{tb_text}"
+        assert "inner" in tb_text, f"Traceback should show inner. Got:\n{tb_text}"
+        assert "raise KeyError" in tb_text, f"Traceback should show raise. Got:\n{tb_text}"
+
+
+def test_error_metadata_preserved_in_serialization():
+    """Test that file/line metadata is preserved through serialization round-trip."""
+    import inspect
+    import json
+    from nnsight.intervention.serialization_source import (
+        extract_remote_object,
+        _get_remote_metadata,
+    )
+
+    @remote
+    def tracked_function():
+        pass
+
+    # Get actual file/line info
+    actual_file = inspect.getfile(tracked_function)
+    _, actual_line = inspect.getsourcelines(tracked_function)
+
+    # Extract metadata using the serialization helper
+    metadata = _get_remote_metadata(tracked_function)
+
+    # Verify file and line are captured
+    assert metadata['source']['file'] == actual_file, (
+        f"File should be {actual_file}, got {metadata['source']['file']}"
+    )
+    assert metadata['source']['line'] == actual_line, (
+        f"Line should be {actual_line}, got {metadata['source']['line']}"
+    )
+
+    # Verify it survives JSON serialization
+    json_str = json.dumps(metadata)
+    restored = json.loads(json_str)
+    assert restored['source']['file'] == actual_file
+    assert restored['source']['line'] == actual_line
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

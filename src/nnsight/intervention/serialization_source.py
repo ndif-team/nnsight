@@ -1016,7 +1016,7 @@ def reconstruct_model_subclass(
         subclass_data: Dict containing class_name, discovered_classes, state, model_key
         server_model: The server's base LanguageModel instance
         namespace: Current execution namespace
-        exec_func: Function to execute code (handles restricted mode)
+        exec_func: Function to execute code with signature (code, ns, source_file, start_line)
 
     Returns:
         Reconstructed model as an instance of the subclass
@@ -1032,8 +1032,12 @@ def reconstruct_model_subclass(
         source_data = cls_data.get('source', '')
         if isinstance(source_data, dict):
             source_code = source_data.get('code', '')
+            source_file = source_data.get('file', '<unknown>')
+            start_line = source_data.get('line', 1)
         else:
             source_code = source_data
+            source_file = '<unknown>'
+            start_line = 1
 
         # Add module references (JSON-serializable values) to namespace
         module_refs = cls_data.get('module_refs', {})
@@ -1068,7 +1072,7 @@ def reconstruct_model_subclass(
         # Execute the class definition
         if source_code:
             try:
-                exec_func(source_code, namespace)
+                exec_func(source_code, namespace, source_file, start_line)
             except Exception:
                 # If a class fails to define, continue with others
                 # (might be a base class that's already available)
@@ -1613,6 +1617,31 @@ def can_serialize_source_based(tracer: "Tracer") -> Tuple[bool, Optional[str]]:
 
 # Server-side deserialization
 
+def _exec_with_source_info(
+    source_code: str,
+    namespace: dict,
+    source_file: str = "<unknown>",
+    start_line: int = 1,
+) -> None:
+    """
+    Execute source code with proper file/line info for error tracebacks.
+
+    This ensures that when errors occur in user code, the traceback shows
+    the original file path and line numbers from the user's source, not
+    generic "<string>" with line 1.
+
+    Args:
+        source_code: The source code to execute
+        namespace: The namespace dict for exec()
+        source_file: Original source file path
+        start_line: Starting line number in the original file
+    """
+    tree = ast.parse(source_code)
+    ast.increment_lineno(tree, start_line - 1)
+    code_obj = compile(tree, source_file, 'exec')
+    exec(code_obj, namespace)
+
+
 def deserialize_source_based(
     payload: bytes,
     model: Any,
@@ -1671,18 +1700,21 @@ def deserialize_source_based(
             base_globals=base_modules,
             allowed_modules=allowed_modules,
         )
-        exec_func = lambda code, ns: exec(
-            compile_user_code(
+
+        def exec_func(code, ns, source_file='<user_code>', start_line=1):
+            compiled = compile_user_code(
                 code,
+                filename=source_file,
                 allowed_modules=allowed_modules,
                 user_id=effective_user_id,
                 job_id=effective_job_id,
-            ),
-            ns
-        )
+            )
+            exec(compiled, ns)
     else:
         namespace = dict(base_modules)
-        exec_func = lambda code, ns: exec(code, ns)
+
+        def exec_func(code, ns, source_file='<unknown>', start_line=1):
+            _exec_with_source_info(code, ns, source_file, start_line)
 
     # Store source metadata for error mapping
     source_info = data.get('source', {})
@@ -1708,7 +1740,7 @@ def deserialize_source_based(
             model_subclass_data,
             model,
             namespace,
-            exec_func
+            exec_func,
         )
         # Update the model reference in namespace
         namespace['model'] = model
@@ -1721,12 +1753,16 @@ def deserialize_source_based(
         # Add closure variables
         namespace.update(obj_data.get('closure_vars', {}))
 
-        # Extract source code (handle both new and legacy format)
+        # Extract source code and location info (handle both new and legacy format)
         source_data = obj_data.get('source', '')
         if isinstance(source_data, dict):
             source_code = source_data.get('code', '')
+            source_file = source_data.get('file', '<unknown>')
+            start_line = source_data.get('line', 1)
         else:
             source_code = source_data
+            source_file = '<unknown>'
+            start_line = 1
 
         # Handle different types
         obj_type = obj_data.get('type', 'function')
@@ -1735,10 +1771,10 @@ def deserialize_source_based(
             # Lambda: wrap in assignment and execute
             var_name = obj_data.get('var_name', obj_name)
             lambda_assignment = f"{var_name} = {source_code}"
-            exec_func(lambda_assignment, namespace)
+            exec_func(lambda_assignment, namespace, source_file, start_line)
         else:
-            # Function or class: execute definition directly
-            exec_func(source_code, namespace)
+            # Function or class: execute definition directly with line numbers
+            exec_func(source_code, namespace, source_file, start_line)
 
             # For classes, reconstruct instances
             if obj_type == 'class':
