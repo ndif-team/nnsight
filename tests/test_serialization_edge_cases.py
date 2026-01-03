@@ -431,25 +431,51 @@ def test_init_subclass():
 
 
 # =============================================================================
-# Test 10: Relative imports in source (documented limitation)
+# Test 10: Relative imports are prohibited
 # =============================================================================
 
-def test_relative_import_detection():
-    """Test that relative imports in source are detectable."""
-    # We can't easily test actual relative imports in a unit test,
-    # but we can verify the source extraction works
+def test_relative_import_rejected():
+    """Test that relative imports are rejected in @remote code.
 
+    Relative imports can't work on the server because the package structure
+    doesn't exist there. They are explicitly prohibited with a clear error.
+    """
+    from nnsight.remote import RemoteValidationError
+
+    # Test single-dot relative import
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def uses_relative():
+            from . import sibling_module
+            return sibling_module.foo()
+
+    error_msg = str(exc_info.value)
+    assert "relative import" in error_msg.lower()
+    assert "from ." in error_msg
+
+    # Test double-dot relative import
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def uses_parent_relative():
+            from ..parent import something
+            return something
+
+    error_msg = str(exc_info.value)
+    assert "relative import" in error_msg.lower()
+    assert "from .." in error_msg
+
+
+def test_absolute_import_allowed():
+    """Test that absolute imports from allowed modules work."""
     @remote
-    class NoRelativeImports:
+    class WithAbsoluteImport:
         def method(self):
             import os
             return os.getcwd()
 
     # Source should be extractable
-    assert 'import os' in NoRelativeImports._remote_source
-
-    # Relative imports would look like: from . import foo
-    # These would fail during reconstruction - document this limitation
+    assert 'import os' in WithAbsoluteImport._remote_source
+    assert WithAbsoluteImport._remote_validated is True
 
 
 # =============================================================================
@@ -538,7 +564,7 @@ def test_empty_class():
 # =============================================================================
 
 def test_lambda_default_argument():
-    """Test functions with lambda default arguments."""
+    """Test functions with lambda default arguments can be reconstructed."""
     @remote
     def func_with_lambda_default(processor=lambda x: x * 2):
         return processor(5)
@@ -549,6 +575,15 @@ def test_lambda_default_argument():
 
     # Source should include the lambda
     assert 'lambda' in func_with_lambda_default._remote_source
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(func_with_lambda_default._remote_source, namespace)
+    recon_func = namespace['func_with_lambda_default']
+
+    # Reconstructed function should work with default lambda
+    assert recon_func() == 10, "Reconstructed function with default lambda should return 10"
+    assert recon_func(lambda x: x + 1) == 6, "Reconstructed function with custom lambda should return 6"
 
 
 # =============================================================================
@@ -766,34 +801,18 @@ def test_mixed_tensor_types():
 # =============================================================================
 
 def test_async_function():
-    """Test behavior with async functions.
-
-    Async functions are a gap in current support. This test documents
-    the current behavior and what should happen.
-    """
+    """Test that async functions can be decorated and reconstructed."""
     import asyncio
 
-    # Test 1: Can we decorate an async function?
-    try:
-        @remote
-        async def async_analyze(x):
-            return x * 2
+    # Async function decoration should work
+    @remote
+    async def async_analyze(x):
+        return x * 2
 
-        decorated = True
-        has_source = hasattr(async_analyze, '_remote_source')
-    except Exception as e:
-        decorated = False
-        has_source = False
+    assert async_analyze._remote_validated is True
+    assert 'async def' in async_analyze._remote_source
 
-    # Document current behavior
-    assert decorated, "Async functions should be decoratable with @remote"
-    assert has_source, "Async functions should have _remote_source"
-
-    # Verify source contains 'async def'
-    if has_source:
-        assert 'async def' in async_analyze._remote_source
-
-    # Test 2: Async method in a class
+    # Async method in a class
     @remote
     class AsyncAnalyzer:
         async def process(self, x):
@@ -801,8 +820,22 @@ def test_async_function():
 
     assert 'async def process' in AsyncAnalyzer._remote_source
 
-    # Note: Actually awaiting these would require server-side async support
-    # which is documented as a gap in the design doc
+    # Test reconstruction works
+    namespace = make_exec_namespace()
+    exec(AsyncAnalyzer._remote_source, namespace)
+    ReconClass = namespace['AsyncAnalyzer']
+
+    # Create instance and verify async method exists
+    obj = ReconClass()
+    assert asyncio.iscoroutinefunction(obj.process), "Reconstructed method should be async"
+
+    # Actually run the async function
+    async def run_test():
+        result = await obj.process(5)
+        return result
+
+    result = asyncio.run(run_test())
+    assert result == 6, f"Async method should return 6, got {result}"
 
 
 # =============================================================================
@@ -810,33 +843,17 @@ def test_async_function():
 # =============================================================================
 
 def test_generator_function():
-    """Test behavior with generator functions (yield).
+    """Test that generator functions can be decorated and reconstructed."""
+    # Generator function decoration should work
+    @remote
+    def generate_numbers(n):
+        for i in range(n):
+            yield i * 2
 
-    Generator functions are a gap in current support. This test documents
-    the current behavior.
-    """
-    # Test 1: Can we decorate a generator function?
-    try:
-        @remote
-        def generate_layers(n):
-            for i in range(n):
-                yield i
+    assert generate_numbers._remote_validated is True
+    assert 'yield' in generate_numbers._remote_source
 
-        decorated = True
-        has_source = hasattr(generate_layers, '_remote_source')
-    except Exception as e:
-        decorated = False
-        has_source = False
-
-    # Document current behavior
-    assert decorated, "Generator functions should be decoratable with @remote"
-    assert has_source, "Generator functions should have _remote_source"
-
-    # Verify source contains 'yield'
-    if has_source:
-        assert 'yield' in generate_layers._remote_source
-
-    # Test 2: Generator method in a class
+    # Generator method in a class
     @remote
     class LayerIterator:
         def __init__(self, n):
@@ -848,8 +865,15 @@ def test_generator_function():
 
     assert 'yield' in LayerIterator._remote_source
 
-    # Note: Server-side behavior for generators is undefined
-    # (does it return a list? a generator? lazy eval?)
+    # Test reconstruction works
+    namespace = make_exec_namespace()
+    exec(LayerIterator._remote_source, namespace)
+    ReconClass = namespace['LayerIterator']
+
+    # Create instance and use generator
+    obj = ReconClass(5)
+    results = list(obj.iterate())
+    assert results == [0, 1, 2, 3, 4], f"Generator should yield [0,1,2,3,4], got {results}"
 
 
 # =============================================================================
@@ -1260,6 +1284,289 @@ def test_namefinder_import_shadowing():
     # json shouldn't be in closure_vars (it's imported locally)
     # Note: It might be in module_refs if the system decides to track server imports
     assert 'json' not in closure_vars, f"'json' should not be in closure_vars: {closure_vars}"
+
+
+# =============================================================================
+# Test 29: Inheritance hierarchies
+# =============================================================================
+
+def test_inheritance_hierarchy():
+    """Test that @remote classes with inheritance hierarchies work correctly."""
+    @remote
+    class BaseAnalyzer:
+        def __init__(self, name):
+            self.name = name
+
+        def describe(self):
+            return f"Analyzer: {self.name}"
+
+    @remote
+    class AdvancedAnalyzer(BaseAnalyzer):
+        def __init__(self, name, level):
+            super().__init__(name)
+            self.level = level
+
+        def describe(self):
+            base = super().describe()
+            return f"{base} (level {self.level})"
+
+    # Test original works
+    obj = AdvancedAnalyzer("test", 5)
+    assert obj.describe() == "Analyzer: test (level 5)"
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    # Need to exec base class first
+    exec(BaseAnalyzer._remote_source, namespace)
+    exec(AdvancedAnalyzer._remote_source, namespace)
+
+    ReconClass = namespace['AdvancedAnalyzer']
+    restored = ReconClass("restored", 10)
+    assert restored.describe() == "Analyzer: restored (level 10)"
+
+
+# =============================================================================
+# Test 30: Multiple inheritance
+# =============================================================================
+
+def test_multiple_inheritance():
+    """Test that @remote classes with multiple inheritance work correctly."""
+    @remote
+    class MixinA:
+        def method_a(self):
+            return "A"
+
+    @remote
+    class MixinB:
+        def method_b(self):
+            return "B"
+
+    @remote
+    class Combined(MixinA, MixinB):
+        def combined(self):
+            return self.method_a() + self.method_b()
+
+    # Test original
+    obj = Combined()
+    assert obj.combined() == "AB"
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(MixinA._remote_source, namespace)
+    exec(MixinB._remote_source, namespace)
+    exec(Combined._remote_source, namespace)
+
+    ReconClass = namespace['Combined']
+    restored = ReconClass()
+    assert restored.combined() == "AB"
+
+
+# =============================================================================
+# Test 31: Abstract base classes
+# =============================================================================
+
+def test_abstract_base_class():
+    """Test that @remote classes with abstract-like pattern work correctly.
+
+    Note: Python's abc.ABC uses ABCMeta metaclass which isn't supported by @remote.
+    Instead, we test an abstract-like pattern using NotImplementedError.
+    """
+    @remote
+    class AbstractProcessor:
+        """Base class with abstract-like methods."""
+        def process(self, data):
+            raise NotImplementedError("Subclasses must implement process()")
+
+        def describe(self):
+            return "AbstractProcessor"
+
+    @remote
+    class ConcreteProcessor(AbstractProcessor):
+        def process(self, data):
+            return data * 2
+
+    # Base class can be instantiated but process raises
+    base = AbstractProcessor()
+    with pytest.raises(NotImplementedError):
+        base.process(5)
+
+    # Concrete works
+    obj = ConcreteProcessor()
+    assert obj.process(5) == 10
+    assert obj.describe() == "AbstractProcessor"
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(AbstractProcessor._remote_source, namespace)
+    exec(ConcreteProcessor._remote_source, namespace)
+
+    ReconClass = namespace['ConcreteProcessor']
+    restored = ReconClass()
+    assert restored.process(5) == 10
+
+
+# =============================================================================
+# Test 32: Descriptors
+# =============================================================================
+
+def test_descriptor():
+    """Test that @remote classes with descriptors work correctly."""
+    @remote
+    class ValidatedAttribute:
+        """A descriptor that validates values are positive."""
+        def __init__(self, name):
+            self.name = name
+            self.private_name = '_' + name
+
+        def __get__(self, obj, objtype=None):
+            if obj is None:
+                return self
+            return getattr(obj, self.private_name, None)
+
+        def __set__(self, obj, value):
+            if value < 0:
+                raise ValueError(f"{self.name} must be positive")
+            setattr(obj, self.private_name, value)
+
+    @remote
+    class PositiveNumbers:
+        x = ValidatedAttribute('x')
+        y = ValidatedAttribute('y')
+
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    # Test original works
+    obj = PositiveNumbers(10, 20)
+    assert obj.x == 10
+    assert obj.y == 20
+
+    with pytest.raises(ValueError):
+        obj.x = -5
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(ValidatedAttribute._remote_source, namespace)
+    exec(PositiveNumbers._remote_source, namespace)
+
+    ReconClass = namespace['PositiveNumbers']
+    restored = ReconClass(5, 15)
+    assert restored.x == 5
+    assert restored.y == 15
+
+    with pytest.raises(ValueError):
+        restored.x = -1
+
+
+# =============================================================================
+# Test 33: Context managers
+# =============================================================================
+
+def test_context_manager():
+    """Test that @remote classes implementing context manager protocol work."""
+    @remote
+    class ResourceManager:
+        def __init__(self):
+            self.opened = False
+            self.closed = False
+
+        def __enter__(self):
+            self.opened = True
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.closed = True
+            return False  # Don't suppress exceptions
+
+        def do_work(self):
+            if not self.opened:
+                raise RuntimeError("Not opened")
+            return "work done"
+
+    # Test original works
+    with ResourceManager() as mgr:
+        result = mgr.do_work()
+        assert result == "work done"
+        assert mgr.opened is True
+    assert mgr.closed is True
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(ResourceManager._remote_source, namespace)
+
+    ReconClass = namespace['ResourceManager']
+    with ReconClass() as restored_mgr:
+        result = restored_mgr.do_work()
+        assert result == "work done"
+    assert restored_mgr.closed is True
+
+
+# =============================================================================
+# Test 34: Malformed serialized data handling
+# =============================================================================
+
+def test_malformed_data_handling():
+    """Test that malformed serialized data is handled gracefully."""
+    from nnsight.intervention.serialization_source import (
+        reconstruct_state, reconstruct_value
+    )
+
+    namespace = make_exec_namespace()
+
+    # Test 1: Unknown special key
+    malformed = {"__unknown_special__": "value"}
+    # Should not crash - return as-is or handle gracefully
+    result = reconstruct_value(malformed, namespace, None, {})
+    # The function should handle unknown keys gracefully
+
+    # Test 2: Missing required fields in tensor
+    incomplete_tensor = {"__tensor__": True}  # Missing data, shape, dtype
+    try:
+        result = reconstruct_value(incomplete_tensor, namespace, None, {})
+        # If it doesn't raise, it should return something usable or None
+    except (KeyError, ValueError, TypeError) as e:
+        # Expected - missing required fields or type error from base64 decode
+        pass
+
+    # Test 3: Invalid enum reference
+    bad_enum = {"__enum__": True, "class": "NonexistentEnum", "member": "FOO"}
+    try:
+        result = reconstruct_value(bad_enum, namespace, None, {})
+    except (KeyError, AttributeError, NameError):
+        # Expected - enum class doesn't exist
+        pass
+
+
+# =============================================================================
+# Test 35: Version compatibility (forward compatibility check)
+# =============================================================================
+
+def test_version_compatibility():
+    """Test handling of serialized data with version markers."""
+    from nnsight.intervention.serialization_source import deserialize_source_based
+    import json
+
+    # Create a payload with a future version
+    future_payload = json.dumps({
+        "version": "99.0",  # Future version
+        "source": {"code": "def test(): pass", "file": "test.py", "line": 1},
+        "variables": {},
+        "remote_objects": {},
+    }).encode('utf-8')  # deserialize_source_based expects bytes
+
+    # Deserialization should either work (forwards compatible) or raise informative error
+    try:
+        # Pass model=None since we're just testing version handling
+        result = deserialize_source_based(future_payload, model=None)
+        # If it works, good - we're forwards compatible
+    except Exception as e:
+        # Should be an informative error about version or format
+        error_msg = str(e).lower()
+        # The error should be about the version, format, or a parsing error - not a random crash
+        acceptable_errors = ["version", "format", "unsupported", "key", "missing", "invalid"]
+        has_acceptable_error = any(kw in error_msg for kw in acceptable_errors)
+        assert has_acceptable_error, f"Version error should be informative: {e}"
 
 
 if __name__ == "__main__":

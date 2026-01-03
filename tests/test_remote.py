@@ -742,9 +742,14 @@ def test_remote_source_is_properly_dedented():
         return 42
 
     # Source should not have leading indentation
-    assert not nested_func._remote_source.startswith(" ")
-    assert not nested_func._remote_source.startswith("\t")
-    assert nested_func._remote_source.startswith("@remote") or nested_func._remote_source.startswith("def ")
+    assert not nested_func._remote_source.startswith(" "), "Source should not start with space"
+    assert not nested_func._remote_source.startswith("\t"), "Source should not start with tab"
+
+    # Source should start with a valid Python declaration (decorator or def)
+    first_line = nested_func._remote_source.split('\n')[0]
+    assert first_line.startswith('@') or first_line.startswith('def '), (
+        f"First line should start with '@' or 'def ', got: {first_line!r}"
+    )
 
 
 def test_remote_class_source_includes_decorator():
@@ -1519,7 +1524,11 @@ def test_extract_lambda_with_default_args():
     """Test extracting lambda with default arguments."""
     with_default = lambda x, y=10: x + y
     source = extract_lambda_source(with_default)
-    assert "y=10" in source or "y = 10" in source
+
+    # Normalize whitespace for comparison
+    normalized = source.replace(" ", "")
+    assert "y=10" in normalized, f"Default arg y=10 should be in source: {source}"
+    assert "x+y" in normalized, f"Body x+y should be in source: {source}"
 
 
 def test_validate_lambda_valid():
@@ -1539,10 +1548,15 @@ def test_validate_lambda_with_torch():
 
 
 def test_lambda_rejects_disallowed_call():
-    """Test that lambda with disallowed calls is rejected."""
-    # We can't easily test this without executing the lambda
-    # The validation happens at serialization time
-    pass
+    """Test that lambda with disallowed calls is rejected during validation."""
+    # Lambda that calls open() should be rejected
+    bad_lambda = lambda path: open(path).read()
+
+    source, errors = validate_lambda_for_remote(bad_lambda)
+
+    # Should have validation errors
+    assert len(errors) > 0, f"Lambda with open() should be rejected, got errors: {errors}"
+    assert any("open" in err for err in errors), f"Error should mention 'open': {errors}"
 
 
 def test_deserialize_lambda():

@@ -747,7 +747,12 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
             self.generic_visit(node)
 
         def visit_ImportFrom(self, node):
-            if not is_server_available_module(node.module or ''):
+            # Relative imports (from . import X, from ..foo import Y) can't work on server
+            if node.level > 0:
+                dots = '.' * node.level
+                module_part = node.module or ''
+                errors.append(f"Line {node.lineno}: relative import 'from {dots}{module_part}' not supported in @nnsight.remote code")
+            elif not is_server_available_module(node.module or ''):
                 errors.append(f"Line {node.lineno}: imports from '{node.module}' (not available on NDIF server)")
             self.generic_visit(node)
 
