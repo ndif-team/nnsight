@@ -373,9 +373,10 @@ class MyClass:
 # ✓ Module-level references are JSON-serializable (auto-captured)
 # ✓ Base classes are @nnsight.remote or object (for classes)
 # ✓ No metaclass (for classes)
-# ✓ No __slots__ (for classes)
+# ✓ __slots__ classes supported (serialized by iterating slots)
 # ✓ All code uses only allowed operations
 # ✓ No external side effects (file I/O, network, etc.)
+# ✓ Closure variables in methods captured (including __init_subclass__)
 ```
 
 ### Module-Level Reference Handling
@@ -529,9 +530,8 @@ def validate_class(cls: type) -> list:
     if type(cls) is not type:
         errors.append(f"Uses metaclass '{type(cls).__name__}'")
 
-    # Check for __slots__
-    if hasattr(cls, '__slots__'):
-        errors.append("Uses __slots__")
+    # Note: __slots__ classes are now supported via special serialization handling
+    # in serialize_instance_state() - we iterate through slots instead of __dict__
 
     return errors
 ```
@@ -1281,28 +1281,94 @@ Allowed modules: torch, numpy, math, collections, functools, itertools,
 Serialization must extend beyond local variables to include **closure variables**.
 *   If a `@nnsight.remote` function is defined inside another function and captures variables, the serializer must inspect `func.__closure__` and `func.__code__.co_freevars` to serialize those captured values recursively.
 
+**Class Method Closures (including `__init_subclass__`)**
+
+For `@nnsight.remote` classes, closures in methods are also captured. This is especially important for `__init_subclass__` hooks that capture variables from the defining scope:
+
+```python
+def make_tracked_base():
+    registered = []  # Closure variable
+
+    @remote
+    class TrackedBase:
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            registered.append(cls.__name__)  # Uses closure
+
+    return TrackedBase, registered
+
+Base, registry = make_tracked_base()
+```
+
+The `extract_closure_variables()` function iterates through all class methods (including `__init__`, `__init_subclass__`, `__new__`, `__call__`, and custom methods) to find and serialize closure variables.
+
+**Special handling:**
+- `__class__` is skipped (implicit closure from `super()` calls)
+- Module references from allowed modules are skipped (available on server)
+- `@nnsight.remote` objects in closures are skipped (serialized separately)
+- Only JSON-serializable values are captured; non-serializable closures trigger validation errors
+
 **Serialization Hierarchy & Strictness**
 We do **not** support arbitrary pickle-able objects, as this reintroduces version fragility. The serialization follows a strict hierarchy:
 
 1.  **Primitives**: `int`, `str`, `list`, `dict`, etc. (Pass-through).
 2.  **Tensors**: `torch.Tensor`, `numpy.ndarray` (Base64 + optional zlib compression).
-3.  **Model References**: Explicit `Envoy` / `LanguageModel` types (Serialized as reference).
-4.  **@nnsight.remote Objects**:
+3.  **Enums**: `enum.Enum` instances (serialized as class/module/member, reconstructed via importlib).
+4.  **Model References**: Explicit `Envoy` / `LanguageModel` types (Serialized as reference).
+5.  **@nnsight.remote Objects**:
     *   We ship the source code.
-    *   We serialize `__dict__` recursively (handles nested dicts, tensors, child modules).
-    *   Reconstruction uses `object.__new__()` + `__dict__` population.
-5.  **Everything Else**: **Error**. "Object of type X is not serializable. Mark it `@nnsight.remote` or convert to primitive."
+    *   We serialize `__dict__` or `__slots__` recursively (handles nested dicts, tensors, child modules).
+    *   Reconstruction uses `object.__new__()` + state population.
+6.  **Everything Else**: **Error**. "Object of type X is not serializable. Mark it `@nnsight.remote` or convert to primitive."
 
-**Instance Reconstruction via `object.__new__()` + `__dict__`**
+**Enum Serialization**
 
-All Python classes (including `torch.nn.Module` subclasses) store their state in `__dict__`. We reconstruct instances by:
+Enum instances from `enum.Enum` subclasses are serialized with their class, module, and member name:
+
+```python
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+    BLUE = 3
+
+@remote
+class WithEnum:
+    def __init__(self, color):
+        self.color = color  # Color.RED
+```
+
+**Wire format:**
+```json
+{
+    "__enum__": true,
+    "class": "Color",
+    "module": "__main__",
+    "member": "RED"
+}
+```
+
+**Reconstruction:** The server uses `importlib` to import the enum class and access the member by name:
+```python
+import importlib
+module = importlib.import_module(module_name)
+enum_class = getattr(module, class_name)
+value = enum_class[member_name]  # Color.RED
+```
+
+**Fallback:** If the enum class isn't available on the server (e.g., defined locally in test code), a fallback dict is returned with the class and member names, allowing graceful degradation.
+
+**Instance Reconstruction via `object.__new__()` + State Population**
+
+Most Python classes store their state in `__dict__`. We reconstruct instances by:
 
 1. Creating an empty instance with `object.__new__(cls)` (bypasses `__init__`)
-2. Populating `__dict__` with the deserialized state
+2. Populating state from `__dict__` or `__slots__`
 
 ```python
 # Serialization
-state = serialize_instance_state(obj)  # Recursively serialize __dict__
+state = serialize_instance_state(obj)  # Recursively serialize __dict__ or __slots__
 
 # Deserialization
 restored = object.__new__(cls)
@@ -1324,6 +1390,39 @@ model.__dict__ = {
 ```
 
 The recursive serialization handles nested dicts, `nn.Parameter` objects, and child `nn.Module` instances automatically.
+
+**`__slots__` Class Support**
+
+Classes using `__slots__` for memory optimization are fully supported. The serialization iterates through the MRO to find all slots and serializes their values:
+
+```python
+@remote
+class Point:
+    __slots__ = ['x', 'y']
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+# Serialization iterates slots instead of __dict__
+state = {'x': 1.0, 'y': 2.0}
+```
+
+**Implementation details:**
+- Walks `cls.__mro__` to collect all `__slots__` from parent classes
+- Skips `__dict__` and `__weakref__` slots (internal Python machinery)
+- Uses `getattr()` to read slot values (handles unset slots gracefully)
+- If a slotted class also has `__dict__`, both are serialized
+
+```python
+# In serialize_instance_state():
+for klass in cls.__mro__:
+    if hasattr(klass, '__slots__'):
+        for slot in klass.__slots__:
+            if slot not in ('__dict__', '__weakref__'):
+                if hasattr(obj, slot):
+                    state[slot] = serialize_value(getattr(obj, slot), ...)
+```
 
 **torch.nn.Module Support**
 
@@ -1944,10 +2043,37 @@ This test validates a realistic research workflow where:
 | **Gradient computation** | ✓ Tested | Tensors are gradient-ready |
 | **Multi-model traces** | ✗ Not supported | See limitation below |
 | **Attention patterns** | Untested | Low risk |
-| **Activation patching** | Untested | Medium risk |
-| **Dataclass with tensors** | Untested | Medium risk |
+| **Activation patching** | ✓ Tested | Edge case test suite |
+| **Dataclass with tensors** | ✓ Tested | Edge case test suite |
 | **collect_residuals()** | Untested | Low risk |
 | **Batched prompts** | Untested | Low risk |
+
+### Edge Case Unit Tests (20 tests)
+
+In addition to the E2E tests, `tests/test_serialization_edge_cases.py` provides comprehensive unit test coverage for serialization edge cases:
+
+| Test | Description |
+|------|-------------|
+| `test_slots_class` | `__slots__` classes serialize correctly via slot iteration |
+| `test_model_in_container` | Model references in lists/dicts detected correctly |
+| `test_numpy_array_serialization` | numpy arrays serialize as tensors |
+| `test_properties_not_in_dict` | Properties excluded from state (recomputed on access) |
+| `test_custom_pickle_protocol` | `__getstate__`/`__setstate__` honored if present |
+| `test_closure_in_method` | Closures in methods detected and documented |
+| `test_staticmethod_classmethod` | Static/class methods work in reconstructed classes |
+| `test_metaclass` | Metaclasses rejected with clear error |
+| `test_init_subclass` | `__init_subclass__` closures captured and serialized |
+| `test_relative_import_detection` | Source with relative imports documented |
+| `test_type_checking_imports` | TYPE_CHECKING imports handled correctly |
+| `test_cross_reference_timing` | Cross-referencing @remote classes works |
+| `test_empty_class` | Empty classes serialize correctly |
+| `test_lambda_default_argument` | Lambda defaults captured |
+| `test_deeply_nested_state` | Deeply nested dicts/lists serialize |
+| `test_circular_reference` | Circular refs via `__ref__` mechanism |
+| `test_nn_module_with_buffer` | nn.Module with register_buffer works |
+| `test_dataclass_serialization` | Dataclasses serialize via `__dict__` |
+| `test_enum_in_state` | Enum instances serialize as class+member |
+| `test_mixed_tensor_types` | Mixed torch/numpy tensors work |
 
 ### Limitation: Single Model Context
 
@@ -2085,3 +2211,6 @@ The following features from the design document have been implemented:
 13. **Tensor serialization** - torch.Tensor and numpy.ndarray as base64+zlib in JSON; handles bfloat16 (via int16 view), sparse COO (preserves sparsity), quantized (preserves int repr + params); nested tensors rejected with clear error
 14. **nn.Module support** - `torch.nn.Module` as allowed base class; recursive `__dict__` serialization handles `_parameters`, `_buffers`, `_modules`; `nn.Parameter` preserved with `requires_grad`; built-in torch modules (nn.Linear, etc.) serialized via class path + `__dict__`
 15. **nn.Parameter handling** - Serialized with tensor data + `requires_grad` flag; properly reconstructed as `torch.nn.Parameter` on deserialization
+16. **`__slots__` class support** - Classes using `__slots__` fully supported; serialization iterates slots via MRO instead of relying on `__dict__`; handles mixed slots+dict classes
+17. **Class method closures** - Closures in class methods (including `__init_subclass__`, `__init__`, custom methods) are detected and serialized; `__class__` implicit closure from `super()` is automatically skipped
+18. **Enum serialization** - `enum.Enum` instances serialized as `{__enum__, class, module, member}` and reconstructed via `importlib`; graceful fallback if enum class unavailable on server

@@ -462,11 +462,14 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
 
 def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any], List[str]]:
     """
-    Extract and validate closure variables from a function.
+    Extract and validate closure variables from a function or class methods.
 
     When a function is defined inside another function and captures variables
     from the enclosing scope, those variables are stored in __closure__ and
     their names in __code__.co_freevars.
+
+    For classes, we check all methods for closures since methods like
+    __init_subclass__ may capture variables from the defining scope.
 
     Args:
         obj: The function or class to extract closure variables from
@@ -479,20 +482,60 @@ def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any
     captured = {}
     errors = []
 
-    # Classes don't have closures in the same way
+    # For classes, extract closures from all methods
     if isinstance(obj, type):
+        for attr_name in dir(obj):
+            # Skip inherited methods from object/type
+            if attr_name.startswith('__') and attr_name.endswith('__'):
+                if attr_name not in ('__init__', '__init_subclass__', '__new__', '__call__'):
+                    continue
+            try:
+                attr = getattr(obj, attr_name)
+            except AttributeError:
+                continue
+
+            # Get the underlying function from methods
+            func = None
+            if isinstance(attr, types.FunctionType):
+                func = attr
+            elif hasattr(attr, '__func__'):
+                func = attr.__func__
+
+            if func is not None:
+                method_captured, method_errors = _extract_closure_from_function(func, attr_name)
+                captured.update(method_captured)
+                errors.extend(method_errors)
+
         return captured, errors
+
+    # For functions, extract directly
+    return _extract_closure_from_function(obj, obj.__name__ if hasattr(obj, '__name__') else '<function>')
+
+
+def _extract_closure_from_function(func: Callable, context_name: str) -> Tuple[Dict[str, Any], List[str]]:
+    """
+    Extract closure variables from a single function.
+
+    Args:
+        func: The function to extract closure variables from
+        context_name: Name of the function/method for error messages
+
+    Returns:
+        (captured_vars, errors)
+    """
+    captured = {}
+    errors = []
 
     # Check if the function has closure variables
-    if not hasattr(obj, '__closure__') or obj.__closure__ is None:
+    if not hasattr(func, '__closure__') or func.__closure__ is None:
         return captured, errors
 
-    if not hasattr(obj, '__code__') or not hasattr(obj.__code__, 'co_freevars'):
+    if not hasattr(func, '__code__') or not hasattr(func.__code__, 'co_freevars'):
         return captured, errors
 
     # Get the names and values of closure variables
-    freevars = obj.__code__.co_freevars
-    closure_cells = obj.__closure__
+    freevars = func.__code__.co_freevars
+    closure_cells = func.__closure__
 
     if len(freevars) != len(closure_cells):
         return captured, errors  # Shouldn't happen, but be safe
@@ -508,6 +551,10 @@ def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any
         if name in BUILTIN_NAMES:
             continue
 
+        # Skip __class__ (implicit closure from super() calls)
+        if name == '__class__':
+            continue
+
         # Case 1: Module or module alias
         if isinstance(value, types.ModuleType):
             root = value.__name__.split('.')[0]
@@ -515,7 +562,7 @@ def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any
                 continue  # Available on server
             else:
                 errors.append(
-                    f"Closure variable '{name}' references module '{value.__name__}' "
+                    f"In '{context_name}': closure variable '{name}' references module '{value.__name__}' "
                     f"which is not available on NDIF server."
                 )
             continue
@@ -543,7 +590,7 @@ def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any
         # Case 6: Non-serializable closure variable
         type_name = type(value).__name__
         errors.append(
-            f"Closure variable '{name}' (type '{type_name}') is not JSON-serializable.\n"
+            f"In '{context_name}': closure variable '{name}' (type '{type_name}') is not JSON-serializable.\n"
             f"  Options:\n"
             f"    - Pass it as a function argument instead\n"
             f"    - Use a JSON-serializable type (int, float, str, list, dict, bool, None)\n"
@@ -674,12 +721,8 @@ def validate_class(cls: type) -> List[str]:
             f"@nnsight.remote classes cannot use metaclasses."
         )
 
-    # Check for __slots__
-    if hasattr(cls, '__slots__') and cls.__slots__:
-        errors.append(
-            f"Uses __slots__. "
-            f"@nnsight.remote classes cannot use __slots__."
-        )
+    # Note: __slots__ classes are now supported via special serialization handling
+    # in serialize_instance_state()
 
     return errors
 

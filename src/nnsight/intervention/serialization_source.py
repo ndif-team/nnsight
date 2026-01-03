@@ -1390,6 +1390,16 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
     if is_the_traced_model(value, traced_model):
         return {"__model_ref__": True}
 
+    # Handle Enum instances (serialize as class + member name)
+    from enum import Enum
+    if isinstance(value, Enum):
+        return {
+            "__enum__": True,
+            "class": type(value).__name__,
+            "module": type(value).__module__,
+            "member": value.name,
+        }
+
     # Handle nn.Module instances FIRST (both built-in torch and @remote)
     # This must come before is_remote_object since @remote nn.Module should use __dict__ serialization
     if is_nn_module(value):
@@ -1515,7 +1525,7 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
 
 def serialize_instance_state(obj: Any, memo: dict = None, discovered_classes: Dict[str, Any] = None, traced_model: Any = None) -> Dict[str, Any]:
     """
-    Serialize a @nnsight.remote instance's __dict__.
+    Serialize a @nnsight.remote instance's state (__dict__ or __slots__).
 
     Args:
         obj: Instance of a @nnsight.remote class
@@ -1536,8 +1546,38 @@ def serialize_instance_state(obj: Any, memo: dict = None, discovered_classes: Di
 
     state = {}
 
-    for key, value in obj.__dict__.items():
-        state[key] = serialize_value(value, key, memo, discovered_classes, traced_model)
+    # Handle __slots__ classes
+    cls = type(obj)
+    has_slots = False
+
+    # Collect all slots from class hierarchy
+    all_slots = []
+    for klass in cls.__mro__:
+        if hasattr(klass, '__slots__'):
+            slots = klass.__slots__
+            if isinstance(slots, str):
+                slots = [slots]
+            all_slots.extend(slots)
+            has_slots = True
+
+    if has_slots and all_slots:
+        # Serialize slot values
+        for slot in all_slots:
+            if slot == '__dict__':
+                continue  # Skip __dict__ slot, handle separately
+            if slot == '__weakref__':
+                continue  # Skip weakref slot
+            if hasattr(obj, slot):
+                try:
+                    value = getattr(obj, slot)
+                    state[slot] = serialize_value(value, slot, memo, discovered_classes, traced_model)
+                except AttributeError:
+                    pass  # Slot not set
+
+    # Also serialize __dict__ if present (slots classes can have __dict__ too)
+    if hasattr(obj, '__dict__'):
+        for key, value in obj.__dict__.items():
+            state[key] = serialize_value(value, key, memo, discovered_classes, traced_model)
 
     return state
 
@@ -1928,6 +1968,21 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
     # Set
     if '__set__' in value:
         return set(value['__set__'])
+
+    # Enum
+    if '__enum__' in value:
+        import importlib
+        from enum import Enum
+        module_name = value['module']
+        class_name = value['class']
+        member_name = value['member']
+        try:
+            module = importlib.import_module(module_name)
+            enum_class = getattr(module, class_name)
+            return enum_class[member_name]
+        except (ImportError, AttributeError, KeyError):
+            # If we can't reconstruct the enum, return a dict with the info
+            return {"__enum_fallback__": True, "class": class_name, "member": member_name}
 
     # Weakref - return None (will be rebuilt by torch)
     if '__weakref__' in value:
