@@ -123,9 +123,9 @@
       stroke-width: 2.5px;
     }
     .new-diamond {
-      fill: #fbbf24;
-      stroke: #b45309;
-      stroke-width: 1px;
+      fill: #ffd700;
+      stroke: #daa520;
+      stroke-width: 0.5px;
     }
     .node.state.const rect {
       stroke-dasharray: 4,2;
@@ -451,14 +451,14 @@
           return last.length > 25 ? last.slice(0, 22) + '...' : last;
         });
 
-      // Add gold diamond for nodes new to this branch (not present in main)
-      nodeEnter.filter(d => d.isNew && d.isNewToBranch).each(function(d) {
+      // Add gold diamond twinkle for nodes new to this branch (not present in main)
+      nodeEnter.filter(d => d.isNewToBranch).each(function(d) {
         const g = d3.select(this);
-        // Diamond shape: 6x6 rotated square
+        // Small diamond above-right of node
         g.append('polygon')
           .attr('class', 'new-diamond')
-          .attr('points', '0,-5 5,0 0,5 -5,0')
-          .attr('transform', d.type === 'function' ? 'translate(-12, 0)' : 'translate(-18, 0)');
+          .attr('points', '0,-3 3,0 0,3 -3,0')
+          .attr('transform', d.type === 'function' ? 'translate(8, -8)' : 'translate(12, -10)');
       });
 
       // Hover and click handlers
