@@ -89,7 +89,9 @@ This means we can:
 4. **Reconstruct** the classes there
 5. **Execute** the trace using the reconstructed classes
 
-Since Python source code is version-independent (unlike bytecode), this eliminates version lock-in. And since we're sending source, third-party libraries work without server installation.
+Since Python source code is version-independent (unlike bytecode), this eliminates version lock-in.
+
+**Third-party libraries do not need to be installed on the server**: all the necessary code is transmitted as part of the request. For example, transmitting nnterp's `StandardizedTransformer` and its dependencies adds about 36KB to the request—a small price for complete library independence.
 
 ---
 
