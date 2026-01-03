@@ -139,6 +139,40 @@ def test_model_identity_check():
     assert is_the_traced_model(models_dict["m"], model) is True
 
 
+def test_model_in_container_serialization():
+    """Test that models inside containers are correctly detected during serialization.
+
+    While is_the_traced_model() is an identity check (container != model),
+    the serialization code recursively processes containers, so models
+    inside lists/dicts ARE detected and serialized as __model_ref__.
+    """
+    # Use serialize_value to verify the full serialization handles this correctly
+    import torch.nn as nn
+
+    model = nn.Linear(10, 5)
+    models_list = [model, "other_item"]
+    models_dict = {"model": model, "config": "value"}
+
+    # Serialize the list containing the model
+    memo = {}
+    result = serialize_value(models_list, 'models', memo, traced_model=model)
+
+    # The result should have the model detected as __model_ref__
+    import json
+    json_str = json.dumps(result)
+    assert '__model_ref__' in json_str, (
+        f"Model inside list should be serialized as __model_ref__. Got: {result}"
+    )
+
+    # Same for dict
+    memo = {}
+    result = serialize_value(models_dict, 'config', memo, traced_model=model)
+    json_str = json.dumps(result)
+    assert '__model_ref__' in json_str, (
+        f"Model inside dict should be serialized as __model_ref__. Got: {result}"
+    )
+
+
 # =============================================================================
 # Test 3: Numpy arrays in instance state
 # =============================================================================
