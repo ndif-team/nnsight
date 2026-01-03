@@ -38,6 +38,77 @@ class SourceSerializationError(Exception):
 
 
 # =============================================================================
+# Serialization Format Constants
+# =============================================================================
+# Marker keys used in the serialized JSON format for type identification.
+# Changing these values would break backwards compatibility.
+
+SERIALIZATION_VERSION = "2.2"
+
+# Type markers in serialized data
+TENSOR_MARKER = "__tensor__"
+NN_PARAMETER_MARKER = "__nn_parameter__"
+NN_MODULE_MARKER = "__nn_module__"
+DICT_MARKER = "__dict__"
+LIST_MARKER = "__list__"
+TUPLE_MARKER = "__tuple__"
+SET_MARKER = "__set__"
+ENUM_MARKER = "__enum__"
+REF_MARKER = "__ref__"
+ID_MARKER = "__id__"
+MODEL_REF_MARKER = "__model_ref__"
+REMOTE_REF_MARKER = "__remote_ref__"
+REMOTE_TYPE_MARKER = "__remote_type__"
+AUTO_INSTANCE_MARKER = "__auto_instance__"
+STATE_MARKER = "__state__"
+CALLABLE_REF_MARKER = "__callable_ref__"
+TYPE_REF_MARKER = "__type_ref__"
+WEAKREF_MARKER = "__weakref__"
+SERVER_PROVIDED_MARKER = "__server_provided__"
+ENUM_FALLBACK_MARKER = "__enum_fallback__"
+
+
+# =============================================================================
+# Remote Metadata Extraction
+# =============================================================================
+
+def _get_remote_metadata(cls_or_func: Any) -> Dict[str, Any]:
+    """
+    Extract metadata from a @remote decorated class or function.
+
+    This is a helper to avoid duplicating the metadata extraction logic
+    in both auto_discover_class() and extract_remote_object().
+
+    Args:
+        cls_or_func: A @remote decorated class or function
+
+    Returns:
+        Dict with source, module_refs, closure_vars, type, library, version
+    """
+    # Get file/line info
+    try:
+        source_file = inspect.getfile(cls_or_func)
+        _, start_line = inspect.getsourcelines(cls_or_func)
+    except (OSError, TypeError):
+        source_file = "<unknown>"
+        start_line = 1
+
+    return {
+        "source": {
+            "code": getattr(cls_or_func, '_remote_source', ''),
+            "file": source_file,
+            "line": start_line,
+        },
+        "module_refs": getattr(cls_or_func, '_remote_module_refs', {}),
+        "closure_vars": getattr(cls_or_func, '_remote_closure_vars', {}),
+        "type": "class" if isinstance(cls_or_func, type) else "function",
+        "instances": {},
+        "library": getattr(cls_or_func, '_remote_library', None),
+        "version": getattr(cls_or_func, '_remote_version', None),
+    }
+
+
+# =============================================================================
 # Auto-Discovery of Dependencies
 # =============================================================================
 
@@ -104,19 +175,7 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
 
     # Already @remote decorated - use existing metadata
     if getattr(cls, '_remote_validated', False):
-        result = {
-            "source": {
-                "code": getattr(cls, '_remote_source', ''),
-                "file": inspect.getfile(cls) if hasattr(cls, '__module__') else "<unknown>",
-                "line": 1,
-            },
-            "module_refs": getattr(cls, '_remote_module_refs', {}),
-            "closure_vars": getattr(cls, '_remote_closure_vars', {}),
-            "type": "class",
-            "instances": {},
-            "library": getattr(cls, '_remote_library', None),
-            "version": getattr(cls, '_remote_version', None),
-        }
+        result = _get_remote_metadata(cls)
         _auto_discovered_cache[cls] = result
         discovered[cls_name] = result
         return result
@@ -150,11 +209,10 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
     external_names = find_external_references(tree, cls)
 
     # Get globals to resolve references
-    import sys
-    obj_globals = {}
+    module_globals = {}
     if hasattr(cls, '__module__'):
         module = sys.modules.get(cls.__module__)
-        obj_globals = getattr(module, '__dict__', {}) if module else {}
+        module_globals = getattr(module, '__dict__', {}) if module else {}
 
     # Resolve module references, but also track type references for auto-discovery
     module_refs, resolution_errors = resolve_module_references(external_names, cls)
@@ -168,8 +226,8 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         if "is not @nnsight.remote decorated" in error:
             # Try to find the type in globals
             for name in external_names:
-                if name in obj_globals:
-                    value = obj_globals[name]
+                if name in module_globals:
+                    value = module_globals[name]
                     if isinstance(value, type) and can_auto_discover(value):
                         types_to_discover.append(value)
                         break
@@ -400,7 +458,7 @@ def serialize_tensor(value: Any) -> Dict[str, Any]:
     b64_data = base64.b64encode(data_bytes).decode('ascii')
 
     result = {
-        "__tensor__": b64_data,
+        TENSOR_MARKER: b64_data,
         "dtype": str(np_array.dtype),
         "shape": list(np_array.shape),
         "compressed": is_compressed,
@@ -437,7 +495,7 @@ def deserialize_tensor(data: Dict[str, Any], as_torch: bool = True) -> Any:
     import numpy as np
 
     # Decode base64 for values
-    raw_bytes = base64.b64decode(data["__tensor__"])
+    raw_bytes = base64.b64decode(data[TENSOR_MARKER])
 
     # Decompress if needed
     if data.get("compressed", False):
@@ -533,7 +591,7 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
     variables, remote_objects, model_refs = extract_all(frame_locals, traced_model=traced_model)
 
     payload = {
-        "version": "2.2",  # Bumped for model_subclass support
+        "version": SERIALIZATION_VERSION,
         "source": source_metadata,  # Now includes file/line info
         "variables": variables,
         "remote_objects": remote_objects,
@@ -589,13 +647,12 @@ def extract_source_metadata(tracer: "Tracer") -> Dict[str, Any]:
     return result
 
 
-def extract_all(locals_dict: Dict[str, Any], seen: set = None, traced_model: Any = None) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+def extract_all(locals_dict: Dict[str, Any], traced_model: Any = None) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
     """
     Extract all serializable data from locals.
 
     Args:
         locals_dict: Dictionary of local variables
-        seen: Set of already-seen object ids (for cycle detection)
         traced_model: The model being traced (for identity-based model ref detection)
 
     Returns:
@@ -604,9 +661,6 @@ def extract_all(locals_dict: Dict[str, Any], seen: set = None, traced_model: Any
         - remote_objects: @nnsight.remote functions/classes/instances
         - model_refs: list of variable names that reference the model
     """
-    if seen is None:
-        seen = set()
-
     variables = {}
     remote_objects = {}
     model_refs = []
@@ -696,6 +750,12 @@ def is_model_reference(value: Any) -> bool:
 
     return False
 
+
+# =============================================================================
+# Model Subclass Handling
+# =============================================================================
+# Functions for handling LanguageModel subclasses (like nnterp's StandardizedTransformer).
+# These need their source code sent to the server.
 
 def is_languagemodel_subclass(value: Any) -> bool:
     """Check if value is an instance of a LanguageModel SUBCLASS (not LanguageModel itself).
@@ -905,10 +965,10 @@ def serialize_model_subclass(model: Any, discovered_classes: Dict[str, Any] = No
     for key, value in model.__dict__.items():
         if key in server_provided:
             # Mark as server-provided (will be substituted on server)
-            custom_state[key] = {"__server_provided__": True}
+            custom_state[key] = {SERVER_PROVIDED_MARKER: True}
         elif key.startswith('_'):
             # Skip private attributes (likely internal state)
-            custom_state[key] = {"__server_provided__": True}
+            custom_state[key] = {SERVER_PROVIDED_MARKER: True}
         else:
             # Try to serialize the value
             try:
@@ -923,9 +983,9 @@ def serialize_model_subclass(model: Any, discovered_classes: Dict[str, Any] = No
                     custom_state[key] = value
                 else:
                     # Non-serializable, mark as server-provided
-                    custom_state[key] = {"__server_provided__": True}
+                    custom_state[key] = {SERVER_PROVIDED_MARKER: True}
             except (TypeError, ValueError):
-                custom_state[key] = {"__server_provided__": True}
+                custom_state[key] = {SERVER_PROVIDED_MARKER: True}
 
     # Get the model key for server-side model creation
     model_key = None
@@ -1045,6 +1105,11 @@ def reconstruct_model_subclass(
     return reconstructed
 
 
+# =============================================================================
+# Remote Object Extraction
+# =============================================================================
+# Functions for extracting @remote decorated objects and lambdas from frame locals.
+
 def is_the_traced_model(value: Any, traced_model: Any) -> bool:
     """Check if value IS the specific model being traced (by identity)."""
     if traced_model is None:
@@ -1062,8 +1127,6 @@ def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any], tra
         result: Dict to add the extracted data to
         traced_model: The model being traced (for identity-based model ref detection)
     """
-    import inspect
-
     # Determine if it's a class/function itself or an instance
     if isinstance(value, type):
         # It's a class
@@ -1082,28 +1145,7 @@ def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any], tra
 
     # Create entry for this class/function if not exists
     if cls_name not in result:
-        # Get file/line metadata for remote object
-        try:
-            source_file = inspect.getfile(cls)
-            source_lines, start_line = inspect.getsourcelines(cls)
-        except (OSError, TypeError):
-            source_file = "<unknown>"
-            start_line = 1
-
-        result[cls_name] = {
-            "source": {
-                "code": getattr(cls, '_remote_source', ''),
-                "file": source_file,
-                "line": start_line,
-            },
-            "module_refs": getattr(cls, '_remote_module_refs', {}),
-            "closure_vars": getattr(cls, '_remote_closure_vars', {}),
-            "type": "class" if isinstance(cls, type) else "function",
-            "instances": {},
-            # Version metadata for server-side caching
-            "library": getattr(cls, '_remote_library', None),
-            "version": getattr(cls, '_remote_version', None),
-        }
+        result[cls_name] = _get_remote_metadata(cls)
 
     # For instances, serialize their state
     if is_instance:
@@ -1220,6 +1262,12 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
     }
 
 
+# =============================================================================
+# Value Serialization
+# =============================================================================
+# These functions handle serializing different value types (tensors, nn.Modules,
+# primitives, containers) into JSON-compatible format.
+
 def is_nn_parameter(value: Any) -> bool:
     """Check if value is a torch.nn.Parameter."""
     type_name = type(value).__name__
@@ -1260,9 +1308,9 @@ def serialize_nn_module(value: Any, key: str, memo: dict, discovered_classes: Di
         ref_id = f"module_{obj_id}"
         serialized_dict = {}
         result = {
-            "__nn_module__": f"{module_path}.{class_name}",
-            "__dict__": serialized_dict,
-            "__id__": ref_id,
+            NN_MODULE_MARKER: f"{module_path}.{class_name}",
+            DICT_MARKER: serialized_dict,
+            ID_MARKER: ref_id,
         }
         memo[obj_id] = (ref_id, result)
 
@@ -1304,17 +1352,17 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
     obj_id = id(value)
     if obj_id in memo:
         ref_id, _ = memo[obj_id]
-        return {"__ref__": ref_id}
+        return {REF_MARKER: ref_id}
 
     # Handle THE traced model (by identity)
     if is_the_traced_model(value, traced_model):
-        return {"__model_ref__": True}
+        return {MODEL_REF_MARKER: True}
 
     # Handle Enum instances (serialize as class + member name)
     from enum import Enum
     if isinstance(value, Enum):
         return {
-            "__enum__": True,
+            ENUM_MARKER: True,
             "class": type(value).__name__,
             "module": type(value).__module__,
             "member": value.name,
@@ -1327,7 +1375,7 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
 
     # Handle other @remote instances (non-nn.Module classes)
     if is_remote_object(value):
-        return {"__remote_ref__": id(value), "__remote_type__": type(value).__name__}
+        return {REMOTE_REF_MARKER: id(value), REMOTE_TYPE_MARKER: type(value).__name__}
 
     # Handle auto-discoverable instances (third-party classes like nnterp's LayerAccessor)
     if is_auto_discoverable_instance(value):
@@ -1342,9 +1390,9 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
         ref_id = f"auto_{obj_id}"
         instance_state = {}
         result = {
-            "__auto_instance__": cls_name,
-            "__state__": instance_state,
-            "__id__": ref_id,
+            AUTO_INSTANCE_MARKER: cls_name,
+            STATE_MARKER: instance_state,
+            ID_MARKER: ref_id,
         }
         memo[obj_id] = (ref_id, result)
 
@@ -1359,9 +1407,9 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
         # Register in memo before serializing (for circular refs)
         ref_id = f"param_{obj_id}"
         tensor_data = serialize_tensor(value.data)
-        tensor_data["__nn_parameter__"] = True
+        tensor_data[NN_PARAMETER_MARKER] = True
         tensor_data["requires_grad"] = value.requires_grad
-        tensor_data["__id__"] = ref_id
+        tensor_data[ID_MARKER] = ref_id
         memo[obj_id] = (ref_id, tensor_data)
         return tensor_data
 
@@ -1370,7 +1418,7 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
         # Register in memo before serializing (for circular refs)
         ref_id = f"tensor_{obj_id}"
         tensor_data = serialize_tensor(value)
-        tensor_data["__id__"] = ref_id
+        tensor_data[ID_MARKER] = ref_id
         memo[obj_id] = (ref_id, tensor_data)
         return tensor_data
 
@@ -1382,7 +1430,7 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
         # Register in memo before recursing (handles circular refs)
         ref_id = f"dict_{obj_id}"
         serialized_dict = {}
-        result = {"__dict__": serialized_dict, "__id__": ref_id}
+        result = {DICT_MARKER: serialized_dict, ID_MARKER: ref_id}
         memo[obj_id] = (ref_id, result)
         for k, v in value.items():
             serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
@@ -1396,7 +1444,7 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
         # Register in memo before recursing
         ref_id = f"list_{obj_id}"
         serialized_list = []
-        result = {"__list__": serialized_list, "__tuple__": isinstance(value, tuple), "__id__": ref_id}
+        result = {LIST_MARKER: serialized_list, TUPLE_MARKER: isinstance(value, tuple), ID_MARKER: ref_id}
         memo[obj_id] = (ref_id, result)
         for i, item in enumerate(value):
             serialized_list.append(serialize_value(item, f"{key}[{i}]", memo, discovered_classes, traced_model))
@@ -1406,7 +1454,7 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
     if isinstance(value, set):
         # Sets can only contain JSON-serializable values
         if all(is_json_serializable(item) for item in value):
-            return {"__set__": list(value)}
+            return {SET_MARKER: list(value)}
         raise SourceSerializationError(
             f"Set attribute '{key}' contains non-JSON-serializable values."
         )
@@ -1419,18 +1467,18 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
     if callable(value):
         callable_ref = get_callable_reference(value)
         if callable_ref:
-            return {"__callable_ref__": callable_ref}
+            return {CALLABLE_REF_MARKER: callable_ref}
 
     # Weakrefs - internal torch state, serialize as None (will be rebuilt)
     import weakref
     if isinstance(value, weakref.ReferenceType):
-        return {"__weakref__": True}
+        return {WEAKREF_MARKER: True}
 
     # Type references (like torch.float32)
     if isinstance(value, type):
         module = getattr(value, '__module__', '')
         if is_server_available_module(module) or module == 'builtins':
-            return {"__type_ref__": f"{module}.{value.__name__}"}
+            return {TYPE_REF_MARKER: f"{module}.{value.__name__}"}
 
     raise SourceSerializationError(
         f"Instance attribute '{key}' of type '{type(value).__name__}' "
@@ -1532,6 +1580,12 @@ def get_callable_reference(value: Any) -> Optional[str]:
 
     return f"{module}.{value.__name__}"
 
+
+# =============================================================================
+# Top-Level API: Serialization and Deserialization
+# =============================================================================
+# Main entry points for source-based serialization. serialize_source_based()
+# is called client-side, deserialize_source_based() is called server-side.
 
 def can_serialize_source_based(tracer: "Tracer") -> Tuple[bool, Optional[str]]:
     """
@@ -1716,6 +1770,12 @@ def deserialize_source_based(
     return namespace
 
 
+# =============================================================================
+# Value Reconstruction
+# =============================================================================
+# These functions handle reconstructing serialized values back to Python objects.
+# Called server-side during deserialization.
+
 def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: dict) -> Any:
     """
     Reconstruct a single serialized value.
@@ -1733,27 +1793,27 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         return value
 
     # Reference to previously reconstructed object (deduplication)
-    if '__ref__' in value:
-        ref_id = value['__ref__']
+    if REF_MARKER in value:
+        ref_id = value[REF_MARKER]
         if ref_id in reconstructed:
             return reconstructed[ref_id]
         raise ValueError(f"Reference '{ref_id}' not found in reconstructed objects")
 
     # Model reference
-    if '__model_ref__' in value:
+    if MODEL_REF_MARKER in value:
         return model
 
     # Remote object reference
-    if '__remote_ref__' in value:
-        ref_id = str(value['__remote_ref__'])
+    if REMOTE_REF_MARKER in value:
+        ref_id = str(value[REMOTE_REF_MARKER])
         if ref_id in reconstructed:
             return reconstructed[ref_id]
         # Placeholder, will be resolved later if needed
         return value
 
     # Auto-discovered instance (from third-party packages like nnterp)
-    if '__auto_instance__' in value:
-        cls_name = value['__auto_instance__']
+    if AUTO_INSTANCE_MARKER in value:
+        cls_name = value[AUTO_INSTANCE_MARKER]
 
         # Get class from namespace (should have been exec'd from source)
         cls = namespace.get(cls_name)
@@ -1764,19 +1824,19 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         instance = object.__new__(cls)
 
         # Register BEFORE recursing (handles circular refs)
-        if '__id__' in value:
-            reconstructed[value['__id__']] = instance
+        if ID_MARKER in value:
+            reconstructed[value[ID_MARKER]] = instance
 
         # Reconstruct __dict__ from __state__
-        if '__state__' in value:
-            for k, v in value['__state__'].items():
+        if STATE_MARKER in value:
+            for k, v in value[STATE_MARKER].items():
                 setattr(instance, k, reconstruct_value(v, namespace, model, reconstructed))
 
         return instance
 
     # Callable reference
-    if '__callable_ref__' in value:
-        ref = value['__callable_ref__']
+    if CALLABLE_REF_MARKER in value:
+        ref = value[CALLABLE_REF_MARKER]
         parts = ref.rsplit('.', 1)
         if len(parts) == 2:
             mod_name, func_name = parts
@@ -1789,8 +1849,8 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         return value
 
     # Type reference
-    if '__type_ref__' in value:
-        ref = value['__type_ref__']
+    if TYPE_REF_MARKER in value:
+        ref = value[TYPE_REF_MARKER]
         parts = ref.rsplit('.', 1)
         if len(parts) == 2:
             mod_name, type_name = parts
@@ -1803,9 +1863,9 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         return value
 
     # nn.Module (built-in torch modules or @remote modules)
-    if '__nn_module__' in value:
+    if NN_MODULE_MARKER in value:
         import importlib
-        module_class_path = value['__nn_module__']
+        module_class_path = value[NN_MODULE_MARKER]
         parts = module_class_path.rsplit('.', 1)
         if len(parts) == 2:
             mod_name, class_name = parts
@@ -1825,13 +1885,13 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
             instance = object.__new__(cls)
 
             # Register BEFORE recursing (handles circular refs)
-            if '__id__' in value:
-                reconstructed[value['__id__']] = instance
+            if ID_MARKER in value:
+                reconstructed[value[ID_MARKER]] = instance
 
             # Reconstruct __dict__
-            if '__dict__' in value:
+            if DICT_MARKER in value:
                 reconstructed_dict = {}
-                for k, v in value['__dict__'].items():
+                for k, v in value[DICT_MARKER].items():
                     reconstructed_dict[k] = reconstruct_value(v, namespace, model, reconstructed)
                 instance.__dict__.update(reconstructed_dict)
 
@@ -1839,54 +1899,54 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         return value
 
     # nn.Parameter
-    if '__tensor__' in value and value.get('__nn_parameter__'):
+    if TENSOR_MARKER in value and value.get(NN_PARAMETER_MARKER):
         import torch
         tensor = deserialize_tensor(value)
         param = torch.nn.Parameter(tensor, requires_grad=value.get('requires_grad', True))
         # Register for deduplication
-        if '__id__' in value:
-            reconstructed[value['__id__']] = param
+        if ID_MARKER in value:
+            reconstructed[value[ID_MARKER]] = param
         return param
 
     # Regular tensor
-    if '__tensor__' in value:
+    if TENSOR_MARKER in value:
         tensor = deserialize_tensor(value)
         # Register for deduplication
-        if '__id__' in value:
-            reconstructed[value['__id__']] = tensor
+        if ID_MARKER in value:
+            reconstructed[value[ID_MARKER]] = tensor
         return tensor
 
     # Nested dict
-    if '__dict__' in value:
+    if DICT_MARKER in value:
         result = {}
         # Register BEFORE recursing (handles circular refs)
-        if '__id__' in value:
-            reconstructed[value['__id__']] = result
-        for k, v in value['__dict__'].items():
+        if ID_MARKER in value:
+            reconstructed[value[ID_MARKER]] = result
+        for k, v in value[DICT_MARKER].items():
             result[k] = reconstruct_value(v, namespace, model, reconstructed)
         return result
 
     # List/tuple
-    if '__list__' in value:
+    if LIST_MARKER in value:
         result = []
         # Register BEFORE recursing (handles circular refs)
-        if '__id__' in value:
-            reconstructed[value['__id__']] = result
-        for item in value['__list__']:
+        if ID_MARKER in value:
+            reconstructed[value[ID_MARKER]] = result
+        for item in value[LIST_MARKER]:
             result.append(reconstruct_value(item, namespace, model, reconstructed))
-        if value.get('__tuple__'):
+        if value.get(TUPLE_MARKER):
             result = tuple(result)
             # Update registration for tuple
-            if '__id__' in value:
-                reconstructed[value['__id__']] = result
+            if ID_MARKER in value:
+                reconstructed[value[ID_MARKER]] = result
         return result
 
     # Set
-    if '__set__' in value:
-        return set(value['__set__'])
+    if SET_MARKER in value:
+        return set(value[SET_MARKER])
 
     # Enum
-    if '__enum__' in value:
+    if ENUM_MARKER in value:
         import importlib
         from enum import Enum
         module_name = value['module']
@@ -1898,10 +1958,10 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
             return enum_class[member_name]
         except (ImportError, AttributeError, KeyError):
             # If we can't reconstruct the enum, return a dict with the info
-            return {"__enum_fallback__": True, "class": class_name, "member": member_name}
+            return {ENUM_MARKER_FALLBACK: True, "class": class_name, "member": member_name}
 
     # Weakref - return None (will be rebuilt by torch)
-    if '__weakref__' in value:
+    if WEAKREF_MARKER in value:
         return None
 
     # Unknown dict - return as-is

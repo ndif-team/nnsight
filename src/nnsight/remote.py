@@ -535,15 +535,15 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
 
     # Get globals from the decorated object
     if hasattr(obj, '__globals__'):
-        obj_globals = obj.__globals__
+        module_globals = obj.__globals__
     else:
         # For classes, get the module globals
         module = sys.modules.get(obj.__module__)
-        obj_globals = getattr(module, '__dict__', {}) if module else {}
+        module_globals = getattr(module, '__dict__', {}) if module else {}
 
     for name in names:
         # Get the actual value from globals
-        if name not in obj_globals:
+        if name not in module_globals:
             # Name not in globals - skip if it's a builtin (will use default)
             if name in BUILTIN_NAMES:
                 continue
@@ -551,7 +551,7 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
             # We'll let Python's runtime handle truly undefined names
             continue
 
-        value = obj_globals[name]
+        value = module_globals[name]
 
         # Skip if it's a builtin AND the value is the same as the builtin
         # (if overridden with a different value, we need to capture it)
