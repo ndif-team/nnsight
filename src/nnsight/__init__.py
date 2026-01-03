@@ -95,6 +95,7 @@ from .modeling.base import NNsight
 from .modeling.language import LanguageModel
 from .intervention.tracing.base import Tracer
 from .intervention.tracing.globals import save
+from .remote import remote, RemoteValidationError
 
 
     

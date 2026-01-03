@@ -70,15 +70,17 @@ class RemoteBackend(Backend):
 
         interventions = super().__call__(tracer)
 
-        data = RequestModel(interventions=interventions, tracer=tracer).serialize(
-            self.zlib
-        )
+        request_model = RequestModel(interventions=interventions, tracer=tracer)
+
+        # Use new serialization with format detection
+        data, serialization_format = request_model.serialize_with_format(self.zlib)
 
         headers = {
             "nnsight-model-key": self.model_key,
             "nnsight-zlib": str(self.zlib),
             "nnsight-version": __version__,
-            "python-version": python_version,
+            "nnsight-serialization": serialization_format,  # "source" or "cloudpickle"
+            "python-version": python_version,  # Still sent for cloudpickle compat
             "ndif-api-key": self.api_key,
             "ndif-timestamp": str(time.time()),
             "ndif-callback": self.callback,
