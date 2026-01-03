@@ -18,12 +18,18 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # Configuration
 REPO_NAME = 'davidbau/nnsight'
 SOURCE_FILES = [
-    'src/nnsight/intervention/base.py',
-    'src/nnsight/intervention/contexts.py',
-    'src/nnsight/intervention/protocols.py',
-    'src/nnsight/intervention/graph/node.py',
-    'src/nnsight/intervention/graph/graph.py',
-    'src/nnsight/intervention/graph/proxy.py',
+    'src/nnsight/__init__.py',
+    'src/nnsight/intervention/backends/remote.py',
+    'src/nnsight/intervention/envoy.py',
+    'src/nnsight/intervention/restricted_execution.py',
+    'src/nnsight/intervention/serialization_source.py',
+    'src/nnsight/intervention/serialization.py',
+    'src/nnsight/modeling/base.py',
+    'src/nnsight/modeling/huggingface.py',
+    'src/nnsight/modeling/language.py',
+    'src/nnsight/modeling/transformers.py',
+    'src/nnsight/remote.py',
+    'src/nnsight/schema/request.py',
 ]
 
 

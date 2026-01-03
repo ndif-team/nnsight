@@ -88,11 +88,33 @@
     }
     .node.new circle, .node.new rect {
       animation: pulse 0.5s ease-out;
+      filter: drop-shadow(0 0 6px #22c55e) drop-shadow(0 0 12px #22c55e);
+    }
+    .node.new text {
+      font-weight: bold;
+    }
+    .new-badge {
+      font-size: 7px;
+      font-weight: bold;
+      fill: #fff;
+      pointer-events: none;
+    }
+    .new-badge-bg {
+      fill: #22c55e;
+      rx: 2;
+      ry: 2;
     }
     @keyframes pulse {
       0% { opacity: 0; transform: scale(0); }
       50% { opacity: 1; }
       100% { opacity: 1; transform: scale(1); }
+    }
+    @keyframes glow {
+      0%, 100% { filter: drop-shadow(0 0 4px #22c55e) drop-shadow(0 0 8px #22c55e); }
+      50% { filter: drop-shadow(0 0 8px #22c55e) drop-shadow(0 0 16px #22c55e); }
+    }
+    .node.new-glow circle, .node.new-glow rect {
+      animation: glow 1.5s ease-in-out infinite;
     }
     .link {
       stroke: #666;
@@ -607,6 +629,14 @@
       });
 
       nodeEnter.append('text').attr('dx', 12).attr('dy', 3);
+
+      // Add NEW badge for newly introduced nodes
+      nodeEnter.filter(d => d.isNew).each(function(d) {
+        const g = d3.select(this);
+        const badge = g.append('g').attr('class', 'new-badge-group').attr('transform', 'translate(-8, -14)');
+        badge.append('rect').attr('class', 'new-badge-bg').attr('width', 22).attr('height', 10).attr('x', 0).attr('y', 0);
+        badge.append('text').attr('class', 'new-badge').attr('x', 11).attr('y', 8).attr('text-anchor', 'middle').text('NEW');
+      });
 
       const nodeMerge = nodeEnter.merge(node);
 
