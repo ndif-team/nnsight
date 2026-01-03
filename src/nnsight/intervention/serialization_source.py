@@ -655,7 +655,7 @@ def is_nn_module(value: Any) -> bool:
         return False
 
 
-def serialize_nn_module(value: Any, key: str, seen: set) -> Dict[str, Any]:
+def serialize_nn_module(value: Any, key: str, memo: dict) -> Dict[str, Any]:
     """
     Serialize a torch.nn.Module instance using object.__new__() + __dict__ approach.
 
@@ -670,15 +670,22 @@ def serialize_nn_module(value: Any, key: str, seen: set) -> Dict[str, Any]:
     # serialize via class path + __dict__
     # This works because all nn.Module subclasses store state in __dict__
     if module_path.startswith('torch') or getattr(cls, '_remote_validated', False):
-        # Recursively serialize __dict__
+        # Register in memo before recursing (handles circular refs)
+        obj_id = id(value)
+        ref_id = f"module_{obj_id}"
         serialized_dict = {}
-        for k, v in value.__dict__.items():
-            serialized_dict[k] = serialize_value(v, f"{key}.{k}", seen)
-
-        return {
+        result = {
             "__nn_module__": f"{module_path}.{class_name}",
             "__dict__": serialized_dict,
+            "__id__": ref_id,
         }
+        memo[obj_id] = (ref_id, result)
+
+        # Recursively serialize __dict__
+        for k, v in value.__dict__.items():
+            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo)
+
+        return result
 
     # Unknown module type (not torch, not @remote)
     raise SourceSerializationError(
@@ -687,18 +694,28 @@ def serialize_nn_module(value: Any, key: str, seen: set) -> Dict[str, Any]:
     )
 
 
-def serialize_value(value: Any, key: str, seen: set) -> Any:
+def serialize_value(value: Any, key: str, memo: dict) -> Any:
     """
     Serialize a single value for instance state.
 
     Args:
         value: The value to serialize
         key: The attribute key (for error messages)
-        seen: Set of already-seen object ids
+        memo: Dict mapping id(obj) -> (ref_id, serialized) for deduplication
 
     Returns:
         Serialized representation of the value
     """
+    # Primitives don't need deduplication
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+
+    # Check if we've already serialized this object (deduplication)
+    obj_id = id(value)
+    if obj_id in memo:
+        ref_id, _ = memo[obj_id]
+        return {"__ref__": ref_id}
+
     # Handle model references
     if is_model_reference(value):
         return {"__model_ref__": True}
@@ -706,7 +723,7 @@ def serialize_value(value: Any, key: str, seen: set) -> Any:
     # Handle nn.Module instances FIRST (both built-in torch and @remote)
     # This must come before is_remote_object since @remote nn.Module should use __dict__ serialization
     if is_nn_module(value):
-        return serialize_nn_module(value, key, seen)
+        return serialize_nn_module(value, key, memo)
 
     # Handle other @remote instances (non-nn.Module classes)
     if is_remote_object(value):
@@ -714,34 +731,51 @@ def serialize_value(value: Any, key: str, seen: set) -> Any:
 
     # Handle nn.Parameter (must check before is_tensor since Parameter is a Tensor subclass)
     if is_nn_parameter(value):
+        # Register in memo before serializing (for circular refs)
+        ref_id = f"param_{obj_id}"
         tensor_data = serialize_tensor(value.data)
         tensor_data["__nn_parameter__"] = True
         tensor_data["requires_grad"] = value.requires_grad
+        tensor_data["__id__"] = ref_id
+        memo[obj_id] = (ref_id, tensor_data)
         return tensor_data
 
     # Handle tensors
     if is_tensor(value):
-        return serialize_tensor(value)
+        # Register in memo before serializing (for circular refs)
+        ref_id = f"tensor_{obj_id}"
+        tensor_data = serialize_tensor(value)
+        tensor_data["__id__"] = ref_id
+        memo[obj_id] = (ref_id, tensor_data)
+        return tensor_data
 
     # Handle nested dicts (like nn.Module's _parameters, _buffers, _modules)
     if isinstance(value, dict):
         # Check if the dict is fully JSON-serializable - if so, return as-is
         if is_json_serializable(value):
             return value
-        # Otherwise, serialize recursively with wrapper
+        # Register in memo before recursing (handles circular refs)
+        ref_id = f"dict_{obj_id}"
         serialized_dict = {}
+        result = {"__dict__": serialized_dict, "__id__": ref_id}
+        memo[obj_id] = (ref_id, result)
         for k, v in value.items():
-            serialized_dict[k] = serialize_value(v, f"{key}.{k}", seen)
-        return {"__dict__": serialized_dict}
+            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo)
+        return result
 
     # Handle lists/tuples
     if isinstance(value, (list, tuple)):
         # Check if all items are JSON-serializable - if so, return as-is
         if all(is_json_serializable(item) for item in value):
             return list(value) if isinstance(value, tuple) else value
-        # Otherwise, serialize recursively with wrapper
-        serialized_list = [serialize_value(item, f"{key}[{i}]", seen) for i, item in enumerate(value)]
-        return {"__list__": serialized_list, "__tuple__": isinstance(value, tuple)}
+        # Register in memo before recursing
+        ref_id = f"list_{obj_id}"
+        serialized_list = []
+        result = {"__list__": serialized_list, "__tuple__": isinstance(value, tuple), "__id__": ref_id}
+        memo[obj_id] = (ref_id, result)
+        for i, item in enumerate(value):
+            serialized_list.append(serialize_value(item, f"{key}[{i}]", memo))
+        return result
 
     # Handle sets
     if isinstance(value, set):
@@ -752,7 +786,7 @@ def serialize_value(value: Any, key: str, seen: set) -> Any:
             f"Set attribute '{key}' contains non-JSON-serializable values."
         )
 
-    # JSON-serializable values
+    # JSON-serializable values (complex types like nested lists/dicts)
     if is_json_serializable(value):
         return value
 
@@ -784,36 +818,27 @@ def serialize_value(value: Any, key: str, seen: set) -> Any:
     )
 
 
-def serialize_instance_state(obj: Any, seen: set = None) -> Dict[str, Any]:
+def serialize_instance_state(obj: Any, memo: dict = None) -> Dict[str, Any]:
     """
     Serialize a @nnsight.remote instance's __dict__.
 
     Args:
         obj: Instance of a @nnsight.remote class
-        seen: Set of already-seen object ids (for cycle detection)
+        memo: Dict mapping id(obj) -> (ref_id, serialized) for deduplication
 
     Returns:
         Dict containing the serialized state
 
     Raises:
-        SourceSerializationError: If an attribute cannot be serialized or cycles detected
+        SourceSerializationError: If an attribute cannot be serialized
     """
-    if seen is None:
-        seen = set()
-
-    # Cycle detection
-    obj_id = id(obj)
-    if obj_id in seen:
-        raise SourceSerializationError(
-            f"Circular reference detected in '{type(obj).__name__}' instance. "
-            f"Circular references between @nnsight.remote objects are not yet supported."
-        )
-    seen.add(obj_id)
+    if memo is None:
+        memo = {}
 
     state = {}
 
     for key, value in obj.__dict__.items():
-        state[key] = serialize_value(value, key, seen)
+        state[key] = serialize_value(value, key, memo)
 
     return state
 
@@ -1024,13 +1049,20 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         value: The serialized value
         namespace: Current namespace
         model: The model object
-        reconstructed: Dict of already reconstructed instances by id
+        reconstructed: Dict mapping ref_id -> reconstructed object for deduplication
 
     Returns:
         Reconstructed value
     """
     if not isinstance(value, dict):
         return value
+
+    # Reference to previously reconstructed object (deduplication)
+    if '__ref__' in value:
+        ref_id = value['__ref__']
+        if ref_id in reconstructed:
+            return reconstructed[ref_id]
+        raise ValueError(f"Reference '{ref_id}' not found in reconstructed objects")
 
     # Model reference
     if '__model_ref__' in value:
@@ -1094,6 +1126,10 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
             # Use object.__new__() + __dict__ approach
             instance = object.__new__(cls)
 
+            # Register BEFORE recursing (handles circular refs)
+            if '__id__' in value:
+                reconstructed[value['__id__']] = instance
+
             # Reconstruct __dict__
             if '__dict__' in value:
                 reconstructed_dict = {}
@@ -1108,25 +1144,44 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
     if '__tensor__' in value and value.get('__nn_parameter__'):
         import torch
         tensor = deserialize_tensor(value)
-        return torch.nn.Parameter(tensor, requires_grad=value.get('requires_grad', True))
+        param = torch.nn.Parameter(tensor, requires_grad=value.get('requires_grad', True))
+        # Register for deduplication
+        if '__id__' in value:
+            reconstructed[value['__id__']] = param
+        return param
 
     # Regular tensor
     if '__tensor__' in value:
-        return deserialize_tensor(value)
+        tensor = deserialize_tensor(value)
+        # Register for deduplication
+        if '__id__' in value:
+            reconstructed[value['__id__']] = tensor
+        return tensor
 
     # Nested dict
     if '__dict__' in value:
-        return {
-            k: reconstruct_value(v, namespace, model, reconstructed)
-            for k, v in value['__dict__'].items()
-        }
+        result = {}
+        # Register BEFORE recursing (handles circular refs)
+        if '__id__' in value:
+            reconstructed[value['__id__']] = result
+        for k, v in value['__dict__'].items():
+            result[k] = reconstruct_value(v, namespace, model, reconstructed)
+        return result
 
     # List/tuple
     if '__list__' in value:
-        items = [reconstruct_value(item, namespace, model, reconstructed) for item in value['__list__']]
+        result = []
+        # Register BEFORE recursing (handles circular refs)
+        if '__id__' in value:
+            reconstructed[value['__id__']] = result
+        for item in value['__list__']:
+            result.append(reconstruct_value(item, namespace, model, reconstructed))
         if value.get('__tuple__'):
-            return tuple(items)
-        return items
+            result = tuple(result)
+            # Update registration for tuple
+            if '__id__' in value:
+                reconstructed[value['__id__']] = result
+        return result
 
     # Set
     if '__set__' in value:

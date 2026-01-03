@@ -979,8 +979,8 @@ def test_extract_remote_object_includes_file_line():
 # Test: Cycle detection
 # =============================================================================
 
-def test_serialize_rejects_self_reference():
-    """Test that self-references are detected and rejected."""
+def test_serialize_handles_self_reference():
+    """Test that self-references are handled via reference (not infinite recursion)."""
     @remote
     class Node:
         def __init__(self, value):
@@ -991,13 +991,50 @@ def test_serialize_rejects_self_reference():
     node = Node(1)
     node.self_ref = node  # Self-reference
 
-    # Note: The current cycle detection uses a `seen` set that's passed during recursion.
-    # We need to manually create a seen set and pass it to trigger cycle detection
-    seen = {id(node)}
-    with pytest.raises(SourceSerializationError) as exc_info:
-        serialize_instance_state(node, seen)
+    # With reference-based serialization, this should work (not infinite loop)
+    state = serialize_instance_state(node)
 
-    assert "Circular reference" in str(exc_info.value)
+    # Non-nn.Module @remote objects use __remote_ref__ for references
+    assert "__remote_ref__" in state.get("self_ref", {}), "Self-reference should use __remote_ref__"
+    assert state["value"] == 1
+
+
+def test_serialize_deduplicates_shared_tensors():
+    """Test that shared tensor references are deduplicated and restored correctly."""
+    import json
+    from nnsight.intervention.serialization_source import reconstruct_state
+
+    @remote
+    class SharedTensorHolder:
+        def __init__(self):
+            pass
+
+    # Create object with shared tensor reference
+    obj = SharedTensorHolder()
+    shared_tensor = torch.randn(10)
+    obj.a = shared_tensor
+    obj.b = shared_tensor  # Same reference
+
+    # Verify original has identity
+    assert obj.a is obj.b, "Original should have shared reference"
+
+    # Serialize
+    state = serialize_instance_state(obj)
+    json_str = json.dumps(state)
+
+    # One should be full tensor, other should be __ref__
+    tensor_count = json_str.count('"__tensor__"')
+    ref_count = json_str.count('"__ref__"')
+    assert tensor_count == 1, f"Should have exactly 1 tensor serialization, got {tensor_count}"
+    assert ref_count == 1, f"Should have exactly 1 reference, got {ref_count}"
+
+    # Deserialize and verify identity is preserved
+    state_back = json.loads(json_str)
+    restored = object.__new__(SharedTensorHolder)
+    restored.__dict__ = reconstruct_state(state_back, {}, None, {})
+
+    assert restored.a is restored.b, "Restored should preserve shared reference"
+    assert torch.allclose(obj.a, restored.a), "Tensor values should match"
 
 
 def test_serialize_handles_remote_references():
