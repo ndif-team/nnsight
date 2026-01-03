@@ -30,24 +30,23 @@ class MyAnalyzer:
 
 ## Implementation Status & Roadmap
 
-**✅ Implemented (v2.1)**
-*   `@nnsight.remote` decorator with import-time validation
-*   AST validation for allowed modules and attribute chains
-*   Source serialization for functions, classes, and instances
-*   Capture of module-level constants and callable references (`__callable_ref__`)
-*   Heuristics for identifying the Model and internal variables
-*   **Allowed attribute chains** - `os.path.join`, `pathlib.Path()` allowed; I/O blocked
-*   **Closure variable support** - `__closure__` and `co_freevars` extraction
-*   **File/line metadata** - Source payload includes origin for error mapping
-*   **Cycle detection** - Clear error for self-referential objects
-*   **Backward compatibility** - Falls back to cloudpickle with deprecation warning
+**✅ Implemented**
+*   `@nnsight.remote` decorator with import-time validation.
+*   **Closures**: Extraction of `__closure__` variables is implemented.
+*   **Lambdas**: Source extraction with bytecode disambiguation is implemented.
+*   **Tensor Serialization**: Implemented via inline Base64 encoding (with compression for sparse/zeros).
+*   **Auto-Discovery**: Logic to automatically serialize dependencies (like `nnterp` classes) without explicit decoration.
+*   **Cycle Detection**: Recursive serialization with `__id__` / `__ref__` handles self-references and shared objects.
+*   **Strict Model Heuristics**: Identity-based detection (`is_the_traced_model`) and type-based fallbacks.
 
-**🚧 Deferred (See "Deferred Features" section below)**
-1.  **Binary Sidecars**: Tensor/Array extraction to binary buffers (requires transport changes)
-2.  **Flat Graph**: `objects` map for circular references (rare use case)
-3.  **Pickle Hooks**: `__getstate__`/`__setstate__` support (default `__dict__` works)
-4.  **Source Hashing**: Cache verification (version string sufficient for now)
-5.  **Notebook Support**: IPython history fallback (fragile, `.py` files primary use case)
+**🚧 To Do (Pending / Gaps)**
+1.  **Binary Sidecars (Performance)**: Current code uses **Inline Base64** for tensors. This adds 33% overhead and JSON parsing cost. **Priority:** Move to the "Flat Graph + Buffers" design for large payloads.
+2.  **Pickle Hooks**: The current code ignores `__getstate__`/`__setstate__` and manually serializes `__dict__`/`__slots__`. This must be fixed to support classes with custom state logic.
+3.  **Async & Generators**: Support for `async def` and `yield` in remote functions is undefined/untested.
+4.  **Weakrefs**: Currently serialized as `None`. Should likely raise a warning or error as they cannot be preserved.
+5.  **Source Hashing**: Client-side hashing and server-side verification logic is not yet visible in the client code.
+6.  **Notebook Support**: Fallback to IPython history for source extraction is missing.
+7.  **Error Mapping**: File/line metadata is captured (`source_metadata`), but server-side re-mapping logic needs validation.
 
 ---
 
@@ -211,6 +210,16 @@ This is where closure variables get transferred. Currently they're cloudpickled;
 │  Returns: requested tensors                         │
 └─────────────────────────────────────────────────────┘
 ```
+
+### Auto-Discovery of Dependencies
+
+The implementation includes an **Auto-Discovery** mechanism to support third-party libraries (like `nnterp`) that are not explicitly decorated with `@nnsight.remote`.
+
+*   **Logic**: If a `LanguageModel` subclass or a helper object is passed to the tracer, the serializer inspects its class.
+*   **Condition**: If the class has source available (via `inspect.getsource`) and is *not* in a restricted module (like `torch` or `numpy`), it is automatically treated as if it were `@nnsight.remote`.
+*   **Recursive**: This applies recursively to base classes and type dependencies found in the source.
+
+This allows researchers to use custom model wrappers and helper classes transparently, without modifying the third-party library code.
 
 ### New Serialization Format: Flat Graph + Buffers
 
@@ -1452,6 +1461,19 @@ class MyModule(torch.nn.Module):
 **Notebook & REPL Support**
 `inspect.getsource` is brittle in interactive environments.
 *   **Strategy**: If standard source extraction fails, the system will attempt to retrieve source code from the IPython history manager (if available) or use robust third-party helpers (like `dill.source`) to locate the definition.
+
+### 5. Advanced Edge Cases (To Be Implemented)
+*   **Async Functions**:
+    *   Trace with `async def`. Verify behavior on server (does it await? error?).
+*   **Generators**:
+    *   Trace with a function that `yield`s. Verify if it returns a list or a generator object.
+*   **Weak References**:
+    *   Serialize an object containing a `weakref`. Verify it either warns or deserializes as `None` (current behavior) safely.
+*   **Pickle Hooks**:
+    *   Define a class with `__getstate__` that excludes a large attribute.
+    *   Serialize it.
+    *   **Failure Test**: Verify that current implementation *ignores* the hook (includes the attribute).
+    *   **Success Test**: Verify that future implementation respects it.
 
 ---
 
