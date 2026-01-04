@@ -10,7 +10,6 @@ These tests verify that:
 Run with: pytest tests/test_auto_discovery.py -v
 """
 
-from collections import OrderedDict
 import warnings
 import sys
 
@@ -20,7 +19,7 @@ import numpy as np
 
 sys.path.insert(0, 'src')
 
-from nnsight import NNsight
+from nnsight import LanguageModel
 from nnsight.remote import remote
 from nnsight.intervention.serialization_source import (
     serialize_source_based,
@@ -36,29 +35,23 @@ from nnsight.intervention.serialization_source import (
 # Fixtures
 # =============================================================================
 
-input_size = 5
-hidden_dims = 10
-output_size = 2
-
 
 @pytest.fixture(scope="module")
 def tiny_model(device: str):
-    """Create a simple test model."""
-    net = torch.nn.Sequential(
-        OrderedDict(
-            [
-                ("layer1", torch.nn.Linear(input_size, hidden_dims)),
-                ("layer2", torch.nn.Linear(hidden_dims, output_size)),
-            ]
-        )
-    )
-    return NNsight(net).to(device)
+    """Create a tiny GPT-2 model for testing."""
+    model = LanguageModel("hf-internal-testing/tiny-random-gpt2")
+    if device != "cpu":
+        try:
+            model = model.to(device)
+        except Exception:
+            pass  # Stay on CPU if device not available
+    return model
 
 
 @pytest.fixture
 def tiny_input():
     """Create a simple test input."""
-    return torch.rand((1, input_size))
+    return "Hello world"
 
 
 # =============================================================================
@@ -273,7 +266,7 @@ def test_no_warning_under_threshold():
 # =============================================================================
 
 @torch.no_grad()
-def test_auto_discovery_with_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
+def test_auto_discovery_with_trace(tiny_model: LanguageModel, tiny_input: str):
     """Test that auto-discovery works in actual traces."""
     # Define a function WITHOUT @remote
     def double_values(x):
@@ -281,47 +274,47 @@ def test_auto_discovery_with_trace(tiny_model: NNsight, tiny_input: torch.Tensor
 
     # This should work because strict=False is the default
     with tiny_model.trace(tiny_input, remote='local'):
-        out = tiny_model.layer1.output
+        out = tiny_model.transformer.h[0].output[0]
         doubled = double_values(out)
-        tiny_model.layer1.output[:] = doubled
-        result = tiny_model.layer1.output.save()
+        tiny_model.transformer.h[0].output[0][:] = doubled
+        result = tiny_model.transformer.h[0].output[0].save()
 
     assert isinstance(result, torch.Tensor)
 
 
 @torch.no_grad()
-def test_strict_mode_with_trace(tiny_model: NNsight, tiny_input: torch.Tensor):
+def test_strict_mode_with_trace(tiny_model: LanguageModel, tiny_input: str):
     """Test that strict_remote mode rejects undecorated functions."""
     def process_values(x):
         return x + 1
 
     with pytest.raises(SourceSerializationError) as exc_info:
         with tiny_model.trace(tiny_input, remote='local', strict_remote=True):
-            out = tiny_model.layer1.output
+            out = tiny_model.transformer.h[0].output[0]
             result = process_values(out)  # noqa: F841
-            tiny_model.layer1.output.save()
+            tiny_model.transformer.h[0].output[0].save()
 
     error_msg = str(exc_info.value)
     assert 'process_values' in error_msg
 
 
 @torch.no_grad()
-def test_strict_mode_accepts_remote(tiny_model: NNsight, tiny_input: torch.Tensor):
+def test_strict_mode_accepts_remote(tiny_model: LanguageModel, tiny_input: str):
     """Test that strict_remote mode accepts @remote decorated functions."""
     @remote
     def process_values(x):
         return x + 1
 
     with tiny_model.trace(tiny_input, remote='local', strict_remote=True):
-        out = tiny_model.layer1.output
+        out = tiny_model.transformer.h[0].output[0]
         processed = process_values(out)  # noqa: F841
-        result = tiny_model.layer1.output.save()
+        result = tiny_model.transformer.h[0].output[0].save()
 
     assert isinstance(result, torch.Tensor)
 
 
 @torch.no_grad()
-def test_auto_discovery_class_instance(tiny_model: NNsight, tiny_input: torch.Tensor):
+def test_auto_discovery_class_instance(tiny_model: LanguageModel, tiny_input: str):
     """Test auto-discovery of class instances in traces."""
     # Define a class WITHOUT @remote
     class Multiplier:
@@ -335,9 +328,9 @@ def test_auto_discovery_class_instance(tiny_model: NNsight, tiny_input: torch.Te
 
     # This should work because strict=False is the default
     with tiny_model.trace(tiny_input, remote='local'):
-        out = tiny_model.layer1.output
+        out = tiny_model.transformer.h[0].output[0]
         scaled = multiplier.apply(out)  # noqa: F841
-        result = tiny_model.layer1.output.save()
+        result = tiny_model.transformer.h[0].output[0].save()
 
     assert isinstance(result, torch.Tensor)
 
@@ -356,7 +349,7 @@ def test_error_message_mentions_source_unavailable():
     locals_dict = {'dynamic_fn': dynamic_fn}
 
     with pytest.raises(SourceSerializationError) as exc_info:
-        extract_all(locals_dict, strict=False)
+        extract_all(locals_dict, strict_remote=False)
 
     error_msg = str(exc_info.value)
     # Should mention that source is not available
@@ -372,7 +365,7 @@ def test_error_message_provides_options():
     locals_dict = {'lock': lock}
 
     with pytest.raises(SourceSerializationError) as exc_info:
-        extract_all(locals_dict, strict=False)
+        extract_all(locals_dict, strict_remote=False)
 
     error_msg = str(exc_info.value)
     # Should provide options
