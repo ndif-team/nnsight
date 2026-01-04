@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nnsight Source Serialization Documentation</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+            color: #333;
+        }
+        h1 {
+            border-bottom: 2px solid #0366d6;
+            padding-bottom: 0.5rem;
+        }
+        h2 {
+            color: #0366d6;
+            margin-top: 2rem;
+        }
+        a {
+            color: #0366d6;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .doc-list {
+            list-style: none;
+            padding: 0;
+        }
+        .doc-list li {
+            margin: 1rem 0;
+            padding: 1rem;
+            background: #f6f8fa;
+            border-radius: 6px;
+        }
+        .doc-list li a {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+        .doc-list li p {
+            margin: 0.5rem 0 0 0;
+            color: #586069;
+        }
+        .tools {
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid #e1e4e8;
+        }
+    </style>
+</head>
+<body>
+    <h1>nnsight Source Serialization Documentation</h1>
+
+    <p>Documentation for nnsight's source-based serialization system, which enables Python-version-independent remote execution on NDIF servers.</p>
+
+    <h2>Tutorials</h2>
+    <ul class="doc-list">
+        <li>
+            <a href="source-serialization-tutorial.html">Source Serialization Tutorial</a>
+            <p>Comprehensive guide to how source-based serialization works, including the @remote decorator, serialization format, and special case handling.</p>
+        </li>
+    </ul>
+
+    <h2>Design Documents</h2>
+    <ul class="doc-list">
+        <li>
+            <a href="nnsight-source-serialization-design.html">Source Serialization Design</a>
+            <p>Main design document covering the architecture, wire format, and implementation details of source-based serialization.</p>
+        </li>
+        <li>
+            <a href="forbidden-serialization-design.html">Forbidden Serialization Design</a>
+            <p>Design for early detection and blocking of objects that should not be serialized (pandas DataFrames, sockets, pytest fixtures, etc.) with actionable error messages.</p>
+        </li>
+        <li>
+            <a href="local-simulation-backend.html">LocalSimulationBackend Design</a>
+            <p>Design for the <code>remote='local'</code> backend that simulates NDIF serialization locally for testing and debugging.</p>
+        </li>
+        <li>
+            <a href="version-check-optimization.html">Version Check Optimization</a>
+            <p>Future optimization to skip source transmission when the server has a compatible library version installed.</p>
+        </li>
+    </ul>
+
+    <h2 class="tools">Development Tools</h2>
+    <ul class="doc-list">
+        <li>
+            <a href="callgraph.html">Call Graph Visualization</a>
+            <p>Interactive visualization of function call relationships in the serialization codebase.</p>
+        </li>
+        <li>
+            <a href="dataflow.html">Data Flow Visualization</a>
+            <p>Interactive visualization of data flow through the serialization pipeline.</p>
+        </li>
+    </ul>
+
+    <hr style="margin-top: 3rem;">
+    <p style="color: #586069; font-size: 0.9rem;">
+        Part of the <a href="https://nnsight.net">nnsight</a> project.
+        Source on <a href="https://github.com/ndif-team/nnsight">GitHub</a>.
+    </p>
+</body>
+</html>

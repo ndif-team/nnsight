@@ -178,7 +178,15 @@ def test_remote_rejects_non_remote_base():
         class BadClass(NonRemoteBase):
             pass
 
-    assert "Base class 'NonRemoteBase'" in str(exc_info.value)
+    error_msg = str(exc_info.value)
+    # Check error message contains the base class name
+    assert "base class 'NonRemoteBase'" in error_msg
+    # Check error message includes relative file path and line number
+    import os
+    rel_path = os.path.relpath(__file__)
+    assert f"{rel_path}:" in error_msg, (
+        f"Error should include relative path '{rel_path}:', got: {error_msg}"
+    )
 
 
 def test_remote_allows_remote_base():
@@ -775,7 +783,7 @@ def test_remote_class_source_includes_decorator():
 # =============================================================================
 
 def test_error_message_includes_line_number():
-    """Test that error messages include line numbers."""
+    """Test that error messages include file:line location information."""
     with pytest.raises(RemoteValidationError) as exc_info:
         @remote
         def multi_line_bad():
@@ -787,8 +795,18 @@ def test_error_message_includes_line_number():
     error_msg = str(exc_info.value)
     # Error should mention the pandas import
     assert "pandas" in error_msg, f"Error should mention pandas: {error_msg}"
-    # Error should include line number information
-    assert "Line" in error_msg, f"Error should include line number: {error_msg}"
+    # Error should include relative file path and line number (format: "path/to/file.py:123:")
+    import re
+    import os
+    rel_path = os.path.relpath(__file__)
+    assert f"{rel_path}:" in error_msg, (
+        f"Error should include relative path '{rel_path}:', got: {error_msg}"
+    )
+    # Check that the line number is present (a digit follows the path)
+    escaped_path = re.escape(rel_path)
+    assert re.search(escaped_path + r':\d+:', error_msg), (
+        f"Error should include line number after path: {error_msg}"
+    )
 
 
 # Module-level non-serializable object for error message test
@@ -812,6 +830,334 @@ def test_error_message_suggests_alternatives():
     assert "not JSON-serializable" in error_msg, f"Error should say not JSON-serializable: {error_msg}"
     # Should suggest alternatives
     assert "Options" in error_msg, f"Error should suggest options: {error_msg}"
+
+
+def test_error_line_number_accuracy():
+    """Test that error line numbers exactly match the offending line."""
+    import re
+    import sys
+
+    # We'll define the function and track exact line numbers
+    # The import statement will be on a known line relative to the function def
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_bad_import():
+            x = 1
+            y = 2
+            import subprocess  # BAD IMPORT - this is the line that should be reported
+            return x + y
+
+    error_msg = str(exc_info.value)
+
+    # Extract the line number from the error message
+    match = re.search(r':(\d+):', error_msg)
+    assert match, f"Error should include line number in file:line: format: {error_msg}"
+    reported_line = int(match.group(1))
+
+    # Read the source file and find what's actually on that line
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    # Line numbers are 1-indexed, list is 0-indexed
+    actual_line_content = lines[reported_line - 1].strip()
+
+    # The reported line should contain "import subprocess"
+    assert "import subprocess" in actual_line_content, (
+        f"Line {reported_line} should contain 'import subprocess', "
+        f"but contains: {actual_line_content!r}"
+    )
+
+
+def test_error_includes_correct_file_path():
+    """Test that error messages include the correct relative file path.
+
+    Verifies the error contains the relative path to this test file,
+    matching Python traceback conventions.
+    """
+    import os
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def bad_eval_call():
+            return eval("1+1")  # eval is disallowed
+
+    error_msg = str(exc_info.value)
+
+    # Error should include the relative file path
+    rel_path = os.path.relpath(__file__)
+    assert rel_path in error_msg, (
+        f"Error should include relative path '{rel_path}', got: {error_msg}"
+    )
+    # Verify file:line format
+    assert f"{rel_path}:" in error_msg, (
+        f"Error should have file:line format with '{rel_path}:', got: {error_msg}"
+    )
+
+
+def test_multiple_errors_have_accurate_lines():
+    """Test that when there are multiple errors, each has exact file path and line.
+
+    Verifies that each error in a multi-error scenario has the correct relative
+    file path and accurate line number pointing to the actual offending code.
+    """
+    import re
+    import os
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def multi_error_func():
+            import pandas  # error 1 - BAD IMPORT
+            exec("x = 1")  # error 2 - BAD CALL
+            return 1
+
+    error_msg = str(exc_info.value)
+
+    # Should have multiple errors
+    assert "pandas" in error_msg
+    assert "exec" in error_msg
+
+    # Verify each error includes the relative file path
+    rel_path = os.path.relpath(__file__)
+    assert rel_path in error_msg, (
+        f"Error should include relative path '{rel_path}', got: {error_msg}"
+    )
+
+    # Read the source file
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    # Escape the file path for regex (handles special chars like . and /)
+    escaped_path = re.escape(rel_path)
+
+    # Extract line numbers and verify each points to the correct line
+    for error_line in error_msg.split('\n'):
+        match = re.search(escaped_path + r':(\d+):', error_line)
+        if match:
+            line_num = int(match.group(1))
+            actual_content = lines[line_num - 1].strip()
+
+            if "pandas" in error_line:
+                assert "import pandas" in actual_content, (
+                    f"Line {line_num} should contain 'import pandas', "
+                    f"but contains: {actual_content!r}"
+                )
+            elif "exec" in error_line:
+                assert "exec(" in actual_content, (
+                    f"Line {line_num} should contain 'exec(', "
+                    f"but contains: {actual_content!r}"
+                )
+
+
+def test_exact_line_disallowed_call_eval():
+    """Test exact line number for disallowed eval() call."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_eval():
+            x = 1
+            y = 2
+            result = eval("x + y")  # BAD - eval is disallowed
+            return result
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    assert "eval(" in actual_content, (
+        f"Line {line_num} should contain 'eval(', but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_disallowed_attr_chain():
+    """Test exact line number for disallowed attribute chain like os.system()."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_os_system():
+            import os
+            x = 1
+            os.system("echo hello")  # BAD - os.system is disallowed
+            return x
+
+    error_msg = str(exc_info.value)
+
+    # Find the error about os.system
+    for error_line in error_msg.split('\n'):
+        if "os.system" in error_line or "os" in error_line and "system" in error_line:
+            match = re.search(r'test_remote\.py:(\d+):', error_line)
+            if match:
+                with open(__file__, 'r') as f:
+                    lines = f.readlines()
+                line_num = int(match.group(1))
+                actual_content = lines[line_num - 1].strip()
+                assert "os.system(" in actual_content, (
+                    f"Line {line_num} should contain 'os.system(', but contains: {actual_content!r}"
+                )
+                return
+
+    pytest.fail(f"No os.system error with line number found in: {error_msg}")
+
+
+def test_exact_line_relative_import():
+    """Test exact line number for relative import error."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_relative_import():
+            x = 1
+            from . import something  # BAD - relative import
+            return x
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    assert "from . import" in actual_content or "from ." in actual_content, (
+        f"Line {line_num} should contain relative import, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_base_class_error():
+    """Test exact line number for base class validation error."""
+    import re
+
+    class NotRemoteBase:
+        pass
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        class ChildClass(NotRemoteBase):  # BAD - base class not @remote
+            def __init__(self):
+                pass
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    # The error points to the class definition line
+    assert "class ChildClass" in actual_content or "@remote" in actual_content, (
+        f"Line {line_num} should contain class definition, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_non_serializable_reference():
+    """Test exact line number for non-serializable reference error."""
+    import re
+
+    class CustomNonSerializable:
+        pass
+
+    _custom_obj = CustomNonSerializable()
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_using_custom():  # The error points to the function definition
+            return _custom_obj
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    # Reference errors point to the function/class definition line
+    assert "def func_using_custom" in actual_content or "@remote" in actual_content, (
+        f"Line {line_num} should contain function definition, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_closure_variable_error():
+    """Test exact line number for non-serializable closure variable error."""
+    import re
+
+    class ClosureCustomClass:
+        pass
+
+    def outer_function():
+        captured_obj = ClosureCustomClass()
+
+        with pytest.raises(RemoteValidationError) as exc_info:
+            @remote
+            def inner_func():  # Captures non-serializable closure var
+                return captured_obj
+
+        return exc_info
+
+    exc_info = outer_function()
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    # Closure errors point to the function definition
+    assert "def inner_func" in actual_content or "@remote" in actual_content, (
+        f"Line {line_num} should contain function definition, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_multiple_error_types():
+    """Test exact line numbers when multiple different error types occur."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_many_errors():
+            import requests  # BAD - not available on server
+            x = compile("1+1", "", "eval")  # BAD - compile is disallowed
+            return x
+
+    error_msg = str(exc_info.value)
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    errors_verified = 0
+    for error_line in error_msg.split('\n'):
+        match = re.search(r'test_remote\.py:(\d+):', error_line)
+        if match:
+            line_num = int(match.group(1))
+            actual_content = lines[line_num - 1].strip()
+
+            if "requests" in error_line:
+                assert "import requests" in actual_content, (
+                    f"Line {line_num} should contain 'import requests', "
+                    f"but contains: {actual_content!r}"
+                )
+                errors_verified += 1
+            elif "compile" in error_line:
+                assert "compile(" in actual_content, (
+                    f"Line {line_num} should contain 'compile(', "
+                    f"but contains: {actual_content!r}"
+                )
+                errors_verified += 1
+
+    assert errors_verified >= 2, f"Should verify at least 2 errors, verified {errors_verified}"
 
 
 # =============================================================================
@@ -1898,7 +2244,6 @@ def test_serialize_tensor_basic():
     assert "__tensor__" in result
     assert result["dtype"] == "float32"
     assert result["shape"] == [3]
-    assert "compressed" in result
 
 
 def test_serialize_tensor_2d():
@@ -1940,37 +2285,11 @@ def test_deserialize_tensor_numpy():
 
 
 def test_tensor_roundtrip_random():
-    """Test roundtrip for random float tensor (uncompressed)."""
+    """Test roundtrip for random float tensor."""
     original = torch.randn(100, 50)
     serialized = serialize_tensor(original)
     restored = deserialize_tensor(serialized)
 
-    # Random floats shouldn't compress
-    assert serialized["compressed"] is False
-    assert torch.allclose(original, restored)
-
-
-def test_tensor_roundtrip_zeros():
-    """Test roundtrip for zeros tensor (compressed)."""
-    original = torch.zeros(1000, 100)
-    serialized = serialize_tensor(original)
-    restored = deserialize_tensor(serialized)
-
-    # Zeros should compress well
-    assert serialized["compressed"] is True
-    assert torch.allclose(original, restored)
-
-
-def test_tensor_roundtrip_sparse():
-    """Test roundtrip for sparse tensor (mostly zeros, compressed)."""
-    original = torch.zeros(100, 100)
-    original[0, 0] = 1.0
-    original[50, 50] = 2.0
-    serialized = serialize_tensor(original)
-    restored = deserialize_tensor(serialized)
-
-    # Sparse should compress
-    assert serialized["compressed"] is True
     assert torch.allclose(original, restored)
 
 
@@ -2050,23 +2369,6 @@ def test_tensor_full_roundtrip():
     assert isinstance(namespace["my_vec"], torch.Tensor)
     assert torch.allclose(namespace["my_vec"], original)
     assert namespace["factor"] == 2
-
-
-def test_tensor_compression_savings():
-    """Test that compression actually saves space for compressible data."""
-    # All zeros - should compress extremely well
-    zeros = torch.zeros(1000)
-    zeros_serialized = serialize_tensor(zeros)
-
-    # Raw would be 4000 bytes (1000 * 4), compressed + b64 should be much smaller
-    b64_size = len(zeros_serialized["__tensor__"])
-    assert b64_size < 1000  # Much smaller than 4000 raw or 5333 uncompressed b64
-
-    # Random floats - should NOT compress
-    random_t = torch.randn(1000)
-    random_serialized = serialize_tensor(random_t)
-
-    assert random_serialized["compressed"] is False
 
 
 def test_tensor_sparse_pytorch():
@@ -2517,3 +2819,126 @@ def test_deserialize_source_based_restricted_blocks_dangerous():
         )
 
     assert "subprocess" in str(exc_info.value)
+
+
+# =============================================================================
+# remote_noop and Class Deduplication Tests
+# =============================================================================
+
+def test_remote_noop_marks_as_validated():
+    """Test that remote_noop marks objects as validated without source extraction."""
+    from nnsight.remote import remote_noop
+
+    # Define a class using remote_noop (simulating deserialization context)
+    @remote_noop
+    class TestClass:
+        def __init__(self, x):
+            self.x = x
+
+    # Should be marked as validated
+    assert hasattr(TestClass, '_remote_validated')
+    assert TestClass._remote_validated is True
+
+    # Source should be None (not extracted)
+    assert TestClass._remote_source is None
+
+
+def test_remote_noop_with_arguments():
+    """Test that remote_noop works with version/library arguments."""
+    from nnsight.remote import remote_noop
+
+    @remote_noop(library="test_lib", version="1.0.0")
+    class TestClass:
+        pass
+
+    assert TestClass._remote_validated is True
+    assert TestClass._remote_library == "test_lib"
+    assert TestClass._remote_version == "1.0.0"
+
+
+def test_multiple_instances_deduplicated_source():
+    """Test that multiple instances of the same class share one source definition."""
+    @remote
+    class Counter:
+        def __init__(self, start):
+            self.value = start
+
+        def increment(self):
+            self.value += 1
+            return self.value
+
+    # Create multiple instances
+    a = Counter(1)
+    b = Counter(2)
+    c = Counter(3)
+
+    # Extract
+    variables, remote_objects, model_refs = extract_all({'a': a, 'b': b, 'c': c})
+
+    # Should only have one class entry
+    assert len(remote_objects) == 1
+    assert 'Counter' in remote_objects
+
+    # Source should be present once
+    assert 'source' in remote_objects['Counter']
+    assert 'code' in remote_objects['Counter']['source']
+    assert 'class Counter' in remote_objects['Counter']['source']['code']
+
+    # All three instances should be present
+    assert len(remote_objects['Counter']['instances']) == 3
+
+    # Verify each instance has correct state
+    instance_values = {
+        inst['var_name']: inst['state']['value']
+        for inst in remote_objects['Counter']['instances'].values()
+    }
+    assert instance_values == {'a': 1, 'b': 2, 'c': 3}
+
+
+def test_multiple_instances_isinstance_after_roundtrip():
+    """Test that all instances are isinstance of the same class after deserialization."""
+    @remote
+    class Counter:
+        def __init__(self, start):
+            self.value = start
+
+        def increment(self):
+            self.value += 1
+            return self.value
+
+    # Create multiple instances
+    a = Counter(10)
+    b = Counter(20)
+
+    # Serialize
+    variables, remote_objects, model_refs = extract_all({'a': a, 'b': b})
+    payload = json.dumps({
+        'version': '2.2',
+        'source': {'code': '', 'file': 'test.py', 'line': 1},
+        'variables': variables,
+        'remote_objects': remote_objects,
+        'model_refs': model_refs,
+    }).encode('utf-8')
+
+    # Deserialize
+    namespace = deserialize_source_based(payload, model=None)
+
+    # Both instances should exist
+    assert 'a' in namespace
+    assert 'b' in namespace
+
+    # KEY TEST: Both should be instances of the SAME class object
+    assert type(namespace['a']) is type(namespace['b'])
+
+    # isinstance should work correctly
+    cls = type(namespace['a'])
+    assert isinstance(namespace['a'], cls)
+    assert isinstance(namespace['b'], cls)
+
+    # State should be preserved
+    assert namespace['a'].value == 10
+    assert namespace['b'].value == 20
+
+    # Methods should work
+    assert namespace['a'].increment() == 11
+    assert namespace['b'].increment() == 21

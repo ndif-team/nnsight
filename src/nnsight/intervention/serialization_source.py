@@ -18,7 +18,6 @@ import json
 import sys
 import textwrap
 import types
-import zlib
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -41,7 +40,13 @@ class SourceSerializationError(Exception):
 # Serialization Format Constants
 # =============================================================================
 # Marker keys used in the serialized JSON format for type identification.
-# Changing these values would break backwards compatibility.
+# These constants define the wire format for source-based serialization:
+# - Each marker key (e.g., "__tensor__", "__nn_module__") identifies a special
+#   type in the JSON payload that requires reconstruction on the server.
+# - The format is designed to be self-describing so the server can reconstruct
+#   Python objects (tensors, nn.Modules, @remote instances) from JSON.
+# - IMPORTANT: Changing these values would break backwards compatibility with
+#   existing serialized payloads and server deployments.
 
 SERIALIZATION_VERSION = "2.2"
 
@@ -69,8 +74,227 @@ ENUM_FALLBACK_MARKER = "__enum_fallback__"
 
 
 # =============================================================================
+# Forbidden Serialization Lists
+# =============================================================================
+# Some objects should never be serialized for remote execution, even if they
+# technically could be. These objects either:
+# 1. Represent OS/system resources that cannot be transferred (sockets, locks)
+# 2. Have huge dependency graphs that would generate confusing warnings (pandas)
+# 3. Leak into scope from test frameworks or infrastructure (pytest fixtures)
+#
+# We check these EARLY to provide clear, actionable error messages instead of
+# confusing failures after extensive processing.
+
+# Module prefixes to skip during auto-discovery
+# Objects from these modules will be immediately rejected with a clear message
+FORBIDDEN_MODULE_PREFIXES: frozenset = frozenset({
+    # Test frameworks - these leak into scope during testing
+    '_pytest',
+    'pytest',
+    'unittest',
+
+    # OS/System resources - represent state that cannot be transferred
+    'socket',           # Network sockets (has Python wrapper over C extension)
+    'multiprocessing',  # Process resources, queues, locks
+    'asyncio',          # Async event loops, tasks
+    'concurrent',       # Thread pools, futures
+    'queue',            # Thread communication queues
+    'subprocess',       # OS subprocesses
+
+    # Database connections - represent network/session state
+    'sqlite3',
+    'sqlalchemy',
+    'pymongo',
+    'redis',
+    'psycopg',          # PostgreSQL
+    'psycopg2',
+    'mysql',
+    'pymysql',
+
+    # Logging - handlers often have file references
+    'logging',
+})
+
+# Specific class names (fully qualified) with custom error messages
+# Format: "module.ClassName": "Error message with suggestions"
+FORBIDDEN_CLASSES: Dict[str, str] = {
+    # Pandas - massive dependency explosion, convert to tensor instead
+    'pandas.core.frame.DataFrame': (
+        "pandas.DataFrame cannot be serialized for remote execution.\n"
+        "DataFrames have complex internal state that cannot be transferred.\n"
+        "\n"
+        "Convert to a tensor before the trace:\n"
+        "  tensor_data = torch.tensor(df.values)\n"
+        "Or extract specific columns:\n"
+        "  values = df['column'].tolist()"
+    ),
+    'pandas.core.series.Series': (
+        "pandas.Series cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a tensor or list before the trace:\n"
+        "  tensor_data = torch.tensor(series.values)\n"
+        "  values = series.tolist()"
+    ),
+
+    # Matplotlib - contains rendering state and callbacks
+    'matplotlib.figure.Figure': (
+        "matplotlib.Figure cannot be serialized for remote execution.\n"
+        "Figures contain rendering state and callbacks that cannot be transferred.\n"
+        "\n"
+        "If you need to pass image data, save to bytes first:\n"
+        "  import io\n"
+        "  buf = io.BytesIO()\n"
+        "  fig.savefig(buf, format='png')\n"
+        "  image_bytes = buf.getvalue()"
+    ),
+    'matplotlib.axes._axes.Axes': (
+        "matplotlib.Axes cannot be serialized for remote execution.\n"
+        "Axes contain rendering state bound to a Figure.\n"
+        "\n"
+        "Access the data you need before the trace instead."
+    ),
+    'matplotlib.axes._subplots.Axes': (
+        "matplotlib.Axes cannot be serialized for remote execution.\n"
+        "Axes contain rendering state bound to a Figure.\n"
+        "\n"
+        "Access the data you need before the trace instead."
+    ),
+    'matplotlib.axes._subplots.AxesSubplot': (
+        "matplotlib.Axes cannot be serialized for remote execution.\n"
+        "Axes contain rendering state bound to a Figure.\n"
+        "\n"
+        "Access the data you need before the trace instead."
+    ),
+
+    # PIL/Pillow - convert to tensor
+    'PIL.Image.Image': (
+        "PIL.Image cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a tensor first:\n"
+        "  from torchvision import transforms\n"
+        "  tensor = transforms.ToTensor()(image)"
+    ),
+
+    # Scipy sparse matrices - convert to dense or use specific format
+    'scipy.sparse._csr.csr_matrix': (
+        "scipy.sparse.csr_matrix cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a dense tensor:\n"
+        "  tensor = torch.tensor(sparse_matrix.toarray())\n"
+        "Or extract the CSR components if you need sparse format."
+    ),
+    'scipy.sparse._csc.csc_matrix': (
+        "scipy.sparse.csc_matrix cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a dense tensor:\n"
+        "  tensor = torch.tensor(sparse_matrix.toarray())"
+    ),
+}
+
+
+def _get_full_class_name(obj: Any) -> str:
+    """Get the fully qualified class name of an object."""
+    cls = type(obj) if not isinstance(obj, type) else obj
+    module = getattr(cls, '__module__', '')
+    name = getattr(cls, '__qualname__', cls.__name__)
+    return f"{module}.{name}" if module else name
+
+
+def is_forbidden_for_serialization(obj: Any) -> Tuple[bool, Optional[str]]:
+    """
+    Check if an object is forbidden from serialization.
+
+    This check happens EARLY, before any auto-discovery attempt, to provide
+    clear error messages without generating confusing warnings.
+
+    Args:
+        obj: The object to check
+
+    Returns:
+        (is_forbidden, error_message) tuple. If is_forbidden is True,
+        error_message contains a helpful explanation and suggestions.
+    """
+    # Get the class and module info
+    cls = type(obj) if not isinstance(obj, type) else obj
+    module = getattr(cls, '__module__', '') or ''
+    full_name = _get_full_class_name(obj)
+
+    # Check against forbidden class names first (most specific)
+    if full_name in FORBIDDEN_CLASSES:
+        return True, FORBIDDEN_CLASSES[full_name]
+
+    # Check against forbidden module prefixes
+    for prefix in FORBIDDEN_MODULE_PREFIXES:
+        if module.startswith(prefix) or module.startswith(f"_{prefix}"):
+            # Generate a helpful message based on the category
+            if prefix in ('_pytest', 'pytest', 'unittest'):
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"This appears to be a test framework object that leaked into scope.\n"
+                    f"\n"
+                    f"This usually happens when pytest fixtures are captured in the trace.\n"
+                    f"Make sure you're not accidentally referencing test infrastructure."
+                )
+            elif prefix in ('socket', 'multiprocessing', 'asyncio', 'concurrent', 'queue', 'subprocess'):
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"This object represents OS/system resources that cannot be transferred.\n"
+                    f"\n"
+                    f"Options:\n"
+                    f"  - Create the resource inside the trace block\n"
+                    f"  - Pass configuration data and create the resource on the server"
+                )
+            elif prefix in ('sqlite3', 'sqlalchemy', 'pymongo', 'redis', 'psycopg', 'psycopg2', 'mysql', 'pymysql'):
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"Database connections represent network state that cannot be transferred.\n"
+                    f"\n"
+                    f"Options:\n"
+                    f"  - Query the data before the trace and pass results as tensors/lists\n"
+                    f"  - Create a new connection inside the trace block"
+                )
+            elif prefix == 'logging':
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"Logging handlers contain file/stream references that cannot be transferred.\n"
+                    f"\n"
+                    f"Create logging handlers inside the trace block if needed."
+                )
+            else:
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"Objects from this module are not supported for remote execution."
+                )
+            return True, msg
+
+    return False, None
+
+
+def check_forbidden_or_raise(name: str, obj: Any) -> None:
+    """
+    Check if an object is forbidden and raise SourceSerializationError if so.
+
+    Args:
+        name: Variable name (for error message)
+        obj: The object to check
+
+    Raises:
+        SourceSerializationError: If the object is forbidden
+    """
+    is_forbidden, message = is_forbidden_for_serialization(obj)
+    if is_forbidden:
+        raise SourceSerializationError(
+            f"Cannot serialize '{name}' for remote execution:\n\n{message}"
+        )
+
+
+# =============================================================================
 # Remote Metadata Extraction
 # =============================================================================
+# Helper functions to extract metadata from @remote decorated objects.
+# This metadata (source code, module references, closure variables) is attached
+# to objects by the @remote decorator at import time and is used during
+# serialization to send the object's definition to the server.
 
 def _get_remote_metadata(cls_or_func: Any) -> Dict[str, Any]:
     """
@@ -111,6 +335,19 @@ def _get_remote_metadata(cls_or_func: Any) -> Dict[str, Any]:
 # =============================================================================
 # Auto-Discovery of Dependencies
 # =============================================================================
+# Functions for automatically discovering classes that need to be serialized,
+# even when they are not explicitly decorated with @remote. This enables
+# third-party libraries (like nnterp) to work with NDIF without modification.
+#
+# Auto-discovery works by:
+# 1. Detecting when a value's class has available source code (via inspect)
+# 2. Extracting the source and finding external references (like @remote does)
+# 3. Recursively discovering base classes and type dependencies
+# 4. Including discovered classes in the serialized payload for server-side
+#    reconstruction
+#
+# This is triggered at serialization time (not import time) when we encounter
+# instances of classes that aren't @remote decorated but have available source.
 
 # Cache of auto-discovered classes to avoid re-processing
 _auto_discovered_cache: Dict[type, Dict[str, Any]] = {}
@@ -180,29 +417,33 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         discovered[cls_name] = result
         return result
 
+    # Get file/line info first (for error messages)
+    try:
+        source_file = inspect.getfile(cls)
+        _, start_line = inspect.getsourcelines(cls)
+        location = f"{source_file}:{start_line}"
+    except (OSError, TypeError):
+        source_file = None
+        start_line = None
+        location = None
+
     # Extract source
     try:
         source = inspect.getsource(cls)
         dedented_source = textwrap.dedent(source)
     except (OSError, TypeError) as e:
+        prefix = f"{location}: " if location else ""
         raise SourceSerializationError(
-            f"Cannot auto-discover class '{cls_name}': source not available. {e}"
+            f"{prefix}cannot auto-discover class '{cls_name}': source not available. {e}"
         )
-
-    # Get file/line info
-    try:
-        source_file = inspect.getfile(cls)
-        _, start_line = inspect.getsourcelines(cls)
-    except (OSError, TypeError):
-        source_file = "<unknown>"
-        start_line = 1
 
     # Parse AST and find external references
     try:
         tree = ast.parse(dedented_source)
     except SyntaxError as e:
+        prefix = f"{location}: " if location else ""
         raise SourceSerializationError(
-            f"Cannot parse source for '{cls_name}': {e}"
+            f"{prefix}cannot parse source for '{cls_name}': {e}"
         )
 
     # Find external references
@@ -215,7 +456,7 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         module_globals = getattr(module, '__dict__', {}) if module else {}
 
     # Resolve module references, but also track type references for auto-discovery
-    module_refs, resolution_errors = resolve_module_references(external_names, cls)
+    module_refs, resolution_errors = resolve_module_references(external_names, cls, source_file, start_line)
 
     # Find type references that need auto-discovery
     types_to_discover = []
@@ -237,7 +478,7 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
             filtered_errors.append(error)
 
     # Validate AST (warnings only for auto-discovered - don't block)
-    ast_errors = validate_ast(tree, cls_name)
+    ast_errors = validate_ast(tree, cls_name, source_file, start_line)
 
     # For auto-discovered classes, we're more lenient - just warn
     if filtered_errors or ast_errors:
@@ -311,10 +552,17 @@ def is_auto_discoverable_instance(value: Any) -> bool:
 # =============================================================================
 # Tensor Serialization
 # =============================================================================
-
-# Compression threshold: only compress if we save at least 10%
-COMPRESSION_THRESHOLD = 0.9
-
+# Functions for serializing PyTorch tensors and NumPy arrays to JSON-compatible
+# format. Tensors are converted to base64-encoded bytes with dtype/shape metadata.
+#
+# Special tensor types are handled:
+# - Sparse tensors: Preserved in COO format to maintain memory efficiency
+# - Quantized tensors: Preserved with scale/zero_point to maintain precision
+# - GPU/MPS tensors: Moved to CPU before serialization
+# - bfloat16 tensors: View-cast to int16 (same bits) since NumPy lacks bfloat16
+#
+# Note: Per-tensor compression is disabled because the full JSON payload is
+# compressed at the transport layer, making per-tensor compression redundant.
 
 def is_tensor(value: Any) -> bool:
     """
@@ -336,15 +584,80 @@ def is_tensor(value: Any) -> bool:
     return False
 
 
+def _can_deep_serialize(value: Any, _seen: set = None) -> bool:
+    """
+    Check if a value (including nested collections) can be serialized.
+
+    This is more permissive than is_json_serializable - it allows:
+    - JSON primitives (None, bool, int, float, str)
+    - Tensors (torch.Tensor, numpy.ndarray)
+    - Collections containing the above (list, tuple, dict, set)
+    - @remote decorated objects
+    - Auto-discoverable instances
+
+    Returns True if the value can be serialized via serialize_value.
+    """
+    # Handle circular references
+    if _seen is None:
+        _seen = set()
+
+    # Primitives are always serializable
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+
+    # Check for circular reference
+    obj_id = id(value)
+    if obj_id in _seen:
+        return True  # We handle circular refs via memo
+    _seen.add(obj_id)
+
+    # Tensors are serializable
+    if is_tensor(value):
+        return True
+
+    # @remote objects are serializable
+    if is_remote_object(value):
+        return True
+
+    # Auto-discoverable instances are serializable
+    if is_auto_discoverable_instance(value):
+        return True
+
+    # Collections - recursively check all elements
+    if isinstance(value, (list, tuple)):
+        return all(_can_deep_serialize(item, _seen) for item in value)
+
+    if isinstance(value, dict):
+        return all(
+            isinstance(k, str) and _can_deep_serialize(v, _seen)
+            for k, v in value.items()
+        )
+
+    if isinstance(value, set):
+        return all(_can_deep_serialize(item, _seen) for item in value)
+
+    # Enum values are serializable
+    from enum import Enum
+    if isinstance(value, Enum):
+        return True
+
+    # nn.Module instances are serializable (check by type name to avoid circular dependency)
+    type_name = type(value).__name__
+    module = getattr(type(value), '__module__', '')
+    if 'torch.nn' in module or (hasattr(value, 'forward') and hasattr(value, 'parameters')):
+        return True
+
+    return False
+
+
 def serialize_tensor(value: Any) -> Dict[str, Any]:
     """
-    Serialize a tensor to a JSON-compatible dict with optional compression.
+    Serialize a tensor to a JSON-compatible dict.
 
     Strategy:
     - Convert to numpy bytes (handling sparse, quantized, device-specific tensors)
-    - Try zlib compression (level=1 for speed)
-    - Only use compression if it saves at least 10%
     - Base64 encode for JSON transport
+    - Note: Per-tensor compression is disabled since the full message is compressed
 
     Handles special cases:
     - Sparse tensors: preserved in COO format (memory efficient)
@@ -356,15 +669,14 @@ def serialize_tensor(value: Any) -> Dict[str, Any]:
         - __tensor__: base64-encoded bytes
         - dtype: string dtype (e.g., "float32")
         - shape: list of dimensions
-        - compressed: bool indicating if zlib compressed
         - quantization: (optional) dict with scale, zero_point, qtype for quantized tensors
         - sparse: (optional) dict with indices, dense_shape for sparse COO tensors
 
-    Wire format example (uncompressed):
-        {"__tensor__": "base64...", "dtype": "float32", "shape": [768], "compressed": false}
+    Wire format example:
+        {"__tensor__": "base64...", "dtype": "float32", "shape": [768]}
 
     Wire format example (quantized - preserves exact int8 values, 4x smaller):
-        {"__tensor__": "base64...", "dtype": "int8", "shape": [768], "compressed": true,
+        {"__tensor__": "base64...", "dtype": "int8", "shape": [768],
          "quantization": {"scale": 0.1, "zero_point": 0, "qtype": "qint8"}}
 
     Wire format example (sparse COO - memory efficient for large sparse tensors):
@@ -396,21 +708,14 @@ def serialize_tensor(value: Any) -> Dict[str, Any]:
             indices = t._indices().cpu().numpy()
             values = t._values().cpu().numpy()
 
-            # Compress indices
+            # Encode indices (no per-tensor compression; message is compressed globally)
             indices_bytes = indices.tobytes()
-            indices_compressed = zlib.compress(indices_bytes, level=1)
-            if len(indices_compressed) < len(indices_bytes) * COMPRESSION_THRESHOLD:
-                indices_data = base64.b64encode(indices_compressed).decode('ascii')
-                indices_is_compressed = True
-            else:
-                indices_data = base64.b64encode(indices_bytes).decode('ascii')
-                indices_is_compressed = False
+            indices_data = base64.b64encode(indices_bytes).decode('ascii')
 
             sparse_info = {
                 "indices": indices_data,
                 "indices_dtype": str(indices.dtype),
                 "indices_shape": list(indices.shape),
-                "indices_compressed": indices_is_compressed,
                 "dense_shape": list(t.shape),
             }
             np_array = values
@@ -440,28 +745,14 @@ def serialize_tensor(value: Any) -> Dict[str, Any]:
         np_array = value
         original_dtype = None
 
-    # Get raw bytes
+    # Get raw bytes and base64 encode (no per-tensor compression; message is compressed globally)
     raw_bytes = np_array.tobytes()
-
-    # Try compression
-    compressed_bytes = zlib.compress(raw_bytes, level=1)
-
-    # Only use compression if it actually helps (at least 10% savings)
-    if len(compressed_bytes) < len(raw_bytes) * COMPRESSION_THRESHOLD:
-        data_bytes = compressed_bytes
-        is_compressed = True
-    else:
-        data_bytes = raw_bytes
-        is_compressed = False
-
-    # Base64 encode for JSON
-    b64_data = base64.b64encode(data_bytes).decode('ascii')
+    b64_data = base64.b64encode(raw_bytes).decode('ascii')
 
     result = {
         TENSOR_MARKER: b64_data,
         "dtype": str(np_array.dtype),
         "shape": list(np_array.shape),
-        "compressed": is_compressed,
     }
 
     # Add quantization info if present
@@ -497,10 +788,6 @@ def deserialize_tensor(data: Dict[str, Any], as_torch: bool = True) -> Any:
     # Decode base64 for values
     raw_bytes = base64.b64decode(data[TENSOR_MARKER])
 
-    # Decompress if needed
-    if data.get("compressed", False):
-        raw_bytes = zlib.decompress(raw_bytes)
-
     # Reconstruct numpy array (values for sparse, or full tensor for dense)
     dtype = np.dtype(data["dtype"])
     shape = tuple(data["shape"])
@@ -525,8 +812,6 @@ def deserialize_tensor(data: Dict[str, Any], as_torch: bool = True) -> Any:
             s = data["sparse"]
             # Decode indices
             indices_bytes = base64.b64decode(s["indices"])
-            if s.get("indices_compressed", False):
-                indices_bytes = zlib.decompress(indices_bytes)
             indices_dtype = np.dtype(s["indices_dtype"])
             indices_shape = tuple(s["indices_shape"])
             indices_np = np.frombuffer(indices_bytes, dtype=indices_dtype).reshape(indices_shape)
@@ -557,7 +842,11 @@ def deserialize_tensor(data: Dict[str, Any], as_torch: bool = True) -> Any:
     return np_array
 
 
-def serialize_source_based(tracer: "Tracer") -> bytes:
+def serialize_source_based(
+    tracer: "Tracer",
+    strict_remote: bool = False,
+    max_upload_mb: float = 10.0,
+) -> bytes:
     """
     Serialize a tracer for remote execution using source + JSON.
 
@@ -566,6 +855,11 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
 
     Args:
         tracer: The tracer object containing source and frame information
+        strict_remote: If True, require explicit @remote decorations for all
+                user-defined functions/classes. If False (default), auto-discover
+                classes/functions with available source code.
+        max_upload_mb: Maximum upload payload size in MB before warning. Default is
+                       10 MB. Set to 0 to disable warnings.
 
     Returns:
         JSON-encoded bytes ready for transmission
@@ -588,7 +882,9 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
     source_metadata = extract_source_metadata(tracer)
 
     # Extract variables and remote objects
-    variables, remote_objects, model_refs = extract_all(frame_locals, traced_model=traced_model)
+    variables, remote_objects, model_refs = extract_all(
+        frame_locals, traced_model=traced_model, strict_remote=strict_remote
+    )
 
     payload = {
         "version": SERIALIZATION_VERSION,
@@ -608,7 +904,24 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
             # The server will create a plain LanguageModel with the rename dict
             pass
 
-    return json.dumps(payload).encode('utf-8')
+    # Serialize to JSON bytes
+    result = json.dumps(payload).encode('utf-8')
+
+    # Check upload payload size against threshold
+    if max_upload_mb > 0:
+        payload_mb = len(result) / (1024 * 1024)
+        if payload_mb > max_upload_mb:
+            import warnings
+            warnings.warn(
+                f"Upload payload size ({payload_mb:.2f} MB) exceeds threshold "
+                f"({max_upload_mb} MB). Large uploads may cause slow transmission "
+                f"or NDIF submission failures. Consider reducing tensor sizes or "
+                f"computing values server-side. Use max_upload_mb=0 to disable.",
+                UserWarning,
+                stacklevel=3,  # Point to caller's caller (trace block)
+            )
+
+    return result
 
 
 def extract_source_metadata(tracer: "Tracer") -> Dict[str, Any]:
@@ -647,18 +960,202 @@ def extract_source_metadata(tracer: "Tracer") -> Dict[str, Any]:
     return result
 
 
-def extract_all(locals_dict: Dict[str, Any], traced_model: Any = None) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+# =============================================================================
+# Auto-Discovery Helper Functions
+# =============================================================================
+# These functions handle auto-discovery of classes and functions that don't have
+# @remote decoration but have available source code. This enables third-party
+# libraries to work without requiring explicit decoration.
+
+def _can_auto_discover_function(func: Any) -> bool:
+    """
+    Check if a function can be auto-discovered for remote serialization.
+
+    A function can be auto-discovered if:
+    1. It has available source code (via inspect.getsource)
+    2. It's not from a core allowed module (torch, numpy, etc.)
+    3. It's not already @remote decorated
+    """
+    # Already decorated
+    if getattr(func, '_remote_validated', False):
+        return True  # Use existing metadata
+
+    # Skip lambdas (handled separately)
+    if is_lambda(func):
+        return False
+
+    # Check module - skip core allowed modules
+    module = getattr(func, '__module__', '')
+    if module and is_server_available_module(module):
+        return False
+
+    # Check if source is available
+    try:
+        inspect.getsource(func)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def _auto_discover_function(func: Any) -> Dict[str, Any]:
+    """
+    Auto-discover a function for remote serialization.
+
+    Similar to auto_discover_class but for standalone functions.
+    """
+    func_name = func.__name__
+
+    # Get file/line info
+    try:
+        source_file = inspect.getfile(func)
+        source_lines, start_line = inspect.getsourcelines(func)
+    except (OSError, TypeError):
+        source_file = "<unknown>"
+        start_line = 1
+
+    # Get source
+    try:
+        source = inspect.getsource(func)
+        dedented_source = textwrap.dedent(source)
+    except (OSError, TypeError) as e:
+        raise SourceSerializationError(
+            f"Cannot auto-discover function '{func_name}': source not available. {e}"
+        )
+
+    # Parse AST and find external references
+    try:
+        tree = ast.parse(dedented_source)
+    except SyntaxError as e:
+        raise SourceSerializationError(
+            f"Cannot parse source for function '{func_name}': {e}"
+        )
+
+    # Find external references
+    external_names = find_external_references(tree, func)
+
+    # Get module globals
+    module_globals = {}
+    if hasattr(func, '__module__'):
+        module = sys.modules.get(func.__module__)
+        module_globals = getattr(module, '__dict__', {}) if module else {}
+
+    # Resolve module references
+    module_refs, resolution_errors = resolve_module_references(
+        external_names, func, source_file, start_line
+    )
+
+    # Get closure variables (JSON-serializable only)
+    closure_vars = {}
+    if func.__closure__ and hasattr(func.__code__, 'co_freevars'):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+
+            if is_json_serializable(value):
+                closure_vars[name] = value
+            elif isinstance(value, types.ModuleType) and is_server_available_module(value.__name__):
+                continue  # Skip - available on server
+            elif is_remote_object(value):
+                continue  # Skip - serialized separately
+
+    # Auto-detect library/version
+    library = None
+    version = None
+    if hasattr(func, '__module__') and func.__module__:
+        root_package = func.__module__.split('.')[0]
+        try:
+            from importlib.metadata import version as get_version
+            version = get_version(root_package)
+            library = root_package
+        except Exception:
+            pass
+
+    return {
+        "source": {
+            "code": dedented_source,
+            "file": source_file,
+            "line": start_line,
+        },
+        "module_refs": module_refs,
+        "closure_vars": closure_vars,
+        "type": "function",
+        "library": library,
+        "version": version,
+    }
+
+
+def extract_auto_discovered_function(var_name: str, func: Any, result: Dict[str, Any]) -> None:
+    """
+    Extract an auto-discovered function for serialization.
+    """
+    func_name = func.__name__
+
+    if func_name not in result:
+        result[func_name] = _auto_discover_function(func)
+
+
+def extract_auto_discovered_type(var_name: str, cls: type, result: Dict[str, Any]) -> None:
+    """
+    Extract an auto-discovered class type (not instance) for serialization.
+    """
+    cls_name = cls.__name__
+
+    if cls_name not in result:
+        discovered = {}
+        auto_discover_class(cls, discovered)
+        result.update(discovered)
+
+
+def extract_auto_discovered_object(
+    var_name: str,
+    value: Any,
+    result: Dict[str, Any],
+    traced_model: Any = None
+) -> None:
+    """
+    Extract an auto-discovered object instance for serialization.
+
+    Similar to extract_remote_object but for non-@remote classes.
+    """
+    cls = type(value)
+    cls_name = cls.__name__
+
+    # Auto-discover the class if not already in result
+    if cls_name not in result:
+        discovered = {}
+        auto_discover_class(cls, discovered)
+        result.update(discovered)
+
+    # Serialize instance state
+    instance_state = serialize_instance_state(value, discovered_classes=result, traced_model=traced_model)
+    if "instances" not in result[cls_name]:
+        result[cls_name]["instances"] = {}
+    result[cls_name]["instances"][str(id(value))] = {
+        "var_name": var_name,
+        "state": instance_state
+    }
+
+
+def extract_all(
+    locals_dict: Dict[str, Any],
+    traced_model: Any = None,
+    strict_remote: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
     """
     Extract all serializable data from locals.
 
     Args:
         locals_dict: Dictionary of local variables
         traced_model: The model being traced (for identity-based model ref detection)
+        strict_remote: If True, require explicit @remote decorations. If False (default),
+                       auto-discover classes/functions with available source code.
 
     Returns:
         (variables, remote_objects, model_refs) where:
         - variables: JSON-serializable simple values
-        - remote_objects: @nnsight.remote functions/classes/instances
+        - remote_objects: @nnsight.remote functions/classes/instances (or auto-discovered)
         - model_refs: list of variable names that reference the model
     """
     variables = {}
@@ -699,6 +1196,17 @@ def extract_all(locals_dict: Dict[str, Any], traced_model: Any = None) -> Tuple[
             variables[name] = value
             continue
 
+        # Handle collections (list, tuple, dict, set) that might contain tensors
+        # These need special serialization via serialize_value
+        if isinstance(value, (list, tuple, dict, set)):
+            if _can_deep_serialize(value):
+                memo = {}
+                discovered = {}
+                variables[name] = serialize_value(value, name, memo, discovered, traced_model)
+                # If any classes were auto-discovered during serialization, add them
+                remote_objects.update(discovered)
+                continue
+
         # Skip module references (they'll be available on server)
         if isinstance(value, types.ModuleType):
             if is_server_available_module(value.__name__):
@@ -717,15 +1225,48 @@ def extract_all(locals_dict: Dict[str, Any], traced_model: Any = None) -> Tuple[
         if isinstance(value, type) and value.__module__ == 'builtins':
             continue
 
+        # EARLY CHECK: Reject forbidden objects before any auto-discovery attempt
+        # This catches common mistakes (pandas, matplotlib, sockets) with clear messages
+        check_forbidden_or_raise(name, value)
+
+        # Auto-discovery mode (strict_remote=False): try to auto-discover classes/functions
+        if not strict_remote:
+            # Try to auto-discover instances of classes with available source
+            if is_auto_discoverable_instance(value):
+                extract_auto_discovered_object(name, value, remote_objects, traced_model=traced_model)
+                continue
+
+            # Try to auto-discover class types (not instances)
+            if isinstance(value, type) and can_auto_discover(value):
+                extract_auto_discovered_type(name, value, remote_objects)
+                continue
+
+            # Try to auto-discover regular functions with available source
+            if callable(value) and not isinstance(value, type):
+                if _can_auto_discover_function(value):
+                    extract_auto_discovered_function(name, value, remote_objects)
+                    continue
+
         # If we get here, we can't serialize this value
-        raise SourceSerializationError(
-            f"Variable '{name}' of type '{type(value).__name__}' "
-            f"cannot be serialized for source-based remote execution.\n"
-            f"Options:\n"
-            f"  - Use JSON-serializable type (int, float, str, list, dict)\n"
-            f"  - Mark functions/classes with @nnsight.remote\n"
-            f"  - Compute the value inside the trace block"
-        )
+        if strict_remote:
+            raise SourceSerializationError(
+                f"Variable '{name}' of type '{type(value).__name__}' "
+                f"cannot be serialized for source-based remote execution.\n"
+                f"Options:\n"
+                f"  - Use JSON-serializable type (int, float, str, list, dict)\n"
+                f"  - Mark functions/classes with @nnsight.remote\n"
+                f"  - Compute the value inside the trace block"
+            )
+        else:
+            raise SourceSerializationError(
+                f"Variable '{name}' of type '{type(value).__name__}' "
+                f"cannot be serialized for source-based remote execution.\n"
+                f"The source code for this object is not available for auto-discovery.\n"
+                f"Options:\n"
+                f"  - Use JSON-serializable type (int, float, str, list, dict)\n"
+                f"  - Mark functions/classes with @nnsight.remote\n"
+                f"  - Compute the value inside the trace block"
+            )
 
     return variables, remote_objects, model_refs
 
@@ -754,8 +1295,20 @@ def is_model_reference(value: Any) -> bool:
 # =============================================================================
 # Model Subclass Handling
 # =============================================================================
-# Functions for handling LanguageModel subclasses (like nnterp's StandardizedTransformer).
-# These need their source code sent to the server.
+# Functions for serializing LanguageModel subclasses so they can be reconstructed
+# on the NDIF server. This enables third-party model wrappers (like nnterp's
+# StandardizedTransformer) to work on servers that don't have the library installed.
+#
+# When a user traces a LanguageModel subclass:
+# 1. is_languagemodel_subclass() detects it's not a base nnsight class
+# 2. serialize_model_subclass() auto-discovers the class hierarchy
+# 3. The class source, dependencies, and instance state are serialized
+# 4. reconstruct_model_subclass() rebuilds the class on the server
+#
+# This differs from regular @remote classes because:
+# - The model is the "context" for the trace, not just a variable
+# - Server-provided attributes (_module, _tokenizer) must be preserved
+# - The model_key is used to load the HuggingFace model on the server
 
 def is_languagemodel_subclass(value: Any) -> bool:
     """Check if value is an instance of a LanguageModel SUBCLASS (not LanguageModel itself).
@@ -1112,7 +1665,19 @@ def reconstruct_model_subclass(
 # =============================================================================
 # Remote Object Extraction
 # =============================================================================
-# Functions for extracting @remote decorated objects and lambdas from frame locals.
+# Functions for extracting @remote decorated objects and lambdas from the trace
+# frame's local variables. These functions are called by extract_all() during
+# serialization to identify which objects need their source code sent to the server.
+#
+# For @remote functions/classes: The source and metadata were captured at import
+# time by the @remote decorator. We extract and include them in the payload.
+#
+# For instances of @remote classes: We serialize their __dict__ state so the
+# server can reconstruct the instance after re-creating the class from source.
+#
+# For lambdas: We extract the source using AST parsing (extract_lambda_source),
+# validate it doesn't capture non-serializable closures, and include it in the
+# payload. Complex lambdas should be converted to @remote functions.
 
 def is_the_traced_model(value: Any, traced_model: Any) -> bool:
     """Check if value IS the specific model being traced (by identity)."""
@@ -1175,14 +1740,25 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
     """
     import inspect
 
+    # Get file/line metadata first (for error messages)
+    try:
+        source_file = inspect.getfile(func)
+        source_line = func.__code__.co_firstlineno
+        location = f"{source_file}:{source_line}"
+    except (OSError, TypeError):
+        source_file = None
+        source_line = None
+        location = None
+
     # Use the lambda extraction function
     source, errors = validate_lambda_for_remote(func)
 
     if errors:
         # Format errors nicely
+        prefix = f"{location}: " if location else ""
         error_text = '\n'.join(f"  - {e}" for e in errors)
         raise SourceSerializationError(
-            f"Lambda '{var_name}' cannot be serialized for remote execution:\n\n"
+            f"{prefix}lambda '{var_name}' cannot be serialized for remote execution:\n\n"
             f"{error_text}\n\n"
             f"Consider converting to a named function:\n\n"
             f"  @nnsight.remote\n"
@@ -1190,16 +1766,9 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
             f"      return ..."
         )
 
-    # Get file/line metadata
-    try:
-        source_file = inspect.getfile(func)
-        source_line = func.__code__.co_firstlineno
-    except (OSError, TypeError):
-        source_file = "<unknown>"
-        source_line = 1
-
     # Extract closure variables if present
     closure_vars = {}
+    prefix = f"{location}: " if location else ""
     if func.__closure__ and hasattr(func.__code__, 'co_freevars'):
         for name, cell in zip(func.__code__.co_freevars, func.__closure__):
             try:
@@ -1213,7 +1782,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
                 if is_server_available_module(value.__name__):
                     continue
                 raise SourceSerializationError(
-                    f"Lambda '{var_name}' captures module '{value.__name__}' "
+                    f"{prefix}lambda '{var_name}' captures module '{value.__name__}' "
                     f"which is not available on NDIF server."
                 )
 
@@ -1229,7 +1798,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
             # Nested lambda in closure
             if is_lambda(value):
                 raise SourceSerializationError(
-                    f"Lambda '{var_name}' captures another lambda '{name}' in its closure. "
+                    f"{prefix}lambda '{var_name}' captures another lambda '{name}' in its closure. "
                     f"Nested lambdas are not supported. Please convert to named functions."
                 )
 
@@ -1240,7 +1809,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
 
             # Non-serializable closure variable - error!
             raise SourceSerializationError(
-                f"Lambda '{var_name}' captures '{name}' of type '{type(value).__name__}' "
+                f"{prefix}lambda '{var_name}' captures '{name}' of type '{type(value).__name__}' "
                 f"which cannot be serialized.\n\n"
                 f"Options:\n"
                 f"  - Pass '{name}' as an argument instead of capturing it\n"
@@ -1269,8 +1838,22 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
 # =============================================================================
 # Value Serialization
 # =============================================================================
-# These functions handle serializing different value types (tensors, nn.Modules,
-# primitives, containers) into JSON-compatible format.
+# Functions for recursively serializing Python values into JSON-compatible format.
+# Used by serialize_instance_state() to serialize @remote instance __dict__ contents.
+#
+# Each value type has a specific serialization strategy:
+# - Primitives (None, bool, int, float, str): Pass through unchanged
+# - Tensors/Parameters: serialize_tensor() with base64 encoding
+# - nn.Modules: Serialize class path + __dict__ for reconstruction
+# - @remote instances: Reference by id (serialized separately)
+# - Auto-discoverable instances: Include class source + __dict__
+# - Containers (list, dict, tuple, set): Recursive serialization with markers
+# - Callables from allowed modules: Store qualified name for server import
+# - Enums: Store class/module/member for reconstruction
+#
+# Deduplication: A memo dict tracks serialized objects by id() to handle:
+# - Shared references (same tensor in multiple places)
+# - Circular references (object A contains B which contains A)
 
 def is_nn_parameter(value: Any) -> bool:
     """Check if value is a torch.nn.Parameter."""
@@ -1588,8 +2171,23 @@ def get_callable_reference(value: Any) -> Optional[str]:
 # =============================================================================
 # Top-Level API: Serialization and Deserialization
 # =============================================================================
-# Main entry points for source-based serialization. serialize_source_based()
-# is called client-side, deserialize_source_based() is called server-side.
+# Main entry points for source-based serialization.
+#
+# Client-side (serialize_source_based):
+#   Called when the trace context exits with a remote backend. (The Tracer.__exit__
+#   method invokes RemoteBackend, which serializes the trace for submission to NDIF.)
+#   Extracts the trace source code,
+#   frame locals, and all dependencies into a JSON payload. The payload includes:
+#   - The trace block source code with file/line metadata for error mapping
+#   - JSON-serializable variables (int, str, list, dict, tensors)
+#   - @remote object definitions (source + module refs + instances)
+#   - Model subclass definitions (for LanguageModel subclasses)
+#
+# Server-side (deserialize_source_based):
+#   Called on the NDIF server to reconstruct the execution environment.
+#   Re-creates all @remote classes/functions by exec'ing their source, rebuilds
+#   instances with their serialized state, and returns a namespace dict ready
+#   for executing the user's trace code.
 
 def can_serialize_source_based(tracer: "Tracer") -> Tuple[bool, Optional[str]]:
     """
@@ -1670,10 +2268,15 @@ def deserialize_source_based(
     import os
     import pathlib
     import random
+    from nnsight.remote import remote_noop
 
     data = json.loads(payload.decode('utf-8'))
 
     # Build base namespace with allowed modules
+    # Note: We use remote_noop instead of remote because:
+    # 1. Code was already validated client-side before transmission
+    # 2. Source extraction won't work on exec'd code
+    # 3. remote_noop just marks objects as validated without re-checking
     base_modules = {
         'torch': torch,
         'numpy': numpy,
@@ -1682,6 +2285,7 @@ def deserialize_source_based(
         'pathlib': pathlib,
         'random': random,
         'model': model,
+        'remote': remote_noop,  # No-op for deserialized code (already validated)
     }
 
     # Set up execution environment
@@ -1809,8 +2413,22 @@ def deserialize_source_based(
 # =============================================================================
 # Value Reconstruction
 # =============================================================================
-# These functions handle reconstructing serialized values back to Python objects.
-# Called server-side during deserialization.
+# Functions for recursively reconstructing Python values from serialized JSON.
+# Called server-side by deserialize_source_based() to rebuild @remote instance
+# state and nested data structures.
+#
+# Each marker type has a reconstruction strategy:
+# - __tensor__: deserialize_tensor() with optional quantization/sparsity
+# - __nn_module__: object.__new__(cls) + reconstruct __dict__
+# - __auto_instance__: Same as above, class was exec'd from discovered source
+# - __dict__/__list__/__tuple__/__set__: Recursive reconstruction
+# - __ref__: Return previously reconstructed object (deduplication)
+# - __model_ref__: Return the traced model
+# - __callable_ref__/__type_ref__: Import from module path
+# - __enum__: Import enum class and get member by name
+#
+# The reconstructed dict tracks objects by their serialized ID_MARKER to handle
+# shared references and circular references correctly.
 
 def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: dict) -> Any:
     """

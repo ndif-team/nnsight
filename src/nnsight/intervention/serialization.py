@@ -115,7 +115,7 @@ def save_for_remote(tracer: "Tracer") -> Tuple[bytes, str]:
         f"To use version-agnostic serialization:\n"
         f"  - Use JSON-serializable variables (int, float, str, list, dict)\n"
         f"  - Mark functions and classes with @nnsight.remote\n\n"
-        f"Cloudpickle fallback will be removed in nnsight 2.0.",
+        f"Cloudpickle fallback will be removed in nnsight 0.6.",
         DeprecationWarning,
         stacklevel=4
     )
