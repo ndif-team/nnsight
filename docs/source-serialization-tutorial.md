@@ -340,9 +340,7 @@ This distinction between code (source) and environment (external references) is 
 
 Classes decorated with `@remote` have their external references captured at decoration time. But what about third-party classes that aren't decorated?
 
-To test source serialization with existing libraries, we implemented an **auto-discovery pipeline** for classes that extend `LanguageModel` (like nnterp's `StandardizedTransformer`). When such a class is used, the system automatically treats it as remote-eligible and discovers its dependencies at serialization time.
-
-> **Note:** This auto-discovery mechanism is experimental. We're evaluating whether it should be removed (requiring explicit `@remote` annotation), become the default for all dependencies, or coexist with the `@remote` decorator. For now, it only applies to `LanguageModel` subclasses.
+To enable source serialization with existing libraries, we implemented an **auto-discovery pipeline** for classes that extend `LanguageModel` (like nnterp's `StandardizedTransformer`). When such a class is used, the system automatically treats it as remote-eligible and discovers its dependencies at serialization time. See [Auto-Discovery vs @remote Annotation](#auto-discovery-vs-remote-annotation) in Design Decisions for discussion of the design trade-offs.
 
 ```python
 def auto_discover_class(cls, discovered):
@@ -606,30 +604,164 @@ The JSON payload has this shape:
 
 ### Type Markers
 
-Complex types use marker keys for unambiguous reconstruction:
+JSON doesn't distinguish between different Python types—a list is just `[...]`, a dict is just `{...}`. To reconstruct Python objects correctly, we use **marker keys** that indicate the type and carry the necessary data for reconstruction.
+
+The marker constants are defined at the top of `serialization_source.py`. Here's a complete reference:
+
+#### Tensor and Parameter Markers
 
 ```python
-# Tensor
-{"__tensor__": {"data": "base64...", "dtype": "float32", "shape": [768]}}
+# TENSOR_MARKER = "__tensor__"
+# For torch.Tensor and numpy.ndarray
+{"__tensor__": {
+    "data": "base64-encoded-bytes...",
+    "dtype": "float32",
+    "shape": [768, 512],
+    "compressed": true  # optional, indicates zlib compression
+}}
 
-# Reference to already-serialized object (deduplication)
+# NN_PARAMETER_MARKER = "__nn_parameter__"
+# For nn.Parameter (wraps tensor with requires_grad info)
+{"__nn_parameter__": {
+    "data": "base64...",
+    "dtype": "float32",
+    "shape": [768],
+    "requires_grad": true
+}}
+```
+
+Tensors are serialized as base64-encoded bytes with metadata about dtype and shape. Large tensors are optionally compressed with zlib. On deserialization, the bytes are decoded and reshaped into the original tensor.
+
+#### Collection Markers
+
+```python
+# DICT_MARKER = "__dict__"
+# For dicts with non-string keys (JSON requires string keys)
+{"__dict__": {
+    "keys": [{"__tensor__": ...}, 42, "normal_key"],
+    "values": ["value1", "value2", "value3"]
+}}
+
+# LIST_MARKER = "__list__"
+# For lists containing complex types
+{"__list__": [item1, item2, ...]}
+
+# TUPLE_MARKER = "__tuple__"
+# Distinguishes tuples from lists (JSON has only arrays)
+{"__tuple__": [item1, item2, ...]}
+
+# SET_MARKER = "__set__"
+# For sets (no JSON equivalent)
+{"__set__": [item1, item2, ...]}
+```
+
+Python has rich collection types; JSON has only arrays and string-keyed objects. These markers preserve the distinction so `(1, 2)` doesn't become `[1, 2]` after round-trip.
+
+#### Reference Markers (Deduplication and Identity)
+
+```python
+# ID_MARKER = "__id__"
+# Marks an object's identity for later reference
+{"__id__": "140234567890", ...rest of object...}
+
+# REF_MARKER = "__ref__"
+# References a previously-serialized object by ID
 {"__ref__": "140234567890"}
-
-# Reference to the model
-{"__model_ref__": True}
-
-# nn.Module (just the state_dict)
-{"__nn_module__": {"class": "Linear", "state_dict": {...}}}
 ```
 
-The marker constants are defined at the top of `serialization_source.py`:
+These work together to handle object identity and circular references. When an object is first serialized, it gets an `__id__`. If the same object appears again (same `id()` in Python), we emit a `__ref__` instead of re-serializing. On deserialization, we maintain a lookup table to reconnect references.
 
 ```python
-TENSOR_MARKER = "__tensor__"
-REF_MARKER = "__ref__"
-MODEL_REF_MARKER = "__model_ref__"
-# etc.
+# Example: circular reference
+a = {"name": "a"}
+b = {"name": "b", "other": a}
+a["other"] = b  # circular!
+
+# Serializes as:
+{"__id__": "111", "name": "a", "other": {"__id__": "222", "name": "b", "other": {"__ref__": "111"}}}
 ```
+
+#### Model Reference Marker
+
+```python
+# MODEL_REF_MARKER = "__model_ref__"
+# Placeholder for the traced model (injected server-side)
+{"__model_ref__": true}
+```
+
+The traced model exists on the server already—we don't serialize it. Instead, we emit this marker wherever the model is referenced. During deserialization, the server replaces these markers with the actual model instance.
+
+#### Remote Object Markers
+
+```python
+# REMOTE_REF_MARKER = "__remote_ref__"
+# References a @remote class by name
+{"__remote_ref__": "MyAnalyzer"}
+
+# REMOTE_TYPE_MARKER = "__remote_type__"
+# The class itself (not an instance) as a value
+{"__remote_type__": "MyAnalyzer"}
+
+# STATE_MARKER = "__state__"
+# Instance state (the __dict__)
+{"__remote_ref__": "MyAnalyzer", "__state__": {"top_k": 10, "threshold": 0.5}}
+
+# AUTO_INSTANCE_MARKER = "__auto_instance__"
+# Instance of an auto-discovered class (not @remote decorated)
+{"__auto_instance__": "StandardizedTransformer", "__state__": {...}}
+```
+
+Remote objects are serialized as source code (in the `remote_objects` section of the payload). These markers appear in the `variables` section to reference those classes and their instances. The `__state__` marker carries the instance's `__dict__` for reconstruction.
+
+#### Callable and Type References
+
+```python
+# CALLABLE_REF_MARKER = "__callable_ref__"
+# Reference to a function/method from a server-available module
+{"__callable_ref__": {"module": "torch.nn.functional", "name": "softmax"}}
+
+# TYPE_REF_MARKER = "__type_ref__"
+# Reference to a type/class from a server-available module
+{"__type_ref__": {"module": "torch", "name": "float32"}}
+```
+
+When code references functions or types from allowed modules (like `torch`, `numpy`), we don't serialize their source—we just record where to import them from. These markers encode that import path.
+
+#### Special Case Markers
+
+```python
+# NN_MODULE_MARKER = "__nn_module__"
+# For nn.Module instances (serializes class path + state_dict)
+{"__nn_module__": {
+    "class": "torch.nn.Linear",
+    "state_dict": {"weight": {"__tensor__": ...}, "bias": {"__tensor__": ...}}
+}}
+
+# ENUM_MARKER = "__enum__"
+# For enum values
+{"__enum__": {"class": "MyEnum", "name": "VALUE_A"}}
+
+# ENUM_FALLBACK_MARKER = "__enum_fallback__"
+# For enums that can't be reconstructed by name
+{"__enum_fallback__": {"class": "MyEnum", "value": 42}}
+
+# WEAKREF_MARKER = "__weakref__"
+# Placeholder for weakref (can't serialize, will be None)
+{"__weakref__": null}
+
+# SERVER_PROVIDED_MARKER = "__server_provided__"
+# Value that will be provided by the server environment
+{"__server_provided__": "some_server_resource"}
+```
+
+These handle edge cases: `nn.Module` uses PyTorch's state_dict mechanism; enums are reconstructed by name; weakrefs can't be serialized (they're ephemeral by design); and some values are expected to exist server-side.
+
+#### Marker Design Principles
+
+1. **Unambiguous**: Each marker is a unique key that can't appear in normal data
+2. **Self-describing**: The marker name indicates what type to reconstruct
+3. **Minimal**: Only include data necessary for reconstruction
+4. **Composable**: Markers can nest (e.g., a `__tuple__` containing `__tensor__` values)
 
 ---
 
@@ -984,6 +1116,29 @@ Calling `__init__` would require:
 Instead, we use `object.__new__()` + direct `__dict__` assignment. This is how `pickle` works.
 
 **Limitation:** Classes that rely on `__init__` for invariants may not work correctly. But this is rare for the "query generator" pattern these classes follow.
+
+### Auto-Discovery vs @remote Annotation
+
+The `@remote` decorator requires users to explicitly mark classes for remote serialization. But what about existing third-party libraries that don't use `@remote`?
+
+To test source serialization with real-world libraries, we implemented an **auto-discovery pipeline** that automatically discovers and serializes classes extending `LanguageModel` (like nnterp's `StandardizedTransformer`) and all their dependencies—without requiring any `@remote` annotations.
+
+This creates an interesting design tension:
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **@remote only** | Explicit, clear contract; validation at import time; user knows what's serialized | Third-party libraries can't be used without modification |
+| **Auto-discovery only** | Works with any library; no annotations needed | Implicit behavior; validation deferred to serialization time; harder to debug |
+| **Hybrid (current)** | Best of both; `@remote` for user code, auto-discovery for `LanguageModel` subclasses | Two mechanisms to understand; special-case for `LanguageModel` |
+
+**Current status:** Auto-discovery is limited to `LanguageModel` subclasses as a pragmatic compromise. This lets libraries like nnterp work out-of-the-box while keeping the explicit `@remote` contract for user-defined helpers.
+
+**Open questions:**
+1. Should auto-discovery be extended to all dependencies? This would eliminate the need for `@remote` but lose early validation.
+2. Should auto-discovery be removed entirely? This would require library authors to use `@remote`, creating a cleaner but more demanding contract.
+3. Should auto-discovery become the default, with `@remote` as an optional early-validation mechanism?
+
+The answer likely depends on how the ecosystem evolves. If many third-party libraries emerge that need remote serialization, auto-discovery becomes more valuable. If most users write their own helpers, explicit `@remote` provides better guardrails.
 
 ---
 
