@@ -178,7 +178,13 @@ def test_remote_rejects_non_remote_base():
         class BadClass(NonRemoteBase):
             pass
 
-    assert "Base class 'NonRemoteBase'" in str(exc_info.value)
+    error_msg = str(exc_info.value)
+    # Check error message contains the base class name
+    assert "base class 'NonRemoteBase'" in error_msg
+    # Check error message includes exact file path and line number
+    assert f"{__file__}:" in error_msg, (
+        f"Error should include exact file path '{__file__}:', got: {error_msg}"
+    )
 
 
 def test_remote_allows_remote_base():
@@ -775,7 +781,7 @@ def test_remote_class_source_includes_decorator():
 # =============================================================================
 
 def test_error_message_includes_line_number():
-    """Test that error messages include line numbers."""
+    """Test that error messages include file:line location information."""
     with pytest.raises(RemoteValidationError) as exc_info:
         @remote
         def multi_line_bad():
@@ -787,8 +793,16 @@ def test_error_message_includes_line_number():
     error_msg = str(exc_info.value)
     # Error should mention the pandas import
     assert "pandas" in error_msg, f"Error should mention pandas: {error_msg}"
-    # Error should include line number information
-    assert "Line" in error_msg, f"Error should include line number: {error_msg}"
+    # Error should include exact file path and line number (format: "/path/to/file.py:123:")
+    import re
+    assert f"{__file__}:" in error_msg, (
+        f"Error should include exact file path '{__file__}:', got: {error_msg}"
+    )
+    # Check that the line number is present (a digit follows the path)
+    escaped_path = re.escape(__file__)
+    assert re.search(escaped_path + r':\d+:', error_msg), (
+        f"Error should include line number after path: {error_msg}"
+    )
 
 
 # Module-level non-serializable object for error message test
@@ -812,6 +826,332 @@ def test_error_message_suggests_alternatives():
     assert "not JSON-serializable" in error_msg, f"Error should say not JSON-serializable: {error_msg}"
     # Should suggest alternatives
     assert "Options" in error_msg, f"Error should suggest options: {error_msg}"
+
+
+def test_error_line_number_accuracy():
+    """Test that error line numbers exactly match the offending line."""
+    import re
+    import sys
+
+    # We'll define the function and track exact line numbers
+    # The import statement will be on a known line relative to the function def
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_bad_import():
+            x = 1
+            y = 2
+            import subprocess  # BAD IMPORT - this is the line that should be reported
+            return x + y
+
+    error_msg = str(exc_info.value)
+
+    # Extract the line number from the error message
+    match = re.search(r':(\d+):', error_msg)
+    assert match, f"Error should include line number in file:line: format: {error_msg}"
+    reported_line = int(match.group(1))
+
+    # Read the source file and find what's actually on that line
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    # Line numbers are 1-indexed, list is 0-indexed
+    actual_line_content = lines[reported_line - 1].strip()
+
+    # The reported line should contain "import subprocess"
+    assert "import subprocess" in actual_line_content, (
+        f"Line {reported_line} should contain 'import subprocess', "
+        f"but contains: {actual_line_content!r}"
+    )
+
+
+def test_error_includes_correct_file_path():
+    """Test that error messages include the exact correct source file path.
+
+    Verifies the error contains the actual absolute path to this test file,
+    not just the filename.
+    """
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def bad_eval_call():
+            return eval("1+1")  # eval is disallowed
+
+    error_msg = str(exc_info.value)
+
+    # Error should include the exact file path of this test file
+    this_file = __file__
+    assert this_file in error_msg, (
+        f"Error should include exact file path '{this_file}', got: {error_msg}"
+    )
+    # Verify file:line format
+    assert f"{this_file}:" in error_msg, (
+        f"Error should have file:line format with '{this_file}:', got: {error_msg}"
+    )
+
+
+def test_multiple_errors_have_accurate_lines():
+    """Test that when there are multiple errors, each has exact file path and line.
+
+    Verifies that each error in a multi-error scenario has the correct absolute
+    file path and accurate line number pointing to the actual offending code.
+    """
+    import re
+    import os
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def multi_error_func():
+            import pandas  # error 1 - BAD IMPORT
+            exec("x = 1")  # error 2 - BAD CALL
+            return 1
+
+    error_msg = str(exc_info.value)
+
+    # Should have multiple errors
+    assert "pandas" in error_msg
+    assert "exec" in error_msg
+
+    # Verify each error includes the exact file path
+    this_file = __file__
+    assert this_file in error_msg, (
+        f"Error should include exact file path '{this_file}', got: {error_msg}"
+    )
+
+    # Read the source file
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    # Escape the file path for regex (handles special chars like . and /)
+    escaped_path = re.escape(this_file)
+
+    # Extract line numbers and verify each points to the correct line
+    for error_line in error_msg.split('\n'):
+        match = re.search(escaped_path + r':(\d+):', error_line)
+        if match:
+            line_num = int(match.group(1))
+            actual_content = lines[line_num - 1].strip()
+
+            if "pandas" in error_line:
+                assert "import pandas" in actual_content, (
+                    f"Line {line_num} should contain 'import pandas', "
+                    f"but contains: {actual_content!r}"
+                )
+            elif "exec" in error_line:
+                assert "exec(" in actual_content, (
+                    f"Line {line_num} should contain 'exec(', "
+                    f"but contains: {actual_content!r}"
+                )
+
+
+def test_exact_line_disallowed_call_eval():
+    """Test exact line number for disallowed eval() call."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_eval():
+            x = 1
+            y = 2
+            result = eval("x + y")  # BAD - eval is disallowed
+            return result
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    assert "eval(" in actual_content, (
+        f"Line {line_num} should contain 'eval(', but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_disallowed_attr_chain():
+    """Test exact line number for disallowed attribute chain like os.system()."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_os_system():
+            import os
+            x = 1
+            os.system("echo hello")  # BAD - os.system is disallowed
+            return x
+
+    error_msg = str(exc_info.value)
+
+    # Find the error about os.system
+    for error_line in error_msg.split('\n'):
+        if "os.system" in error_line or "os" in error_line and "system" in error_line:
+            match = re.search(r'test_remote\.py:(\d+):', error_line)
+            if match:
+                with open(__file__, 'r') as f:
+                    lines = f.readlines()
+                line_num = int(match.group(1))
+                actual_content = lines[line_num - 1].strip()
+                assert "os.system(" in actual_content, (
+                    f"Line {line_num} should contain 'os.system(', but contains: {actual_content!r}"
+                )
+                return
+
+    pytest.fail(f"No os.system error with line number found in: {error_msg}")
+
+
+def test_exact_line_relative_import():
+    """Test exact line number for relative import error."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_relative_import():
+            x = 1
+            from . import something  # BAD - relative import
+            return x
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    assert "from . import" in actual_content or "from ." in actual_content, (
+        f"Line {line_num} should contain relative import, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_base_class_error():
+    """Test exact line number for base class validation error."""
+    import re
+
+    class NotRemoteBase:
+        pass
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        class ChildClass(NotRemoteBase):  # BAD - base class not @remote
+            def __init__(self):
+                pass
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    # The error points to the class definition line
+    assert "class ChildClass" in actual_content or "@remote" in actual_content, (
+        f"Line {line_num} should contain class definition, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_non_serializable_reference():
+    """Test exact line number for non-serializable reference error."""
+    import re
+
+    class CustomNonSerializable:
+        pass
+
+    _custom_obj = CustomNonSerializable()
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_using_custom():  # The error points to the function definition
+            return _custom_obj
+
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    # Reference errors point to the function/class definition line
+    assert "def func_using_custom" in actual_content or "@remote" in actual_content, (
+        f"Line {line_num} should contain function definition, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_closure_variable_error():
+    """Test exact line number for non-serializable closure variable error."""
+    import re
+
+    class ClosureCustomClass:
+        pass
+
+    def outer_function():
+        captured_obj = ClosureCustomClass()
+
+        with pytest.raises(RemoteValidationError) as exc_info:
+            @remote
+            def inner_func():  # Captures non-serializable closure var
+                return captured_obj
+
+        return exc_info
+
+    exc_info = outer_function()
+    error_msg = str(exc_info.value)
+    match = re.search(r'test_remote\.py:(\d+):', error_msg)
+    assert match, f"Error should include line number: {error_msg}"
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    line_num = int(match.group(1))
+    actual_content = lines[line_num - 1].strip()
+    # Closure errors point to the function definition
+    assert "def inner_func" in actual_content or "@remote" in actual_content, (
+        f"Line {line_num} should contain function definition, but contains: {actual_content!r}"
+    )
+
+
+def test_exact_line_multiple_error_types():
+    """Test exact line numbers when multiple different error types occur."""
+    import re
+
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def func_with_many_errors():
+            import requests  # BAD - not available on server
+            x = compile("1+1", "", "eval")  # BAD - compile is disallowed
+            return x
+
+    error_msg = str(exc_info.value)
+
+    with open(__file__, 'r') as f:
+        lines = f.readlines()
+
+    errors_verified = 0
+    for error_line in error_msg.split('\n'):
+        match = re.search(r'test_remote\.py:(\d+):', error_line)
+        if match:
+            line_num = int(match.group(1))
+            actual_content = lines[line_num - 1].strip()
+
+            if "requests" in error_line:
+                assert "import requests" in actual_content, (
+                    f"Line {line_num} should contain 'import requests', "
+                    f"but contains: {actual_content!r}"
+                )
+                errors_verified += 1
+            elif "compile" in error_line:
+                assert "compile(" in actual_content, (
+                    f"Line {line_num} should contain 'compile(', "
+                    f"but contains: {actual_content!r}"
+                )
+                errors_verified += 1
+
+    assert errors_verified >= 2, f"Should verify at least 2 errors, verified {errors_verified}"
 
 
 # =============================================================================

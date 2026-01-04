@@ -219,9 +219,11 @@ def _apply_remote(obj: Union[Type, Callable], version: str = None, library: str 
             except Exception:
                 pass  # Not a installed package, no version info
 
-    # Step 1: Verify source is available
+    # Step 1: Verify source is available and get file/line info for error messages
     try:
         source = inspect.getsource(obj)
+        source_file = inspect.getfile(obj)
+        _, start_line = inspect.getsourcelines(obj)
     except OSError:
         raise RemoteValidationError(
             f"@nnsight.remote requires source code for '{obj.__name__}'. "
@@ -243,19 +245,19 @@ def _apply_remote(obj: Union[Type, Callable], version: str = None, library: str 
     external_names = find_external_references(tree, obj)
 
     # Step 4: Resolve module-level references and validate them
-    module_refs, resolution_errors = resolve_module_references(external_names, obj)
+    module_refs, resolution_errors = resolve_module_references(external_names, obj, source_file, start_line)
 
     # Step 5: Extract and validate closure variables (for nested functions)
-    closure_vars, closure_errors = extract_closure_variables(obj)
+    closure_vars, closure_errors = extract_closure_variables(obj, source_file, start_line)
     module_refs.update(closure_vars)  # Merge closure vars into module refs
 
     # Step 6: Validate AST for disallowed patterns
-    ast_errors = validate_ast(tree, obj.__name__)
+    ast_errors = validate_ast(tree, obj.__name__, source_file, start_line)
 
     # Step 7: For classes, additional validation
     class_errors = []
     if isinstance(obj, type):
-        class_errors = validate_class(obj)
+        class_errors = validate_class(obj, source_file, start_line)
 
     # Collect all errors
     all_errors = resolution_errors + closure_errors + ast_errors + class_errors
@@ -533,9 +535,15 @@ def classify_reference_value(name: str, value: Any) -> Tuple[str, Optional[Any],
     return ValueClassification.ERROR, None, f"type '{type_name}' is not JSON-serializable"
 
 
-def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tuple[Dict[str, Any], List[str]]:
+def resolve_module_references(names: Set[str], obj: Union[Type, Callable], source_file: str = None, start_line: int = None) -> Tuple[Dict[str, Any], List[str]]:
     """
     Resolve external names to their values from the function/class globals.
+
+    Args:
+        names: Set of external names to resolve
+        obj: The function or class being decorated
+        source_file: The source file path (for error messages)
+        start_line: The starting line number in the source file (for error messages)
 
     Returns:
         (captured_refs, errors) where:
@@ -544,6 +552,16 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
     """
     captured = {}
     errors = []
+
+    # Format location prefix for error messages
+    if source_file and start_line is not None:
+        location = f"{source_file}:{start_line}"
+    elif source_file:
+        location = source_file
+    elif start_line is not None:
+        location = f"Line {start_line}"
+    else:
+        location = None
 
     # Get globals from the decorated object
     if hasattr(obj, '__globals__'):
@@ -577,8 +595,9 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
         if classification == ValueClassification.CAPTURE:
             captured[name] = captured_value
         elif classification == ValueClassification.ERROR:
+            prefix = f"{location}: " if location else ""
             errors.append(
-                f"Reference '{name}' ({error_detail}).\n"
+                f"{prefix}reference '{name}' ({error_detail}).\n"
                 f"  Options:\n"
                 f"    - Make it a class/instance attribute instead\n"
                 f"    - Pass it as a function/method argument\n"
@@ -588,7 +607,7 @@ def resolve_module_references(names: Set[str], obj: Union[Type, Callable]) -> Tu
     return captured, errors
 
 
-def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any], List[str]]:
+def extract_closure_variables(obj: Union[Type, Callable], source_file: str = None, start_line: int = None) -> Tuple[Dict[str, Any], List[str]]:
     """
     Extract and validate closure variables from a function or class methods.
 
@@ -601,6 +620,8 @@ def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any
 
     Args:
         obj: The function or class to extract closure variables from
+        source_file: The source file path (for error messages)
+        start_line: The starting line number in the source file (for error messages)
 
     Returns:
         (captured_vars, errors) where:
@@ -630,29 +651,41 @@ def extract_closure_variables(obj: Union[Type, Callable]) -> Tuple[Dict[str, Any
                 func = attr.__func__
 
             if func is not None:
-                method_captured, method_errors = _extract_closure_from_function(func, attr_name)
+                method_captured, method_errors = _extract_closure_from_function(func, attr_name, source_file, start_line)
                 captured.update(method_captured)
                 errors.extend(method_errors)
 
         return captured, errors
 
     # For functions, extract directly
-    return _extract_closure_from_function(obj, obj.__name__ if hasattr(obj, '__name__') else '<function>')
+    return _extract_closure_from_function(obj, obj.__name__ if hasattr(obj, '__name__') else '<function>', source_file, start_line)
 
 
-def _extract_closure_from_function(func: Callable, context_name: str) -> Tuple[Dict[str, Any], List[str]]:
+def _extract_closure_from_function(func: Callable, context_name: str, source_file: str = None, start_line: int = None) -> Tuple[Dict[str, Any], List[str]]:
     """
     Extract closure variables from a single function.
 
     Args:
         func: The function to extract closure variables from
         context_name: Name of the function/method for error messages
+        source_file: The source file path (for error messages)
+        start_line: The starting line number in the source file (for error messages)
 
     Returns:
         (captured_vars, errors)
     """
     captured = {}
     errors = []
+
+    # Format location prefix for error messages
+    if source_file and start_line is not None:
+        location = f"{source_file}:{start_line}"
+    elif source_file:
+        location = source_file
+    elif start_line is not None:
+        location = f"Line {start_line}"
+    else:
+        location = None
 
     # Check if the function has closure variables
     if not hasattr(func, '__closure__') or func.__closure__ is None:
@@ -692,8 +725,9 @@ def _extract_closure_from_function(func: Callable, context_name: str) -> Tuple[D
         if classification == ValueClassification.CAPTURE:
             captured[name] = captured_value
         elif classification == ValueClassification.ERROR:
+            prefix = f"{location}: " if location else ""
             errors.append(
-                f"In '{context_name}': closure variable '{name}' ({error_detail}).\n"
+                f"{prefix}in '{context_name}': closure variable '{name}' ({error_detail}).\n"
                 f"  Options:\n"
                 f"    - Pass it as a function argument instead\n"
                 f"    - Use a JSON-serializable type (int, float, str, list, dict, bool, None)\n"
@@ -741,7 +775,7 @@ def is_json_serializable(value: Any, _seen: set = None) -> bool:
         return False
 
 
-def validate_ast(tree: ast.AST, name: str) -> List[str]:
+def validate_ast(tree: ast.AST, name: str, source_file: str = None, start_line: int = None) -> List[str]:
     """
     Validate AST for disallowed patterns that would disqualify the code from
     being remoted.
@@ -759,6 +793,8 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
     Args:
         tree: The parsed AST of the source code to validate
         name: The name of the function/class being validated (for error messages)
+        source_file: The source file path (for error messages)
+        start_line: The starting line number in the source file (for error messages)
 
     Returns:
         A list of error strings describing each validation failure. An empty list
@@ -766,11 +802,21 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
     """
     errors = []
 
+    def format_location(lineno: int) -> str:
+        """Format file:line prefix for error messages."""
+        if start_line is not None:
+            actual_line = start_line + lineno - 1
+        else:
+            actual_line = lineno
+        if source_file:
+            return f"{source_file}:{actual_line}"
+        return f"Line {actual_line}"
+
     class Validator(ast.NodeVisitor):
         def visit_Import(self, node):
             for alias in node.names:
                 if not is_server_available_module(alias.name):
-                    errors.append(f"Line {node.lineno}: imports '{alias.name}' (not available on NDIF server)")
+                    errors.append(f"{format_location(node.lineno)}: imports '{alias.name}' (not available on NDIF server)")
             self.generic_visit(node)
 
         def visit_ImportFrom(self, node):
@@ -778,16 +824,16 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
             if node.level > 0:
                 dots = '.' * node.level
                 module_part = node.module or ''
-                errors.append(f"Line {node.lineno}: relative import 'from {dots}{module_part}' not supported in @nnsight.remote code")
+                errors.append(f"{format_location(node.lineno)}: relative import 'from {dots}{module_part}' not supported in @nnsight.remote code")
             elif not is_server_available_module(node.module or ''):
-                errors.append(f"Line {node.lineno}: imports from '{node.module}' (not available on NDIF server)")
+                errors.append(f"{format_location(node.lineno)}: imports from '{node.module}' (not available on NDIF server)")
             self.generic_visit(node)
 
         def visit_Call(self, node):
             # Check for disallowed function calls
             if isinstance(node.func, ast.Name):
                 if node.func.id in DISALLOWED_CALLS:
-                    errors.append(f"Line {node.lineno}: calls '{node.func.id}()' (not allowed in @nnsight.remote code)")
+                    errors.append(f"{format_location(node.lineno)}: calls '{node.func.id}()' (not allowed in @nnsight.remote code)")
 
             # Check for disallowed attribute calls like os.system()
             if isinstance(node.func, ast.Attribute):
@@ -795,7 +841,7 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
                 for pattern in DISALLOWED_ATTR_PATTERNS:
                     if len(chain) >= len(pattern):
                         if chain[:len(pattern)] == pattern:
-                            errors.append(f"Line {node.lineno}: calls '{'.'.join(chain)}()' (not allowed in @nnsight.remote code)")
+                            errors.append(f"{format_location(node.lineno)}: calls '{'.'.join(chain)}()' (not allowed in @nnsight.remote code)")
                             break
 
             self.generic_visit(node)
@@ -822,18 +868,33 @@ def validate_ast(tree: ast.AST, name: str) -> List[str]:
     return errors
 
 
-def validate_class(cls: type) -> List[str]:
+def validate_class(cls: type, source_file: str = None, start_line: int = None) -> List[str]:
     """
     Additional validation for classes.
 
     Checks:
     - Base classes are @nnsight.remote, object, or in ALLOWED_BASE_CLASSES
     - No metaclass (except for allowed base classes like nn.Module)
-    - No __slots__
+
+    Args:
+        cls: The class to validate
+        source_file: The source file path (for error messages)
+        start_line: The starting line number in the source file (for error messages)
     """
     errors = []
 
+    # Format location prefix for error messages
+    if source_file and start_line is not None:
+        location = f"{source_file}:{start_line}"
+    elif source_file:
+        location = source_file
+    elif start_line is not None:
+        location = f"Line {start_line}"
+    else:
+        location = None
+
     # Check base classes
+    prefix = f"{location}: " if location else ""
     for base in cls.__bases__:
         if base is object:
             continue
@@ -843,14 +904,14 @@ def validate_class(cls: type) -> List[str]:
             continue
         if not getattr(base, '_remote_validated', False):
             errors.append(
-                f"Base class '{base.__name__}' is not @nnsight.remote decorated. "
+                f"{prefix}base class '{base.__name__}' is not @nnsight.remote decorated. "
                 f"All base classes must be @nnsight.remote or object."
             )
 
     # Check for metaclass
     if type(cls) is not type:
         errors.append(
-            f"Uses metaclass '{type(cls).__name__}'. "
+            f"{prefix}uses metaclass '{type(cls).__name__}'. "
             f"@nnsight.remote classes cannot use metaclasses."
         )
 

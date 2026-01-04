@@ -202,29 +202,33 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         discovered[cls_name] = result
         return result
 
+    # Get file/line info first (for error messages)
+    try:
+        source_file = inspect.getfile(cls)
+        _, start_line = inspect.getsourcelines(cls)
+        location = f"{source_file}:{start_line}"
+    except (OSError, TypeError):
+        source_file = None
+        start_line = None
+        location = None
+
     # Extract source
     try:
         source = inspect.getsource(cls)
         dedented_source = textwrap.dedent(source)
     except (OSError, TypeError) as e:
+        prefix = f"{location}: " if location else ""
         raise SourceSerializationError(
-            f"Cannot auto-discover class '{cls_name}': source not available. {e}"
+            f"{prefix}cannot auto-discover class '{cls_name}': source not available. {e}"
         )
-
-    # Get file/line info
-    try:
-        source_file = inspect.getfile(cls)
-        _, start_line = inspect.getsourcelines(cls)
-    except (OSError, TypeError):
-        source_file = "<unknown>"
-        start_line = 1
 
     # Parse AST and find external references
     try:
         tree = ast.parse(dedented_source)
     except SyntaxError as e:
+        prefix = f"{location}: " if location else ""
         raise SourceSerializationError(
-            f"Cannot parse source for '{cls_name}': {e}"
+            f"{prefix}cannot parse source for '{cls_name}': {e}"
         )
 
     # Find external references
@@ -237,7 +241,7 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         module_globals = getattr(module, '__dict__', {}) if module else {}
 
     # Resolve module references, but also track type references for auto-discovery
-    module_refs, resolution_errors = resolve_module_references(external_names, cls)
+    module_refs, resolution_errors = resolve_module_references(external_names, cls, source_file, start_line)
 
     # Find type references that need auto-discovery
     types_to_discover = []
@@ -259,7 +263,7 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
             filtered_errors.append(error)
 
     # Validate AST (warnings only for auto-discovered - don't block)
-    ast_errors = validate_ast(tree, cls_name)
+    ast_errors = validate_ast(tree, cls_name, source_file, start_line)
 
     # For auto-discovered classes, we're more lenient - just warn
     if filtered_errors or ast_errors:
@@ -1199,14 +1203,25 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
     """
     import inspect
 
+    # Get file/line metadata first (for error messages)
+    try:
+        source_file = inspect.getfile(func)
+        source_line = func.__code__.co_firstlineno
+        location = f"{source_file}:{source_line}"
+    except (OSError, TypeError):
+        source_file = None
+        source_line = None
+        location = None
+
     # Use the lambda extraction function
     source, errors = validate_lambda_for_remote(func)
 
     if errors:
         # Format errors nicely
+        prefix = f"{location}: " if location else ""
         error_text = '\n'.join(f"  - {e}" for e in errors)
         raise SourceSerializationError(
-            f"Lambda '{var_name}' cannot be serialized for remote execution:\n\n"
+            f"{prefix}lambda '{var_name}' cannot be serialized for remote execution:\n\n"
             f"{error_text}\n\n"
             f"Consider converting to a named function:\n\n"
             f"  @nnsight.remote\n"
@@ -1214,16 +1229,9 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
             f"      return ..."
         )
 
-    # Get file/line metadata
-    try:
-        source_file = inspect.getfile(func)
-        source_line = func.__code__.co_firstlineno
-    except (OSError, TypeError):
-        source_file = "<unknown>"
-        source_line = 1
-
     # Extract closure variables if present
     closure_vars = {}
+    prefix = f"{location}: " if location else ""
     if func.__closure__ and hasattr(func.__code__, 'co_freevars'):
         for name, cell in zip(func.__code__.co_freevars, func.__closure__):
             try:
@@ -1237,7 +1245,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
                 if is_server_available_module(value.__name__):
                     continue
                 raise SourceSerializationError(
-                    f"Lambda '{var_name}' captures module '{value.__name__}' "
+                    f"{prefix}lambda '{var_name}' captures module '{value.__name__}' "
                     f"which is not available on NDIF server."
                 )
 
@@ -1253,7 +1261,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
             # Nested lambda in closure
             if is_lambda(value):
                 raise SourceSerializationError(
-                    f"Lambda '{var_name}' captures another lambda '{name}' in its closure. "
+                    f"{prefix}lambda '{var_name}' captures another lambda '{name}' in its closure. "
                     f"Nested lambdas are not supported. Please convert to named functions."
                 )
 
@@ -1264,7 +1272,7 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
 
             # Non-serializable closure variable - error!
             raise SourceSerializationError(
-                f"Lambda '{var_name}' captures '{name}' of type '{type(value).__name__}' "
+                f"{prefix}lambda '{var_name}' captures '{name}' of type '{type(value).__name__}' "
                 f"which cannot be serialized.\n\n"
                 f"Options:\n"
                 f"  - Pass '{name}' as an argument instead of capturing it\n"
