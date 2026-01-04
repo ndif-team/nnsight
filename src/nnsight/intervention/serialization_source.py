@@ -584,6 +584,72 @@ def is_tensor(value: Any) -> bool:
     return False
 
 
+def _can_deep_serialize(value: Any, _seen: set = None) -> bool:
+    """
+    Check if a value (including nested collections) can be serialized.
+
+    This is more permissive than is_json_serializable - it allows:
+    - JSON primitives (None, bool, int, float, str)
+    - Tensors (torch.Tensor, numpy.ndarray)
+    - Collections containing the above (list, tuple, dict, set)
+    - @remote decorated objects
+    - Auto-discoverable instances
+
+    Returns True if the value can be serialized via serialize_value.
+    """
+    # Handle circular references
+    if _seen is None:
+        _seen = set()
+
+    # Primitives are always serializable
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+
+    # Check for circular reference
+    obj_id = id(value)
+    if obj_id in _seen:
+        return True  # We handle circular refs via memo
+    _seen.add(obj_id)
+
+    # Tensors are serializable
+    if is_tensor(value):
+        return True
+
+    # @remote objects are serializable
+    if is_remote_object(value):
+        return True
+
+    # Auto-discoverable instances are serializable
+    if is_auto_discoverable_instance(value):
+        return True
+
+    # Collections - recursively check all elements
+    if isinstance(value, (list, tuple)):
+        return all(_can_deep_serialize(item, _seen) for item in value)
+
+    if isinstance(value, dict):
+        return all(
+            isinstance(k, str) and _can_deep_serialize(v, _seen)
+            for k, v in value.items()
+        )
+
+    if isinstance(value, set):
+        return all(_can_deep_serialize(item, _seen) for item in value)
+
+    # Enum values are serializable
+    from enum import Enum
+    if isinstance(value, Enum):
+        return True
+
+    # nn.Module instances are serializable (check by type name to avoid circular dependency)
+    type_name = type(value).__name__
+    module = getattr(type(value), '__module__', '')
+    if 'torch.nn' in module or (hasattr(value, 'forward') and hasattr(value, 'parameters')):
+        return True
+
+    return False
+
+
 def serialize_tensor(value: Any) -> Dict[str, Any]:
     """
     Serialize a tensor to a JSON-compatible dict.
@@ -1129,6 +1195,17 @@ def extract_all(
         if is_json_serializable(value):
             variables[name] = value
             continue
+
+        # Handle collections (list, tuple, dict, set) that might contain tensors
+        # These need special serialization via serialize_value
+        if isinstance(value, (list, tuple, dict, set)):
+            if _can_deep_serialize(value):
+                memo = {}
+                discovered = {}
+                variables[name] = serialize_value(value, name, memo, discovered, traced_model)
+                # If any classes were auto-discovered during serialization, add them
+                remote_objects.update(discovered)
+                continue
 
         # Skip module references (they'll be available on server)
         if isinstance(value, types.ModuleType):
@@ -2191,10 +2268,15 @@ def deserialize_source_based(
     import os
     import pathlib
     import random
+    from nnsight.remote import remote_noop
 
     data = json.loads(payload.decode('utf-8'))
 
     # Build base namespace with allowed modules
+    # Note: We use remote_noop instead of remote because:
+    # 1. Code was already validated client-side before transmission
+    # 2. Source extraction won't work on exec'd code
+    # 3. remote_noop just marks objects as validated without re-checking
     base_modules = {
         'torch': torch,
         'numpy': numpy,
@@ -2203,6 +2285,7 @@ def deserialize_source_based(
         'pathlib': pathlib,
         'random': random,
         'model': model,
+        'remote': remote_noop,  # No-op for deserialized code (already validated)
     }
 
     # Set up execution environment

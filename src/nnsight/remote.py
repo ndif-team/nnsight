@@ -206,6 +206,10 @@ def remote(obj: Union[Type, Callable] = None, *, version: str = None, library: s
 def _apply_remote(obj: Union[Type, Callable], version: str = None, library: str = None) -> Union[Type, Callable]:
     """Internal implementation of the @remote decorator."""
 
+    # If already validated (e.g., during deserialization round-trip), just return
+    if getattr(obj, '_remote_validated', False):
+        return obj
+
     # Auto-detect library/version from package metadata if not provided
     if library is None and hasattr(obj, '__module__'):
         module_name = obj.__module__
@@ -1128,9 +1132,40 @@ def is_remote_object(obj: Any) -> bool:
     return False
 
 
+def remote_noop(obj: Union[Type, Callable] = None, *, version: str = None, library: str = None) -> Union[Type, Callable]:
+    """
+    No-op version of @remote decorator for use during deserialization.
+
+    When code is deserialized and exec'd on the server, any @remote decorators
+    in that code would normally try to re-validate and extract source. But:
+    1. The code was already validated client-side
+    2. Source extraction won't work on exec'd code
+
+    This no-op decorator is used in the deserialization namespace to skip
+    re-validation. It just marks the object as validated without any checks.
+
+    IMPORTANT: This should ONLY be used in the deserialization namespace.
+    Regular users should use @remote which performs full validation.
+    """
+    def apply_noop(obj):
+        obj._remote_validated = True
+        obj._remote_source = None  # Source already transmitted
+        obj._remote_module_refs = {}
+        obj._remote_closure_vars = {}
+        obj._remote_library = library
+        obj._remote_version = version
+        return obj
+
+    # Support both @remote_noop and @remote_noop(version="...", library="...")
+    if obj is None:
+        return apply_noop
+    else:
+        return apply_noop(obj)
+
+
 # Re-export for convenient access
 __all__ = [
-    'remote', 'RemoteValidationError', 'is_json_serializable',
+    'remote', 'remote_noop', 'RemoteValidationError', 'is_json_serializable',
     # Module constants (single source of truth for server-available modules)
     'STDLIB_MODULES', 'ML_LIBRARY_MODULES', 'SERVER_AVAILABLE_MODULES',
     'ALLOWED_MODULES',  # Backwards compatibility alias

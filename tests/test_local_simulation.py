@@ -247,9 +247,13 @@ def test_lambda_with_capture(tiny_model: LanguageModel, tiny_input: str):
 @torch.no_grad()
 def test_verbose_mode_output(tiny_model: LanguageModel, tiny_input: str, capsys):
     """Test that verbose mode produces helpful output."""
-    with tiny_model.trace(tiny_input, remote='local', verbose=True):
-        h0_out = tiny_model.transformer.h[0].output[0].save()
+    # Run trace in a nested function to avoid capsys leaking into trace scope
+    def run_trace():
+        with tiny_model.trace(tiny_input, remote='local', verbose=True):
+            h0_out = tiny_model.transformer.h[0].output[0].save()
+        return h0_out
 
+    run_trace()
     captured = capsys.readouterr()
 
     # Should show serialization info
@@ -260,12 +264,15 @@ def test_verbose_mode_output(tiny_model: LanguageModel, tiny_input: str, capsys)
 @torch.no_grad()
 def test_verbose_mode_shows_variables(tiny_model: LanguageModel, tiny_input: str, capsys):
     """Test that verbose mode shows variable names."""
-    my_variable = 42
+    # Run trace in a nested function to avoid capsys leaking into trace scope
+    def run_trace():
+        my_variable = 42
+        with tiny_model.trace(tiny_input, remote='local', verbose=True):
+            x = my_variable + 1  # noqa: F841
+            h0_out = tiny_model.transformer.h[0].output[0].save()
+        return h0_out
 
-    with tiny_model.trace(tiny_input, remote='local', verbose=True):
-        x = my_variable + 1  # noqa: F841
-        h0_out = tiny_model.transformer.h[0].output[0].save()
-
+    run_trace()
     captured = capsys.readouterr()
 
     # Should show variable info
