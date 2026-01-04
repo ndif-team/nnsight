@@ -218,6 +218,88 @@ Tests verify:
 3. Allowed objects (torch tensors, user classes) still work
 4. The forbidden lists can be extended
 
+## Additional Design Decisions
+
+### Collections with Tensors
+
+A common pattern is building up results across multiple traces:
+
+```python
+results = []
+for i in range(3):
+    with model.trace(input, remote='local'):
+        result = model.layer.output.save()
+    results.append(result)  # results now contains tensors
+```
+
+On subsequent traces, `results` contains tensors from previous iterations. Simple JSON serialization fails for `[tensor, tensor, ...]`, but these ARE serializable via our tensor handling.
+
+**Solution**: Added `_can_deep_serialize()` which recursively checks if a value (including nested collections) can be serialized:
+- JSON primitives (None, bool, int, float, str)
+- Tensors (torch.Tensor, numpy.ndarray)
+- @remote decorated objects
+- Auto-discoverable instances
+- Collections containing the above
+
+When `extract_all()` encounters a collection that isn't pure JSON but CAN be deep-serialized, it uses `serialize_value()` for recursive handling with proper tensor encoding.
+
+### The `remote_noop` Decorator
+
+**Problem**: When code with `@remote` decorators is deserialized and exec'd on the server, the decorators try to:
+1. Extract source code (fails - code was created via exec)
+2. Re-validate the code (unnecessary - already validated client-side)
+
+**Solution**: Provide `remote_noop` in the deserialization namespace instead of `remote`:
+
+```python
+def remote_noop(obj=None, *, version=None, library=None):
+    """No-op version of @remote for deserialization context."""
+    def apply_noop(obj):
+        obj._remote_validated = True
+        obj._remote_source = None  # Source already transmitted
+        obj._remote_module_refs = {}
+        obj._remote_closure_vars = {}
+        obj._remote_library = library
+        obj._remote_version = version
+        return obj
+    # ...
+```
+
+The deserialization namespace maps `'remote': remote_noop` so transmitted code like:
+```python
+@remote
+class MyClass:
+    ...
+```
+Just marks the class as validated without attempting source extraction.
+
+### Class Deduplication and Instance Identity
+
+**Problem**: When multiple instances of the same class are serialized, we must:
+1. Transmit the class source only once (efficiency)
+2. Ensure all instances share the same class object after deserialization (`isinstance` must work)
+
+**Solution**: The serialization format groups instances under their class:
+
+```json
+{
+  "remote_objects": {
+    "Counter": {
+      "source": {"code": "class Counter:...", ...},
+      "instances": {
+        "12345678": {"var_name": "a", "state": {"value": 1}},
+        "23456789": {"var_name": "b", "state": {"value": 2}}
+      }
+    }
+  }
+}
+```
+
+During deserialization:
+1. The class is exec'd once: `cls = namespace['Counter']`
+2. All instances are created from the SAME class: `object.__new__(cls)`
+3. This guarantees `type(a) is type(b)` and `isinstance(b, type(a))`
+
 ## Future Extensions
 
 1. **User-configurable forbidden list** - Allow users to add their own forbidden patterns

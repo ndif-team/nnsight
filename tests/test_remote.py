@@ -2819,3 +2819,126 @@ def test_deserialize_source_based_restricted_blocks_dangerous():
         )
 
     assert "subprocess" in str(exc_info.value)
+
+
+# =============================================================================
+# remote_noop and Class Deduplication Tests
+# =============================================================================
+
+def test_remote_noop_marks_as_validated():
+    """Test that remote_noop marks objects as validated without source extraction."""
+    from nnsight.remote import remote_noop
+
+    # Define a class using remote_noop (simulating deserialization context)
+    @remote_noop
+    class TestClass:
+        def __init__(self, x):
+            self.x = x
+
+    # Should be marked as validated
+    assert hasattr(TestClass, '_remote_validated')
+    assert TestClass._remote_validated is True
+
+    # Source should be None (not extracted)
+    assert TestClass._remote_source is None
+
+
+def test_remote_noop_with_arguments():
+    """Test that remote_noop works with version/library arguments."""
+    from nnsight.remote import remote_noop
+
+    @remote_noop(library="test_lib", version="1.0.0")
+    class TestClass:
+        pass
+
+    assert TestClass._remote_validated is True
+    assert TestClass._remote_library == "test_lib"
+    assert TestClass._remote_version == "1.0.0"
+
+
+def test_multiple_instances_deduplicated_source():
+    """Test that multiple instances of the same class share one source definition."""
+    @remote
+    class Counter:
+        def __init__(self, start):
+            self.value = start
+
+        def increment(self):
+            self.value += 1
+            return self.value
+
+    # Create multiple instances
+    a = Counter(1)
+    b = Counter(2)
+    c = Counter(3)
+
+    # Extract
+    variables, remote_objects, model_refs = extract_all({'a': a, 'b': b, 'c': c})
+
+    # Should only have one class entry
+    assert len(remote_objects) == 1
+    assert 'Counter' in remote_objects
+
+    # Source should be present once
+    assert 'source' in remote_objects['Counter']
+    assert 'code' in remote_objects['Counter']['source']
+    assert 'class Counter' in remote_objects['Counter']['source']['code']
+
+    # All three instances should be present
+    assert len(remote_objects['Counter']['instances']) == 3
+
+    # Verify each instance has correct state
+    instance_values = {
+        inst['var_name']: inst['state']['value']
+        for inst in remote_objects['Counter']['instances'].values()
+    }
+    assert instance_values == {'a': 1, 'b': 2, 'c': 3}
+
+
+def test_multiple_instances_isinstance_after_roundtrip():
+    """Test that all instances are isinstance of the same class after deserialization."""
+    @remote
+    class Counter:
+        def __init__(self, start):
+            self.value = start
+
+        def increment(self):
+            self.value += 1
+            return self.value
+
+    # Create multiple instances
+    a = Counter(10)
+    b = Counter(20)
+
+    # Serialize
+    variables, remote_objects, model_refs = extract_all({'a': a, 'b': b})
+    payload = json.dumps({
+        'version': '2.2',
+        'source': {'code': '', 'file': 'test.py', 'line': 1},
+        'variables': variables,
+        'remote_objects': remote_objects,
+        'model_refs': model_refs,
+    }).encode('utf-8')
+
+    # Deserialize
+    namespace = deserialize_source_based(payload, model=None)
+
+    # Both instances should exist
+    assert 'a' in namespace
+    assert 'b' in namespace
+
+    # KEY TEST: Both should be instances of the SAME class object
+    assert type(namespace['a']) is type(namespace['b'])
+
+    # isinstance should work correctly
+    cls = type(namespace['a'])
+    assert isinstance(namespace['a'], cls)
+    assert isinstance(namespace['b'], cls)
+
+    # State should be preserved
+    assert namespace['a'].value == 10
+    assert namespace['b'].value == 20
+
+    # Methods should work
+    assert namespace['a'].increment() == 11
+    assert namespace['b'].increment() == 21
