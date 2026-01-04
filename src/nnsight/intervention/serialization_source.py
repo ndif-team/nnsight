@@ -74,6 +74,221 @@ ENUM_FALLBACK_MARKER = "__enum_fallback__"
 
 
 # =============================================================================
+# Forbidden Serialization Lists
+# =============================================================================
+# Some objects should never be serialized for remote execution, even if they
+# technically could be. These objects either:
+# 1. Represent OS/system resources that cannot be transferred (sockets, locks)
+# 2. Have huge dependency graphs that would generate confusing warnings (pandas)
+# 3. Leak into scope from test frameworks or infrastructure (pytest fixtures)
+#
+# We check these EARLY to provide clear, actionable error messages instead of
+# confusing failures after extensive processing.
+
+# Module prefixes to skip during auto-discovery
+# Objects from these modules will be immediately rejected with a clear message
+FORBIDDEN_MODULE_PREFIXES: frozenset = frozenset({
+    # Test frameworks - these leak into scope during testing
+    '_pytest',
+    'pytest',
+    'unittest',
+
+    # OS/System resources - represent state that cannot be transferred
+    'socket',           # Network sockets (has Python wrapper over C extension)
+    'multiprocessing',  # Process resources, queues, locks
+    'asyncio',          # Async event loops, tasks
+    'concurrent',       # Thread pools, futures
+    'queue',            # Thread communication queues
+    'subprocess',       # OS subprocesses
+
+    # Database connections - represent network/session state
+    'sqlite3',
+    'sqlalchemy',
+    'pymongo',
+    'redis',
+    'psycopg',          # PostgreSQL
+    'psycopg2',
+    'mysql',
+    'pymysql',
+
+    # Logging - handlers often have file references
+    'logging',
+})
+
+# Specific class names (fully qualified) with custom error messages
+# Format: "module.ClassName": "Error message with suggestions"
+FORBIDDEN_CLASSES: Dict[str, str] = {
+    # Pandas - massive dependency explosion, convert to tensor instead
+    'pandas.core.frame.DataFrame': (
+        "pandas.DataFrame cannot be serialized for remote execution.\n"
+        "DataFrames have complex internal state that cannot be transferred.\n"
+        "\n"
+        "Convert to a tensor before the trace:\n"
+        "  tensor_data = torch.tensor(df.values)\n"
+        "Or extract specific columns:\n"
+        "  values = df['column'].tolist()"
+    ),
+    'pandas.core.series.Series': (
+        "pandas.Series cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a tensor or list before the trace:\n"
+        "  tensor_data = torch.tensor(series.values)\n"
+        "  values = series.tolist()"
+    ),
+
+    # Matplotlib - contains rendering state and callbacks
+    'matplotlib.figure.Figure': (
+        "matplotlib.Figure cannot be serialized for remote execution.\n"
+        "Figures contain rendering state and callbacks that cannot be transferred.\n"
+        "\n"
+        "If you need to pass image data, save to bytes first:\n"
+        "  import io\n"
+        "  buf = io.BytesIO()\n"
+        "  fig.savefig(buf, format='png')\n"
+        "  image_bytes = buf.getvalue()"
+    ),
+    'matplotlib.axes._axes.Axes': (
+        "matplotlib.Axes cannot be serialized for remote execution.\n"
+        "Axes contain rendering state bound to a Figure.\n"
+        "\n"
+        "Access the data you need before the trace instead."
+    ),
+    'matplotlib.axes._subplots.Axes': (
+        "matplotlib.Axes cannot be serialized for remote execution.\n"
+        "Axes contain rendering state bound to a Figure.\n"
+        "\n"
+        "Access the data you need before the trace instead."
+    ),
+    'matplotlib.axes._subplots.AxesSubplot': (
+        "matplotlib.Axes cannot be serialized for remote execution.\n"
+        "Axes contain rendering state bound to a Figure.\n"
+        "\n"
+        "Access the data you need before the trace instead."
+    ),
+
+    # PIL/Pillow - convert to tensor
+    'PIL.Image.Image': (
+        "PIL.Image cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a tensor first:\n"
+        "  from torchvision import transforms\n"
+        "  tensor = transforms.ToTensor()(image)"
+    ),
+
+    # Scipy sparse matrices - convert to dense or use specific format
+    'scipy.sparse._csr.csr_matrix': (
+        "scipy.sparse.csr_matrix cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a dense tensor:\n"
+        "  tensor = torch.tensor(sparse_matrix.toarray())\n"
+        "Or extract the CSR components if you need sparse format."
+    ),
+    'scipy.sparse._csc.csc_matrix': (
+        "scipy.sparse.csc_matrix cannot be serialized for remote execution.\n"
+        "\n"
+        "Convert to a dense tensor:\n"
+        "  tensor = torch.tensor(sparse_matrix.toarray())"
+    ),
+}
+
+
+def _get_full_class_name(obj: Any) -> str:
+    """Get the fully qualified class name of an object."""
+    cls = type(obj) if not isinstance(obj, type) else obj
+    module = getattr(cls, '__module__', '')
+    name = getattr(cls, '__qualname__', cls.__name__)
+    return f"{module}.{name}" if module else name
+
+
+def is_forbidden_for_serialization(obj: Any) -> Tuple[bool, Optional[str]]:
+    """
+    Check if an object is forbidden from serialization.
+
+    This check happens EARLY, before any auto-discovery attempt, to provide
+    clear error messages without generating confusing warnings.
+
+    Args:
+        obj: The object to check
+
+    Returns:
+        (is_forbidden, error_message) tuple. If is_forbidden is True,
+        error_message contains a helpful explanation and suggestions.
+    """
+    # Get the class and module info
+    cls = type(obj) if not isinstance(obj, type) else obj
+    module = getattr(cls, '__module__', '') or ''
+    full_name = _get_full_class_name(obj)
+
+    # Check against forbidden class names first (most specific)
+    if full_name in FORBIDDEN_CLASSES:
+        return True, FORBIDDEN_CLASSES[full_name]
+
+    # Check against forbidden module prefixes
+    for prefix in FORBIDDEN_MODULE_PREFIXES:
+        if module.startswith(prefix) or module.startswith(f"_{prefix}"):
+            # Generate a helpful message based on the category
+            if prefix in ('_pytest', 'pytest', 'unittest'):
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"This appears to be a test framework object that leaked into scope.\n"
+                    f"\n"
+                    f"This usually happens when pytest fixtures are captured in the trace.\n"
+                    f"Make sure you're not accidentally referencing test infrastructure."
+                )
+            elif prefix in ('socket', 'multiprocessing', 'asyncio', 'concurrent', 'queue', 'subprocess'):
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"This object represents OS/system resources that cannot be transferred.\n"
+                    f"\n"
+                    f"Options:\n"
+                    f"  - Create the resource inside the trace block\n"
+                    f"  - Pass configuration data and create the resource on the server"
+                )
+            elif prefix in ('sqlite3', 'sqlalchemy', 'pymongo', 'redis', 'psycopg', 'psycopg2', 'mysql', 'pymysql'):
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"Database connections represent network state that cannot be transferred.\n"
+                    f"\n"
+                    f"Options:\n"
+                    f"  - Query the data before the trace and pass results as tensors/lists\n"
+                    f"  - Create a new connection inside the trace block"
+                )
+            elif prefix == 'logging':
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"Logging handlers contain file/stream references that cannot be transferred.\n"
+                    f"\n"
+                    f"Create logging handlers inside the trace block if needed."
+                )
+            else:
+                msg = (
+                    f"'{type(obj).__name__}' from {module} cannot be serialized.\n"
+                    f"Objects from this module are not supported for remote execution."
+                )
+            return True, msg
+
+    return False, None
+
+
+def check_forbidden_or_raise(name: str, obj: Any) -> None:
+    """
+    Check if an object is forbidden and raise SourceSerializationError if so.
+
+    Args:
+        name: Variable name (for error message)
+        obj: The object to check
+
+    Raises:
+        SourceSerializationError: If the object is forbidden
+    """
+    is_forbidden, message = is_forbidden_for_serialization(obj)
+    if is_forbidden:
+        raise SourceSerializationError(
+            f"Cannot serialize '{name}' for remote execution:\n\n{message}"
+        )
+
+
+# =============================================================================
 # Remote Metadata Extraction
 # =============================================================================
 # Helper functions to extract metadata from @remote decorated objects.
@@ -932,6 +1147,10 @@ def extract_all(
         # Skip type references from builtins
         if isinstance(value, type) and value.__module__ == 'builtins':
             continue
+
+        # EARLY CHECK: Reject forbidden objects before any auto-discovery attempt
+        # This catches common mistakes (pandas, matplotlib, sockets) with clear messages
+        check_forbidden_or_raise(name, value)
 
         # Auto-discovery mode (strict_remote=False): try to auto-discover classes/functions
         if not strict_remote:
