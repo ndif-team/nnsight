@@ -28,6 +28,44 @@ class MyAnalyzer:
 - Libraries like nnterp work without NDIF server installation
 - Validation at import time, not mysterious runtime failures
 
+**Example: Training a probe remotely**
+
+```python
+import json
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SentimentProbe(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.linear = nn.Linear(hidden_size, 2)
+
+    def forward(self, x):
+        return self.linear(x)
+
+# Load training data
+with open("sentiment_data.json") as f:
+    training_data = json.load(f)  # [{"text": "...", "label": 0}, ...]
+
+probe = SentimentProbe(768)
+optimizer = torch.optim.Adam(probe.parameters())
+
+# Entire training loop runs on server
+with model.session(remote=True):
+    for epoch in range(10):
+        for example in training_data:
+            with model.trace(example["text"]):
+                hidden = model.transformer.h[10].output[0][:, -1, :]
+                logits = probe(hidden)
+                loss = F.cross_entropy(logits, torch.tensor([example["label"]]))
+                loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+    trained_weights = probe.state_dict().save()
+```
+
 ## Implementation Status & Roadmap
 
 **✅ Implemented**
