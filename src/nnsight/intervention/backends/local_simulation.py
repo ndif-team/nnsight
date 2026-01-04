@@ -46,6 +46,8 @@ class LocalSimulationBackend(Backend):
     Attributes:
         model: The model instance being traced
         verbose: If True, print serialization details
+        strict_remote: If True, require explicit @remote decorations
+        max_upload_mb: Upload payload size threshold for warnings (default 10 MB)
         _last_payload_size: Size of last serialized payload in bytes
         _last_payload: The last serialized payload (for debugging)
     """
@@ -54,6 +56,8 @@ class LocalSimulationBackend(Backend):
         self,
         model: Any,
         verbose: bool = False,
+        strict_remote: bool = False,
+        max_upload_mb: float = 10.0,
     ) -> None:
         """
         Initialize the LocalSimulationBackend.
@@ -61,9 +65,13 @@ class LocalSimulationBackend(Backend):
         Args:
             model: The model instance being traced
             verbose: If True, print serialization details for debugging
+            strict_remote: If True, require explicit @remote decorations (default False)
+            max_upload_mb: Threshold for upload payload size warnings (default 10 MB)
         """
         self.model = model
         self.verbose = verbose
+        self.strict_remote = strict_remote
+        self.max_upload_mb = max_upload_mb
         self._last_payload_size: int = 0
         self._last_payload: Optional[bytes] = None
 
@@ -92,7 +100,11 @@ class LocalSimulationBackend(Backend):
 
         # STEP 2: Serialize using source-based serialization
         try:
-            payload = serialize_source_based(tracer)
+            payload = serialize_source_based(
+                tracer,
+                strict_remote=self.strict_remote,
+                max_upload_mb=self.max_upload_mb,
+            )
             self._last_payload_size = len(payload)
             self._last_payload = payload
 

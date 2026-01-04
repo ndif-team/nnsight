@@ -561,7 +561,11 @@ def deserialize_tensor(data: Dict[str, Any], as_torch: bool = True) -> Any:
     return np_array
 
 
-def serialize_source_based(tracer: "Tracer") -> bytes:
+def serialize_source_based(
+    tracer: "Tracer",
+    strict_remote: bool = False,
+    max_upload_mb: float = 10.0,
+) -> bytes:
     """
     Serialize a tracer for remote execution using source + JSON.
 
@@ -570,6 +574,11 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
 
     Args:
         tracer: The tracer object containing source and frame information
+        strict_remote: If True, require explicit @remote decorations for all
+                user-defined functions/classes. If False (default), auto-discover
+                classes/functions with available source code.
+        max_upload_mb: Maximum upload payload size in MB before warning. Default is
+                       10 MB. Set to 0 to disable warnings.
 
     Returns:
         JSON-encoded bytes ready for transmission
@@ -592,7 +601,9 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
     source_metadata = extract_source_metadata(tracer)
 
     # Extract variables and remote objects
-    variables, remote_objects, model_refs = extract_all(frame_locals, traced_model=traced_model)
+    variables, remote_objects, model_refs = extract_all(
+        frame_locals, traced_model=traced_model, strict_remote=strict_remote
+    )
 
     payload = {
         "version": SERIALIZATION_VERSION,
@@ -612,7 +623,24 @@ def serialize_source_based(tracer: "Tracer") -> bytes:
             # The server will create a plain LanguageModel with the rename dict
             pass
 
-    return json.dumps(payload).encode('utf-8')
+    # Serialize to JSON bytes
+    result = json.dumps(payload).encode('utf-8')
+
+    # Check upload payload size against threshold
+    if max_upload_mb > 0:
+        payload_mb = len(result) / (1024 * 1024)
+        if payload_mb > max_upload_mb:
+            import warnings
+            warnings.warn(
+                f"Upload payload size ({payload_mb:.2f} MB) exceeds threshold "
+                f"({max_upload_mb} MB). Large uploads may cause slow transmission "
+                f"or NDIF submission failures. Consider reducing tensor sizes or "
+                f"computing values server-side. Use max_upload_mb=0 to disable.",
+                UserWarning,
+                stacklevel=3,  # Point to caller's caller (trace block)
+            )
+
+    return result
 
 
 def extract_source_metadata(tracer: "Tracer") -> Dict[str, Any]:
@@ -651,18 +679,202 @@ def extract_source_metadata(tracer: "Tracer") -> Dict[str, Any]:
     return result
 
 
-def extract_all(locals_dict: Dict[str, Any], traced_model: Any = None) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+# =============================================================================
+# Auto-Discovery Helper Functions
+# =============================================================================
+# These functions handle auto-discovery of classes and functions that don't have
+# @remote decoration but have available source code. This enables third-party
+# libraries to work without requiring explicit decoration.
+
+def _can_auto_discover_function(func: Any) -> bool:
+    """
+    Check if a function can be auto-discovered for remote serialization.
+
+    A function can be auto-discovered if:
+    1. It has available source code (via inspect.getsource)
+    2. It's not from a core allowed module (torch, numpy, etc.)
+    3. It's not already @remote decorated
+    """
+    # Already decorated
+    if getattr(func, '_remote_validated', False):
+        return True  # Use existing metadata
+
+    # Skip lambdas (handled separately)
+    if is_lambda(func):
+        return False
+
+    # Check module - skip core allowed modules
+    module = getattr(func, '__module__', '')
+    if module and is_server_available_module(module):
+        return False
+
+    # Check if source is available
+    try:
+        inspect.getsource(func)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def _auto_discover_function(func: Any) -> Dict[str, Any]:
+    """
+    Auto-discover a function for remote serialization.
+
+    Similar to auto_discover_class but for standalone functions.
+    """
+    func_name = func.__name__
+
+    # Get file/line info
+    try:
+        source_file = inspect.getfile(func)
+        source_lines, start_line = inspect.getsourcelines(func)
+    except (OSError, TypeError):
+        source_file = "<unknown>"
+        start_line = 1
+
+    # Get source
+    try:
+        source = inspect.getsource(func)
+        dedented_source = textwrap.dedent(source)
+    except (OSError, TypeError) as e:
+        raise SourceSerializationError(
+            f"Cannot auto-discover function '{func_name}': source not available. {e}"
+        )
+
+    # Parse AST and find external references
+    try:
+        tree = ast.parse(dedented_source)
+    except SyntaxError as e:
+        raise SourceSerializationError(
+            f"Cannot parse source for function '{func_name}': {e}"
+        )
+
+    # Find external references
+    external_names = find_external_references(tree, func)
+
+    # Get module globals
+    module_globals = {}
+    if hasattr(func, '__module__'):
+        module = sys.modules.get(func.__module__)
+        module_globals = getattr(module, '__dict__', {}) if module else {}
+
+    # Resolve module references
+    module_refs, resolution_errors = resolve_module_references(
+        external_names, func, source_file, start_line
+    )
+
+    # Get closure variables (JSON-serializable only)
+    closure_vars = {}
+    if func.__closure__ and hasattr(func.__code__, 'co_freevars'):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+
+            if is_json_serializable(value):
+                closure_vars[name] = value
+            elif isinstance(value, types.ModuleType) and is_server_available_module(value.__name__):
+                continue  # Skip - available on server
+            elif is_remote_object(value):
+                continue  # Skip - serialized separately
+
+    # Auto-detect library/version
+    library = None
+    version = None
+    if hasattr(func, '__module__') and func.__module__:
+        root_package = func.__module__.split('.')[0]
+        try:
+            from importlib.metadata import version as get_version
+            version = get_version(root_package)
+            library = root_package
+        except Exception:
+            pass
+
+    return {
+        "source": {
+            "code": dedented_source,
+            "file": source_file,
+            "line": start_line,
+        },
+        "module_refs": module_refs,
+        "closure_vars": closure_vars,
+        "type": "function",
+        "library": library,
+        "version": version,
+    }
+
+
+def extract_auto_discovered_function(var_name: str, func: Any, result: Dict[str, Any]) -> None:
+    """
+    Extract an auto-discovered function for serialization.
+    """
+    func_name = func.__name__
+
+    if func_name not in result:
+        result[func_name] = _auto_discover_function(func)
+
+
+def extract_auto_discovered_type(var_name: str, cls: type, result: Dict[str, Any]) -> None:
+    """
+    Extract an auto-discovered class type (not instance) for serialization.
+    """
+    cls_name = cls.__name__
+
+    if cls_name not in result:
+        discovered = {}
+        auto_discover_class(cls, discovered)
+        result.update(discovered)
+
+
+def extract_auto_discovered_object(
+    var_name: str,
+    value: Any,
+    result: Dict[str, Any],
+    traced_model: Any = None
+) -> None:
+    """
+    Extract an auto-discovered object instance for serialization.
+
+    Similar to extract_remote_object but for non-@remote classes.
+    """
+    cls = type(value)
+    cls_name = cls.__name__
+
+    # Auto-discover the class if not already in result
+    if cls_name not in result:
+        discovered = {}
+        auto_discover_class(cls, discovered)
+        result.update(discovered)
+
+    # Serialize instance state
+    instance_state = serialize_instance_state(value, discovered_classes=result, traced_model=traced_model)
+    if "instances" not in result[cls_name]:
+        result[cls_name]["instances"] = {}
+    result[cls_name]["instances"][str(id(value))] = {
+        "var_name": var_name,
+        "state": instance_state
+    }
+
+
+def extract_all(
+    locals_dict: Dict[str, Any],
+    traced_model: Any = None,
+    strict_remote: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
     """
     Extract all serializable data from locals.
 
     Args:
         locals_dict: Dictionary of local variables
         traced_model: The model being traced (for identity-based model ref detection)
+        strict_remote: If True, require explicit @remote decorations. If False (default),
+                       auto-discover classes/functions with available source code.
 
     Returns:
         (variables, remote_objects, model_refs) where:
         - variables: JSON-serializable simple values
-        - remote_objects: @nnsight.remote functions/classes/instances
+        - remote_objects: @nnsight.remote functions/classes/instances (or auto-discovered)
         - model_refs: list of variable names that reference the model
     """
     variables = {}
@@ -721,15 +933,44 @@ def extract_all(locals_dict: Dict[str, Any], traced_model: Any = None) -> Tuple[
         if isinstance(value, type) and value.__module__ == 'builtins':
             continue
 
+        # Auto-discovery mode (strict_remote=False): try to auto-discover classes/functions
+        if not strict_remote:
+            # Try to auto-discover instances of classes with available source
+            if is_auto_discoverable_instance(value):
+                extract_auto_discovered_object(name, value, remote_objects, traced_model=traced_model)
+                continue
+
+            # Try to auto-discover class types (not instances)
+            if isinstance(value, type) and can_auto_discover(value):
+                extract_auto_discovered_type(name, value, remote_objects)
+                continue
+
+            # Try to auto-discover regular functions with available source
+            if callable(value) and not isinstance(value, type):
+                if _can_auto_discover_function(value):
+                    extract_auto_discovered_function(name, value, remote_objects)
+                    continue
+
         # If we get here, we can't serialize this value
-        raise SourceSerializationError(
-            f"Variable '{name}' of type '{type(value).__name__}' "
-            f"cannot be serialized for source-based remote execution.\n"
-            f"Options:\n"
-            f"  - Use JSON-serializable type (int, float, str, list, dict)\n"
-            f"  - Mark functions/classes with @nnsight.remote\n"
-            f"  - Compute the value inside the trace block"
-        )
+        if strict_remote:
+            raise SourceSerializationError(
+                f"Variable '{name}' of type '{type(value).__name__}' "
+                f"cannot be serialized for source-based remote execution.\n"
+                f"Options:\n"
+                f"  - Use JSON-serializable type (int, float, str, list, dict)\n"
+                f"  - Mark functions/classes with @nnsight.remote\n"
+                f"  - Compute the value inside the trace block"
+            )
+        else:
+            raise SourceSerializationError(
+                f"Variable '{name}' of type '{type(value).__name__}' "
+                f"cannot be serialized for source-based remote execution.\n"
+                f"The source code for this object is not available for auto-discovery.\n"
+                f"Options:\n"
+                f"  - Use JSON-serializable type (int, float, str, list, dict)\n"
+                f"  - Mark functions/classes with @nnsight.remote\n"
+                f"  - Compute the value inside the trace block"
+            )
 
     return variables, remote_objects, model_refs
 

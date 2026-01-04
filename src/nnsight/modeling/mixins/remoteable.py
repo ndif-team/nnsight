@@ -23,6 +23,8 @@ class RemoteableMixin(MetaMixin):
         remote: Union[bool, str] = False,
         blocking: bool = True,
         verbose: bool = False,
+        strict_remote: bool = False,
+        max_upload_mb: float = 10.0,
         **kwargs: Dict[str, Any],
     ):
         """
@@ -38,6 +40,12 @@ class RemoteableMixin(MetaMixin):
                   locally to test serialization without network access
             blocking: If True, wait for remote results
             verbose: If True (and remote='local'), print serialization details
+            strict_remote: If True, require explicit @remote decorations for
+                          user-defined functions/classes. If False (default),
+                          auto-discover classes and functions with available
+                          source code.
+            max_upload_mb: Threshold for upload payload size warnings. Default is
+                          10 MB. Set to 0 to disable warnings.
             **kwargs: Additional arguments passed to parent trace()
 
         Returns:
@@ -47,7 +55,12 @@ class RemoteableMixin(MetaMixin):
             pass
         elif remote == 'local':
             # Local simulation: test serialization without network
-            backend = LocalSimulationBackend(self, verbose=verbose)
+            backend = LocalSimulationBackend(
+                self,
+                verbose=verbose,
+                strict_remote=strict_remote,
+                max_upload_mb=max_upload_mb,
+            )
         elif remote:
             backend = RemoteBackend(self.to_model_key(), blocking=blocking)
         # If backend is a string, assume RemoteBackend url.
@@ -69,6 +82,8 @@ class RemoteableMixin(MetaMixin):
         remote: Union[bool, str] = False,
         blocking: bool = True,
         verbose: bool = False,
+        strict_remote: bool = False,
+        max_upload_mb: float = 10.0,
         **kwargs: Dict[str, Any],
     ):
         """
@@ -84,6 +99,12 @@ class RemoteableMixin(MetaMixin):
                   locally to test serialization without network access
             blocking: If True, wait for remote results
             verbose: If True (and remote='local'), print serialization details
+            strict_remote: If True, require explicit @remote decorations for
+                          user-defined functions/classes. If False (default),
+                          auto-discover classes and functions with available
+                          source code.
+            max_upload_mb: Threshold for upload payload size warnings. Default is
+                          10 MB. Set to 0 to disable warnings.
             **kwargs: Additional arguments passed to parent session()
 
         Returns:
@@ -93,7 +114,12 @@ class RemoteableMixin(MetaMixin):
             pass
         elif remote == 'local':
             # Local simulation: test serialization without network
-            backend = LocalSimulationBackend(self, verbose=verbose)
+            backend = LocalSimulationBackend(
+                self,
+                verbose=verbose,
+                strict_remote=strict_remote,
+                max_upload_mb=max_upload_mb,
+            )
         elif remote:
             backend = RemoteBackend(self.to_model_key(), blocking=blocking)
         # If backend is a string, assume RemoteBackend url.

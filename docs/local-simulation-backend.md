@@ -127,10 +127,12 @@ While `remote='local'` simulates remote execution, there are some differences:
 
 ### trace() Parameters
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `remote` | `bool \| str` | `False` (local), `True` (NDIF), or `'local'` (simulation) |
-| `verbose` | `bool` | If `True` and `remote='local'`, print serialization details |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `remote` | `bool \| str` | `False` | `False` (local), `True` (NDIF), or `'local'` (simulation) |
+| `verbose` | `bool` | `False` | If `True` and `remote='local'`, print serialization details |
+| `strict_remote` | `bool` | `False` | If `True`, require explicit `@remote` decorations |
+| `max_upload_mb` | `float` | `10.0` | Warn if upload payload exceeds this size. Set to 0 to disable. |
 
 ### LocalSimulationBackend
 

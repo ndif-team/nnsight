@@ -340,7 +340,9 @@ This distinction between code (source) and environment (external references) is 
 
 Classes decorated with `@remote` have their external references captured at decoration time. But what about third-party classes that aren't decorated?
 
-To enable source serialization with existing libraries, we implemented an **auto-discovery pipeline** for classes that extend `LanguageModel` (like nnterp's `StandardizedTransformer`). When such a class is used, the system automatically treats it as remote-eligible and discovers its dependencies at serialization time. See [Auto-Discovery vs @remote Annotation](#auto-discovery-vs-remote-annotation) in Design Decisions for discussion of the design trade-offs.
+**Auto-discovery is enabled by default.** When you use any class or function with available source code, the system automatically discovers and serializes it—no `@remote` annotation required. This works for third-party libraries like nnterp, custom helper classes, and any code where `inspect.getsource()` can retrieve the source.
+
+For users who prefer explicit control, pass `strict=True` to require `@remote` annotations. See [Auto-Discovery vs @remote Annotation](#auto-discovery-vs-remote-annotation) in Design Decisions for discussion of when to use each approach.
 
 ```python
 def auto_discover_class(cls, discovered):
@@ -1119,26 +1121,59 @@ Instead, we use `object.__new__()` + direct `__dict__` assignment. This is how `
 
 ### Auto-Discovery vs @remote Annotation
 
-The `@remote` decorator requires users to explicitly mark classes for remote serialization. But what about existing third-party libraries that don't use `@remote`?
+The `@remote` decorator provides explicit annotation for remote serialization. But what about existing third-party libraries that don't use `@remote`?
 
-To test source serialization with real-world libraries, we implemented an **auto-discovery pipeline** that automatically discovers and serializes classes extending `LanguageModel` (like nnterp's `StandardizedTransformer`) and all their dependencies—without requiring any `@remote` annotations.
+**Current default behavior:** Auto-discovery is **enabled by default** for all classes and functions with available source code. This means third-party libraries (like nnterp's `StandardizedTransformer`) work out-of-the-box without requiring `@remote` annotations.
 
-This creates an interesting design tension:
+```python
+# No @remote needed - auto-discovered at serialization time
+class MyHelper:
+    def __init__(self, scale):
+        self.scale = scale
+    def apply(self, x):
+        return x * self.scale
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **@remote only** | Explicit, clear contract; validation at import time; user knows what's serialized | Third-party libraries can't be used without modification |
-| **Auto-discovery only** | Works with any library; no annotations needed | Implicit behavior; validation deferred to serialization time; harder to debug |
-| **Hybrid (current)** | `@remote` provides explicit contract for user code; auto-discovery enables existing libraries | Two mechanisms to understand; inconsistent mental model; special-case for `LanguageModel` |
+helper = MyHelper(2.0)
 
-**Current status:** Auto-discovery is limited to `LanguageModel` subclasses as a pragmatic compromise. This lets libraries like nnterp work out-of-the-box while keeping the explicit `@remote` contract for user-defined helpers.
+with model.trace("test", remote=True):
+    result = helper.apply(hidden)  # Auto-discovered and serialized
+```
 
-**Open questions:**
-1. Should auto-discovery be extended to all dependencies? This would eliminate the need for `@remote` but lose early validation.
-2. Should auto-discovery be removed entirely? This would require library authors to use `@remote`, creating a cleaner but more demanding contract.
-3. Should auto-discovery become the default, with `@remote` as an optional early-validation mechanism?
+**Strict mode:** For users who prefer explicit control, pass `strict_remote=True` to require `@remote` annotations:
 
-The answer likely depends on how the ecosystem evolves. If many third-party libraries emerge that need remote serialization, auto-discovery becomes more valuable. If most users write their own helpers, explicit `@remote` provides better guardrails.
+```python
+with model.trace("test", remote=True, strict_remote=True):
+    result = helper.apply(hidden)  # Error: MyHelper not @remote decorated
+```
+
+**Design trade-offs:**
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| **Default (strict_remote=False)** | Auto-discover any class/function with source | Easy integration with third-party libraries; less boilerplate |
+| **Strict (strict_remote=True)** | Require explicit `@remote` annotations | Early validation at import time; clear serialization contract |
+
+**When to use @remote:**
+- When you want import-time validation (catch errors early)
+- When you want to clearly document which code runs remotely
+- When you need guaranteed serialization behavior
+
+**When to rely on auto-discovery:**
+- When using third-party libraries you don't control
+- For quick prototyping without annotation overhead
+- When working with existing codebases
+
+**Upload size warnings:** Large payloads can cause slow transmission. The default threshold is 10 MB. Adjust with `max_upload_mb`:
+
+```python
+with model.trace("test", remote=True, max_upload_mb=5.0):
+    # Warning if upload payload exceeds 5 MB
+    ...
+
+with model.trace("test", remote=True, max_upload_mb=0):
+    # Disable upload size warnings
+    ...
+```
 
 ---
 
