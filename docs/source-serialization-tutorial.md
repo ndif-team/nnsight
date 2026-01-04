@@ -1474,6 +1474,28 @@ This approach lets you:
 - Verify round-trip correctness for new types
 - Run fast unit tests in CI
 
+### Proposed: `remote='local'` Mode
+
+Currently, testing the full serialization pipeline requires manual payload construction. A more convenient approach would be a `remote='local'` mode that exercises the entire serialize/deserialize round-trip locally:
+
+```python
+# Proposed API (not yet implemented):
+with model.trace("Hello world", remote='local'):
+    hidden = model.layers[10].output[0]
+    result = hidden.topk(10).save()
+```
+
+This would:
+1. Serialize using `serialize_source_based()` (identical to `remote=True`)
+2. Create a fresh namespace (simulating the server environment)
+3. Deserialize using `deserialize_source_based()` into that namespace
+4. Execute the trace in the isolated namespace
+5. Return results normally
+
+The key benefit: it catches bugs where code accidentally depends on closure variables or imports that aren't properly captured during serialization. With `remote=True`, these bugs only surface on the actual server; with `remote='local'`, you'd catch them immediately during development.
+
+Implementation would involve a `LocalSimulationBackend` that wraps the serialization/deserialization functions instead of making network calls.
+
 ---
 
 ## Summary
