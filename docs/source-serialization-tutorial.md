@@ -1071,6 +1071,140 @@ When we find a reference to these, we record an import instruction rather than e
 }
 ```
 
+### Forbidden Serialization
+
+Some objects *could* technically be serialized, but *shouldn't* be—either because they represent OS resources that can't be transferred, or because they trigger massive warning cascades before eventually failing.
+
+**Problem categories:**
+
+1. **OS/System Resources**: `socket.socket`, `threading.Lock`, file handles—these have Python wrappers but represent system state that can't transfer between machines.
+
+2. **Data Science Objects**: `pandas.DataFrame` generates 50+ warnings before failing on an internal `range` type. `matplotlib.Figure` fails on callback references.
+
+3. **Test Framework Leakage**: `pytest` fixtures like `capsys` can accidentally leak into trace scope.
+
+**Solution**: Early detection with actionable error messages:
+
+```python
+FORBIDDEN_MODULE_PREFIXES = frozenset({
+    'socket', 'multiprocessing', '_pytest', 'pytest',
+    'sqlalchemy', 'logging', ...
+})
+
+FORBIDDEN_CLASSES = {
+    'pandas.core.frame.DataFrame': (
+        "pandas.DataFrame cannot be serialized.\n"
+        "Convert to tensor: torch.tensor(df.values)"
+    ),
+    'matplotlib.figure.Figure': (
+        "matplotlib.Figure cannot be serialized.\n"
+        "Save to bytes: fig.savefig(buf, format='png')"
+    ),
+}
+```
+
+The check happens BEFORE any auto-discovery attempt, so users get a clear error immediately instead of a cascade of warnings.
+
+### Collections with Tensors
+
+A common pattern accumulates results across traces:
+
+```python
+results = []
+for prompt in prompts:
+    with model.trace(prompt, remote='local'):
+        result = model.layer.output.save()
+    results.append(result)  # results now contains tensors
+```
+
+On subsequent traces, `results` contains tensors from previous iterations. Simple `is_json_serializable()` fails because tensors aren't JSON-serializable, but these lists ARE serializable via our tensor handling.
+
+**Solution**: `_can_deep_serialize()` recursively checks if a value can be serialized:
+
+```python
+def _can_deep_serialize(value, seen=None):
+    """Check if value (including nested collections) can be serialized."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+    if is_tensor(value):
+        return True
+    if is_remote_object(value):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_can_deep_serialize(item, seen) for item in value)
+    # ... similar for dict, set
+    return False
+```
+
+When `extract_all()` encounters a collection that isn't pure JSON but CAN be deep-serialized, it uses `serialize_value()` for recursive handling.
+
+### The `remote_noop` Decorator
+
+**Problem**: When code with `@remote` decorators is deserialized and exec'd on the server:
+1. The decorator tries to extract source (fails—code was created via exec)
+2. It tries to re-validate (unnecessary—already validated client-side)
+
+**Solution**: Provide `remote_noop` in the deserialization namespace:
+
+```python
+def remote_noop(obj=None, *, version=None, library=None):
+    """No-op @remote for deserialization context."""
+    def apply_noop(obj):
+        obj._remote_validated = True
+        obj._remote_source = None  # Already transmitted
+        return obj
+    return apply_noop(obj) if obj else apply_noop
+```
+
+The deserialization namespace maps `'remote': remote_noop`, so transmitted code like `@remote class MyClass: ...` just marks the class as validated without source extraction.
+
+### Class Deduplication and Instance Identity
+
+When multiple instances of the same class are serialized:
+
+```python
+a = Counter(1)
+b = Counter(2)
+c = Counter(3)
+```
+
+We must:
+1. Transmit the class source only once (efficiency)
+2. Ensure all instances share the same class object after deserialization (`isinstance` must work)
+
+**Serialization format** groups instances under their class:
+
+```json
+{
+  "remote_objects": {
+    "Counter": {
+      "source": {"code": "class Counter:..."},
+      "instances": {
+        "12345678": {"var_name": "a", "state": {"value": 1}},
+        "23456789": {"var_name": "b", "state": {"value": 2}},
+        "34567890": {"var_name": "c", "state": {"value": 3}}
+      }
+    }
+  }
+}
+```
+
+**Deserialization** reconstructs all instances from the SAME class:
+
+```python
+# Class is exec'd once
+exec_func(source_code, namespace)
+cls = namespace['Counter']
+
+# All instances created from same class
+for instance_id, instance_data in obj_data['instances'].items():
+    obj = object.__new__(cls)  # Same cls for all!
+    obj.__dict__ = reconstruct_state(instance_data['state'], ...)
+    namespace[instance_data['var_name']] = obj
+```
+
+This guarantees `type(a) is type(b)` and `isinstance(b, type(a))`.
+
 ---
 
 ## Design Decisions and Trade-offs
