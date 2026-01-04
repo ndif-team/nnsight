@@ -553,8 +553,7 @@ The marker constants are defined at the top of `serialization_source.py`. Here's
 {"__tensor__": {
     "data": "base64-encoded-bytes...",
     "dtype": "float32",
-    "shape": [768, 512],
-    "compressed": true  # optional, indicates zlib compression
+    "shape": [768, 512]
 }}
 
 # NN_PARAMETER_MARKER = "__nn_parameter__"
@@ -567,7 +566,7 @@ The marker constants are defined at the top of `serialization_source.py`. Here's
 }}
 ```
 
-Tensors are serialized as base64-encoded bytes with metadata about dtype and shape. Large tensors are optionally compressed with zlib. On deserialization, the bytes are decoded and reshaped into the original tensor.
+Tensors are serialized as base64-encoded bytes with metadata about dtype and shape. On deserialization, the bytes are decoded and reshaped into the original tensor. Note: the full JSON payload is compressed at the transport layer, so per-tensor compression is not needed.
 
 #### Collection Markers
 
@@ -632,23 +631,19 @@ The traced model exists on the server already—we don't serialize it. Instead, 
 
 ```python
 # REMOTE_REF_MARKER = "__remote_ref__"
-# References a @remote class by name
-{"__remote_ref__": "MyAnalyzer"}
+# CLASS_MARKER = "__class__"
+# Instance of a user-defined class (auto-discovered or @remote decorated)
+# Uses short class name (looked up in namespace populated by exec'ing source)
+{"__class__": "MyAnalyzer", "__dict__": {"top_k": 10, "threshold": 0.5}, "__id__": "auto_12345"}
 
 # REMOTE_TYPE_MARKER = "__remote_type__"
 # The class itself (not an instance) as a value
 {"__remote_type__": "MyAnalyzer"}
-
-# STATE_MARKER = "__state__"
-# Instance state (the __dict__)
-{"__remote_ref__": "MyAnalyzer", "__state__": {"top_k": 10, "threshold": 0.5}}
-
-# AUTO_INSTANCE_MARKER = "__auto_instance__"
-# Instance of an auto-discovered class (not @remote decorated)
-{"__auto_instance__": "StandardizedTransformer", "__state__": {...}}
 ```
 
-Remote objects are serialized as source code (in the `remote_objects` section of the payload). These markers appear in the `variables` section to reference those classes and their instances. The `__state__` marker carries the instance's `__dict__` for reconstruction.
+User-defined classes are serialized as source code (in the `remote_objects` section of the payload). The `__class__` marker identifies which class to instantiate, and `__dict__` contains the instance state. The `__id__` marker enables deduplication for shared/circular references.
+
+Note: If two classes with the same name from different modules are discovered, a collision error is raised with a suggestion to rename one of the classes.
 
 #### Callable and Type References
 
@@ -775,7 +770,7 @@ for var_name, value in frame_locals.items():
 
 ### Tensor Serialization
 
-Tensors are base64-encoded with optional compression:
+Tensors are base64-encoded:
 
 ```python
 def serialize_tensor(tensor) -> dict:
@@ -783,25 +778,20 @@ def serialize_tensor(tensor) -> dict:
     arr = tensor.detach().cpu().numpy()
     data = arr.tobytes()
 
-    # Compress if it saves space
-    compressed = zlib.compress(data)
-    if len(compressed) < len(data) * COMPRESSION_THRESHOLD:
-        data = compressed
-        is_compressed = True
-
     return {
         "__tensor__": {
             "data": base64.b64encode(data).decode('ascii'),
             "dtype": str(arr.dtype),
             "shape": list(arr.shape),
-            "compressed": is_compressed,
         }
     }
 ```
 
+Note: The full JSON payload is compressed at the transport layer, so per-tensor compression is not needed.
+
 ### Instance State Serialization
 
-For instances of `@remote` classes, we serialize their `__dict__`:
+For instances of user-defined classes, we serialize their `__dict__`:
 
 ```python
 def serialize_instance_state(instance, discovered_classes, traced_model):

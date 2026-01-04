@@ -538,8 +538,11 @@ def test_serialize_instance_state_nested_remote():
     outer = Outer(inner)
     state = serialize_instance_state(outer)
 
-    assert "__remote_ref__" in state["inner"]
-    assert state["inner"]["__remote_type__"] == "Inner"
+    # Nested instances use __class__ + __dict__ format (same as top-level)
+    assert "__class__" in state["inner"]
+    assert state["inner"]["__class__"] == "Inner"
+    assert "__dict__" in state["inner"]
+    assert state["inner"]["__dict__"]["v"] == 42
 
 
 # =============================================================================
@@ -1425,8 +1428,11 @@ def test_serialize_handles_self_reference():
     # With reference-based serialization, this should work (not infinite loop)
     state = serialize_instance_state(node)
 
-    # Non-nn.Module @remote objects use __remote_ref__ for references
-    assert "__remote_ref__" in state.get("self_ref", {}), "Self-reference should use __remote_ref__"
+    # The self_ref gets serialized as a full object (first occurrence)
+    # but the nested self_ref inside it uses __ref__ to break the cycle
+    assert "__class__" in state["self_ref"], "self_ref should be serialized with __class__"
+    nested_state = state["self_ref"]["__dict__"]
+    assert "__ref__" in nested_state.get("self_ref", {}), "Nested self_ref should use __ref__"
     assert state["value"] == 1
 
 
@@ -1470,8 +1476,8 @@ def test_serialize_deduplicates_shared_tensors():
 
 def test_serialize_handles_remote_references():
     """Test that indirect remote object references work without cycle detection issues."""
-    # This test verifies that referencing other @remote objects via __remote_ref__
-    # doesn't cause cycle issues - they're stored as references, not fully serialized
+    # This test verifies that referencing other @remote objects uses __class__ + __dict__
+    # for first occurrence and __ref__ for subsequent (deduplication)
     @remote
     class Node:
         def __init__(self, value):
@@ -1483,14 +1489,18 @@ def test_serialize_handles_remote_references():
     node1.next = node2
     node2.next = node1  # Indirect cycle through references
 
-    # This should work - node2 is stored as __remote_ref__, not recursively serialized
+    # node1 is serialized with __class__ + __dict__
+    # node1.next (node2) is also serialized with __class__ + __dict__ (first time seeing it)
+    # node2.next (node1) would use __ref__ since node1 was already serialized
     state = serialize_instance_state(node1)
     assert state["value"] == 1
-    assert "__remote_ref__" in state["next"]
+    # node2 should be fully serialized since it's the first occurrence
+    assert "__class__" in state["next"]
+    assert state["next"]["__class__"] == "Node"
 
 
 def test_serialize_allows_shared_reference():
-    """Test that shared (non-circular) references work."""
+    """Test that shared (non-circular) references work with deduplication."""
     @remote
     class Container:
         def __init__(self, value):
@@ -1507,8 +1517,17 @@ def test_serialize_allows_shared_reference():
 
     # This should NOT raise (no circular reference, just shared)
     state = serialize_instance_state(parent)
-    assert "__remote_ref__" in state["a"]
-    assert "__remote_ref__" in state["b"]
+
+    # First occurrence gets __class__ + __dict__, second gets __ref__
+    # (order depends on dict iteration, so check that one is full, one is ref)
+    a_is_full = "__class__" in state["a"]
+    b_is_full = "__class__" in state["b"]
+    a_is_ref = "__ref__" in state["a"]
+    b_is_ref = "__ref__" in state["b"]
+
+    # Exactly one should be full serialization, one should be reference
+    assert (a_is_full and b_is_ref) or (b_is_full and a_is_ref), \
+        "One should be full serialization (__class__), one should be reference (__ref__)"
 
 
 # =============================================================================

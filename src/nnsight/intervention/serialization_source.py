@@ -64,8 +64,7 @@ ID_MARKER = "__id__"
 MODEL_REF_MARKER = "__model_ref__"
 REMOTE_REF_MARKER = "__remote_ref__"
 REMOTE_TYPE_MARKER = "__remote_type__"
-AUTO_INSTANCE_MARKER = "__auto_instance__"
-STATE_MARKER = "__state__"
+CLASS_MARKER = "__class__"  # User-defined class instances (source transmitted separately)
 CALLABLE_REF_MARKER = "__callable_ref__"
 TYPE_REF_MARKER = "__type_ref__"
 WEAKREF_MARKER = "__weakref__"
@@ -402,6 +401,8 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         discovered = {}
 
     cls_name = cls.__name__
+    cls_module = cls.__module__
+    cls_qualified = f"{cls_module}.{cls_name}"
 
     # Check cache first
     if cls in _auto_discovered_cache:
@@ -410,9 +411,21 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
             discovered[cls_name] = cached
         return cached
 
+    # Check for name collision (same name, different class)
+    if cls_name in discovered:
+        existing = discovered[cls_name]
+        existing_qualified = existing.get('qualified_name', cls_name)
+        if existing_qualified != cls_qualified:
+            raise SourceSerializationError(
+                f"Class name collision: '{cls_name}' from '{cls_module}' conflicts with "
+                f"'{existing_qualified}'. Two different classes with the same name cannot "
+                f"be serialized together. Consider renaming one of the classes."
+            )
+
     # Already @remote decorated - use existing metadata
     if getattr(cls, '_remote_validated', False):
         result = _get_remote_metadata(cls)
+        result['qualified_name'] = cls_qualified  # Track for collision detection
         _auto_discovered_cache[cls] = result
         discovered[cls_name] = result
         return result
@@ -514,6 +527,7 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         "instances": {},
         "library": library,
         "version": version,
+        "qualified_name": cls_qualified,  # For collision detection
     }
 
     # Cache and record
@@ -1874,10 +1888,10 @@ def is_nn_module(value: Any) -> bool:
 
 def serialize_nn_module(value: Any, key: str, memo: dict, discovered_classes: Dict[str, Any] = None, traced_model: Any = None) -> Dict[str, Any]:
     """
-    Serialize a torch.nn.Module instance using object.__new__() + __dict__ approach.
+    Serialize a torch built-in nn.Module instance (e.g., torch.nn.Linear).
 
-    All nn.Module subclasses (both built-in and custom) store their state in __dict__,
-    including _parameters, _buffers, _modules dicts. We recursively serialize __dict__.
+    Only handles modules from torch.* - user-defined nn.Module subclasses
+    go through regular auto-discovery like any other class.
     """
     if discovered_classes is None:
         discovered_classes = {}
@@ -1886,32 +1900,26 @@ def serialize_nn_module(value: Any, key: str, memo: dict, discovered_classes: Di
     module_path = cls.__module__
     class_name = cls.__name__
 
-    # For ALL nn.Module instances (built-in torch, @remote, or other),
-    # serialize via class path + __dict__
-    # This works because all nn.Module subclasses store state in __dict__
-    if module_path.startswith('torch') or getattr(cls, '_remote_validated', False):
-        # Register in memo before recursing (handles circular refs)
-        obj_id = id(value)
-        ref_id = f"module_{obj_id}"
-        serialized_dict = {}
-        result = {
-            NN_MODULE_MARKER: f"{module_path}.{class_name}",
-            DICT_MARKER: serialized_dict,
-            ID_MARKER: ref_id,
-        }
-        memo[obj_id] = (ref_id, result)
+    # Only handle built-in torch modules here
+    if not module_path.startswith('torch'):
+        return None  # Signal to caller to try auto-discovery instead
 
-        # Recursively serialize __dict__
-        for k, v in value.__dict__.items():
-            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
+    # Register in memo before recursing (handles circular refs)
+    obj_id = id(value)
+    ref_id = f"module_{obj_id}"
+    serialized_dict = {}
+    result = {
+        NN_MODULE_MARKER: f"{module_path}.{class_name}",
+        DICT_MARKER: serialized_dict,
+        ID_MARKER: ref_id,
+    }
+    memo[obj_id] = (ref_id, result)
 
-        return result
+    # Recursively serialize __dict__
+    for k, v in value.__dict__.items():
+        serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
 
-    # Unknown module type (not torch, not @remote)
-    raise SourceSerializationError(
-        f"Instance attribute '{key}' is nn.Module '{class_name}' from '{module_path}' "
-        f"which cannot be serialized. Use @nnsight.remote to mark custom modules."
-    )
+    return result
 
 
 def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[str, Any] = None, traced_model: Any = None) -> Any:
@@ -1955,17 +1963,16 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
             "member": value.name,
         }
 
-    # Handle nn.Module instances FIRST (both built-in torch and @remote)
-    # This must come before is_remote_object since @remote nn.Module should use __dict__ serialization
+    # Handle torch built-in nn.Module instances (e.g., torch.nn.Linear)
+    # User-defined nn.Module subclasses fall through to auto-discovery
     if is_nn_module(value):
-        return serialize_nn_module(value, key, memo, discovered_classes, traced_model)
+        result = serialize_nn_module(value, key, memo, discovered_classes, traced_model)
+        if result is not None:
+            return result
+        # Fall through to auto-discovery for user-defined nn.Module subclasses
 
-    # Handle other @remote instances (non-nn.Module classes)
-    if is_remote_object(value):
-        return {REMOTE_REF_MARKER: id(value), REMOTE_TYPE_MARKER: type(value).__name__}
-
-    # Handle auto-discoverable instances (third-party classes like nnterp's LayerAccessor)
-    if is_auto_discoverable_instance(value):
+    # Handle auto-discoverable instances (user-defined classes, including nn.Module subclasses)
+    if is_auto_discoverable_instance(value) or is_remote_object(value):
         cls = type(value)
         cls_name = cls.__name__
 
@@ -1975,17 +1982,17 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
 
         # Serialize like a @remote instance
         ref_id = f"auto_{obj_id}"
-        instance_state = {}
+        serialized_dict = {}
         result = {
-            AUTO_INSTANCE_MARKER: cls_name,
-            STATE_MARKER: instance_state,
+            CLASS_MARKER: cls_name,
+            DICT_MARKER: serialized_dict,
             ID_MARKER: ref_id,
         }
         memo[obj_id] = (ref_id, result)
 
         # Recursively serialize __dict__
         for k, v in value.__dict__.items():
-            instance_state[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
+            serialized_dict[k] = serialize_value(v, f"{key}.{k}", memo, discovered_classes, traced_model)
 
         return result
 
@@ -2465,14 +2472,14 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         # Placeholder, will be resolved later if needed
         return value
 
-    # Auto-discovered instance (from third-party packages like nnterp)
-    if AUTO_INSTANCE_MARKER in value:
-        cls_name = value[AUTO_INSTANCE_MARKER]
+    # User-defined class instance (auto-discovered or @remote)
+    if CLASS_MARKER in value:
+        cls_name = value[CLASS_MARKER]
 
         # Get class from namespace (should have been exec'd from source)
         cls = namespace.get(cls_name)
         if cls is None:
-            raise ValueError(f"Auto-discovered class '{cls_name}' not found in namespace")
+            raise ValueError(f"Class '{cls_name}' not found in namespace")
 
         # Create instance without __init__
         instance = object.__new__(cls)
@@ -2481,9 +2488,9 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
         if ID_MARKER in value:
             reconstructed[value[ID_MARKER]] = instance
 
-        # Reconstruct __dict__ from __state__
-        if STATE_MARKER in value:
-            for k, v in value[STATE_MARKER].items():
+        # Reconstruct __dict__
+        if DICT_MARKER in value:
+            for k, v in value[DICT_MARKER].items():
                 setattr(instance, k, reconstruct_value(v, namespace, model, reconstructed))
 
         return instance

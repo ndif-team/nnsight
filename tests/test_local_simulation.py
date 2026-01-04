@@ -406,6 +406,147 @@ def test_session_local_simulation(tiny_model: LanguageModel, tiny_input: str):
 
 
 # =============================================================================
+# Probe Training Tests
+# =============================================================================
+
+# Define probe class at module level for proper source capture
+@remote
+class SentimentProbe(torch.nn.Module):
+    """Simple binary classifier probe for testing."""
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.linear = torch.nn.Linear(hidden_size, 2)
+
+    def forward(self, x):
+        return self.linear(x)
+
+
+def test_nn_module_probe_in_trace(tiny_model: LanguageModel):
+    """
+    Test that nn.Module probes can be used inside traces.
+
+    This tests the core building block of probe training: using a custom
+    nn.Module to process hidden states inside a trace.
+    """
+    probe = SentimentProbe(hidden_dims)
+
+    with tiny_model.trace("test input", remote='local'):
+        # Extract hidden state and run through probe
+        hidden = tiny_model.transformer.h[0].output[0][:, -1, :]
+        logits = probe(hidden)
+        result = logits.save()
+
+    assert isinstance(result, torch.Tensor)
+    assert result.shape == (1, 2)  # batch=1, num_classes=2
+
+
+def test_backward_pass_in_trace(tiny_model: LanguageModel):
+    """
+    Test that backward passes work inside traces.
+
+    This tests gradient computation, which is essential for probe training.
+    """
+    import torch.nn.functional as F
+
+    probe = SentimentProbe(hidden_dims)
+
+    with tiny_model.trace("test input", remote='local'):
+        hidden = tiny_model.transformer.h[0].output[0][:, -1, :]
+        logits = probe(hidden)
+        loss = F.cross_entropy(logits, torch.tensor([1]))
+        loss.backward()
+        loss_value = loss.save()
+
+    assert isinstance(loss_value, torch.Tensor)
+    assert loss_value.ndim == 0  # scalar loss
+
+
+def test_probe_gradient_computation(tiny_model: LanguageModel):
+    """
+    Test that gradients are computed for probe parameters.
+    """
+    import torch.nn.functional as F
+
+    probe = SentimentProbe(hidden_dims)
+
+    # Ensure no gradients initially
+    assert probe.linear.weight.grad is None
+
+    with tiny_model.trace("test input", remote='local'):
+        hidden = tiny_model.transformer.h[0].output[0][:, -1, :]
+        logits = probe(hidden)
+        loss = F.cross_entropy(logits, torch.tensor([1]))
+        loss.backward()
+
+    # After trace, gradients should be populated
+    assert probe.linear.weight.grad is not None
+    assert probe.linear.weight.grad.shape == (2, hidden_dims)
+
+
+def test_multiple_traces_with_probe(tiny_model: LanguageModel):
+    """
+    Test running multiple traces with the same probe.
+
+    This simulates iterating over training examples, with each trace
+    processing one example.
+    """
+    import torch.nn.functional as F
+
+    probe = SentimentProbe(hidden_dims)
+    optimizer = torch.optim.SGD(probe.parameters(), lr=0.1)
+
+    # Capture initial weights
+    initial_weight = probe.linear.weight.clone().detach()
+
+    # Training data
+    examples = [
+        ("I love this", 1),
+        ("I hate this", 0),
+    ]
+
+    # Run multiple traces (simulating training loop)
+    for text, label in examples:
+        with tiny_model.trace(text, remote='local'):
+            hidden = tiny_model.transformer.h[0].output[0][:, -1, :]
+            logits = probe(hidden)
+            loss = F.cross_entropy(logits, torch.tensor([label]))
+            loss.backward()
+
+        optimizer.step()
+        optimizer.zero_grad()
+
+    # Weights should have changed after training
+    final_weight = probe.linear.weight.clone().detach()
+    assert not torch.allclose(initial_weight, final_weight), \
+        "Probe weights should change after training"
+
+
+def test_session_with_multiple_traces_and_probe(tiny_model: LanguageModel):
+    """
+    Test using a probe in multiple traces within a session.
+
+    Note: Currently, sessions with remote='local' expect traces to be
+    directly nested without intervening Python code. This test verifies
+    the basic session + probe pattern works.
+    """
+    probe = SentimentProbe(hidden_dims)
+
+    with tiny_model.session(remote='local'):
+        with tiny_model.trace("first input"):
+            hidden = tiny_model.transformer.h[0].output[0][:, -1, :]
+            logits1 = probe(hidden).save()
+
+        with tiny_model.trace("second input"):
+            hidden = tiny_model.transformer.h[0].output[0][:, -1, :]
+            logits2 = probe(hidden).save()
+
+    assert isinstance(logits1, torch.Tensor)
+    assert isinstance(logits2, torch.Tensor)
+    assert logits1.shape == (1, 2)
+    assert logits2.shape == (1, 2)
+
+
+# =============================================================================
 # Payload Size Tests
 # =============================================================================
 
