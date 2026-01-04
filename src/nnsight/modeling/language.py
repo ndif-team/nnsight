@@ -45,6 +45,12 @@ class LanguageModel(TransformersModel):
 
     """
 
+    # Extend server-provided attributes
+    _server_provided: frozenset = TransformersModel._server_provided | frozenset({
+        'tokenizer',   # PreTrainedTokenizer from transformers
+        'generator',   # Generator Envoy
+    })
+
     class Generator(WrapperModule):
 
         class Streamer(WrapperModule):

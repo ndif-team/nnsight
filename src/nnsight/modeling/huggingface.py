@@ -7,9 +7,17 @@ from huggingface_hub.file_download import repo_folder_name
 from typing_extensions import Self
 
 from .mixins import RemoteableMixin
+from .base import NNsight
 
 
 class HuggingFaceModel(RemoteableMixin):
+
+    # Inherit server-provided from NNsight (via mixin chain)
+    # and add HuggingFace-specific attributes
+    _server_provided: frozenset = NNsight._server_provided | frozenset({
+        'repo_id',    # Model repository identifier - server has this from pre-loaded model
+        'revision',   # Git revision - server has this from pre-loaded model
+    })
 
     def __init__(
         self,
@@ -97,7 +105,8 @@ class HuggingFaceModel(RemoteableMixin):
             {
                 "repo_id": repo_id,
                 "revision": self.revision,
-            }  # , "torch_dtype": str(self._model.dtype)}
+                "rename": self._alias.rename if self._alias else None,
+            }
         )
 
     @classmethod
@@ -109,4 +118,6 @@ class HuggingFaceModel(RemoteableMixin):
 
         revision = kwargs.pop("revision", "main")
 
-        return cls(repo_id, revision=revision, **kwargs)
+        rename = kwargs.pop("rename", None)
+
+        return cls(repo_id, revision=revision, rename=rename, **kwargs)
