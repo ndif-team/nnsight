@@ -241,7 +241,7 @@ The `serialize_value()` function handles recursive cases:
 - **Tensors** → base64 encoded
 - **Nested user-defined instances** → recurse
 - **Collections (list, dict, tuple)** → recurse into elements
-- **nn.Modules** → serialize class path + state dict
+- **nn.Modules** → serialize class path + `__dict__`
 - **Circular references** → use `memo` dict to detect and emit `__ref__` markers
 
 ### Understanding External References
@@ -388,7 +388,7 @@ The system distinguishes between **code** (source to be exec'd) and **data** (va
 | Lambda expression | Extracted source | `extract_lambda_object()` |
 | Auto-discovered class | Source code + dependencies | `auto_discover_class()` |
 | `torch.Tensor` | Base64 bytes + dtype/shape | `serialize_tensor()` |
-| `nn.Module` | Class path + state dict | `serialize_nn_module()` |
+| `nn.Module` | Class path + `__dict__` | `serialize_nn_module()` |
 | Primitives (int, str, etc.) | JSON value | Direct |
 | Collections | Recursive with markers | `serialize_value()` |
 | Instance state | Recursive `__dict__` | `serialize_instance_state()` |
@@ -667,12 +667,12 @@ When code references functions or types from allowed modules (like `torch`, `num
 #### Special Case Markers
 
 ```python
-# NN_MODULE_MARKER = "__nn_module__"
-# For nn.Module instances (serializes class path + state_dict)
-{"__nn_module__": {
-    "class": "torch.nn.Linear",
-    "state_dict": {"weight": {"__tensor__": ...}, "bias": {"__tensor__": ...}}
-}}
+# NN_MODULE_MARKER = "__nn_module__", DICT_MARKER = "__dict__"
+# For nn.Module instances (serializes class path + __dict__)
+{
+    "__nn_module__": "torch.nn.Linear",
+    "__dict__": {"weight": {"__tensor__": ...}, "bias": {"__tensor__": ...}, ...}
+}
 
 # ENUM_MARKER = "__enum__"
 # For enum values
@@ -691,7 +691,7 @@ When code references functions or types from allowed modules (like `torch`, `num
 {"__server_provided__": "some_server_resource"}
 ```
 
-These handle edge cases: `nn.Module` uses PyTorch's state_dict mechanism; enums are reconstructed by name; weakrefs can't be serialized (they're ephemeral by design); and some values are expected to exist server-side.
+These handle edge cases: `nn.Module` is reconstructed via `object.__new__()` with `__dict__` restoration (same as regular classes); enums are reconstructed by name; weakrefs can't be serialized (they're ephemeral by design); and some values are expected to exist server-side.
 
 #### Marker Design Principles
 
