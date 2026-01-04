@@ -312,10 +312,6 @@ def is_auto_discoverable_instance(value: Any) -> bool:
 # Tensor Serialization
 # =============================================================================
 
-# Compression threshold: only compress if we save at least 10%
-COMPRESSION_THRESHOLD = 0.9
-
-
 def is_tensor(value: Any) -> bool:
     """
     Check if value is a tensor (torch.Tensor or numpy.ndarray).
@@ -338,13 +334,12 @@ def is_tensor(value: Any) -> bool:
 
 def serialize_tensor(value: Any) -> Dict[str, Any]:
     """
-    Serialize a tensor to a JSON-compatible dict with optional compression.
+    Serialize a tensor to a JSON-compatible dict.
 
     Strategy:
     - Convert to numpy bytes (handling sparse, quantized, device-specific tensors)
-    - Try zlib compression (level=1 for speed)
-    - Only use compression if it saves at least 10%
     - Base64 encode for JSON transport
+    - Note: Per-tensor compression is disabled since the full message is compressed
 
     Handles special cases:
     - Sparse tensors: preserved in COO format (memory efficient)
@@ -356,15 +351,14 @@ def serialize_tensor(value: Any) -> Dict[str, Any]:
         - __tensor__: base64-encoded bytes
         - dtype: string dtype (e.g., "float32")
         - shape: list of dimensions
-        - compressed: bool indicating if zlib compressed
         - quantization: (optional) dict with scale, zero_point, qtype for quantized tensors
         - sparse: (optional) dict with indices, dense_shape for sparse COO tensors
 
-    Wire format example (uncompressed):
-        {"__tensor__": "base64...", "dtype": "float32", "shape": [768], "compressed": false}
+    Wire format example:
+        {"__tensor__": "base64...", "dtype": "float32", "shape": [768]}
 
     Wire format example (quantized - preserves exact int8 values, 4x smaller):
-        {"__tensor__": "base64...", "dtype": "int8", "shape": [768], "compressed": true,
+        {"__tensor__": "base64...", "dtype": "int8", "shape": [768],
          "quantization": {"scale": 0.1, "zero_point": 0, "qtype": "qint8"}}
 
     Wire format example (sparse COO - memory efficient for large sparse tensors):
@@ -396,21 +390,14 @@ def serialize_tensor(value: Any) -> Dict[str, Any]:
             indices = t._indices().cpu().numpy()
             values = t._values().cpu().numpy()
 
-            # Compress indices
+            # Encode indices (no per-tensor compression; message is compressed globally)
             indices_bytes = indices.tobytes()
-            indices_compressed = zlib.compress(indices_bytes, level=1)
-            if len(indices_compressed) < len(indices_bytes) * COMPRESSION_THRESHOLD:
-                indices_data = base64.b64encode(indices_compressed).decode('ascii')
-                indices_is_compressed = True
-            else:
-                indices_data = base64.b64encode(indices_bytes).decode('ascii')
-                indices_is_compressed = False
+            indices_data = base64.b64encode(indices_bytes).decode('ascii')
 
             sparse_info = {
                 "indices": indices_data,
                 "indices_dtype": str(indices.dtype),
                 "indices_shape": list(indices.shape),
-                "indices_compressed": indices_is_compressed,
                 "dense_shape": list(t.shape),
             }
             np_array = values
@@ -440,28 +427,14 @@ def serialize_tensor(value: Any) -> Dict[str, Any]:
         np_array = value
         original_dtype = None
 
-    # Get raw bytes
+    # Get raw bytes and base64 encode (no per-tensor compression; message is compressed globally)
     raw_bytes = np_array.tobytes()
-
-    # Try compression
-    compressed_bytes = zlib.compress(raw_bytes, level=1)
-
-    # Only use compression if it actually helps (at least 10% savings)
-    if len(compressed_bytes) < len(raw_bytes) * COMPRESSION_THRESHOLD:
-        data_bytes = compressed_bytes
-        is_compressed = True
-    else:
-        data_bytes = raw_bytes
-        is_compressed = False
-
-    # Base64 encode for JSON
-    b64_data = base64.b64encode(data_bytes).decode('ascii')
+    b64_data = base64.b64encode(raw_bytes).decode('ascii')
 
     result = {
         TENSOR_MARKER: b64_data,
         "dtype": str(np_array.dtype),
         "shape": list(np_array.shape),
-        "compressed": is_compressed,
     }
 
     # Add quantization info if present
