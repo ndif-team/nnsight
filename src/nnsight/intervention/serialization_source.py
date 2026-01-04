@@ -40,7 +40,13 @@ class SourceSerializationError(Exception):
 # Serialization Format Constants
 # =============================================================================
 # Marker keys used in the serialized JSON format for type identification.
-# Changing these values would break backwards compatibility.
+# These constants define the wire format for source-based serialization:
+# - Each marker key (e.g., "__tensor__", "__nn_module__") identifies a special
+#   type in the JSON payload that requires reconstruction on the server.
+# - The format is designed to be self-describing so the server can reconstruct
+#   Python objects (tensors, nn.Modules, @remote instances) from JSON.
+# - IMPORTANT: Changing these values would break backwards compatibility with
+#   existing serialized payloads and server deployments.
 
 SERIALIZATION_VERSION = "2.2"
 
@@ -70,6 +76,10 @@ ENUM_FALLBACK_MARKER = "__enum_fallback__"
 # =============================================================================
 # Remote Metadata Extraction
 # =============================================================================
+# Helper functions to extract metadata from @remote decorated objects.
+# This metadata (source code, module references, closure variables) is attached
+# to objects by the @remote decorator at import time and is used during
+# serialization to send the object's definition to the server.
 
 def _get_remote_metadata(cls_or_func: Any) -> Dict[str, Any]:
     """
@@ -110,6 +120,19 @@ def _get_remote_metadata(cls_or_func: Any) -> Dict[str, Any]:
 # =============================================================================
 # Auto-Discovery of Dependencies
 # =============================================================================
+# Functions for automatically discovering classes that need to be serialized,
+# even when they are not explicitly decorated with @remote. This enables
+# third-party libraries (like nnterp) to work with NDIF without modification.
+#
+# Auto-discovery works by:
+# 1. Detecting when a value's class has available source code (via inspect)
+# 2. Extracting the source and finding external references (like @remote does)
+# 3. Recursively discovering base classes and type dependencies
+# 4. Including discovered classes in the serialized payload for server-side
+#    reconstruction
+#
+# This is triggered at serialization time (not import time) when we encounter
+# instances of classes that aren't @remote decorated but have available source.
 
 # Cache of auto-discovered classes to avoid re-processing
 _auto_discovered_cache: Dict[type, Dict[str, Any]] = {}
@@ -310,6 +333,17 @@ def is_auto_discoverable_instance(value: Any) -> bool:
 # =============================================================================
 # Tensor Serialization
 # =============================================================================
+# Functions for serializing PyTorch tensors and NumPy arrays to JSON-compatible
+# format. Tensors are converted to base64-encoded bytes with dtype/shape metadata.
+#
+# Special tensor types are handled:
+# - Sparse tensors: Preserved in COO format to maintain memory efficiency
+# - Quantized tensors: Preserved with scale/zero_point to maintain precision
+# - GPU/MPS tensors: Moved to CPU before serialization
+# - bfloat16 tensors: View-cast to int16 (same bits) since NumPy lacks bfloat16
+#
+# Note: Per-tensor compression is disabled because the full JSON payload is
+# compressed at the transport layer, making per-tensor compression redundant.
 
 def is_tensor(value: Any) -> bool:
     """
@@ -720,8 +754,20 @@ def is_model_reference(value: Any) -> bool:
 # =============================================================================
 # Model Subclass Handling
 # =============================================================================
-# Functions for handling LanguageModel subclasses (like nnterp's StandardizedTransformer).
-# These need their source code sent to the server.
+# Functions for serializing LanguageModel subclasses so they can be reconstructed
+# on the NDIF server. This enables third-party model wrappers (like nnterp's
+# StandardizedTransformer) to work on servers that don't have the library installed.
+#
+# When a user traces a LanguageModel subclass:
+# 1. is_languagemodel_subclass() detects it's not a base nnsight class
+# 2. serialize_model_subclass() auto-discovers the class hierarchy
+# 3. The class source, dependencies, and instance state are serialized
+# 4. reconstruct_model_subclass() rebuilds the class on the server
+#
+# This differs from regular @remote classes because:
+# - The model is the "context" for the trace, not just a variable
+# - Server-provided attributes (_module, _tokenizer) must be preserved
+# - The model_key is used to load the HuggingFace model on the server
 
 def is_languagemodel_subclass(value: Any) -> bool:
     """Check if value is an instance of a LanguageModel SUBCLASS (not LanguageModel itself).
@@ -1078,7 +1124,19 @@ def reconstruct_model_subclass(
 # =============================================================================
 # Remote Object Extraction
 # =============================================================================
-# Functions for extracting @remote decorated objects and lambdas from frame locals.
+# Functions for extracting @remote decorated objects and lambdas from the trace
+# frame's local variables. These functions are called by extract_all() during
+# serialization to identify which objects need their source code sent to the server.
+#
+# For @remote functions/classes: The source and metadata were captured at import
+# time by the @remote decorator. We extract and include them in the payload.
+#
+# For instances of @remote classes: We serialize their __dict__ state so the
+# server can reconstruct the instance after re-creating the class from source.
+#
+# For lambdas: We extract the source using AST parsing (extract_lambda_source),
+# validate it doesn't capture non-serializable closures, and include it in the
+# payload. Complex lambdas should be converted to @remote functions.
 
 def is_the_traced_model(value: Any, traced_model: Any) -> bool:
     """Check if value IS the specific model being traced (by identity)."""
@@ -1235,8 +1293,22 @@ def extract_lambda_object(var_name: str, func: Any, result: Dict[str, Any]) -> N
 # =============================================================================
 # Value Serialization
 # =============================================================================
-# These functions handle serializing different value types (tensors, nn.Modules,
-# primitives, containers) into JSON-compatible format.
+# Functions for recursively serializing Python values into JSON-compatible format.
+# Used by serialize_instance_state() to serialize @remote instance __dict__ contents.
+#
+# Each value type has a specific serialization strategy:
+# - Primitives (None, bool, int, float, str): Pass through unchanged
+# - Tensors/Parameters: serialize_tensor() with base64 encoding
+# - nn.Modules: Serialize class path + __dict__ for reconstruction
+# - @remote instances: Reference by id (serialized separately)
+# - Auto-discoverable instances: Include class source + __dict__
+# - Containers (list, dict, tuple, set): Recursive serialization with markers
+# - Callables from allowed modules: Store qualified name for server import
+# - Enums: Store class/module/member for reconstruction
+#
+# Deduplication: A memo dict tracks serialized objects by id() to handle:
+# - Shared references (same tensor in multiple places)
+# - Circular references (object A contains B which contains A)
 
 def is_nn_parameter(value: Any) -> bool:
     """Check if value is a torch.nn.Parameter."""
@@ -1554,8 +1626,23 @@ def get_callable_reference(value: Any) -> Optional[str]:
 # =============================================================================
 # Top-Level API: Serialization and Deserialization
 # =============================================================================
-# Main entry points for source-based serialization. serialize_source_based()
-# is called client-side, deserialize_source_based() is called server-side.
+# Main entry points for source-based serialization.
+#
+# Client-side (serialize_source_based):
+#   Called when the trace context exits with a remote backend. (The Tracer.__exit__
+#   method invokes RemoteBackend, which serializes the trace for submission to NDIF.)
+#   Extracts the trace source code,
+#   frame locals, and all dependencies into a JSON payload. The payload includes:
+#   - The trace block source code with file/line metadata for error mapping
+#   - JSON-serializable variables (int, str, list, dict, tensors)
+#   - @remote object definitions (source + module refs + instances)
+#   - Model subclass definitions (for LanguageModel subclasses)
+#
+# Server-side (deserialize_source_based):
+#   Called on the NDIF server to reconstruct the execution environment.
+#   Re-creates all @remote classes/functions by exec'ing their source, rebuilds
+#   instances with their serialized state, and returns a namespace dict ready
+#   for executing the user's trace code.
 
 def can_serialize_source_based(tracer: "Tracer") -> Tuple[bool, Optional[str]]:
     """
@@ -1775,8 +1862,22 @@ def deserialize_source_based(
 # =============================================================================
 # Value Reconstruction
 # =============================================================================
-# These functions handle reconstructing serialized values back to Python objects.
-# Called server-side during deserialization.
+# Functions for recursively reconstructing Python values from serialized JSON.
+# Called server-side by deserialize_source_based() to rebuild @remote instance
+# state and nested data structures.
+#
+# Each marker type has a reconstruction strategy:
+# - __tensor__: deserialize_tensor() with optional quantization/sparsity
+# - __nn_module__: object.__new__(cls) + reconstruct __dict__
+# - __auto_instance__: Same as above, class was exec'd from discovered source
+# - __dict__/__list__/__tuple__/__set__: Recursive reconstruction
+# - __ref__: Return previously reconstructed object (deduplication)
+# - __model_ref__: Return the traced model
+# - __callable_ref__/__type_ref__: Import from module path
+# - __enum__: Import enum class and get member by name
+#
+# The reconstructed dict tracks objects by their serialized ID_MARKER to handle
+# shared references and circular references correctly.
 
 def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: dict) -> Any:
     """

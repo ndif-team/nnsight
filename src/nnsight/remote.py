@@ -22,8 +22,20 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 # =============================================================================
 # Server-available modules (single source of truth)
 # =============================================================================
-# These modules are available on NDIF servers and don't need to be serialized.
-# Code referencing these modules can be reconstructed server-side.
+# This section defines which Python modules are available on NDIF servers.
+# These modules don't need their source serialized because they're pre-installed.
+#
+# When validating @remote code, references to these modules are marked as "skip"
+# (available on server) rather than "capture" (needs serialization).
+#
+# When reconstructing code server-side, imports from these modules are allowed
+# and resolved using the server's installed packages.
+#
+# IMPORTANT: This is the single source of truth for allowed modules. The same
+# constants are used by:
+# - @remote decorator validation (remote.py)
+# - Source serialization (serialization_source.py)
+# - Restricted execution (restricted_execution.py)
 
 # Python standard library modules (safe subset)
 STDLIB_MODULES = {
@@ -731,11 +743,26 @@ def is_json_serializable(value: Any, _seen: set = None) -> bool:
 
 def validate_ast(tree: ast.AST, name: str) -> List[str]:
     """
-    Validate AST for disallowed patterns.
+    Validate AST for disallowed patterns that would disqualify the code from
+    being remoted.
+
+    This is used by the @remote decorator at import time to catch unsafe code
+    early, and by auto_discover functions at serialization time to validate
+    third-party classes.
 
     Checks for:
-    - Imports of non-allowed modules
-    - Calls to disallowed functions (open, exec, eval, etc.)
+    - Imports of non-allowed modules (not available on NDIF server)
+    - Relative imports (from . import X) which can't work on server
+    - Calls to disallowed functions (open, exec, eval, compile, input, __import__)
+    - Calls to disallowed attribute chains (os.system, subprocess.run, etc.)
+
+    Args:
+        tree: The parsed AST of the source code to validate
+        name: The name of the function/class being validated (for error messages)
+
+    Returns:
+        A list of error strings describing each validation failure. An empty list
+        means the code passed validation and is safe for remote execution.
     """
     errors = []
 
@@ -850,6 +877,21 @@ def format_validation_errors(name: str, errors: List[str]) -> str:
 # =============================================================================
 # Lambda source extraction
 # =============================================================================
+# Functions for extracting the source code of lambda functions for serialization.
+#
+# Lambdas are challenging because:
+# 1. Multiple lambdas can appear on the same source line
+# 2. inspect.getsource() returns the whole line, not just the lambda
+# 3. Lambdas defined in interactive sessions (REPL, notebooks) may not have source
+#
+# The extraction strategy:
+# 1. Get the full source line with inspect.getsource()
+# 2. Parse the line to find all lambda AST nodes
+# 3. If multiple lambdas exist, disambiguate using bytecode matching
+# 4. Return just the lambda expression text (e.g., "lambda x: x + 1")
+#
+# For complex lambdas or those with non-serializable closures, users should
+# convert to @remote decorated named functions.
 
 class LambdaExtractionError(Exception):
     """Raised when lambda source cannot be reliably extracted."""

@@ -42,6 +42,18 @@ except ImportError:
 # =============================================================================
 # Security Audit Logger
 # =============================================================================
+# Logging infrastructure for security-relevant events during code execution.
+# The NDIF server should configure this logger to route events to its security
+# monitoring system (SIEM, alerting, etc.).
+#
+# Log messages include:
+# - SUSPICIOUS_GETATTR: Attempt to access dangerous attributes (f_locals, __code__, etc.)
+# - SUSPICIOUS_GETITEM: Attempt to access dangerous keys via indexing
+# - BLOCKED_IMPORT: Attempt to import a blocked module (subprocess, socket, etc.)
+# - UNAUTHORIZED_IMPORT: Attempt to import a module not in the allowed list
+# - SUSPICIOUS_CALL: Attempt to call a blocked function (eval, exec, etc.)
+#
+# Each log entry includes user_id and job_id for forensic investigation.
 
 # Configure audit logger - server should route this to security monitoring
 audit_logger = logging.getLogger("nnsight.security.audit")
@@ -55,6 +67,20 @@ class SecurityAuditError(Exception):
 # =============================================================================
 # Suspicious Patterns
 # =============================================================================
+# These sets define patterns that indicate potential sandbox escape attempts.
+# When detected, access is blocked and the attempt is logged for security review.
+#
+# SUSPICIOUS_ATTRS: Attribute names that should never be accessed in user code.
+#   These include process execution (os.system), frame inspection (f_locals),
+#   code manipulation (__code__, __globals__), and file operations.
+#
+# BLOCKED_MODULES: Module names that should never be imported.
+#   These include subprocess, socket, ctypes, multiprocessing, and other modules
+#   that could be used to escape the sandbox or access system resources.
+#
+# BLOCKED_FUNCTIONS: Builtin function names that should be blocked.
+#   These include eval, exec, compile, and __import__ which could execute
+#   arbitrary code or bypass import restrictions.
 
 # Attributes that indicate sandbox escape attempts
 SUSPICIOUS_ATTRS: Set[str] = {
@@ -103,6 +129,19 @@ BLOCKED_FUNCTIONS: Set[str] = {
 # =============================================================================
 # Guard Functions with Audit Logging
 # =============================================================================
+# Factory functions that create guarded versions of Python operations.
+# These guards are injected into the restricted execution namespace by
+# RestrictedPython and intercept attribute access, item access, and imports.
+#
+# Each guard:
+# 1. Checks if the operation targets a suspicious pattern
+# 2. Logs the attempt to the security audit logger (if audit=True)
+# 3. Raises SecurityAuditError to block the operation
+# 4. Falls through to RestrictedPython's default guards for allowed operations
+#
+# The audit parameter controls whether attempts are logged:
+# - True (server-side): Log all violations for security monitoring
+# - False (local validation): Skip logging, just validate
 
 def create_guarded_getattr(user_id: str, job_id: str, audit: bool = True) -> Callable:
     """
@@ -255,6 +294,16 @@ def create_guarded_builtins(user_id: str, job_id: str, audit: bool = True) -> Ca
 # =============================================================================
 # Restricted Namespace Builder
 # =============================================================================
+# Functions for building the restricted execution namespace used by exec().
+# The namespace includes:
+# - Guarded builtins (getattr, __import__, etc. wrapped with security checks)
+# - RestrictedPython guard functions (_getattr_, _getitem_, _getiter_, etc.)
+# - Safe builtins (int, str, list, len, etc.)
+# - User-provided globals (model, torch, numpy, etc.)
+#
+# This provides defense-in-depth alongside OS-level sandboxing. Even if an
+# attacker finds a way past RestrictedPython's compile-time checks, runtime
+# guards will block access to dangerous operations.
 
 # Import server-available modules from the single source of truth
 from ..remote import SERVER_AVAILABLE_MODULES
@@ -392,6 +441,18 @@ def create_restricted_globals(
 # =============================================================================
 # Static Import Analysis
 # =============================================================================
+# AST-based analysis to detect blocked imports before execution.
+#
+# While RestrictedPython and runtime guards can catch dynamic imports, static
+# analysis catches import statements at compile time with clearer error messages.
+# This runs during compile_user_code() before RestrictedPython compilation.
+#
+# The analysis walks the AST looking for:
+# - import X statements where X is in BLOCKED_MODULES or not in allowed_modules
+# - from X import Y statements with the same checks on X
+#
+# This catches simple import attempts. Dynamic imports via __import__() or
+# importlib are caught by the guarded_import runtime guard.
 
 import ast
 
@@ -474,6 +535,20 @@ def check_imports_in_code(
 # =============================================================================
 # Main Execution Function
 # =============================================================================
+# The main entry points for restricted code execution on the NDIF server.
+#
+# compile_user_code(): Compiles source code with RestrictedPython.
+#   - Runs static import analysis to catch blocked imports early
+#   - Uses RestrictedPython's compile_restricted() to transform the AST
+#   - The transformed code includes calls to guard functions (_getattr_, etc.)
+#
+# execute_restricted(): Full pipeline for executing user code.
+#   - Compiles the code with compile_user_code()
+#   - Builds a restricted namespace with create_restricted_globals()
+#   - Executes the compiled code in the restricted namespace
+#   - Returns the namespace (containing any results the code produced)
+#
+# These functions are called by deserialize_source_based() when use_restricted=True.
 
 def compile_user_code(
     code: str,
@@ -584,6 +659,8 @@ def execute_restricted(
 # =============================================================================
 # Utility Functions
 # =============================================================================
+# Helper functions for checking restricted execution capabilities and
+# accessing the security audit logger.
 
 def is_restricted_python_available() -> bool:
     """Check if RestrictedPython is installed."""
