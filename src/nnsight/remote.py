@@ -15,6 +15,7 @@ import ast
 import builtins
 import inspect
 import json
+import os
 import sys
 import types
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
@@ -222,7 +223,8 @@ def _apply_remote(obj: Union[Type, Callable], version: str = None, library: str 
     # Step 1: Verify source is available and get file/line info for error messages
     try:
         source = inspect.getsource(obj)
-        source_file = inspect.getfile(obj)
+        # Use relative path for cleaner error messages (matches Python traceback style)
+        source_file = os.path.relpath(inspect.getfile(obj))
         _, start_line = inspect.getsourcelines(obj)
     except OSError:
         raise RemoteValidationError(

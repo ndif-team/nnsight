@@ -181,9 +181,11 @@ def test_remote_rejects_non_remote_base():
     error_msg = str(exc_info.value)
     # Check error message contains the base class name
     assert "base class 'NonRemoteBase'" in error_msg
-    # Check error message includes exact file path and line number
-    assert f"{__file__}:" in error_msg, (
-        f"Error should include exact file path '{__file__}:', got: {error_msg}"
+    # Check error message includes relative file path and line number
+    import os
+    rel_path = os.path.relpath(__file__)
+    assert f"{rel_path}:" in error_msg, (
+        f"Error should include relative path '{rel_path}:', got: {error_msg}"
     )
 
 
@@ -793,13 +795,15 @@ def test_error_message_includes_line_number():
     error_msg = str(exc_info.value)
     # Error should mention the pandas import
     assert "pandas" in error_msg, f"Error should mention pandas: {error_msg}"
-    # Error should include exact file path and line number (format: "/path/to/file.py:123:")
+    # Error should include relative file path and line number (format: "path/to/file.py:123:")
     import re
-    assert f"{__file__}:" in error_msg, (
-        f"Error should include exact file path '{__file__}:', got: {error_msg}"
+    import os
+    rel_path = os.path.relpath(__file__)
+    assert f"{rel_path}:" in error_msg, (
+        f"Error should include relative path '{rel_path}:', got: {error_msg}"
     )
     # Check that the line number is present (a digit follows the path)
-    escaped_path = re.escape(__file__)
+    escaped_path = re.escape(rel_path)
     assert re.search(escaped_path + r':\d+:', error_msg), (
         f"Error should include line number after path: {error_msg}"
     )
@@ -866,11 +870,13 @@ def test_error_line_number_accuracy():
 
 
 def test_error_includes_correct_file_path():
-    """Test that error messages include the exact correct source file path.
+    """Test that error messages include the correct relative file path.
 
-    Verifies the error contains the actual absolute path to this test file,
-    not just the filename.
+    Verifies the error contains the relative path to this test file,
+    matching Python traceback conventions.
     """
+    import os
+
     with pytest.raises(RemoteValidationError) as exc_info:
         @remote
         def bad_eval_call():
@@ -878,21 +884,21 @@ def test_error_includes_correct_file_path():
 
     error_msg = str(exc_info.value)
 
-    # Error should include the exact file path of this test file
-    this_file = __file__
-    assert this_file in error_msg, (
-        f"Error should include exact file path '{this_file}', got: {error_msg}"
+    # Error should include the relative file path
+    rel_path = os.path.relpath(__file__)
+    assert rel_path in error_msg, (
+        f"Error should include relative path '{rel_path}', got: {error_msg}"
     )
     # Verify file:line format
-    assert f"{this_file}:" in error_msg, (
-        f"Error should have file:line format with '{this_file}:', got: {error_msg}"
+    assert f"{rel_path}:" in error_msg, (
+        f"Error should have file:line format with '{rel_path}:', got: {error_msg}"
     )
 
 
 def test_multiple_errors_have_accurate_lines():
     """Test that when there are multiple errors, each has exact file path and line.
 
-    Verifies that each error in a multi-error scenario has the correct absolute
+    Verifies that each error in a multi-error scenario has the correct relative
     file path and accurate line number pointing to the actual offending code.
     """
     import re
@@ -911,10 +917,10 @@ def test_multiple_errors_have_accurate_lines():
     assert "pandas" in error_msg
     assert "exec" in error_msg
 
-    # Verify each error includes the exact file path
-    this_file = __file__
-    assert this_file in error_msg, (
-        f"Error should include exact file path '{this_file}', got: {error_msg}"
+    # Verify each error includes the relative file path
+    rel_path = os.path.relpath(__file__)
+    assert rel_path in error_msg, (
+        f"Error should include relative path '{rel_path}', got: {error_msg}"
     )
 
     # Read the source file
@@ -922,7 +928,7 @@ def test_multiple_errors_have_accurate_lines():
         lines = f.readlines()
 
     # Escape the file path for regex (handles special chars like . and /)
-    escaped_path = re.escape(this_file)
+    escaped_path = re.escape(rel_path)
 
     # Extract line numbers and verify each points to the correct line
     for error_line in error_msg.split('\n'):
