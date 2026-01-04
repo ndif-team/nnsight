@@ -18,7 +18,6 @@ import json
 import sys
 import textwrap
 import types
-import zlib
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -470,10 +469,6 @@ def deserialize_tensor(data: Dict[str, Any], as_torch: bool = True) -> Any:
     # Decode base64 for values
     raw_bytes = base64.b64decode(data[TENSOR_MARKER])
 
-    # Decompress if needed
-    if data.get("compressed", False):
-        raw_bytes = zlib.decompress(raw_bytes)
-
     # Reconstruct numpy array (values for sparse, or full tensor for dense)
     dtype = np.dtype(data["dtype"])
     shape = tuple(data["shape"])
@@ -498,8 +493,6 @@ def deserialize_tensor(data: Dict[str, Any], as_torch: bool = True) -> Any:
             s = data["sparse"]
             # Decode indices
             indices_bytes = base64.b64decode(s["indices"])
-            if s.get("indices_compressed", False):
-                indices_bytes = zlib.decompress(indices_bytes)
             indices_dtype = np.dtype(s["indices_dtype"])
             indices_shape = tuple(s["indices_shape"])
             indices_np = np.frombuffer(indices_bytes, dtype=indices_dtype).reshape(indices_shape)
