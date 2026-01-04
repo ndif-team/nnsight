@@ -125,7 +125,7 @@ The serialization system spans two execution environments:
 │                                                               │
 │  User Code            Serialization              Network      │
 │  ┌─────────────┐     ┌─────────────┐        ┌──────────┐     │
-│  │ @remote     │────▶│ extract_all │───────▶│ JSON     │─────┼──▶
+│  │ User-defined│────▶│ extract_all │───────▶│ JSON     │─────┼──▶
 │  │ classes     │     │ serialize   │        │ payload  │     │
 │  │ & functions │     └─────────────┘        └──────────┘     │
 │  └─────────────┘                                              │
@@ -184,12 +184,6 @@ extract_all(frame_locals, traced_model)
     ├── Is it the traced model itself?
     │   └── Record in model_refs (injected server-side)
     │
-    ├── Is it a @remote decorated object?
-    │   └── Call extract_remote_object() to get source + metadata
-    │
-    ├── Is it a lambda function?
-    │   └── Call extract_lambda_object() to extract lambda source
-    │
     ├── Is it JSON-serializable (int, float, str, list, dict)?
     │   └── Store directly in variables
     │
@@ -199,13 +193,19 @@ extract_all(frame_locals, traced_model)
     ├── Is it from an allowed module (torch, numpy, etc.)?
     │   └── Skip (available on server)
     │
-    └── Otherwise?
+    ├── Is it a lambda function?
+    │   └── Call extract_lambda_object() to extract lambda source
+    │
+    ├── Is it a user-defined class/function (auto-discovered or @remote)?
+    │   └── Extract source code + dependencies
+    │
+    └── Otherwise (forbidden or no source available)?
         └── Raise SourceSerializationError
 ```
 
-### Extracting @remote Objects: Source + Dependencies
+### Extracting User-Defined Objects: Source + Dependencies
 
-When `extract_all()` finds a `@remote` decorated class or function, it calls `extract_remote_object()`. This function retrieves the metadata that was captured at decoration time:
+When `extract_all()` finds a user-defined class or function (whether auto-discovered or explicitly decorated with `@remote`), it extracts the source code and dependencies. For `@remote`-decorated objects, metadata was pre-computed at decoration time. For auto-discovered objects, the same extraction happens at serialization time:
 
 ```python
 def extract_remote_object(var_name, value, result, traced_model):
@@ -223,11 +223,11 @@ def extract_remote_object(var_name, value, result, traced_model):
         state = serialize_instance_state(value, ...)
 ```
 
-The key insight: **most of the work happened at decoration time**. By the time we serialize, we're just retrieving pre-computed metadata.
+For `@remote`-decorated objects, most of the work happened at decoration time. For auto-discovered objects, extraction happens at serialization time using the same logic.
 
 ### Recursive Instance State Serialization
 
-When a `@remote` class instance is found, we need to serialize not just the class but the instance's state (`__dict__`). This can contain arbitrarily nested objects:
+When a user-defined class instance is found, we need to serialize not just the class but the instance's state (`__dict__`). This can contain arbitrarily nested objects:
 
 ```python
 def serialize_instance_state(obj, memo, discovered_classes, traced_model):
@@ -239,7 +239,7 @@ def serialize_instance_state(obj, memo, discovered_classes, traced_model):
 
 The `serialize_value()` function handles recursive cases:
 - **Tensors** → base64 encoded
-- **Nested `@remote` instances** → recurse
+- **Nested user-defined instances** → recurse
 - **Collections (list, dict, tuple)** → recurse into elements
 - **nn.Modules** → serialize class path + state dict
 - **Circular references** → use `memo` dict to detect and emit `__ref__` markers
@@ -1692,12 +1692,12 @@ Implementation would involve a `LocalSimulationBackend` that wraps the serializa
 
 The source serialization system enables Python-version-independent remote execution by:
 
-1. **Extracting source code** instead of bytecode
-2. **Validating early** at import time
+1. **Auto-discovering user code** and extracting source instead of bytecode
+2. **Validating early** (at import time for `@remote`, at serialization for auto-discovered)
 3. **Capturing context** (module refs, closures, constants)
 4. **Preserving identity** through ID-based deduplication
 5. **Maintaining debuggability** with original file/line info
 
-The key mental model: `@remote` decorated code is a **query generator**, not runtime code. We're shipping the query language (source) to the server, not compiled instructions (bytecode).
+The key mental model: user-defined code in traces is a **query generator**, not runtime code. We're shipping the query language (source) to the server, not compiled instructions (bytecode).
 
 For detailed specifications and future roadmap, see `nnsight-source-serialization-design.md`.
