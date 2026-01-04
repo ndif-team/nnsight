@@ -9,17 +9,18 @@ This document is a tutorial introduction to nnsight's source-based serialization
 1. [The Problem We're Solving](#the-problem-were-solving)
 2. [The Key Insight](#the-key-insight)
 3. [Architecture Overview](#architecture-overview)
-4. [The `@remote` Decorator](#the-remote-decorator)
-5. [How Code Discovery Works](#how-code-discovery-works)
-6. [Serialization Format](#serialization-format)
-7. [The Serialization Pipeline](#the-serialization-pipeline)
-8. [The Deserialization Pipeline](#the-deserialization-pipeline)
-9. [Handling Special Cases](#handling-special-cases)
+4. [How Code Discovery Works](#how-code-discovery-works)
+5. [Serialization Format](#serialization-format)
+6. [The Serialization Pipeline](#the-serialization-pipeline)
+7. [The Deserialization Pipeline](#the-deserialization-pipeline)
+8. [Handling Special Cases](#handling-special-cases)
+9. [The `@remote` Decorator (Optional)](#the-remote-decorator-optional)
 10. [Design Decisions and Trade-offs](#design-decisions-and-trade-offs)
 11. [Code Layout](#code-layout)
 12. [Testing Strategy](#testing-strategy)
 13. [Common Patterns and Idioms](#common-patterns-and-idioms)
 14. [Debugging Tips](#debugging-tips)
+15. [Summary](#summary)
 
 ---
 
@@ -147,76 +148,10 @@ The serialization system spans two execution environments:
 
 | Component | Location | Role |
 |-----------|----------|------|
-| `@remote` decorator | `remote.py` | Marks classes/functions for source serialization; validates at import time |
 | `serialize_source_based()` | `serialization_source.py` | Client-side: extracts and packages everything |
 | `deserialize_source_based()` | `serialization_source.py` | Server-side: reconstructs namespace from payload |
-| `extract_all()` | `serialization_source.py` | Walks frame locals, extracts remote objects, tensors, variables |
-
----
-
-## The `@remote` Decorator
-
-### What Users Need to Know
-
-The `@remote` decorator is how users mark helper classes and functions for transport to remote servers. Any class or function used inside a trace that isn't part of the standard library or nnsight itself must be decorated with `@remote`:
-
-```python
-from nnsight import remote
-
-@remote
-class MyAnalyzer:
-    """This class will be transported to NDIF servers."""
-    def __init__(self, top_k=10):
-        self.top_k = top_k
-
-    def analyze(self, hidden):
-        return hidden.topk(self.top_k)
-```
-
-The decorator serves as an explicit contract: "This code is designed to run remotely." This explicitness has several benefits:
-
-1. **Clarity**: Users know which code will be serialized and sent over the network
-2. **Validation**: The decorator checks the code at import time, catching problems early
-3. **Documentation**: The codebase clearly shows what's meant for remote execution
-
-### How It Works Under the Hood
-
-When Python imports a module containing `@remote`, the decorator:
-
-1. **Extracts source code** using `inspect.getsource()`
-2. **Validates the AST** for prohibited patterns (relative imports, `exec`, `eval`)
-3. **Captures external references** (module aliases, constants)
-4. **Stores metadata** on the class/function
-
-### The Metadata Contract
-
-After decoration, the class has these attributes:
-
-```python
-MyAnalyzer._remote_source      # str: the source code
-MyAnalyzer._remote_module_refs # dict: {"np": "numpy", "F": "torch.nn.functional", ...}
-MyAnalyzer._remote_closure     # dict: captured closure variables
-MyAnalyzer._is_remote          # bool: True (marker for detection)
-```
-
-### Why Validate at Import Time?
-
-Early validation is a core design principle. Instead of:
-
-```
-User writes code → Serializes → Sends to server → Server fails → User confused
-```
-
-We want:
-
-```
-User writes code → Import fails with clear error → User fixes immediately
-```
-
-This is why the decorator raises exceptions for things like:
-- Relative imports (`from .utils import helper`)
-- Dynamic code (`exec()`, `eval()`)
-- Closures over non-serializable values
+| `extract_all()` | `serialization_source.py` | Walks frame locals, auto-discovers and extracts objects, tensors, variables |
+| `@remote` decorator (optional) | `remote.py` | Explicitly marks classes/functions for transport; validates at import time |
 
 ---
 
@@ -1204,6 +1139,92 @@ for instance_id, instance_data in obj_data['instances'].items():
 ```
 
 This guarantees `type(a) is type(b)` and `isinstance(b, type(a))`.
+
+---
+
+## The `@remote` Decorator (Optional)
+
+By default, nnsight **auto-discovers** user-defined classes and functions and serializes their source code automatically. The `@remote` decorator provides an **optional explicit annotation** when you want additional control or early validation.
+
+### When Auto-Discovery is Sufficient
+
+For most use cases, you don't need `@remote` at all:
+
+```python
+class MyAnalyzer:
+    """This class will be auto-discovered and transported."""
+    def __init__(self, top_k=10):
+        self.top_k = top_k
+
+    def analyze(self, hidden):
+        return hidden.topk(self.top_k)
+
+analyzer = MyAnalyzer(top_k=10)
+with model.trace("Hello", remote=True):
+    result = analyzer.analyze(model.layers[10].output[0])
+```
+
+The serialization system detects `MyAnalyzer`, extracts its source, and transmits it automatically.
+
+### When to Use `@remote`
+
+The `@remote` decorator is useful when you want:
+
+1. **Import-time validation**: Problems are caught when the module loads, not during trace serialization
+2. **Explicit documentation**: Makes it clear which code is designed for remote execution
+3. **Dependency specification**: Explicitly declare library versions for reproducibility
+
+```python
+from nnsight import remote
+
+@remote
+class MyAnalyzer:
+    """Explicitly marked for remote transport."""
+    def __init__(self, top_k=10):
+        self.top_k = top_k
+
+    def analyze(self, hidden):
+        return hidden.topk(self.top_k)
+```
+
+### How It Works Under the Hood
+
+When Python imports a module containing `@remote`, the decorator:
+
+1. **Extracts source code** using `inspect.getsource()`
+2. **Validates the AST** for prohibited patterns (relative imports, `exec`, `eval`)
+3. **Captures external references** (module aliases, constants)
+4. **Stores metadata** on the class/function
+
+### The Metadata Contract
+
+After decoration, the class has these attributes:
+
+```python
+MyAnalyzer._remote_source      # str: the source code
+MyAnalyzer._remote_module_refs # dict: {"np": "numpy", "F": "torch.nn.functional", ...}
+MyAnalyzer._remote_closure     # dict: captured closure variables
+MyAnalyzer._is_remote          # bool: True (marker for detection)
+```
+
+### Import-Time Validation
+
+Early validation is a key benefit of explicit `@remote`. Instead of:
+
+```
+User writes code → Serializes → Sends to server → Server fails → User confused
+```
+
+With `@remote`:
+
+```
+User writes code → Import fails with clear error → User fixes immediately
+```
+
+The decorator raises exceptions for things like:
+- Relative imports (`from .utils import helper`)
+- Dynamic code (`exec()`, `eval()`)
+- Closures over non-serializable values
 
 ---
 
