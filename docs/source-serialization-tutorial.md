@@ -1129,7 +1129,7 @@ This creates an interesting design tension:
 |----------|------|------|
 | **@remote only** | Explicit, clear contract; validation at import time; user knows what's serialized | Third-party libraries can't be used without modification |
 | **Auto-discovery only** | Works with any library; no annotations needed | Implicit behavior; validation deferred to serialization time; harder to debug |
-| **Hybrid (current)** | Best of both; `@remote` for user code, auto-discovery for `LanguageModel` subclasses | Two mechanisms to understand; special-case for `LanguageModel` |
+| **Hybrid (current)** | `@remote` provides explicit contract for user code; auto-discovery enables existing libraries | Two mechanisms to understand; inconsistent mental model; special-case for `LanguageModel` |
 
 **Current status:** Auto-discovery is limited to `LanguageModel` subclasses as a pragmatic compromise. This lets libraries like nnterp work out-of-the-box while keeping the explicit `@remote` contract for user-defined helpers.
 
@@ -1405,6 +1405,74 @@ fake_locals = {
 result = extract_all(fake_locals, traced_model=mock_model)
 print(result)
 ```
+
+### Local Round-Trip Testing
+
+You can exercise the entire serialization and deserialization pipeline locally without sending anything to a remote server. This is how the test suite works:
+
+```python
+import json
+from nnsight import remote
+from nnsight.intervention.serialization_source import (
+    serialize_instance_state,
+    reconstruct_state,
+    deserialize_source_based,
+)
+
+# 1. Define a @remote class
+@remote
+class MyAnalyzer:
+    def __init__(self, top_k=10):
+        self.top_k = top_k
+
+    def analyze(self, hidden):
+        return hidden.topk(self.top_k)
+
+# 2. Create an instance
+analyzer = MyAnalyzer(top_k=5)
+
+# 3. Serialize the instance state
+state = serialize_instance_state(analyzer)
+print("Serialized state:", json.dumps(state, indent=2))
+
+# 4. Reconstruct the instance
+restored = object.__new__(MyAnalyzer)
+restored.__dict__ = reconstruct_state(state, {}, None, {})
+
+# 5. Verify it works
+print(f"Restored top_k: {restored.top_k}")  # Should print 5
+
+# For full payload round-trip, construct the JSON manually:
+payload = json.dumps({
+    "version": "2.2",
+    "source": {"code": "", "file": "test.py", "line": 1},
+    "variables": {"threshold": 0.5},
+    "remote_objects": {
+        "MyAnalyzer": {
+            "type": "class",
+            "source": {"code": MyAnalyzer._remote_source, "file": "test.py", "line": 1},
+            "module_refs": MyAnalyzer._remote_module_refs,
+            "closure_vars": {},
+            "instances": {},
+        }
+    },
+    "model_refs": [],
+}).encode('utf-8')
+
+# Mock model for deserialization
+class MockModel:
+    pass
+
+# Deserialize - this reconstructs the full namespace
+namespace = deserialize_source_based(payload, MockModel())
+print("Reconstructed namespace keys:", list(namespace.keys()))
+```
+
+This approach lets you:
+- Test serialization logic without network latency
+- Debug payload structure by inspecting the JSON
+- Verify round-trip correctness for new types
+- Run fast unit tests in CI
 
 ---
 
