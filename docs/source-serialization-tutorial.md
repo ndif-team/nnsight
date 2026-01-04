@@ -75,7 +75,7 @@ This makes pickle unsuitable for our use case: we want users to define custom he
 | **Mysterious failures** | Bytecode may serialize successfully but fail at runtime with cryptic errors |
 | **No validation** | Problems only surface when code actually runs on the server |
 
-nnsight's original implementation used cloudpickle, but these limitations created constant friction. Users couldn't use helper libraries unless those libraries were pre-installed on NDIF servers—and even then, version mismatches caused subtle bugs.
+nnsight's 0.5 implementation introduced cloudpickle for remote execution, but these limitations created constant friction. Users couldn't use helper libraries unless those libraries were pre-installed on NDIF servers—and even then, version mismatches caused subtle bugs.
 
 ### The Third-Party Library Problem
 
@@ -309,9 +309,40 @@ The `serialize_value()` function handles recursive cases:
 - **nn.Modules** → serialize class path + state dict
 - **Circular references** → use `memo` dict to detect and emit `__ref__` markers
 
+### Understanding External References
+
+Before diving into auto-discovery, it's important to understand a key concept: **external references** (also called **unbound variables** in programming language theory).
+
+When we serialize a function or class, we need more than just its source code. The code may reference names that aren't defined locally—they come from the surrounding environment:
+
+```python
+import numpy as np
+MAX_VALUE = 5.3
+helper_fn = lambda x: x * 2
+
+@remote
+def analyze(hidden):
+    # 'np' is an external reference (module alias)
+    # 'MAX_VALUE' is an external reference (constant)
+    # 'helper_fn' is an external reference (function)
+    return np.clip(hidden, 0, MAX_VALUE)
+```
+
+In this example, `hidden` is a **locally bound** parameter, but `np`, `MAX_VALUE`, and `helper_fn` are **external references**—values from the environment that must be available for the code to run. Without them, execution would fail with `NameError`.
+
+The serialization system identifies these external references and captures them in the payload:
+- **Module references** like `np → "numpy"` go into the `module_refs` field, telling the server which modules to import
+- **Closure variables** like `MAX_VALUE → 5.3` go into the `closure_vars` field, embedding the actual values
+
+This distinction between code (source) and environment (external references) is what makes source serialization different from regular object serialization. We're not just sending bytes—we're reconstructing the complete execution context.
+
 ### Auto-Discovery: Third-Party Classes
 
-What about classes that aren't decorated with `@remote`? When a `LanguageModel` subclass (like nnterp's `StandardizedTransformer`) is used, the system **auto-discovers** its dependencies:
+Classes decorated with `@remote` have their external references captured at decoration time. But what about third-party classes that aren't decorated?
+
+To test source serialization with existing libraries, we implemented an **auto-discovery pipeline** for classes that extend `LanguageModel` (like nnterp's `StandardizedTransformer`). When such a class is used, the system automatically treats it as remote-eligible and discovers its dependencies at serialization time.
+
+> **Note:** This auto-discovery mechanism is experimental. We're evaluating whether it should be removed (requiring explicit `@remote` annotation), become the default for all dependencies, or coexist with the `@remote` decorator. For now, it only applies to `LanguageModel` subclasses.
 
 ```python
 def auto_discover_class(cls, discovered):
@@ -326,17 +357,17 @@ def auto_discover_class(cls, discovered):
     # 2. Find all external names used in the source
     external_names = find_external_references(tree, cls)
 
-    # 3. Resolve each name to a value
+    # 3. Resolve each name to a value and classify it
     for name in external_names:
         value = resolve_in_globals(name, cls)
         classification = classify_reference_value(name, value)
 
         if classification == ValueClassification.CAPTURE:
-            # JSON-serializable constant → include in payload
-            discovered['module_refs'][name] = value
+            # JSON-serializable constant → include in closure_vars
+            discovered['closure_vars'][name] = value
         elif classification == ValueClassification.SKIP:
-            # Available on server → just import it there
-            pass
+            # Module available on server → record in module_refs
+            discovered['module_refs'][name] = get_module_path(value)
         elif classification == ValueClassification.ERROR:
             # Can't serialize → raise error
             raise SourceSerializationError(f"Cannot serialize {name}")
