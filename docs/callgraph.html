@@ -300,7 +300,6 @@
 
     // Configuration - Python uses different file structure
     const REPO_NAME = 'davidbau/nnsight';
-    const BRANCH = 'source-serialization-design';
 
     // Claude badge for co-authored commits
     const claudeBadge = `<span class="coauthor-icon claude-icon" title="Co-authored with Claude">
@@ -701,7 +700,7 @@
             const hash = snapshot.hash;
             const file = d.file || 'src/nnsight/intervention/serialization_source.py';
             const lineRange = d.line && d.endLine ? `#L${d.line}-L${d.endLine}` : '';
-            const url = `https://github.com/${REPO_NAME}/blob/${BRANCH}/${file}${lineRange}`;
+            const url = `https://github.com/${REPO_NAME}/blob/${hash}/${file}${lineRange}`;
             window.open(url, '_blank');
           }
         });
