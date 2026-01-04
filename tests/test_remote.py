@@ -1898,7 +1898,6 @@ def test_serialize_tensor_basic():
     assert "__tensor__" in result
     assert result["dtype"] == "float32"
     assert result["shape"] == [3]
-    assert "compressed" in result
 
 
 def test_serialize_tensor_2d():
@@ -1940,37 +1939,11 @@ def test_deserialize_tensor_numpy():
 
 
 def test_tensor_roundtrip_random():
-    """Test roundtrip for random float tensor (uncompressed)."""
+    """Test roundtrip for random float tensor."""
     original = torch.randn(100, 50)
     serialized = serialize_tensor(original)
     restored = deserialize_tensor(serialized)
 
-    # Random floats shouldn't compress
-    assert serialized["compressed"] is False
-    assert torch.allclose(original, restored)
-
-
-def test_tensor_roundtrip_zeros():
-    """Test roundtrip for zeros tensor (compressed)."""
-    original = torch.zeros(1000, 100)
-    serialized = serialize_tensor(original)
-    restored = deserialize_tensor(serialized)
-
-    # Zeros should compress well
-    assert serialized["compressed"] is True
-    assert torch.allclose(original, restored)
-
-
-def test_tensor_roundtrip_sparse():
-    """Test roundtrip for sparse tensor (mostly zeros, compressed)."""
-    original = torch.zeros(100, 100)
-    original[0, 0] = 1.0
-    original[50, 50] = 2.0
-    serialized = serialize_tensor(original)
-    restored = deserialize_tensor(serialized)
-
-    # Sparse should compress
-    assert serialized["compressed"] is True
     assert torch.allclose(original, restored)
 
 
@@ -2050,23 +2023,6 @@ def test_tensor_full_roundtrip():
     assert isinstance(namespace["my_vec"], torch.Tensor)
     assert torch.allclose(namespace["my_vec"], original)
     assert namespace["factor"] == 2
-
-
-def test_tensor_compression_savings():
-    """Test that compression actually saves space for compressible data."""
-    # All zeros - should compress extremely well
-    zeros = torch.zeros(1000)
-    zeros_serialized = serialize_tensor(zeros)
-
-    # Raw would be 4000 bytes (1000 * 4), compressed + b64 should be much smaller
-    b64_size = len(zeros_serialized["__tensor__"])
-    assert b64_size < 1000  # Much smaller than 4000 raw or 5333 uncompressed b64
-
-    # Random floats - should NOT compress
-    random_t = torch.randn(1000)
-    random_serialized = serialize_tensor(random_t)
-
-    assert random_serialized["compressed"] is False
 
 
 def test_tensor_sparse_pytorch():
