@@ -672,6 +672,16 @@ class Envoy(Batchable):
             return next(self._module.parameters()).device
         except:
             return None
+        
+    property
+    def devices(self) -> Optional[set[torch.device]]:
+        """
+        Get the devices the module is on. Finds all parameters and return their devices.
+        """
+        try:
+            return {p.device for p in self._module.parameters()}
+        except:
+            return set()
 
     def modules(
         self,
