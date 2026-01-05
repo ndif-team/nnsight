@@ -48,7 +48,14 @@ test = [
     "pytest-cov",
 ]
 
-all = ["nnsight[test]"]
+
+vllm = [
+    "vllm>=0.12",
+    "triton==3.5.0",
+]
+
+
+all = ["nnsight[test,vllm]"]
 
 [project.urls]
 Homepage = "https://github.com/ndif-team/nnsight"
