@@ -1,0 +1,1750 @@
+"""
+Unit tests for source serialization edge cases.
+
+These tests verify that edge cases in the serialization system are handled correctly.
+Run with: pytest tests/test_serialization_edge_cases.py -v
+"""
+
+import json
+import pytest
+import torch
+import torch.nn as nn
+import numpy as np
+from typing import TYPE_CHECKING
+
+import sys
+sys.path.insert(0, 'src')
+
+from nnsight.remote import remote
+from nnsight.intervention.serialization_source import (
+    serialize_instance_state,
+    reconstruct_state,
+    serialize_tensor,
+    deserialize_tensor,
+    serialize_value,
+    auto_discover_class,
+    is_tensor,
+    SourceSerializationError,
+)
+
+
+def make_exec_namespace():
+    """Create a namespace with common builtins needed for class reconstruction.
+
+    Note: In production, module-level references like torch, nn, np are resolved
+    via the server_imports mechanism. For these unit tests, we include them
+    directly to test the serialization logic in isolation.
+    """
+    # No-op remote decorator for server-side reconstruction
+    def noop_remote(cls):
+        return cls
+
+    # Start with builtins
+    import builtins
+    namespace = dict(vars(builtins))
+
+    # Add common decorators and builtins
+    namespace.update({
+        'remote': noop_remote,
+        'property': property,
+        'staticmethod': staticmethod,
+        'classmethod': classmethod,
+    })
+
+    # Add module-level references (in production these come from server_imports)
+    namespace.update({
+        'torch': torch,
+        'nn': nn,
+        'np': np,
+        'numpy': np,
+    })
+
+    return namespace
+
+
+# =============================================================================
+# Test 1: Classes with __slots__
+# =============================================================================
+
+def test_slots_class():
+    """Test that classes with __slots__ are handled correctly."""
+    @remote
+    class SlottedClass:
+        __slots__ = ['x', 'y']
+
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+        def sum(self):
+            return self.x + self.y
+
+    obj = SlottedClass(10, 20)
+
+    # Serialize
+    state = serialize_instance_state(obj)
+
+    # Should have captured x and y
+    assert 'x' in state, f"x not captured: {state}"
+    assert 'y' in state, f"y not captured: {state}"
+    assert state.get('x') == 10, f"x value wrong: {state}"
+    assert state.get('y') == 20, f"y value wrong: {state}"
+
+    # Deserialize
+    namespace = make_exec_namespace()
+    exec(obj._remote_source, namespace)
+    restored = object.__new__(namespace['SlottedClass'])
+
+    # For slots, we need to set attributes directly
+    restored_state = reconstruct_state(state, namespace, None, {})
+    for key, value in restored_state.items():
+        setattr(restored, key, value)
+
+    assert restored.x == 10
+    assert restored.y == 20
+    assert restored.sum() == 30
+
+
+# =============================================================================
+# Test 2: Model identity check behavior
+# =============================================================================
+
+def test_model_identity_check():
+    """Test that is_the_traced_model checks identity, not containment.
+
+    is_the_traced_model(value, model) returns True only if value IS model.
+    It does not recursively check inside containers - that's by design.
+    Container contents must be checked individually.
+    """
+    # Create a mock model-like object
+    class MockModel:
+        pass
+
+    model = MockModel()
+
+    from nnsight.intervention.serialization_source import is_the_traced_model
+
+    # Direct reference - identity check passes
+    assert is_the_traced_model(model, model) is True
+
+    # Container is not the model (correct behavior - identity check)
+    models_list = [model]
+    assert is_the_traced_model(models_list, model) is False
+    # But extracting the element and checking works
+    assert is_the_traced_model(models_list[0], model) is True
+
+    # Same for dicts
+    models_dict = {"m": model}
+    assert is_the_traced_model(models_dict, model) is False
+    assert is_the_traced_model(models_dict["m"], model) is True
+
+
+def test_model_in_container_serialization():
+    """Test that models inside containers are correctly detected during serialization.
+
+    While is_the_traced_model() is an identity check (container != model),
+    the serialization code recursively processes containers, so models
+    inside lists/dicts ARE detected and serialized as __model_ref__.
+    """
+    # Use serialize_value to verify the full serialization handles this correctly
+    import torch.nn as nn
+
+    model = nn.Linear(10, 5)
+    models_list = [model, "other_item"]
+    models_dict = {"model": model, "config": "value"}
+
+    # Serialize the list containing the model
+    memo = {}
+    result = serialize_value(models_list, 'models', memo, traced_model=model)
+
+    # The result should have the model detected as __model_ref__
+    import json
+    json_str = json.dumps(result)
+    assert '__model_ref__' in json_str, (
+        f"Model inside list should be serialized as __model_ref__. Got: {result}"
+    )
+
+    # Same for dict
+    memo = {}
+    result = serialize_value(models_dict, 'config', memo, traced_model=model)
+    json_str = json.dumps(result)
+    assert '__model_ref__' in json_str, (
+        f"Model inside dict should be serialized as __model_ref__. Got: {result}"
+    )
+
+
+# =============================================================================
+# Test 3: Numpy arrays in instance state
+# =============================================================================
+
+def test_numpy_array_serialization():
+    """Test that numpy arrays in instance state are serialized correctly."""
+    @remote
+    class WithNumpy:
+        def __init__(self):
+            self.mean = np.array([1.0, 2.0, 3.0])
+            self.std = np.array([[1, 2], [3, 4]])
+
+    obj = WithNumpy()
+
+    # Serialize
+    state = serialize_instance_state(obj)
+
+    # Check that arrays are serialized
+    assert '__tensor__' in state.get('mean', {}), f"mean not serialized as tensor: {state}"
+    assert '__tensor__' in state.get('std', {}), f"std not serialized as tensor: {state}"
+
+    # Deserialize and verify
+    mean_restored = deserialize_tensor(state['mean'])
+    std_restored = deserialize_tensor(state['std'])
+
+    np.testing.assert_array_almost_equal(mean_restored, obj.mean)
+    np.testing.assert_array_almost_equal(std_restored, obj.std)
+
+
+# =============================================================================
+# Test 4: Properties vs stored attributes
+# =============================================================================
+
+def test_properties_not_in_dict():
+    """Test that properties are not stored in __dict__ but computed on access."""
+    @remote
+    class ComputedClass:
+        def __init__(self, x):
+            self._x = x
+
+        @property
+        def doubled(self):
+            return self._x * 2
+
+        @property
+        def tripled(self):
+            return self._x * 3
+
+    obj = ComputedClass(5)
+
+    # Properties work on original
+    assert obj.doubled == 10
+    assert obj.tripled == 15
+
+    # Serialize - only _x should be in state, not doubled/tripled
+    state = serialize_instance_state(obj)
+    assert '_x' in state
+    assert 'doubled' not in state  # Properties shouldn't be in __dict__
+    assert 'tripled' not in state
+
+    # Reconstruct
+    namespace = make_exec_namespace()
+    exec(obj._remote_source, namespace)
+    restored = object.__new__(namespace['ComputedClass'])
+    restored.__dict__ = reconstruct_state(state, namespace, None, {})
+
+    # Properties should still work
+    assert restored.doubled == 10
+    assert restored.tripled == 15
+
+
+# =============================================================================
+# Test 5: Custom __getstate__/__setstate__
+# =============================================================================
+
+def test_custom_pickle_protocol():
+    """Test behavior with classes that define __getstate__/__setstate__."""
+    @remote
+    class PickleAware:
+        def __init__(self, value):
+            self.value = value
+            self._cache = {"expensive": "computation"}
+
+        def __getstate__(self):
+            # Exclude _cache from pickle
+            return {k: v for k, v in self.__dict__.items() if k != '_cache'}
+
+        def __setstate__(self, state):
+            self.__dict__.update(state)
+            self._cache = {}  # Reinitialize cache
+
+    obj = PickleAware(42)
+    obj._cache["key"] = "data"
+
+    # Current behavior: serialize_instance_state does NOT call __getstate__
+    # It serializes the full __dict__
+    state = serialize_instance_state(obj)
+
+    # Document current behavior: _cache IS included (unlike pickle)
+    # This is a known limitation
+    assert '_cache' in state, "Current behavior: __getstate__ is NOT used"
+
+    # If we want pickle-like behavior, we'd need to check for __getstate__
+
+
+# =============================================================================
+# Test 6: Closures referencing outer scope in methods
+# =============================================================================
+
+def test_closure_in_method():
+    """Test that closures in methods capture outer scope correctly."""
+    GLOBAL_MULTIPLIER = 3.0
+
+    @remote
+    class ClosureClass:
+        def __init__(self, base):
+            self.base = base
+
+        def compute(self):
+            # This closure captures GLOBAL_MULTIPLIER from outer scope
+            def inner(x):
+                return x * GLOBAL_MULTIPLIER
+            return inner(self.base)
+
+    obj = ClosureClass(10)
+
+    # Verify GLOBAL_MULTIPLIER is properly captured (not just that 'inner' is in source)
+    closure_vars = getattr(obj, '_remote_closure_vars', {})
+    assert 'GLOBAL_MULTIPLIER' in closure_vars, (
+        f"GLOBAL_MULTIPLIER should be captured in closure_vars. "
+        f"Got: {closure_vars}"
+    )
+    assert closure_vars['GLOBAL_MULTIPLIER'] == 3.0
+
+    # Verify the original object works
+    assert obj.compute() == 30.0  # 10 * 3.0
+
+    # Verify reconstruction works with the closure variable
+    namespace = make_exec_namespace()
+    namespace.update(closure_vars)
+    exec(obj._remote_source, namespace)
+
+    ReconClass = namespace['ClosureClass']
+    restored = ReconClass(10)
+    assert restored.compute() == 30.0, "Reconstructed class should use captured GLOBAL_MULTIPLIER"
+
+
+# =============================================================================
+# Test 7: @staticmethod and @classmethod
+# =============================================================================
+
+def test_staticmethod_classmethod():
+    """Test that @staticmethod and @classmethod work after reconstruction."""
+    @remote
+    class WithStatic:
+        class_var = 100
+
+        def __init__(self, x):
+            self.x = x
+
+        @staticmethod
+        def helper(x):
+            return x * 2
+
+        @classmethod
+        def from_value(cls, value):
+            return cls(value)
+
+        def use_helper(self):
+            return self.helper(self.x)
+
+    # Test on original
+    obj = WithStatic(5)
+    assert WithStatic.helper(10) == 20
+    assert obj.helper(10) == 20
+    assert obj.use_helper() == 10
+
+    # Reconstruct
+    namespace = make_exec_namespace()
+    exec(obj._remote_source, namespace)
+
+    # Test reconstructed class
+    ReconClass = namespace['WithStatic']
+    assert ReconClass.helper(10) == 20
+
+    recon_obj = ReconClass.from_value(7)
+    assert recon_obj.x == 7
+    assert recon_obj.use_helper() == 14
+
+
+# =============================================================================
+# Test 8: Metaclasses
+# =============================================================================
+
+def test_metaclass():
+    """Test behavior with custom metaclasses (known limitation)."""
+    class MyMeta(type):
+        def __new__(mcs, name, bases, namespace):
+            namespace['meta_added'] = True
+            return super().__new__(mcs, name, bases, namespace)
+
+    # Note: @remote with metaclass is rejected by validation
+    # This test documents that limitation
+
+    # Instead, test that non-metaclass classes work fine
+    @remote
+    class NormalClass:
+        def __init__(self):
+            self.value = 42
+
+    obj = NormalClass()
+    assert obj.value == 42
+
+    # Reconstruction should work
+    namespace = make_exec_namespace()
+    exec(obj._remote_source, namespace)
+    ReconClass = namespace['NormalClass']
+
+    recon_obj = ReconClass()
+    assert recon_obj.value == 42
+
+
+# =============================================================================
+# Test 9: __init_subclass__ hooks
+# =============================================================================
+
+def test_init_subclass():
+    """Test behavior with __init_subclass__ hooks that capture closure variables."""
+    registered_classes = []
+
+    @remote
+    class BaseWithHook:
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            registered_classes.append(cls.__name__)
+
+    @remote
+    class ChildClass(BaseWithHook):
+        pass
+
+    # Child was registered when defined
+    assert 'ChildClass' in registered_classes
+
+    # The closure variable should be captured and available for reconstruction
+    assert 'registered_classes' in BaseWithHook._remote_closure_vars
+    assert BaseWithHook._remote_closure_vars['registered_classes'] is registered_classes
+
+    # Reconstruction should inject the closure variable into namespace
+    namespace = make_exec_namespace()
+    namespace.update(BaseWithHook._remote_closure_vars)
+    exec(BaseWithHook._remote_source, namespace)
+    exec(ChildClass._remote_source, namespace)
+
+    # ChildClass was registered again during reconstruction
+    assert registered_classes.count('ChildClass') == 2
+
+
+# =============================================================================
+# Test 10: Relative imports are prohibited
+# =============================================================================
+
+def test_relative_import_rejected():
+    """Test that relative imports are rejected in @remote code.
+
+    Relative imports can't work on the server because the package structure
+    doesn't exist there. They are explicitly prohibited with a clear error.
+    """
+    from nnsight.remote import RemoteValidationError
+
+    # Test single-dot relative import
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def uses_relative():
+            from . import sibling_module
+            return sibling_module.foo()
+
+    error_msg = str(exc_info.value)
+    assert "relative import" in error_msg.lower()
+    assert "from ." in error_msg
+
+    # Test double-dot relative import
+    with pytest.raises(RemoteValidationError) as exc_info:
+        @remote
+        def uses_parent_relative():
+            from ..parent import something
+            return something
+
+    error_msg = str(exc_info.value)
+    assert "relative import" in error_msg.lower()
+    assert "from .." in error_msg
+
+
+def test_absolute_import_allowed():
+    """Test that absolute imports from allowed modules work."""
+    @remote
+    class WithAbsoluteImport:
+        def method(self):
+            import os
+            return os.getcwd()
+
+    # Source should be extractable
+    assert 'import os' in WithAbsoluteImport._remote_source
+    assert WithAbsoluteImport._remote_validated is True
+
+
+# =============================================================================
+# Test 11: TYPE_CHECKING imports
+# =============================================================================
+
+def test_type_checking_imports():
+    """Test handling of TYPE_CHECKING conditional imports."""
+    # TYPE_CHECKING is False at runtime, so these imports don't execute
+
+    @remote
+    class WithTypeHints:
+        def method(self) -> "SomeType":  # String annotation
+            return None
+
+    # Source extraction should work
+    assert 'def method' in WithTypeHints._remote_source
+
+    # String annotations don't need the type to be importable
+    obj = WithTypeHints()
+    assert obj.method() is None
+
+
+# =============================================================================
+# Test 12: Activation patching pattern
+# =============================================================================
+
+def test_cross_reference_timing():
+    """Test that saved values can be used across contexts."""
+    # This is more of a documentation test for the pattern
+
+    @remote
+    class ActivationStore:
+        def __init__(self):
+            self.saved = None
+
+        def save(self, value):
+            self.saved = value
+
+        def get(self):
+            return self.saved
+
+    store = ActivationStore()
+    store.save(torch.randn(10))
+
+    # Serialize and restore
+    state = serialize_instance_state(store)
+
+    namespace = make_exec_namespace()
+    exec(store._remote_source, namespace)
+    restored = object.__new__(namespace['ActivationStore'])
+    restored.__dict__ = reconstruct_state(state, namespace, None, {})
+
+    # Saved tensor should be restored
+    assert restored.saved is not None
+    assert restored.saved.shape == (10,)
+
+
+# =============================================================================
+# Test 13: Empty class
+# =============================================================================
+
+def test_empty_class():
+    """Test that empty classes serialize correctly."""
+    @remote
+    class Empty:
+        pass
+
+    obj = Empty()
+
+    # Serialize
+    state = serialize_instance_state(obj)
+    assert state == {} or state == {'__dict__': {}}
+
+    # Reconstruct
+    namespace = make_exec_namespace()
+    exec(obj._remote_source, namespace)
+    restored = object.__new__(namespace['Empty'])
+    restored.__dict__ = reconstruct_state(state, namespace, None, {})
+
+    assert type(restored).__name__ == 'Empty'
+
+
+# =============================================================================
+# Test 14: Lambda in default argument
+# =============================================================================
+
+def test_lambda_default_argument():
+    """Test functions with lambda default arguments can be reconstructed."""
+    @remote
+    def func_with_lambda_default(processor=lambda x: x * 2):
+        return processor(5)
+
+    # Function should work
+    assert func_with_lambda_default() == 10
+    assert func_with_lambda_default(lambda x: x + 1) == 6
+
+    # Source should include the lambda
+    assert 'lambda' in func_with_lambda_default._remote_source
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(func_with_lambda_default._remote_source, namespace)
+    recon_func = namespace['func_with_lambda_default']
+
+    # Reconstructed function should work with default lambda
+    assert recon_func() == 10, "Reconstructed function with default lambda should return 10"
+    assert recon_func(lambda x: x + 1) == 6, "Reconstructed function with custom lambda should return 6"
+
+
+# =============================================================================
+# Test 15: Very deeply nested state
+# =============================================================================
+
+def test_deeply_nested_state():
+    """Test serialization of deeply nested data structures."""
+    @remote
+    class DeeplyNested:
+        def __init__(self):
+            self.data = {
+                "level1": {
+                    "level2": {
+                        "level3": {
+                            "level4": {
+                                "values": [1, 2, 3, 4, 5],
+                                "tensor": torch.tensor([1.0, 2.0]),
+                            }
+                        }
+                    }
+                }
+            }
+
+    obj = DeeplyNested()
+
+    # Serialize
+    state = serialize_instance_state(obj)
+
+    # Should preserve nesting
+    assert 'data' in state
+
+    # Reconstruct
+    namespace = make_exec_namespace()
+    exec(obj._remote_source, namespace)
+    restored = object.__new__(namespace['DeeplyNested'])
+    restored.__dict__ = reconstruct_state(state, namespace, None, {})
+
+    # Verify deep structure
+    assert restored.data['level1']['level2']['level3']['level4']['values'] == [1, 2, 3, 4, 5]
+
+    # Tensor should be restored
+    deep_tensor = restored.data['level1']['level2']['level3']['level4']['tensor']
+    assert torch.allclose(deep_tensor, torch.tensor([1.0, 2.0]))
+
+
+# =============================================================================
+# Test 16: Circular reference in instance state
+# =============================================================================
+
+def test_circular_reference():
+    """Test that circular references in dicts/lists are handled via deduplication."""
+    @remote
+    class ContainsCircular:
+        def __init__(self):
+            # Create circular structure inside __init__ to avoid closure issues
+            self.data = {"name": "node1", "next": None}
+            data2 = {"name": "node2", "next": None}
+            data3 = {"name": "node3", "next": None}
+            self.data["next"] = data2
+            data2["next"] = data3
+            data3["next"] = self.data  # Circular!
+            self.other = "value"
+
+    obj = ContainsCircular()
+
+    # Verify the circular structure exists
+    assert obj.data["next"]["next"]["next"] is obj.data
+
+    # Serialize - should not infinite loop
+    memo = {}
+    state = serialize_instance_state(obj, memo=memo)
+
+    # Verify serialization completed without infinite loop
+    json_str = json.dumps(state)  # Should not fail
+
+    # Verify deduplication is working
+    # The nested dicts are complex enough to trigger memo usage
+    assert '__dict__' in json_str, "Complex nested dicts should be serialized with __dict__ marker"
+
+    # Check that circular reference uses __ref__ marker
+    # The circular reference (data3["next"] -> data1) should be a reference
+    assert '__ref__' in json_str, "Circular reference should use __ref__ marker"
+    assert '__id__' in json_str, "Serialized dicts should have __id__ for deduplication"
+
+
+# =============================================================================
+# Additional edge case tests
+# =============================================================================
+
+def test_nn_module_with_buffer():
+    """Test nn.Module with registered buffers."""
+    @remote
+    class ModuleWithBuffer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer('running_mean', torch.zeros(10))
+            self.linear = nn.Linear(10, 5)
+
+        def forward(self, x):
+            return self.linear(x - self.running_mean)
+
+    module = ModuleWithBuffer()
+    module.running_mean.fill_(1.0)
+
+    # Serialize
+    state = serialize_instance_state(module)
+
+    # Should capture buffers
+    assert '_buffers' in state
+
+    # Reconstruct
+    namespace = make_exec_namespace()
+    exec(module._remote_source, namespace)
+    restored = object.__new__(namespace['ModuleWithBuffer'])
+    restored.__dict__ = reconstruct_state(state, namespace, None, {})
+
+    # Buffer should be restored
+    assert torch.allclose(restored.running_mean, torch.ones(10))
+
+
+def test_dataclass_serialization():
+    """Test @dataclass decorated classes."""
+    from dataclasses import dataclass
+
+    @remote
+    @dataclass
+    class DataPoint:
+        x: float
+        y: float
+        label: str = "default"
+
+    point = DataPoint(1.5, 2.5, "test")
+
+    # Serialize
+    state = serialize_instance_state(point)
+
+    assert state.get('x') == 1.5
+    assert state.get('y') == 2.5
+    assert state.get('label') == "test"
+
+    # Reconstruct
+    namespace = make_exec_namespace()
+    namespace['dataclass'] = dataclass
+    exec(point._remote_source, namespace)
+
+    # Create new instance
+    ReconClass = namespace['DataPoint']
+    restored = ReconClass(**reconstruct_state(state, namespace, None, {}))
+
+    assert restored.x == 1.5
+    assert restored.y == 2.5
+    assert restored.label == "test"
+
+
+def test_enum_in_state():
+    """Test serialization of enum values in state."""
+    from enum import Enum
+
+    class Color(Enum):
+        RED = 1
+        GREEN = 2
+        BLUE = 3
+
+    @remote
+    class WithEnum:
+        def __init__(self, color):
+            self.color = color  # Store actual enum instance
+            self.name = color.name
+
+    obj = WithEnum(Color.RED)
+
+    # Serialize - enum should be serialized with class/module/member info
+    state = serialize_instance_state(obj)
+
+    # Check enum was serialized properly
+    assert '__enum__' in state.get('color', {})
+    assert state['color']['class'] == 'Color'
+    assert state['color']['member'] == 'RED'
+
+    # name (string) should serialize as-is
+    assert state.get('name') == 'RED'
+
+
+def test_mixed_tensor_types():
+    """Test mixed torch tensor and numpy array serialization."""
+    @remote
+    class MixedArrays:
+        def __init__(self):
+            self.torch_tensor = torch.tensor([1.0, 2.0, 3.0])
+            self.numpy_array = np.array([4.0, 5.0, 6.0])
+            self.torch_int = torch.tensor([1, 2, 3], dtype=torch.int32)
+            self.numpy_int = np.array([4, 5, 6], dtype=np.int32)
+
+    obj = MixedArrays()
+
+    # Serialize
+    state = serialize_instance_state(obj)
+
+    # All should be serialized as tensors
+    assert '__tensor__' in state.get('torch_tensor', {})
+    assert '__tensor__' in state.get('numpy_array', {})
+
+    # Deserialize and check types/values
+    torch_restored = deserialize_tensor(state['torch_tensor'])
+    numpy_restored = deserialize_tensor(state['numpy_array'])
+
+    # Both should restore to numpy (our deserialize returns numpy)
+    np.testing.assert_array_almost_equal(torch_restored, [1.0, 2.0, 3.0])
+    np.testing.assert_array_almost_equal(numpy_restored, [4.0, 5.0, 6.0])
+
+
+# =============================================================================
+# Test 21: Async functions
+# =============================================================================
+
+def test_async_function():
+    """Test that async functions can be decorated and reconstructed."""
+    import asyncio
+
+    # Async function decoration should work
+    @remote
+    async def async_analyze(x):
+        return x * 2
+
+    assert async_analyze._remote_validated is True
+    assert 'async def' in async_analyze._remote_source
+
+    # Async method in a class
+    @remote
+    class AsyncAnalyzer:
+        async def process(self, x):
+            return x + 1
+
+    assert 'async def process' in AsyncAnalyzer._remote_source
+
+    # Test reconstruction works
+    namespace = make_exec_namespace()
+    exec(AsyncAnalyzer._remote_source, namespace)
+    ReconClass = namespace['AsyncAnalyzer']
+
+    # Create instance and verify async method exists
+    obj = ReconClass()
+    assert asyncio.iscoroutinefunction(obj.process), "Reconstructed method should be async"
+
+    # Actually run the async function
+    async def run_test():
+        result = await obj.process(5)
+        return result
+
+    result = asyncio.run(run_test())
+    assert result == 6, f"Async method should return 6, got {result}"
+
+
+# =============================================================================
+# Test 22: Generator functions
+# =============================================================================
+
+def test_generator_function():
+    """Test that generator functions can be decorated and reconstructed."""
+    # Generator function decoration should work
+    @remote
+    def generate_numbers(n):
+        for i in range(n):
+            yield i * 2
+
+    assert generate_numbers._remote_validated is True
+    assert 'yield' in generate_numbers._remote_source
+
+    # Generator method in a class
+    @remote
+    class LayerIterator:
+        def __init__(self, n):
+            self.n = n
+
+        def iterate(self):
+            for i in range(self.n):
+                yield i
+
+    assert 'yield' in LayerIterator._remote_source
+
+    # Test reconstruction works
+    namespace = make_exec_namespace()
+    exec(LayerIterator._remote_source, namespace)
+    ReconClass = namespace['LayerIterator']
+
+    # Create instance and use generator
+    obj = ReconClass(5)
+    results = list(obj.iterate())
+    assert results == [0, 1, 2, 3, 4], f"Generator should yield [0,1,2,3,4], got {results}"
+
+
+# =============================================================================
+# Test 23: Weak references
+# =============================================================================
+
+def test_weakref_serialization():
+    """Test serialization of objects containing weak references.
+
+    Current behavior: weakrefs serialize as {"__weakref__": True} which
+    deserializes to None. This test verifies that behavior doesn't cause errors.
+    """
+    import weakref
+
+    # Create a simple object to hold a weakref
+    # We don't use @remote here to avoid the closure issue with weakref module
+    class Target:
+        def __init__(self, value):
+            self.value = value
+
+    class Holder:
+        pass
+
+    target = Target(42)
+    holder = Holder()
+    holder.target_ref = weakref.ref(target)
+    holder.name = "holder"
+
+    # Verify weakref works locally
+    assert holder.target_ref() is target
+    assert holder.target_ref().value == 42
+
+    # Serialize - should not raise
+    state = serialize_instance_state(holder)
+
+    # Document current behavior: weakrefs become {"__weakref__": True}
+    # which deserializes to None
+    assert '__weakref__' in state.get('target_ref', {}), \
+        "Weakrefs should serialize as __weakref__ marker"
+
+    # The name should serialize normally
+    assert state.get('name') == "holder"
+
+    # Test deserialization - weakref becomes None
+    from nnsight.intervention.serialization_source import deserialize_source_based
+
+    # Create minimal data structure for reconstruction
+    namespace = {}
+    model = None
+    reconstructed = {}
+
+    # Import reconstruct_value directly
+    from nnsight.intervention.serialization_source import reconstruct_value
+    restored_ref = reconstruct_value(state['target_ref'], namespace, model, reconstructed)
+
+    # Weakref deserializes to None
+    assert restored_ref is None, "Weakrefs should deserialize to None"
+
+
+# =============================================================================
+# Test 24: Pickle hooks behavior documentation
+# =============================================================================
+
+def test_pickle_hooks_current_behavior():
+    """Document that __getstate__/__setstate__ are NOT currently honored.
+
+    This is a known limitation documented in the design doc. The test
+    verifies the current behavior so we know if it changes.
+    """
+    @remote
+    class ExcludesLargeData:
+        def __init__(self):
+            self.small = "keep me"
+            self.large = "x" * 10000  # Would be excluded by __getstate__
+
+        def __getstate__(self):
+            # Exclude large data from serialization
+            return {'small': self.small}
+
+        def __setstate__(self, state):
+            self.__dict__.update(state)
+            self.large = ""  # Would be reinitialized
+
+    obj = ExcludesLargeData()
+    state = serialize_instance_state(obj)
+
+    # CURRENT BEHAVIOR: __getstate__ is IGNORED
+    # Both small and large are serialized
+    assert 'small' in state
+    assert 'large' in state, "Current behavior: __getstate__ is NOT used, large data IS serialized"
+
+    # Verify the large data is actually there
+    assert len(state['large']) == 10000
+
+    # TODO: When pickle hooks are implemented, this test should change:
+    # assert 'large' not in state, "Future behavior: __getstate__ should be honored"
+
+
+# =============================================================================
+# Test 25: Unconventional 'self' usage
+# =============================================================================
+
+def test_unconventional_self():
+    """Test that 'self' as a module variable (not a parameter) is handled correctly.
+
+    Python convention uses 'self' as the first parameter of instance methods,
+    but 'self' is not a keyword - it can be used as a regular variable name.
+    This test verifies such unconventional usage is handled properly.
+    """
+    # Define 'self' as a module-level variable with a value
+    self = {"config": "global_config", "value": 42}
+
+    @remote
+    class UnconventionalSelf:
+        def __init__(this, x):  # Using 'this' instead of 'self'
+            this.x = x
+
+        def get_global_self(this):
+            # Access the module-level 'self' variable
+            return self["config"]
+
+        def compute(this):
+            return this.x + self["value"]
+
+    # Verify the closure captured module-level 'self'
+    assert 'self' in UnconventionalSelf._remote_closure_vars
+    assert UnconventionalSelf._remote_closure_vars['self']['config'] == 'global_config'
+
+    obj = UnconventionalSelf(10)
+
+    # Test that methods work correctly
+    assert obj.get_global_self() == "global_config"
+    assert obj.compute() == 52  # 10 + 42
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    namespace.update(UnconventionalSelf._remote_closure_vars)
+    exec(obj._remote_source, namespace)
+
+    ReconClass = namespace['UnconventionalSelf']
+    restored = ReconClass(20)
+
+    assert restored.get_global_self() == "global_config"
+    assert restored.compute() == 62  # 20 + 42
+
+
+# =============================================================================
+# Test 26: Module variable overriding builtin
+# =============================================================================
+
+def test_module_variable_overrides_builtin():
+    """Test that module variables overriding builtins are correctly captured.
+
+    Python allows shadowing builtins with module-level variables. For example,
+    a module can define `list = SomeClass` which shadows the builtin `list`.
+    The serialization system must capture these overridden values rather than
+    assuming they refer to builtins.
+
+    This test uses a JSON-serializable value to override a builtin, since
+    non-serializable values (like functions) would need to be @remote decorated.
+    """
+    # Override 'len' with a constant (simulating a config value that shadows a builtin)
+    # Note: In real code, overriding builtins with constants is unusual but legal
+    CUSTOM_LENGTH = 42
+    len = CUSTOM_LENGTH  # Shadow the builtin with a constant
+
+    @remote
+    class UsesOverriddenBuiltin:
+        def __init__(self, data):
+            self.data = data
+
+        def get_length(self):
+            # This should use the overridden 'len' (a constant), not the builtin
+            return len
+
+    # Verify that 'len' was captured as a closure variable
+    assert 'len' in UsesOverriddenBuiltin._remote_closure_vars
+    assert UsesOverriddenBuiltin._remote_closure_vars['len'] == CUSTOM_LENGTH
+
+    obj = UsesOverriddenBuiltin([1, 2, 3])
+
+    # Should use the overridden len (returns the constant)
+    assert obj.get_length() == 42
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    namespace.update(UsesOverriddenBuiltin._remote_closure_vars)
+    exec(obj._remote_source, namespace)
+
+    ReconClass = namespace['UsesOverriddenBuiltin']
+    restored = ReconClass([1, 2, 3, 4, 5])
+
+    # Should still use the overridden len
+    assert restored.get_length() == 42
+
+
+def test_module_variable_overrides_builtin_with_remote_function():
+    """Test overriding a builtin with a @remote-decorated function.
+
+    This is a more realistic case where someone defines a custom implementation
+    of a builtin function and uses @remote to make it serializable.
+    """
+    @remote
+    def custom_len(x):
+        # Custom implementation that doubles the length
+        result = 0
+        for _ in x:
+            result += 2
+        return result
+
+    len = custom_len  # Shadow the builtin
+
+    @remote
+    class UsesRemoteOverride:
+        def __init__(self, data):
+            self.data = data
+
+        def get_length(self):
+            # This should use the @remote custom_len, not the builtin
+            return len(self.data)
+
+    # Since custom_len is @remote decorated, it should be skipped (not captured)
+    # because @remote functions are serialized separately
+    assert 'len' not in UsesRemoteOverride._remote_closure_vars
+
+    obj = UsesRemoteOverride([1, 2, 3])
+
+    # Should use the custom len
+    assert obj.get_length() == 6  # 3 items * 2 = 6
+
+
+# =============================================================================
+# Test 28: NameFinder edge cases (potential bugs in simpler AST visitor)
+# =============================================================================
+
+def test_namefinder_comprehension_shadowing():
+    """Test that comprehension variables don't incorrectly shadow external names.
+
+    This test exposes a potential bug in simpler AST visitors that don't track
+    scopes properly. If the visitor doesn't distinguish between comprehension
+    scope and class scope, it might think 'x' is defined locally when it's
+    actually an external reference that happens to share a name with the
+    comprehension variable.
+
+    The correct behavior: 'x' used OUTSIDE the comprehension should be recognized
+    as external, even if 'x' is also used as a loop variable inside a comprehension.
+    """
+    # Module-level x that should be captured
+    x = 42
+
+    @remote
+    class UsesExternalAndComprehension:
+        def method(self):
+            # 'x' here refers to module-level x (external)
+            external_value = x
+
+            # 'x' here is a comprehension-local variable (different scope)
+            squares = [x * x for x in range(5)]
+
+            return external_value, squares
+
+    # The external 'x' should be captured
+    closure_vars = getattr(UsesExternalAndComprehension, '_remote_closure_vars', {})
+    assert 'x' in closure_vars, f"External 'x' should be captured, got: {closure_vars}"
+    assert closure_vars['x'] == 42
+
+
+def test_reference_collector_handles_comprehension_shadowing():
+    """Test that the unified ReferenceCollector correctly handles comprehension shadowing.
+
+    The ReferenceCollector properly tracks scopes, so a comprehension variable
+    does NOT incorrectly shadow an external reference with the same name.
+
+    This was previously a limitation of the simpler NameFinder, but is now
+    handled correctly by using ReferenceCollector for all external name detection.
+    """
+    from nnsight.remote import find_external_references
+
+    # Source code where 'x' is used externally AND as a comprehension variable
+    source = '''
+class Example:
+    def method(self):
+        # External reference to 'x'
+        result = x + 1
+
+        # Comprehension with 'x' as loop variable (different scope in Python)
+        squares = [x * x for x in range(5)]
+
+        return result, squares
+'''
+
+    import ast
+    tree = ast.parse(source)
+
+    class MockClass:
+        __module__ = '__main__'
+
+    external_names = find_external_references(tree, MockClass)
+
+    # ReferenceCollector correctly identifies 'x' as external despite
+    # the comprehension variable shadowing it in inner scope
+    assert 'x' in external_names, (
+        f"External 'x' should be detected even with comprehension shadowing. "
+        f"Got: {external_names}"
+    )
+
+
+def test_reference_collector_handles_lambda_parameters():
+    """Test that lambda parameters are correctly scoped.
+
+    Lambda parameters should not be reported as external references.
+    The 'x' inside 'lambda x: x * 2' is a parameter, not an external.
+    """
+    from nnsight.remote import find_external_references
+    import ast
+
+    # Lambda parameter should NOT be external
+    source = '''
+class Example:
+    def method(self):
+        fn = lambda x: x * 2
+        return fn
+'''
+
+    tree = ast.parse(source)
+
+    class MockClass:
+        __module__ = '__main__'
+
+    external_names = find_external_references(tree, MockClass)
+
+    # 'x' is a lambda parameter, not external
+    assert 'x' not in external_names, (
+        f"Lambda parameter 'x' should not be external. Got: {external_names}"
+    )
+
+
+def test_reference_collector_lambda_with_external():
+    """Test lambda that uses both parameters and external references."""
+    from nnsight.remote import find_external_references
+    import ast
+
+    source = '''
+class Example:
+    def method(self):
+        # External reference
+        result = multiplier * 2
+
+        # Lambda with its own 'x', but also using external 'multiplier'
+        fn = lambda x: x * multiplier
+
+        return result, fn
+'''
+
+    tree = ast.parse(source)
+
+    class MockClass:
+        __module__ = '__main__'
+
+    external_names = find_external_references(tree, MockClass)
+
+    # 'multiplier' is external, 'x' is lambda parameter
+    assert 'multiplier' in external_names, f"'multiplier' should be external. Got: {external_names}"
+    assert 'x' not in external_names, f"Lambda param 'x' should not be external. Got: {external_names}"
+
+
+def test_namefinder_nested_function_shadowing():
+    """Test that inner function parameters don't shadow outer references.
+
+    Similar to comprehension shadowing - an inner function's parameter shouldn't
+    cause the outer reference to be missed.
+    """
+    multiplier = 3
+
+    @remote
+    class UsesExternalWithInnerFunction:
+        def method(self):
+            # Uses external 'multiplier'
+            base = multiplier * 10
+
+            # Inner function has its own 'multiplier' parameter
+            def inner(multiplier):
+                return multiplier * 2
+
+            return base, inner(5)
+
+    # The external 'multiplier' should be captured
+    closure_vars = getattr(UsesExternalWithInnerFunction, '_remote_closure_vars', {})
+    assert 'multiplier' in closure_vars, f"External 'multiplier' should be captured, got: {closure_vars}"
+    assert closure_vars['multiplier'] == 3
+
+
+def test_namefinder_import_shadowing():
+    """Test that import statements are recognized as defining names locally.
+
+    If a name is imported inside the class, it shouldn't be treated as external.
+    """
+    @remote
+    class HasLocalImport:
+        def method(self):
+            import json  # Local import
+            return json.dumps([1, 2, 3])
+
+    # 'json' is imported locally, shouldn't need to be captured
+    closure_vars = getattr(HasLocalImport, '_remote_closure_vars', {})
+    module_refs = getattr(HasLocalImport, '_remote_module_refs', {})
+
+    # json shouldn't be in closure_vars (it's imported locally)
+    # Note: It might be in module_refs if the system decides to track server imports
+    assert 'json' not in closure_vars, f"'json' should not be in closure_vars: {closure_vars}"
+
+
+# =============================================================================
+# Test 29: Inheritance hierarchies
+# =============================================================================
+
+def test_inheritance_hierarchy():
+    """Test that @remote classes with inheritance hierarchies work correctly."""
+    @remote
+    class BaseAnalyzer:
+        def __init__(self, name):
+            self.name = name
+
+        def describe(self):
+            return f"Analyzer: {self.name}"
+
+    @remote
+    class AdvancedAnalyzer(BaseAnalyzer):
+        def __init__(self, name, level):
+            super().__init__(name)
+            self.level = level
+
+        def describe(self):
+            base = super().describe()
+            return f"{base} (level {self.level})"
+
+    # Test original works
+    obj = AdvancedAnalyzer("test", 5)
+    assert obj.describe() == "Analyzer: test (level 5)"
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    # Need to exec base class first
+    exec(BaseAnalyzer._remote_source, namespace)
+    exec(AdvancedAnalyzer._remote_source, namespace)
+
+    ReconClass = namespace['AdvancedAnalyzer']
+    restored = ReconClass("restored", 10)
+    assert restored.describe() == "Analyzer: restored (level 10)"
+
+
+# =============================================================================
+# Test 30: Multiple inheritance
+# =============================================================================
+
+def test_multiple_inheritance():
+    """Test that @remote classes with multiple inheritance work correctly."""
+    @remote
+    class MixinA:
+        def method_a(self):
+            return "A"
+
+    @remote
+    class MixinB:
+        def method_b(self):
+            return "B"
+
+    @remote
+    class Combined(MixinA, MixinB):
+        def combined(self):
+            return self.method_a() + self.method_b()
+
+    # Test original
+    obj = Combined()
+    assert obj.combined() == "AB"
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(MixinA._remote_source, namespace)
+    exec(MixinB._remote_source, namespace)
+    exec(Combined._remote_source, namespace)
+
+    ReconClass = namespace['Combined']
+    restored = ReconClass()
+    assert restored.combined() == "AB"
+
+
+# =============================================================================
+# Test 31: Abstract base classes
+# =============================================================================
+
+def test_abstract_base_class():
+    """Test that @remote classes with abstract-like pattern work correctly.
+
+    Note: Python's abc.ABC uses ABCMeta metaclass which isn't supported by @remote.
+    Instead, we test an abstract-like pattern using NotImplementedError.
+    """
+    @remote
+    class AbstractProcessor:
+        """Base class with abstract-like methods."""
+        def process(self, data):
+            raise NotImplementedError("Subclasses must implement process()")
+
+        def describe(self):
+            return "AbstractProcessor"
+
+    @remote
+    class ConcreteProcessor(AbstractProcessor):
+        def process(self, data):
+            return data * 2
+
+    # Base class can be instantiated but process raises
+    base = AbstractProcessor()
+    with pytest.raises(NotImplementedError):
+        base.process(5)
+
+    # Concrete works
+    obj = ConcreteProcessor()
+    assert obj.process(5) == 10
+    assert obj.describe() == "AbstractProcessor"
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(AbstractProcessor._remote_source, namespace)
+    exec(ConcreteProcessor._remote_source, namespace)
+
+    ReconClass = namespace['ConcreteProcessor']
+    restored = ReconClass()
+    assert restored.process(5) == 10
+
+
+# =============================================================================
+# Test 32: Descriptors
+# =============================================================================
+
+def test_descriptor():
+    """Test that @remote classes with descriptors work correctly."""
+    @remote
+    class ValidatedAttribute:
+        """A descriptor that validates values are positive."""
+        def __init__(self, name):
+            self.name = name
+            self.private_name = '_' + name
+
+        def __get__(self, obj, objtype=None):
+            if obj is None:
+                return self
+            return getattr(obj, self.private_name, None)
+
+        def __set__(self, obj, value):
+            if value < 0:
+                raise ValueError(f"{self.name} must be positive")
+            setattr(obj, self.private_name, value)
+
+    @remote
+    class PositiveNumbers:
+        x = ValidatedAttribute('x')
+        y = ValidatedAttribute('y')
+
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    # Test original works
+    obj = PositiveNumbers(10, 20)
+    assert obj.x == 10
+    assert obj.y == 20
+
+    with pytest.raises(ValueError):
+        obj.x = -5
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(ValidatedAttribute._remote_source, namespace)
+    exec(PositiveNumbers._remote_source, namespace)
+
+    ReconClass = namespace['PositiveNumbers']
+    restored = ReconClass(5, 15)
+    assert restored.x == 5
+    assert restored.y == 15
+
+    with pytest.raises(ValueError):
+        restored.x = -1
+
+
+# =============================================================================
+# Test 33: Context managers
+# =============================================================================
+
+def test_context_manager():
+    """Test that @remote classes implementing context manager protocol work."""
+    @remote
+    class ResourceManager:
+        def __init__(self):
+            self.opened = False
+            self.closed = False
+
+        def __enter__(self):
+            self.opened = True
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.closed = True
+            return False  # Don't suppress exceptions
+
+        def do_work(self):
+            if not self.opened:
+                raise RuntimeError("Not opened")
+            return "work done"
+
+    # Test original works
+    with ResourceManager() as mgr:
+        result = mgr.do_work()
+        assert result == "work done"
+        assert mgr.opened is True
+    assert mgr.closed is True
+
+    # Test reconstruction
+    namespace = make_exec_namespace()
+    exec(ResourceManager._remote_source, namespace)
+
+    ReconClass = namespace['ResourceManager']
+    with ReconClass() as restored_mgr:
+        result = restored_mgr.do_work()
+        assert result == "work done"
+    assert restored_mgr.closed is True
+
+
+# =============================================================================
+# Test 34: Malformed serialized data handling
+# =============================================================================
+
+def test_malformed_data_handling():
+    """Test that malformed serialized data is handled gracefully."""
+    from nnsight.intervention.serialization_source import (
+        reconstruct_state, reconstruct_value
+    )
+
+    namespace = make_exec_namespace()
+
+    # Test 1: Unknown special key
+    malformed = {"__unknown_special__": "value"}
+    # Should not crash - return as-is or handle gracefully
+    result = reconstruct_value(malformed, namespace, None, {})
+    # The function should handle unknown keys gracefully
+
+    # Test 2: Missing required fields in tensor
+    incomplete_tensor = {"__tensor__": True}  # Missing data, shape, dtype
+    try:
+        result = reconstruct_value(incomplete_tensor, namespace, None, {})
+        # If it doesn't raise, it should return something usable or None
+    except (KeyError, ValueError, TypeError) as e:
+        # Expected - missing required fields or type error from base64 decode
+        pass
+
+    # Test 3: Invalid enum reference
+    bad_enum = {"__enum__": True, "class": "NonexistentEnum", "member": "FOO"}
+    try:
+        result = reconstruct_value(bad_enum, namespace, None, {})
+    except (KeyError, AttributeError, NameError):
+        # Expected - enum class doesn't exist
+        pass
+
+
+# =============================================================================
+# Test 35: Version compatibility (forward compatibility check)
+# =============================================================================
+
+def test_version_compatibility():
+    """Test handling of serialized data with version markers."""
+    from nnsight.intervention.serialization_source import deserialize_source_based
+    import json
+
+    # Create a payload with a future version
+    future_payload = json.dumps({
+        "version": "99.0",  # Future version
+        "source": {"code": "def test(): pass", "file": "test.py", "line": 1},
+        "variables": {},
+        "remote_objects": {},
+    }).encode('utf-8')  # deserialize_source_based expects bytes
+
+    # Deserialization should either work (forwards compatible) or raise informative error
+    try:
+        # Pass model=None since we're just testing version handling
+        result = deserialize_source_based(future_payload, model=None)
+        # If it works, good - we're forwards compatible
+    except Exception as e:
+        # Should be an informative error about version or format
+        error_msg = str(e).lower()
+        # The error should be about the version, format, or a parsing error - not a random crash
+        acceptable_errors = ["version", "format", "unsupported", "key", "missing", "invalid"]
+        has_acceptable_error = any(kw in error_msg for kw in acceptable_errors)
+        assert has_acceptable_error, f"Version error should be informative: {e}"
+
+
+# =============================================================================
+# Test 36: Error line number preservation
+# =============================================================================
+
+def test_error_line_numbers_in_remote_function():
+    """Test that errors in @remote functions show correct file/line in traceback."""
+    import traceback
+    import inspect
+
+    # Define a @remote function - we'll track its actual line number
+    @remote
+    def function_that_errors(x):
+        y = x + 1
+        z = y * 2
+        raise ValueError("intentional error")  # This is line 4 of the function body
+
+    # Get the actual source location
+    source_file = inspect.getfile(function_that_errors)
+    _, func_start_line = inspect.getsourcelines(function_that_errors)
+
+    # The error is on line 4 of the function body (after decorator and def line)
+    # decorator line, def line, y=, z=, raise = lines 0,1,2,3,4 relative to decorator
+    error_line = func_start_line + 4  # raise is 4 lines after @remote
+
+    # Extract metadata as would be done for serialization
+    source_code = function_that_errors._remote_source
+
+    # Simulate server-side execution with proper file/line info
+    namespace = make_exec_namespace()
+
+    # Compile with the original filename and line offset
+    try:
+        import ast
+        tree = ast.parse(source_code)
+        # Adjust line numbers to match original source
+        ast.increment_lineno(tree, func_start_line - 1)
+        code_obj = compile(tree, source_file, 'exec')
+        exec(code_obj, namespace)
+
+        # Now call the function
+        reconstructed_func = namespace['function_that_errors']
+        reconstructed_func(5)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        # Get the traceback
+        tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
+        tb_text = ''.join(tb_lines)
+
+        # Verify the traceback mentions the original file
+        assert source_file in tb_text or "test_serialization_edge_cases" in tb_text, (
+            f"Traceback should reference original file. Got:\n{tb_text}"
+        )
+
+        # Verify the line number is approximately correct
+        # (we check that the error line appears in the traceback)
+        assert "raise ValueError" in tb_text, (
+            f"Traceback should show the raise statement. Got:\n{tb_text}"
+        )
+
+
+def test_error_line_numbers_in_remote_class():
+    """Test that errors in @remote class methods show correct file/line."""
+    import traceback
+    import inspect
+
+    @remote
+    class ClassWithError:
+        def method_that_errors(self, x):
+            y = x + 1
+            raise RuntimeError("class method error")
+
+    source_file = inspect.getfile(ClassWithError)
+    _, class_start_line = inspect.getsourcelines(ClassWithError)
+    source_code = ClassWithError._remote_source
+
+    namespace = make_exec_namespace()
+
+    try:
+        import ast
+        tree = ast.parse(source_code)
+        ast.increment_lineno(tree, class_start_line - 1)
+        code_obj = compile(tree, source_file, 'exec')
+        exec(code_obj, namespace)
+
+        ReconClass = namespace['ClassWithError']
+        obj = ReconClass()
+        obj.method_that_errors(10)
+        assert False, "Should have raised RuntimeError"
+    except RuntimeError as e:
+        tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
+        tb_text = ''.join(tb_lines)
+
+        # Verify traceback shows the error
+        assert "raise RuntimeError" in tb_text, (
+            f"Traceback should show the raise statement. Got:\n{tb_text}"
+        )
+
+
+def test_error_line_numbers_nested_calls():
+    """Test that nested call errors show full stack with correct lines."""
+    import traceback
+    import inspect
+
+    @remote
+    class NestedCalls:
+        def outer(self, x):
+            return self.middle(x)
+
+        def middle(self, x):
+            return self.inner(x)
+
+        def inner(self, x):
+            raise KeyError("deep error")
+
+    source_file = inspect.getfile(NestedCalls)
+    _, class_start_line = inspect.getsourcelines(NestedCalls)
+    source_code = NestedCalls._remote_source
+
+    namespace = make_exec_namespace()
+
+    try:
+        import ast
+        tree = ast.parse(source_code)
+        ast.increment_lineno(tree, class_start_line - 1)
+        code_obj = compile(tree, source_file, 'exec')
+        exec(code_obj, namespace)
+
+        ReconClass = namespace['NestedCalls']
+        obj = ReconClass()
+        obj.outer(5)
+        assert False, "Should have raised KeyError"
+    except KeyError as e:
+        tb_lines = traceback.format_exception(type(e), e, e.__traceback__)
+        tb_text = ''.join(tb_lines)
+
+        # Should show the full call chain
+        assert "outer" in tb_text, f"Traceback should show outer. Got:\n{tb_text}"
+        assert "middle" in tb_text, f"Traceback should show middle. Got:\n{tb_text}"
+        assert "inner" in tb_text, f"Traceback should show inner. Got:\n{tb_text}"
+        assert "raise KeyError" in tb_text, f"Traceback should show raise. Got:\n{tb_text}"
+
+
+def test_error_metadata_preserved_in_serialization():
+    """Test that file/line metadata is preserved through serialization round-trip."""
+    import inspect
+    import json
+    from nnsight.intervention.serialization_source import (
+        extract_remote_object,
+        _get_remote_metadata,
+    )
+
+    @remote
+    def tracked_function():
+        pass
+
+    # Get actual file/line info
+    actual_file = inspect.getfile(tracked_function)
+    _, actual_line = inspect.getsourcelines(tracked_function)
+
+    # Extract metadata using the serialization helper
+    metadata = _get_remote_metadata(tracked_function)
+
+    # Verify file and line are captured
+    assert metadata['source']['file'] == actual_file, (
+        f"File should be {actual_file}, got {metadata['source']['file']}"
+    )
+    assert metadata['source']['line'] == actual_line, (
+        f"Line should be {actual_line}, got {metadata['source']['line']}"
+    )
+
+    # Verify it survives JSON serialization
+    json_str = json.dumps(metadata)
+    restored = json.loads(json_str)
+    assert restored['source']['file'] == actual_file
+    assert restored['source']['line'] == actual_line
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

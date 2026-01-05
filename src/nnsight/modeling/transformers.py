@@ -10,10 +10,16 @@ from transformers import AutoModel
 
 class TransformersModel(HuggingFaceModel):
 
+    # Extend server-provided attributes
+    _server_provided: frozenset = HuggingFaceModel._server_provided | frozenset({
+        'config',     # PretrainedConfig from transformers
+        'automodel',  # AutoModel class reference
+    })
+
     def __init__(self, *args, config_model: Type[PretrainedConfig] = None, automodel: Type[AutoModel] = AutoModel, **kwargs):
 
         self.config: PretrainedConfig = config_model
-        
+
         self.automodel = (
             automodel
             if not isinstance(automodel, str)

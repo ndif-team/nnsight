@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Union
 from typing_extensions import Self
 
 from ...intervention.backends import Backend
+from ...intervention.backends.local_simulation import LocalSimulationBackend
 from ...intervention.backends.remote import RemoteBackend
 from ...intervention.serialization import load, save
 from ...intervention.tracing.tracer import InterleavingTracer, Tracer
@@ -19,13 +20,47 @@ class RemoteableMixin(MetaMixin):
         self,
         *inputs: Any,
         backend: Union[Backend, str, None] = None,
-        remote: bool = False,
+        remote: Union[bool, str] = False,
         blocking: bool = True,
+        verbose: bool = False,
+        strict_remote: bool = False,
+        max_upload_mb: float = 10.0,
         **kwargs: Dict[str, Any],
     ):
+        """
+        Create a trace context for model interventions.
 
+        Args:
+            *inputs: Input data for the model
+            backend: Explicit backend instance or URL string
+            remote: Controls execution mode:
+                - False: Local execution (default)
+                - True: Remote execution on NDIF
+                - 'local': Local simulation mode - serializes and deserializes
+                  locally to test serialization without network access
+            blocking: If True, wait for remote results
+            verbose: If True (and remote='local'), print serialization details
+            strict_remote: If True, require explicit @remote decorations for
+                          user-defined functions/classes. If False (default),
+                          auto-discover classes and functions with available
+                          source code.
+            max_upload_mb: Threshold for upload payload size warnings. Default is
+                          10 MB. Set to 0 to disable warnings.
+            **kwargs: Additional arguments passed to parent trace()
+
+        Returns:
+            Trace context manager
+        """
         if backend is not None:
             pass
+        elif remote == 'local':
+            # Local simulation: test serialization without network
+            backend = LocalSimulationBackend(
+                self,
+                verbose=verbose,
+                strict_remote=strict_remote,
+                max_upload_mb=max_upload_mb,
+            )
         elif remote:
             backend = RemoteBackend(self.to_model_key(), blocking=blocking)
         # If backend is a string, assume RemoteBackend url.
@@ -44,13 +79,47 @@ class RemoteableMixin(MetaMixin):
         self,
         *inputs: Any,
         backend: Union[Backend, str, None] = None,
-        remote: bool = False,
+        remote: Union[bool, str] = False,
         blocking: bool = True,
+        verbose: bool = False,
+        strict_remote: bool = False,
+        max_upload_mb: float = 10.0,
         **kwargs: Dict[str, Any],
     ):
+        """
+        Create a session context for multi-step model interactions.
 
+        Args:
+            *inputs: Input data for the model
+            backend: Explicit backend instance or URL string
+            remote: Controls execution mode:
+                - False: Local execution (default)
+                - True: Remote execution on NDIF
+                - 'local': Local simulation mode - serializes and deserializes
+                  locally to test serialization without network access
+            blocking: If True, wait for remote results
+            verbose: If True (and remote='local'), print serialization details
+            strict_remote: If True, require explicit @remote decorations for
+                          user-defined functions/classes. If False (default),
+                          auto-discover classes and functions with available
+                          source code.
+            max_upload_mb: Threshold for upload payload size warnings. Default is
+                          10 MB. Set to 0 to disable warnings.
+            **kwargs: Additional arguments passed to parent session()
+
+        Returns:
+            Session context manager
+        """
         if backend is not None:
             pass
+        elif remote == 'local':
+            # Local simulation: test serialization without network
+            backend = LocalSimulationBackend(
+                self,
+                verbose=verbose,
+                strict_remote=strict_remote,
+                max_upload_mb=max_upload_mb,
+            )
         elif remote:
             backend = RemoteBackend(self.to_model_key(), blocking=blocking)
         # If backend is a string, assume RemoteBackend url.

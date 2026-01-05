@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import io
 import zlib
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict
-from ..intervention.serialization import save, load
+from ..intervention.serialization import save, load, save_for_remote
 if TYPE_CHECKING:
     from .. import NNsight
     from ..intervention.tracing.tracer import Tracer
@@ -19,16 +19,33 @@ class RequestModel(BaseModel):
     interventions: Callable
     tracer: Tracer
 
-    
+
     def serialize(self, _zlib:bool) -> bytes:
-                
+        """Legacy serialization using cloudpickle."""
         data = save(self)
-                
+
         if _zlib:
 
             data = zlib.compress(data)
-                
+
         return data
+
+    def serialize_with_format(self, _zlib: bool) -> Tuple[bytes, str]:
+        """
+        Serialize with automatic format selection.
+
+        Attempts source-based serialization first, falls back to cloudpickle.
+
+        Returns:
+            Tuple of (data_bytes, format_string)
+            format_string is "source" or "cloudpickle"
+        """
+        data, serialization_format = save_for_remote(self.tracer)
+
+        if _zlib:
+            data = zlib.compress(data)
+
+        return data, serialization_format
 
     @staticmethod
     def deserialize(model: "NNsight", request:bytes,  _zlib:bool) -> RequestModel:

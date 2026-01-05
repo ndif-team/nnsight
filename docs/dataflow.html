@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Data Flow Evolution - nnsight</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      overflow: hidden;
+    }
+    #container {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    #header {
+      padding: 10px 20px;
+      background: #16213e;
+      border-bottom: 1px solid #0f3460;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+    #header h1 {
+      font-size: 1.2em;
+      font-weight: 500;
+      color: #3572A5; /* Python blue */
+    }
+    #stats {
+      font-size: 0.85em;
+      color: #888;
+    }
+    #controls {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      flex: 1;
+    }
+    #timeline-container {
+      flex: 1;
+      min-width: 200px;
+      max-width: 600px;
+    }
+    #timeline {
+      width: 100%;
+      cursor: pointer;
+    }
+    #play-btn {
+      background: #0f3460;
+      border: 1px solid #3572A5;
+      color: #3572A5;
+      padding: 5px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9em;
+    }
+    #play-btn:hover {
+      background: #3572A5;
+      color: #fff;
+    }
+    #commit-info {
+      font-size: 0.8em;
+      color: #aaa;
+    }
+    #commit-info .hash {
+      color: #3572A5;
+      font-family: monospace;
+    }
+    #commit-info .message {
+      color: #888;
+      font-style: italic;
+    }
+    .coauthor-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 0.7em;
+      margin-left: 5px;
+    }
+    .claude { background: #d4a574; color: #1a1a2e; }
+    .gemini { background: #4285f4; color: #fff; }
+    .codex { background: #10a37f; color: #fff; }
+    #graph-container {
+      flex: 1;
+      position: relative;
+    }
+    svg {
+      width: 100%;
+      height: 100%;
+    }
+    /* Function nodes: circles - fill set dynamically by age */
+    .node.function circle {
+      stroke: #333;
+      stroke-width: 1.5px;
+    }
+    .node.function.new circle {
+      stroke: #fff;
+      stroke-width: 2.5px;
+    }
+    .node.function text {
+      font-size: 9px;
+      fill: #eee;
+    }
+    /* State nodes: rectangles - fill set dynamically by age */
+    .node.state rect {
+      stroke: #333;
+      stroke-width: 1.5px;
+      rx: 3;
+      ry: 3;
+    }
+    .node.state.new rect {
+      stroke: #fff;
+      stroke-width: 2.5px;
+    }
+    .new-diamond {
+      fill: #ffd700;
+      stroke: #daa520;
+      stroke-width: 0.5px;
+    }
+    .node.state.const rect {
+      stroke-dasharray: 4,2;
+    }
+    .node.state text {
+      font-size: 9px;
+      fill: #eee;
+    }
+    /* Read edges: blue */
+    .link.read {
+      stroke: #4a9eff;
+      stroke-opacity: 0.6;
+      stroke-width: 1.5px;
+    }
+    /* Write edges: orange/red */
+    .link.write {
+      stroke: #ff6b6b;
+      stroke-opacity: 0.8;
+      stroke-width: 2px;
+    }
+    .link {
+      fill: none;
+    }
+    #tooltip {
+      position: absolute;
+      background: rgba(22, 33, 62, 0.95);
+      border: 1px solid #3572A5;
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-size: 0.85em;
+      pointer-events: none;
+      opacity: 0;
+      z-index: 100;
+      max-width: 300px;
+    }
+    #legend {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(22, 33, 62, 0.9);
+      border: 1px solid #0f3460;
+      border-radius: 4px;
+      padding: 10px 15px;
+      font-size: 0.8em;
+    }
+    #search-box {
+      padding: 6px 10px;
+      border: 1px solid #0f3460;
+      border-radius: 4px;
+      font-size: 14px;
+      width: 180px;
+      outline: none;
+      background: #16213e;
+      color: #eee;
+    }
+    #search-box:focus {
+      border-color: #3572A5;
+      box-shadow: 0 0 0 2px rgba(53,114,165,0.3);
+    }
+    #search-box::placeholder {
+      color: #666;
+    }
+    .search-highlight {
+      fill: none;
+      stroke: #3572A5;
+      stroke-width: 3px;
+      pointer-events: none;
+    }
+    @keyframes highlight-pulse {
+      0%, 100% { stroke-opacity: 1; }
+      50% { stroke-opacity: 0.4; }
+    }
+    .search-highlight.active {
+      animation: highlight-pulse 1s ease-in-out infinite;
+    }
+    #legend h3 {
+      margin-bottom: 8px;
+      color: #3572A5;
+      font-size: 0.9em;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+    }
+    .legend-circle {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 2px solid #3572A5;
+      background: #0f3460;
+    }
+    .legend-rect {
+      width: 14px;
+      height: 10px;
+      border: 2px solid #4ecdc4;
+      background: #1a3a5c;
+      border-radius: 2px;
+    }
+    .legend-line {
+      width: 20px;
+      height: 2px;
+    }
+    .legend-line.read { background: #4a9eff; }
+    .legend-line.write { background: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="header">
+      <h1>Data Flow Evolution - nnsight</h1>
+      <div id="controls">
+        <div id="timeline-container">
+          <input type="range" id="timeline" min="0" max="0" value="0">
+        </div>
+        <button id="play-btn">Play</button>
+      </div>
+      <input type="text" id="search-box" placeholder="Search (/ to focus)">
+      <div id="commit-info">
+        <span class="hash"></span>
+        <span class="message"></span>
+      </div>
+      <div id="stats"></div>
+    </div>
+    <div id="graph-container">
+      <svg></svg>
+      <div id="tooltip"></div>
+      <div id="legend">
+        <h3>Legend</h3>
+        <div class="legend-item"><div class="legend-circle"></div> Function/Method</div>
+        <div class="legend-item"><div class="legend-rect"></div> State Variable</div>
+        <div class="legend-item"><div class="legend-line read"></div> Reads</div>
+        <div class="legend-item"><div class="legend-line write"></div> Writes</div>
+        <div class="legend-item" style="margin-top:8px;font-size:0.85em;color:#888;">
+          <div style="width:60px;height:8px;background:linear-gradient(to right, #30123b, #7a0403, #ee6c2c, #f0f921);border-radius:2px;"></div>
+          <span style="margin-left:6px;">older -> newer</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="dataflow-data.js"></script>
+  <script>
+    // Check if data loaded
+    if (typeof window.dataflowData === 'undefined') {
+      document.body.innerHTML = '<div style="padding:40px;text-align:center;"><h2>No data found</h2><p>Run: python scripts/build-dataflow.py</p></div>';
+      throw new Error('No data');
+    }
+
+    const { snapshots } = window.dataflowData;
+    const timeline = snapshots;
+
+    // DOM elements
+    const svg = d3.select('svg');
+    const container = document.getElementById('graph-container');
+    const timelineSlider = document.getElementById('timeline');
+    const playBtn = document.getElementById('play-btn');
+    const commitInfo = document.getElementById('commit-info');
+    const statsEl = document.getElementById('stats');
+    const tooltip = d3.select('#tooltip');
+
+    // Set timeline range
+    timelineSlider.max = timeline.length - 1;
+    timelineSlider.value = timeline.length - 1;
+
+    // Track when each node first appeared (for coloring by age)
+    const nodeFirstSeen = new Map();
+    timeline.forEach((snapshot, idx) => {
+      snapshot.nodes.forEach(node => {
+        if (!nodeFirstSeen.has(node.id)) {
+          nodeFirstSeen.set(node.id, idx);
+        }
+      });
+    });
+
+    // Attach firstSeen to all nodes in all snapshots
+    timeline.forEach(snapshot => {
+      snapshot.nodes.forEach(node => {
+        node.firstSeen = nodeFirstSeen.get(node.id);
+      });
+    });
+
+    // Graph state
+    let currentIndex = timeline.length - 1;
+    let simulation = null;
+    let isPlaying = false;
+    let playInterval = null;
+
+    // Initialize SVG
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    svg.attr('viewBox', [0, 0, width, height]);
+
+    // Create groups for links and nodes
+    const g = svg.append('g');
+    const linkGroup = g.append('g').attr('class', 'links');
+    const nodeGroup = g.append('g').attr('class', 'nodes');
+
+    // Zoom behavior
+    const zoom = d3.zoom()
+      .scaleExtent([0.2, 4])
+      .on('zoom', (event) => {
+        g.attr('transform', event.transform);
+      });
+    svg.call(zoom);
+
+    // Track node positions across updates
+    const nodePositions = new Map();
+
+    // Detect modifier key for GitHub links
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const modifierHint = isMac ? 'Cmd+click' : 'Ctrl+click';
+
+    // GitHub repo info
+    const REPO = 'davidbau/nnsight';
+
+    function updateGraph(index) {
+      currentIndex = index;
+      const snapshot = timeline[index];
+      if (!snapshot) return;
+
+      // Update commit info
+      commitInfo.querySelector('.hash').textContent = snapshot.hash;
+      commitInfo.querySelector('.message').textContent = snapshot.message;
+
+      // Remove old badges
+      commitInfo.querySelectorAll('.coauthor-badge').forEach(el => el.remove());
+
+      // Add coauthor badges
+      if (snapshot.claudeCoauthored) {
+        const badge = document.createElement('span');
+        badge.className = 'coauthor-badge claude';
+        badge.textContent = 'Claude';
+        commitInfo.appendChild(badge);
+      }
+      if (snapshot.geminiCoauthored) {
+        const badge = document.createElement('span');
+        badge.className = 'coauthor-badge gemini';
+        badge.textContent = 'Gemini';
+        commitInfo.appendChild(badge);
+      }
+      if (snapshot.codexCoauthored) {
+        const badge = document.createElement('span');
+        badge.className = 'coauthor-badge codex';
+        badge.textContent = 'Codex';
+        commitInfo.appendChild(badge);
+      }
+
+      // Update stats
+      const funcNodes = snapshot.nodes.filter(n => n.type === 'function').length;
+      const stateNodes = snapshot.nodes.filter(n => n.type === 'state').length;
+      const readEdges = snapshot.edges.filter(e => e.type === 'read').length;
+      const writeEdges = snapshot.edges.filter(e => e.type === 'write').length;
+      statsEl.textContent = `${funcNodes} functions, ${stateNodes} state vars, ${readEdges} reads, ${writeEdges} writes`;
+
+      // Prepare nodes with positions
+      const nodes = snapshot.nodes.map(n => {
+        const existing = nodePositions.get(n.id);
+        return {
+          ...n,
+          x: existing?.x || width / 2 + (Math.random() - 0.5) * 200,
+          y: existing?.y || height / 2 + (Math.random() - 0.5) * 200,
+          isNew: !existing
+        };
+      });
+
+      // Mark which nodes exist
+      const nodeIds = new Set(nodes.map(n => n.id));
+
+      // Prepare edges
+      const edges = snapshot.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
+        .map(e => ({
+          ...e,
+          source: nodes.find(n => n.id === e.source),
+          target: nodes.find(n => n.id === e.target)
+        }));
+
+      // Update links
+      const link = linkGroup.selectAll('.link')
+        .data(edges, d => `${d.source.id}-${d.target.id}-${d.type}`);
+
+      link.exit().remove();
+
+      const linkEnter = link.enter()
+        .append('line')
+        .attr('class', d => 'link ' + d.type);
+
+      // Update nodes
+      const node = nodeGroup.selectAll('.node')
+        .data(nodes, d => d.id);
+
+      node.exit().remove();
+
+      const nodeEnter = node.enter()
+        .append('g')
+        .attr('class', d => 'node ' + d.type + (d.isNew ? ' new' : '') + (d.isConst ? ' const' : ''))
+        .call(d3.drag()
+          .on('start', dragstarted)
+          .on('drag', dragged)
+          .on('end', dragended));
+
+      // Add shapes based on type
+      nodeEnter.filter(d => d.type === 'function')
+        .append('circle')
+        .attr('r', d => 6 + Math.min(d.readCount + d.writeCount, 10));
+
+      nodeEnter.filter(d => d.type === 'state')
+        .append('rect')
+        .attr('width', d => 12 + Math.min((d.readerCount + d.writerCount) * 2, 20))
+        .attr('height', 10)
+        .attr('x', d => -(6 + Math.min((d.readerCount + d.writerCount), 10)))
+        .attr('y', -5);
+
+      nodeEnter.append('text')
+        .attr('dx', d => d.type === 'function' ? 10 : 15)
+        .attr('dy', 3)
+        .text(d => {
+          // Show short name (after last colon or dot)
+          const parts = d.id.split(':');
+          const last = parts[parts.length - 1];
+          return last.length > 25 ? last.slice(0, 22) + '...' : last;
+        });
+
+      // Add gold diamond twinkle for nodes new to this branch (not present in main)
+      nodeEnter.filter(d => d.isNewToBranch).each(function(d) {
+        const g = d3.select(this);
+        // Small diamond above-right of node
+        g.append('polygon')
+          .attr('class', 'new-diamond')
+          .attr('points', '0,-3 3,0 0,3 -3,0')
+          .attr('transform', d.type === 'function' ? 'translate(8, -8)' : 'translate(12, -10)');
+      });
+
+      // Hover and click handlers
+      nodeEnter
+        .on('mouseover', function(event, d) {
+          const typeLabel = d.type === 'function' ? (d.funcType || 'Function') : 'State Variable';
+          let html = `<strong>${d.id}</strong><br>Type: ${typeLabel}`;
+          if (d.type === 'function') {
+            html += `<br>Reads: ${d.readCount} vars, Writes: ${d.writeCount} vars`;
+          } else {
+            html += `<br>Read by: ${d.readerCount} funcs, Written by: ${d.writerCount} funcs`;
+            if (d.isConst) html += '<br><em>(const)</em>';
+            if (d.scope) html += `<br>Scope: ${d.scope}`;
+          }
+          html += `<br>Line: ${d.line}`;
+          if (d.file) html += `<br>File: ${d.file.split('/').pop()}`;
+          html += `<br>Added: ${timeline[d.firstSeen]?.date || 'unknown'}`;
+          html += `<br><em>${modifierHint} to view on GitHub</em>`;
+
+          tooltip
+            .style('opacity', 1)
+            .style('left', (event.pageX + 10) + 'px')
+            .style('top', (event.pageY - 10) + 'px')
+            .html(html);
+        })
+        .on('mouseout', () => tooltip.style('opacity', 0))
+        .on('click', function(event, d) {
+          if (event.metaKey || event.ctrlKey) {
+            const file = d.file || 'src/nnsight/intervention/base.py';
+            const url = `https://github.com/${REPO}/blob/${snapshot.hash}/${file}#L${d.line}`;
+            window.open(url, '_blank');
+          }
+        });
+
+      // Merge and update
+      const allNodes = nodeEnter.merge(node);
+      const allLinks = linkEnter.merge(link);
+
+      // Update classes for existing nodes
+      allNodes.attr('class', d => 'node ' + d.type + (d.isNew ? ' new' : '') + (d.isConst ? ' const' : ''));
+
+      // Color nodes by age: older = cooler colors (blue/purple), newer = warmer (yellow/orange)
+      const maxIdx = index || 1; // Avoid division by zero
+      allNodes.select('circle')
+        .attr('fill', d => {
+          const t = d.firstSeen / maxIdx;
+          return d3.interpolateTurbo(0.15 + t * 0.7);
+        });
+      allNodes.select('rect')
+        .attr('fill', d => {
+          const t = d.firstSeen / maxIdx;
+          return d3.interpolateTurbo(0.15 + t * 0.7);
+        });
+
+      // Force simulation
+      if (simulation) simulation.stop();
+
+      simulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(edges).id(d => d.id).distance(80))
+        .force('charge', d3.forceManyBody().strength(d => d.type === 'state' ? -200 : -100))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide().radius(30))
+        .on('tick', () => {
+          allLinks
+            .attr('x1', d => d.source.x)
+            .attr('y1', d => d.source.y)
+            .attr('x2', d => d.target.x)
+            .attr('y2', d => d.target.y);
+
+          allNodes.attr('transform', d => `translate(${d.x},${d.y})`);
+
+          // Save positions
+          nodes.forEach(n => nodePositions.set(n.id, { x: n.x, y: n.y }));
+
+          // Update search highlight position
+          if (typeof updateHighlightPosition === 'function') {
+            updateHighlightPosition();
+          }
+        });
+    }
+
+    function dragstarted(event, d) {
+      if (!event.active) simulation.alphaTarget(0.3).restart();
+      d.fx = d.x;
+      d.fy = d.y;
+    }
+
+    function dragged(event, d) {
+      d.fx = event.x;
+      d.fy = event.y;
+    }
+
+    function dragended(event, d) {
+      if (!event.active) simulation.alphaTarget(0);
+      d.fx = null;
+      d.fy = null;
+    }
+
+    // Timeline slider
+    timelineSlider.addEventListener('input', (e) => {
+      updateGraph(parseInt(e.target.value));
+    });
+
+    // Play button
+    playBtn.addEventListener('click', () => {
+      if (isPlaying) {
+        isPlaying = false;
+        playBtn.textContent = 'Play';
+        clearInterval(playInterval);
+      } else {
+        isPlaying = true;
+        playBtn.textContent = 'Pause';
+        if (currentIndex >= timeline.length - 1) {
+          currentIndex = 0;
+          timelineSlider.value = 0;
+        }
+        playInterval = setInterval(() => {
+          if (currentIndex >= timeline.length - 1) {
+            isPlaying = false;
+            playBtn.textContent = 'Play';
+            clearInterval(playInterval);
+            return;
+          }
+          currentIndex++;
+          timelineSlider.value = currentIndex;
+          updateGraph(currentIndex);
+        }, 500);
+      }
+    });
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+      if (document.activeElement === document.getElementById('search-box')) return;
+      if (e.key === 'ArrowLeft' && currentIndex > 0) {
+        currentIndex--;
+        timelineSlider.value = currentIndex;
+        updateGraph(currentIndex);
+      } else if (e.key === 'ArrowRight' && currentIndex < timeline.length - 1) {
+        currentIndex++;
+        timelineSlider.value = currentIndex;
+        updateGraph(currentIndex);
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        playBtn.click();
+      }
+    });
+
+    // Initial render
+    updateGraph(currentIndex);
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+      const newWidth = container.clientWidth;
+      const newHeight = container.clientHeight;
+      svg.attr('viewBox', [0, 0, newWidth, newHeight]);
+    });
+
+    // Search functionality
+    const searchBox = document.getElementById('search-box');
+    let highlightCircle = null;
+    let highlightRect = null;
+    let currentHighlightNode = null;
+
+    function highlightNode(searchTerm) {
+      // Remove existing highlights
+      if (highlightCircle) {
+        highlightCircle.remove();
+        highlightCircle = null;
+      }
+      if (highlightRect) {
+        highlightRect.remove();
+        highlightRect = null;
+      }
+      currentHighlightNode = null;
+
+      if (!searchTerm || !searchTerm.trim()) return;
+
+      const term = searchTerm.trim().toLowerCase();
+      const snapshot = timeline[currentIndex];
+      if (!snapshot) return;
+
+      // Find best matching node (prioritize: exact > prefix > substring, then shorter names)
+      let matchingNode = null;
+      let bestScore = -1;
+      let bestLength = Infinity;
+
+      for (const n of snapshot.nodes) {
+        const id = n.id.toLowerCase();
+        let score = -1;
+
+        if (id === term) {
+          score = 3; // Exact match
+        } else if (id.startsWith(term)) {
+          score = 2; // Prefix match
+        } else if (id.includes(term)) {
+          score = 1; // Substring match
+        }
+
+        // Pick this node if better score, or same score but shorter name
+        if (score > bestScore || (score === bestScore && score > 0 && n.id.length < bestLength)) {
+          bestScore = score;
+          bestLength = n.id.length;
+          matchingNode = n;
+        }
+      }
+
+      if (matchingNode && nodePositions.has(matchingNode.id)) {
+        const pos = nodePositions.get(matchingNode.id);
+        currentHighlightNode = matchingNode;
+
+        // Create highlight shape based on node type
+        if (matchingNode.type === 'function') {
+          highlightCircle = g.insert('circle', ':first-child')
+            .attr('class', 'search-highlight active')
+            .attr('cx', pos.x)
+            .attr('cy', pos.y)
+            .attr('r', 25);
+        } else {
+          highlightRect = g.insert('rect', ':first-child')
+            .attr('class', 'search-highlight active')
+            .attr('x', pos.x - 30)
+            .attr('y', pos.y - 15)
+            .attr('width', 60)
+            .attr('height', 30)
+            .attr('rx', 5);
+        }
+
+        // Pan to the node
+        const scale = 1.5;
+        const transform = d3.zoomIdentity
+          .translate(width / 2, height / 2)
+          .scale(scale)
+          .translate(-pos.x, -pos.y);
+
+        svg.transition()
+          .duration(500)
+          .call(zoom.transform, transform);
+      }
+    }
+
+    // Update highlight position when simulation ticks
+    function updateHighlightPosition() {
+      if (currentHighlightNode && nodePositions.has(currentHighlightNode.id)) {
+        const pos = nodePositions.get(currentHighlightNode.id);
+        if (highlightCircle) {
+          highlightCircle.attr('cx', pos.x).attr('cy', pos.y);
+        }
+        if (highlightRect) {
+          highlightRect.attr('x', pos.x - 30).attr('y', pos.y - 15);
+        }
+      }
+    }
+
+    searchBox.addEventListener('input', (e) => {
+      highlightNode(e.target.value);
+    });
+
+    searchBox.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        searchBox.value = '';
+        highlightNode('');
+        searchBox.blur();
+      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        // Cmd/Ctrl+Enter opens GitHub link for the highlighted node
+        if (currentHighlightNode) {
+          const snapshot = timeline[currentIndex];
+          const file = currentHighlightNode.file || 'src/nnsight/intervention/base.py';
+          const url = `https://github.com/${REPO}/blob/${snapshot.hash}/${file}#L${currentHighlightNode.line}`;
+          window.open(url, '_blank');
+        }
+      }
+    });
+
+    // Keyboard shortcut: / to focus search
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && document.activeElement !== searchBox) {
+        e.preventDefault();
+        searchBox.focus();
+        searchBox.select();
+      }
+    });
+  </script>
+</body>
+</html>
