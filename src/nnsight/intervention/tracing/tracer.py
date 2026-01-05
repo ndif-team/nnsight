@@ -357,7 +357,7 @@ class InterleavingTracer(Tracer):
         if self.args:
 
             invoker = self.invoke(*self.args, _info=self.info.copy())
-
+            
             invoker.__exit__(ExitTracingException, None, None)
 
             invoker.info.start_line = 0
@@ -367,7 +367,7 @@ class InterleavingTracer(Tracer):
             ]
 
         self.info.source = [
-            f"def __nnsight_tracer_{id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
+            f"def __nnsight_tracer_{abs(self.info.cache_key) if self.info.cache_key is not None else id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
             f"    {self.tracer_var_name}.pull()\n",
             *self.info.source,
             f"    {self.tracer_var_name}.get_frame()\n",
