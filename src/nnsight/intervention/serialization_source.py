@@ -288,6 +288,80 @@ def check_forbidden_or_raise(name: str, obj: Any) -> None:
 
 
 # =============================================================================
+# Disambiguation Helpers
+# =============================================================================
+# These functions support the hybrid disambiguation strategy described in
+# disambiguation-design.md. They detect problematic patterns like nonlocal
+# closures and mutable class attributes that cannot be properly serialized.
+
+class _NonlocalFinder(ast.NodeVisitor):
+    """AST visitor to find nonlocal statements in a function body."""
+
+    def __init__(self):
+        self.nonlocal_names = set()
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.nonlocal_names.update(node.names)
+        self.generic_visit(node)
+
+
+def _has_nonlocal_closure(func: Any) -> Tuple[bool, Set[str]]:
+    """
+    Check if a function uses nonlocal to capture mutable closure state.
+
+    This pattern cannot be correctly serialized because nonlocal requires
+    the captured variable to exist in an enclosing function's scope, not
+    in globals.
+
+    Args:
+        func: The function to check
+
+    Returns:
+        Tuple of (has_nonlocal, set of nonlocal variable names)
+    """
+    try:
+        source = inspect.getsource(func)
+        tree = ast.parse(textwrap.dedent(source))
+    except (OSError, TypeError, SyntaxError):
+        return False, set()
+
+    finder = _NonlocalFinder()
+    finder.visit(tree)
+
+    return len(finder.nonlocal_names) > 0, finder.nonlocal_names
+
+
+def _check_mutable_class_attributes(cls: type) -> List[Tuple[str, str]]:
+    """
+    Check for mutable class-level attributes that won't survive round-trip.
+
+    Class attributes are reset to their source-code values during deserialization.
+    If they've been mutated (e.g., a list that items were appended to), those
+    mutations will be lost.
+
+    Args:
+        cls: The class to check
+
+    Returns:
+        List of (attr_name, attr_type) tuples for mutable class attributes
+    """
+    mutable_attrs = []
+
+    # Get class-level attributes (not instance attributes)
+    for name, value in vars(cls).items():
+        # Skip private/magic attributes and methods
+        if name.startswith('_') or callable(value):
+            continue
+
+        # Check for mutable types
+        if isinstance(value, (list, dict, set)):
+            type_name = type(value).__name__
+            mutable_attrs.append((name, type_name))
+
+    return mutable_attrs
+
+
+# =============================================================================
 # Remote Metadata Extraction
 # =============================================================================
 # Helper functions to extract metadata from @remote decorated objects.
@@ -407,27 +481,20 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
     # Check cache first
     if cls in _auto_discovered_cache:
         cached = _auto_discovered_cache[cls]
-        if cls_name not in discovered:
-            discovered[cls_name] = cached
+        if cls_qualified not in discovered:
+            discovered[cls_qualified] = cached
         return cached
 
-    # Check for name collision (same name, different class)
-    if cls_name in discovered:
-        existing = discovered[cls_name]
-        existing_qualified = existing.get('qualified_name', cls_name)
-        if existing_qualified != cls_qualified:
-            raise SourceSerializationError(
-                f"Class name collision: '{cls_name}' from '{cls_module}' conflicts with "
-                f"'{existing_qualified}'. Two different classes with the same name cannot "
-                f"be serialized together. Consider renaming one of the classes."
-            )
+    # Already discovered this exact class
+    if cls_qualified in discovered:
+        return discovered[cls_qualified]
 
     # Already @remote decorated - use existing metadata
     if getattr(cls, '_remote_validated', False):
         result = _get_remote_metadata(cls)
-        result['qualified_name'] = cls_qualified  # Track for collision detection
+        result['qualified_name'] = cls_qualified
         _auto_discovered_cache[cls] = result
-        discovered[cls_name] = result
+        discovered[cls_qualified] = result
         return result
 
     # Get file/line info first (for error messages)
@@ -503,6 +570,18 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
                 "\n".join(f"  - {e}" for e in all_errors[:3])
             )
 
+    # Check for mutable class attributes (see disambiguation-design.md)
+    # These are reset to source values on deserialization, so mutations are lost
+    mutable_attrs = _check_mutable_class_attributes(cls)
+    if mutable_attrs:
+        import warnings
+        attrs_str = ', '.join(f"'{name}' (type: {type_name})" for name, type_name in mutable_attrs)
+        warnings.warn(
+            f"Class '{cls_name}' has mutable class attribute(s): {attrs_str}.\n"
+            f"Class attributes are reset to source values during remote execution.\n"
+            f"Current values will not be preserved. Consider using module-level state instead."
+        )
+
     # Auto-detect library/version
     library = None
     version = None
@@ -530,9 +609,9 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
         "qualified_name": cls_qualified,  # For collision detection
     }
 
-    # Cache and record
+    # Cache and record using qualified name
     _auto_discovered_cache[cls] = result
-    discovered[cls_name] = result
+    discovered[cls_qualified] = result
 
     # Recursively discover base classes (except object and allowed bases)
     for base in cls.__bases__:
@@ -546,7 +625,8 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
 
     # Recursively discover type references found in the source
     for dep_type in types_to_discover:
-        if dep_type.__name__ not in discovered:
+        dep_qualified = f"{dep_type.__module__}.{dep_type.__name__}"
+        if dep_qualified not in discovered:
             auto_discover_class(dep_type, discovered)
 
     return result
@@ -1016,8 +1096,28 @@ def _auto_discover_function(func: Any) -> Dict[str, Any]:
     Auto-discover a function for remote serialization.
 
     Similar to auto_discover_class but for standalone functions.
+    Uses fully qualified names for disambiguation.
     """
     func_name = func.__name__
+    func_module = getattr(func, '__module__', '__main__')
+    func_qualified = f"{func_module}.{func_name}"
+
+    # Check for nonlocal closures (forbidden - see disambiguation-design.md)
+    has_nonlocal, nonlocal_names = _has_nonlocal_closure(func)
+    if has_nonlocal:
+        names_str = ', '.join(sorted(nonlocal_names))
+        raise SourceSerializationError(
+            f"Function '{func_name}' captures mutable closure variable(s) "
+            f"'{names_str}' via nonlocal. This cannot be serialized for remote execution.\n"
+            f"\n"
+            f"Workaround: Refactor to use a class with instance state:\n"
+            f"    class Counter:\n"
+            f"        def __init__(self):\n"
+            f"            self.count = 0\n"
+            f"        def increment(self):\n"
+            f"            self.count += 1\n"
+            f"            return self.count"
+        )
 
     # Get file/line info
     try:
@@ -1086,6 +1186,11 @@ def _auto_discover_function(func: Any) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # Track __globals__ identity for namespace grouping (see disambiguation-design.md)
+    globals_id = None
+    if hasattr(func, '__globals__'):
+        globals_id = id(func.__globals__)
+
     return {
         "source": {
             "code": dedented_source,
@@ -1097,26 +1202,36 @@ def _auto_discover_function(func: Any) -> Dict[str, Any]:
         "type": "function",
         "library": library,
         "version": version,
+        "qualified_name": func_qualified,
+        "globals_id": globals_id,  # For namespace group detection
     }
 
 
 def extract_auto_discovered_function(var_name: str, func: Any, result: Dict[str, Any]) -> None:
     """
     Extract an auto-discovered function for serialization.
-    """
-    func_name = func.__name__
 
-    if func_name not in result:
-        result[func_name] = _auto_discover_function(func)
+    Uses fully qualified names as keys to avoid collisions between
+    functions with the same short name from different modules.
+    """
+    func_module = getattr(func, '__module__', '__main__')
+    func_qualified = f"{func_module}.{func.__name__}"
+
+    if func_qualified not in result:
+        result[func_qualified] = _auto_discover_function(func)
 
 
 def extract_auto_discovered_type(var_name: str, cls: type, result: Dict[str, Any]) -> None:
     """
     Extract an auto-discovered class type (not instance) for serialization.
-    """
-    cls_name = cls.__name__
 
-    if cls_name not in result:
+    Uses fully qualified names as keys to avoid collisions between
+    classes with the same short name from different modules.
+    """
+    # Use qualified name as key to prevent collisions
+    cls_qualified = f"{cls.__module__}.{cls.__name__}"
+
+    if cls_qualified not in result:
         discovered = {}
         auto_discover_class(cls, discovered)
         result.update(discovered)
@@ -1134,19 +1249,21 @@ def extract_auto_discovered_object(
     Similar to extract_remote_object but for non-@remote classes.
     """
     cls = type(value)
-    cls_name = cls.__name__
+    # Use qualified name as key to prevent collisions between classes
+    # with the same short name from different modules
+    cls_qualified = f"{cls.__module__}.{cls.__name__}"
 
     # Auto-discover the class if not already in result
-    if cls_name not in result:
+    if cls_qualified not in result:
         discovered = {}
         auto_discover_class(cls, discovered)
         result.update(discovered)
 
     # Serialize instance state
     instance_state = serialize_instance_state(value, discovered_classes=result, traced_model=traced_model)
-    if "instances" not in result[cls_name]:
-        result[cls_name]["instances"] = {}
-    result[cls_name]["instances"][str(id(value))] = {
+    if "instances" not in result[cls_qualified]:
+        result[cls_qualified]["instances"] = {}
+    result[cls_qualified]["instances"][str(id(value))] = {
         "var_name": var_name,
         "state": instance_state
     }
@@ -1715,26 +1832,28 @@ def extract_remote_object(var_name: str, value: Any, result: Dict[str, Any], tra
         # It's a class
         cls = value
         is_instance = False
-    elif callable(value) and hasattr(value, '_remote_source'):
-        # It's a function
+    elif isinstance(value, types.FunctionType) and hasattr(value, '_remote_source'):
+        # It's a @remote decorated function (not a callable instance like nn.Module)
         cls = value
         is_instance = False
     else:
-        # It's an instance
+        # It's an instance (including nn.Module instances which are callable)
         cls = type(value)
         is_instance = True
 
-    cls_name = cls.__name__
+    # Use qualified name as key to prevent collisions between classes
+    # with the same short name from different modules
+    cls_qualified = f"{cls.__module__}.{cls.__name__}"
 
     # Create entry for this class/function if not exists
-    if cls_name not in result:
-        result[cls_name] = _get_remote_metadata(cls)
+    if cls_qualified not in result:
+        result[cls_qualified] = _get_remote_metadata(cls)
 
     # For instances, serialize their state
     if is_instance:
         # Pass result as discovered_classes so any new dependencies get added
         instance_state = serialize_instance_state(value, discovered_classes=result, traced_model=traced_model)
-        result[cls_name]["instances"][str(id(value))] = {
+        result[cls_qualified]["instances"][str(id(value))] = {
             "var_name": var_name,
             "state": instance_state
         }
@@ -1974,17 +2093,17 @@ def serialize_value(value: Any, key: str, memo: dict, discovered_classes: Dict[s
     # Handle auto-discoverable instances (user-defined classes, including nn.Module subclasses)
     if is_auto_discoverable_instance(value) or is_remote_object(value):
         cls = type(value)
-        cls_name = cls.__name__
+        cls_qualified = f"{cls.__module__}.{cls.__name__}"
 
         # Auto-discover the class if not already discovered
-        if cls_name not in discovered_classes:
+        if cls_qualified not in discovered_classes:
             auto_discover_class(cls, discovered_classes)
 
-        # Serialize like a @remote instance
+        # Serialize with fully qualified class name
         ref_id = f"auto_{obj_id}"
         serialized_dict = {}
         result = {
-            CLASS_MARKER: cls_name,
+            CLASS_MARKER: cls_qualified,
             DICT_MARKER: serialized_dict,
             ID_MARKER: ref_id,
         }
@@ -2357,7 +2476,9 @@ def deserialize_source_based(
         namespace['model'] = model
 
     # Reconstruct @nnsight.remote functions and classes
-    for obj_name, obj_data in data.get('remote_objects', {}).items():
+    # Note: Keys are now qualified names (e.g., 'mymodule.MyClass') for disambiguation,
+    # but exec creates objects with their short names. We extract the short name for lookup.
+    for obj_qualified_name, obj_data in data.get('remote_objects', {}).items():
         # Add captured module-level references
         namespace.update(obj_data.get('module_refs', {}))
 
@@ -2375,12 +2496,20 @@ def deserialize_source_based(
             source_file = '<unknown>'
             start_line = 1
 
+        # Extract short name from qualified name for namespace lookup
+        # Qualified name format: 'module.submodule.ClassName' -> 'ClassName'
+        # For backwards compatibility, handle both qualified and short names
+        if '.' in obj_qualified_name:
+            obj_short_name = obj_qualified_name.split('.')[-1]
+        else:
+            obj_short_name = obj_qualified_name
+
         # Handle different types
         obj_type = obj_data.get('type', 'function')
 
         if obj_type == 'lambda':
             # Lambda: wrap in assignment and execute
-            var_name = obj_data.get('var_name', obj_name)
+            var_name = obj_data.get('var_name', obj_short_name)
             lambda_assignment = f"{var_name} = {source_code}"
             exec_func(lambda_assignment, namespace, source_file, start_line)
         else:
@@ -2389,7 +2518,7 @@ def deserialize_source_based(
 
             # For classes, reconstruct instances
             if obj_type == 'class':
-                cls = namespace[obj_name]
+                cls = namespace[obj_short_name]
                 for instance_id, instance_data in obj_data.get('instances', {}).items():
                     # Create instance without calling __init__
                     obj = object.__new__(cls)
@@ -2474,12 +2603,19 @@ def reconstruct_value(value: Any, namespace: dict, model: Any, reconstructed: di
 
     # User-defined class instance (auto-discovered or @remote)
     if CLASS_MARKER in value:
-        cls_name = value[CLASS_MARKER]
+        cls_qualified = value[CLASS_MARKER]
+
+        # Extract short name from qualified name for namespace lookup
+        # Qualified name format: 'module.submodule.ClassName' -> 'ClassName'
+        if '.' in cls_qualified:
+            cls_short_name = cls_qualified.split('.')[-1]
+        else:
+            cls_short_name = cls_qualified
 
         # Get class from namespace (should have been exec'd from source)
-        cls = namespace.get(cls_name)
+        cls = namespace.get(cls_short_name)
         if cls is None:
-            raise ValueError(f"Class '{cls_name}' not found in namespace")
+            raise ValueError(f"Class '{cls_qualified}' not found in namespace")
 
         # Create instance without __init__
         instance = object.__new__(cls)

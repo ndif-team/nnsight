@@ -207,7 +207,12 @@ def _apply_remote(obj: Union[Type, Callable], version: str = None, library: str 
     """Internal implementation of the @remote decorator."""
 
     # If already validated (e.g., during deserialization round-trip), just return
-    if getattr(obj, '_remote_validated', False):
+    # For classes, we must check __dict__ directly to avoid inheriting from parent class.
+    # A child class should be validated separately even if its parent was already validated.
+    if isinstance(obj, type):
+        if obj.__dict__.get('_remote_validated', False):
+            return obj
+    elif getattr(obj, '_remote_validated', False):
         return obj
 
     # Auto-detect library/version from package metadata if not provided

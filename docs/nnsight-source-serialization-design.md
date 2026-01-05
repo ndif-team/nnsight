@@ -426,6 +426,24 @@ class MyClass:
 # ✓ Closure variables in methods captured (including __init_subclass__)
 ```
 
+### Inheritance Handling
+
+When a class inherits from a `@remote` decorated parent, both classes must be validated separately. The decorator checks the class's own `__dict__` rather than using `getattr()` to avoid inheriting the `_remote_validated` flag from the parent:
+
+```python
+@remote
+class Parent:
+    def method(self):
+        return 1
+
+@remote
+class Child(Parent):  # Child gets its OWN _remote_source
+    def method(self):
+        return 2
+```
+
+Without this check, `Child` would incorrectly inherit `Parent`'s `_remote_source` attribute, causing the wrong source code to be serialized. Each class in the hierarchy must capture its own source.
+
 ### Module-Level Reference Handling
 
 The decorator intelligently handles module-level references by checking what they resolve to:
