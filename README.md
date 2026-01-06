@@ -1,12 +1,27 @@
-<img src="./nnsight_logo.svg" alt="drawing" style="width:200px;float:left"/>
+<p align="center">
+  <img src="./nnsight_logo.svg" alt="nnsight" width="300">
+</p>
 
-# nnsight 
+<h3 align="center">
+Interpret and manipulate the internals of deep learning models
+</h3>
 
-[![arXiv](https://img.shields.io/badge/READ%20THE%20PAPER%20HERE!-orange)](https://arxiv.org/abs/2407.14561)
-[![Docs](https://img.shields.io/badge/-Read%20the%20Docs%20Here-blue?style=for-the-badge&logo=Read-the-Docs&logoColor=white)](https://www.nnsight.net)
-[![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/6uFJmCSwW7)
+<p align="center">
+| <a href="https://www.nnsight.net"><b>Documentation</b></a> | <a href="https://github.com/ndif-team/nnsight"><b>GitHub</b></a> | <a href="https://discord.gg/6uFJmCSwW7"><b>Discord</b></a> | <a href="https://discuss.ndif.us/"><b>Forum</b></a> | <a href="https://x.com/ndif_team"><b>Twitter</b></a> | <a href="https://arxiv.org/abs/2407.14561"><b>Paper</b></a> |
+</p>
 
-The `nnsight` package enables interpreting and manipulating the internals of deep learned models. Read our [paper!](https://arxiv.org/abs/2407.14561)
+---
+
+## About
+
+**nnsight** is a Python library that enables interpreting and intervening on the internals of deep learning models. It provides a clean, Pythonic interface for:
+
+- **Accessing activations** at any layer during forward passes
+- **Modifying activations** to study causal effects
+- **Computing gradients** with respect to intermediate values
+- **Batching interventions** across multiple inputs efficiently
+
+Originally developed in the [NDIF team](https://ndif.us/) at Northeastern University, nnsight supports local execution on any PyTorch model and remote execution on large models via the NDIF infrastructure.
 
 ## Installation
 
@@ -33,6 +48,8 @@ with model.trace('The Eiffel Tower is in the city of'):
 
 print(model.tokenizer.decode(output.logits.argmax(dim=-1)[0]))
 ```
+
+> **💡 Tip:** Always call `.save()` on values you want to access after the trace exits. Without `.save()`, values are garbage collected. You can also use `nnsight.save(value)` as an alternative.
 
 ---
 
@@ -366,6 +383,7 @@ with model.trace("Hello"):
     
     # .save() marks the value to persist after the context exits
     hs = hs.save()
+    # Alternative: hs = nnsight.save(hs)
 
 # After exiting, hs contains the actual tensor
 print(hs.shape)  # torch.Size([1, 2, 768])
