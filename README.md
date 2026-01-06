@@ -37,11 +37,11 @@ from nnsight import LanguageModel
 model = LanguageModel('openai-community/gpt2', device_map='auto', dispatch=True)
 
 with model.trace('The Eiffel Tower is in the city of'):
-    # Access and save hidden states
-    hidden_states = model.transformer.h[-1].output[0].save()
-    
-    # Intervene on activations
+    # Intervene on activations (must access in execution order!)
     model.transformer.h[0].output[0][:] = 0
+    
+    # Access and save hidden states from a later layer
+    hidden_states = model.transformer.h[-1].output[0].save()
     
     # Get model output
     output = model.output.save()
@@ -180,6 +180,16 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
         
         outputs.append(model.transformer.h[-1].output[0])
 ```
+
+> **⚠️ Warning:** Code after `tracer.iter[:]` never executes! The unbounded iterator waits forever for more steps. Put post-iteration code in a separate `tracer.invoke()`:
+> ```python
+> with model.generate("Hello", max_new_tokens=3) as tracer:
+>     with tracer.invoke():  # First invoker
+>         with tracer.iter[:]:
+>             hidden = model.transformer.h[-1].output.save()
+>     with tracer.invoke():  # Second invoker - runs after
+>         final = model.output.save()  # Now works!
+> ```
 
 ---
 
@@ -423,6 +433,18 @@ print(model)
 #   (lm_head): Linear(...)
 # )
 ```
+
+---
+
+## Troubleshooting
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `OutOfOrderError: Value was missed...` | Accessed modules in wrong order | Access modules in forward-pass execution order |
+| `NameError` after `tracer.iter[:]` | Code after unbounded iter doesn't run | Use separate `tracer.invoke()` for post-iteration code |
+| `ValueError: Cannot return output of Envoy...` | No input provided to trace | Provide input: `model.trace(input)` or use `tracer.invoke(input)` |
+
+For more debugging tips, see the [documentation](https://www.nnsight.net).
 
 ---
 
