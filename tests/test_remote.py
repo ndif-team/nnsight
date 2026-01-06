@@ -15,7 +15,7 @@ from nnsight import LanguageModel, CONFIG
 
 # Configure API key for testing
 # In production, use CONFIG.set_default_api_key() once
-CONFIG.API.APIKEY = "b5320d07763a43ad95644842a0d4ff09"
+CONFIG.API.APIKEY = "<key here>"
 
 # Check if model is available before running tests
 MODEL_ID = "openai-community/gpt2"
