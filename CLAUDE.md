@@ -189,13 +189,56 @@ with model.trace("The Eiffel Tower is in"):
     hidden_states = model.transformer.h[-1].output[0].save()
 ```
 
+**How LanguageModel Works:**
+
+`LanguageModel` is a thin wrapper around HuggingFace's `transformers` library. Under the hood, it uses `AutoModelForCausalLM.from_pretrained()` (or similar Auto classes) to load the model. This means:
+
+1. **Keyword arguments are forwarded** - Any kwargs you pass to `LanguageModel()` are forwarded directly to the underlying HuggingFace loading function
+2. **Same model, enhanced interface** - The wrapped model is identical to what you'd get from `transformers`, but with NNsight's intervention capabilities added
+3. **Tokenizer included** - The appropriate tokenizer is loaded automatically alongside the model
+
+```python
+# These kwargs are passed directly to AutoModelForCausalLM.from_pretrained()
+model = LanguageModel(
+    "meta-llama/Llama-3.1-8B",
+    device_map="auto",           # HuggingFace accelerate device mapping
+    torch_dtype=torch.float16,   # Precision setting
+    trust_remote_code=True,      # For custom model code
+    attn_implementation="flash_attention_2",  # Attention backend
+)
+```
+
 **Important `LanguageModel` parameters:**
 
 | Parameter | Description |
 |-----------|-------------|
-| `device_map` | Device placement (e.g., `"auto"`, `"cuda"`, `"cpu"`) |
-| `dispatch=True` | Load model into memory immediately (default: lazy loading) |
+| `device_map` | Device placement - `"auto"` distributes layers across available GPUs (and CPU if needed). Uses HuggingFace Accelerate. Other options: `"cuda"`, `"cpu"`, or a custom dict |
+| `dispatch=True` | Load model weights into memory immediately. Default is lazy loading (meta tensors) which is faster for initialization but requires dispatch before use |
+| `torch_dtype` | Model precision (e.g., `torch.float16`, `torch.bfloat16`). Forwarded to HuggingFace |
 | `rename={...}` | Create module aliases (see [Module Renaming](#module-renaming)) |
+
+**Note on `device_map="auto"`:** This tells HuggingFace Accelerate to automatically distribute model layers across all available GPUs. If the model doesn't fit on GPUs, it will offload to CPU. This is the recommended setting for large models.
+
+**Wrapping pre-loaded models:**
+
+You can wrap an existing HuggingFace model, but **you must provide the tokenizer**:
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Load model yourself
+hf_model = AutoModelForCausalLM.from_pretrained("gpt2")
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
+# MUST provide tokenizer
+model = LanguageModel(hf_model, tokenizer=tokenizer)
+```
+
+Without `tokenizer=`, you'll get:
+```
+AttributeError: Tokenizer not found. If you passed a pre-loaded model to 
+`LanguageModel`, you need to provide a tokenizer when initializing.
+```
 
 ---
 
@@ -250,7 +293,7 @@ The tracing context returns a `tracer` object with useful methods:
 
 ```python
 with model.trace("Hello") as tracer:
-    tracer.log("Debug message:", model.layer1.output)  # Print during execution
+    print("Debug:", model.layer1.output.shape)  # Print works normally
     tracer.stop()  # Early termination
 ```
 
@@ -560,6 +603,43 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
     hs3 = model.transformer.h[-1].next().output[0].save()
 ```
 
+### ⚠️ Critical Footgun: Unbounded Iteration
+
+**When using `tracer.iter[:]` or `tracer.all()`, code AFTER the iter block never executes.**
+
+These unbounded iterators don't know when to stop — they wait forever for the "next" iteration. When generation finishes:
+
+1. The iterator is still waiting for more iterations
+2. NNsight issues a warning (not an error)
+3. **All code after the iter block is skipped**
+
+```python
+# WRONG:
+with model.generate("Hello", max_new_tokens=3) as tracer:
+    with tracer.iter[:]:
+        hidden = model.transformer.h[-1].output.save()
+    
+    # ⚠️ THIS NEVER EXECUTES!
+    final_logits = model.output.save()
+
+print(final_logits)  # NameError: 'final_logits' is not defined
+```
+
+**Solutions:**
+
+1. **Use a separate empty invoker** (recommended):
+   ```python
+   with model.generate("Hello", max_new_tokens=3) as tracer:
+       with tracer.invoke():  # First invoker - handles iteration
+           with tracer.iter[:]:
+               hidden = model.transformer.h[-1].output.save()
+       
+       with tracer.invoke():  # Second invoker - runs after generation
+           final_logits = model.output.save()  # Now runs!
+   ```
+2. **Use bounded iteration** if you know the count: `tracer.iter[:3]`
+3. **Use `tracer.next()`** for explicit step control
+
 ---
 
 ## Gradients and Backpropagation
@@ -576,6 +656,17 @@ When you use `with tensor.backward():`, nnsight creates a **completely separate 
 4. After the backward context exits, the original forward trace resumes
 
 This means: **get any `.output` values you need BEFORE entering the backward context**.
+
+### Gradient Access Order (Reverse of Forward Pass)
+
+Just like the forward pass requires accessing modules in execution order, **the backward pass requires accessing gradients in reverse order**. This is because gradients flow backwards through the model:
+
+```
+Forward pass order:  layer0 → layer1 → ... → layer11 → lm_head → loss
+Backward pass order: loss → lm_head → layer11 → ... → layer1 → layer0
+```
+
+If you accessed `layer5.output` and `layer10.output` during the forward pass, you must access their gradients in reverse: `layer10.grad` first, then `layer5.grad`.
 
 ### Accessing Gradients
 
@@ -1000,37 +1091,138 @@ with model.trace(max_tokens=3) as tracer:
 
 ## Remote Execution (NDIF)
 
-Run on NDIF's remote infrastructure:
+Run interventions on NDIF's remote infrastructure without local GPU resources.
 
-### Configuration
+### Setup
 
 ```python
 from nnsight import CONFIG
+import nnsight
 
+# Set API key (get from login.ndif.us)
 CONFIG.set_default_api_key("YOUR_API_KEY")
+
+# Check available models
+nnsight.ndif_status()
+
+# Check if specific model is running (may return False even if available)
+nnsight.is_model_running("openai-community/gpt2")
 ```
 
-### Remote Tracing
+### Basic Remote Tracing
 
 ```python
-model = LanguageModel("meta-llama/Meta-Llama-3.1-8B")
+# Model loads on 'meta' device - no local GPU memory used
+model = LanguageModel("meta-llama/Llama-3.1-8B")
+print(model.device)  # "meta"
 
-with model.trace("Hello", remote=True):
-    hidden_states = model.model.layers[-1].output.save()
+# Add remote=True to execute on NDIF
+with model.trace("The Eiffel Tower is in the city of", remote=True):
+    logit = model.lm_head.output[0][-1].argmax(dim=-1).save()
+
+print(model.tokenizer.decode(logit))  # "Paris"
 ```
 
 ### Remote Generation
 
 ```python
-with model.generate("Hello", remote=True, max_new_tokens=10):
-    output = model.generator.output.save()
+with model.generate("Hello", max_new_tokens=5, remote=True) as tracer:
+    # Use tracer.result for generation output
+    output = tracer.result.save()
+    
+    # Or iterate over generation steps
+    logits = list().save()
+    with tracer.iter[:]:
+        logits.append(model.lm_head.output[0][-1].argmax(dim=-1))
+
+print(model.tokenizer.decode(output[0]))
+```
+
+### Request Lifecycle
+
+When you run a remote trace, you'll see status updates:
+
+| Status | Description |
+|--------|-------------|
+| `RECEIVED` | Request validated with API key |
+| `QUEUED` | Waiting in model's queue |
+| `DISPATCHED` | Forwarded to model deployment |
+| `RUNNING` | Executing your intervention |
+| `LOG` | Print statements from your code |
+| `COMPLETED` | Results ready for download |
+
+### Print Statements in Remote Traces
+
+Print statements inside remote traces are captured and sent back as `LOG` status:
+
+```python
+with model.trace("Hello", remote=True):
+    hidden = model.transformer.h[0].output[0]
+    print(f"Hidden shape: {hidden.shape}")  # Appears as LOG
+    print(f"Hidden mean: {hidden.mean()}")  # Appears as LOG
+    output = model.lm_head.output.save()
+```
+
+### Saving Results Remotely
+
+**Critical:** `.save()` is how values are transmitted back to your local environment.
+
+```python
+# WRONG: Local list won't be updated
+my_list = list()
+with model.trace("Hello", remote=True):
+    my_list.append(model.output.save())  # Local list stays empty!
+
+# CORRECT: Create and save inside the trace
+with model.trace("Hello", remote=True):
+    my_list = list().save()  # Create inside trace
+    my_list.append(model.output)
+
+# Best practice: move tensors to CPU for smaller downloads
+with model.trace("Hello", remote=True):
+    hidden = model.transformer.h[0].output[0].detach().cpu().save()
+```
+
+### Non-Blocking Execution
+
+Submit jobs without waiting:
+
+```python
+with model.trace("Hello", remote=True, blocking=False) as tracer:
+    output = model.lm_head.output.save()
+
+# Get backend to check status
+backend = tracer.backend
+print(backend.job_id)      # UUID
+print(backend.job_status)  # JobStatus.RECEIVED
+
+# Poll for result
+import time
+while True:
+    result = backend()  # Returns None if not complete
+    if result is not None:
+        break
+    print(f"Status: {backend.job_status}")
+    time.sleep(1)
+
+# Result is a dict with variable names as keys
+print(result.keys())        # dict_keys(['id', 'output'])
+print(result['output'].shape)
+```
+
+### Disable Remote Logging
+
+```python
+CONFIG.APP.REMOTE_LOGGING = False
 ```
 
 ---
 
 ## Sessions
 
-Group multiple traces for efficiency:
+Group multiple traces for shared state and efficiency.
+
+### Local Sessions
 
 ```python
 with model.session() as session:
@@ -1046,15 +1238,32 @@ with model.session() as session:
 
 ### Remote Sessions
 
+Sessions are especially powerful for remote execution — they bundle multiple traces into a **single request**:
+
 ```python
-with model.session(remote=True) as session:
-    with model.trace("Prompt 1"):
-        hs = model.model.layers[31].output[0][:, -1, :]
+# Single request, single queue wait
+with model.session(remote=True):
+    # First trace: capture hidden states
+    with model.trace("Megan Rapinoe plays the sport of"):
+        hs = model.model.layers[5].output[0][:, -1, :]  # No .save() needed!
     
-    with model.trace("Prompt 2"):
-        model.model.layers[1].output[0][:, -1, :] = hs
-        output = model.lm_head.output.save()
+    # Second trace: clean baseline
+    with model.trace("Shaquille O'Neal plays the sport of"):
+        clean = model.lm_head.output[0][-1].argmax(dim=-1).save()
+    
+    # Third trace: patch the hidden states
+    with model.trace("Shaquille O'Neal plays the sport of"):
+        model.model.layers[5].output[0][:, -1, :] = hs  # Direct reference works!
+        patched = model.lm_head.output[0][-1].argmax(dim=-1).save()
+
+print(f"Clean: {model.tokenizer.decode(clean)}")
+print(f"Patched: {model.tokenizer.decode(patched)}")
 ```
+
+**Benefits of remote sessions:**
+- Single queue wait for all traces
+- Values from earlier traces accessible directly (no `.save()` needed)
+- Only put `remote=True` on the session, not inner traces
 
 ---
 
@@ -1106,6 +1315,26 @@ with model.trace("The Eiffel Tower is in"):
         logits = model.lm_head(model.transformer.ln_f(hs))
         tokens = logits.argmax(dim=-1).save()
         print(f"Layer {i}:", model.tokenizer.decode(tokens[0][-1]))
+```
+
+**Why this works:** When you call `model.lm_head(...)` inside a trace, it uses `.forward()` instead of `__call__()`, bypassing interleaving hooks. This means the module's computation runs without triggering `.input`/`.output` hooks.
+
+### Using Auxiliary Modules (SAEs, LoRA, etc.)
+
+When you add auxiliary modules to a model (like SAEs or LoRA adapters), use `hook=True` to enable `.input`/`.output` access on them:
+
+```python
+# Assume model.sae is an auxiliary SAE module you've added
+with model.trace() as tracer:
+    # First invoke: apply the SAE with hooks enabled
+    with tracer.invoke("Hello"):
+        hidden = model.transformer.h[5].output[0]
+        reconstructed = model.sae(hidden, hook=True)  # Enable hooks!
+        model.transformer.h[5].output[0] = reconstructed
+    
+    # Second invoke: access the SAE's activations
+    with tracer.invoke("Hello"):
+        sae_activations = model.sae.output.save()  # Works because we used hook=True
 ```
 
 ### Ablation Study
@@ -1291,14 +1520,91 @@ with model.trace("Hello"):
 
 ---
 
-## Debugging Tips
+## Understanding Exceptions in NNsight
 
-### 1. Use `tracer.log()` for Runtime Inspection
+Debugging in NNsight can be tricky because of **deferred execution**. Your intervention code is captured, compiled into a function, and run in a worker thread — not where you wrote it. Without special handling, exceptions would point to internal NNsight code instead of your original trace.
+
+### How NNsight Fixes This
+
+NNsight **reconstructs exception tracebacks** to show your original code and line numbers. When an exception occurs:
+
+1. NNsight catches it at the trace boundary
+2. Maps the internal line numbers back to your source file
+3. Rebuilds the traceback to look like a normal Python exception
+
+**What you see:**
+```
+Traceback (most recent call last):
+  File "my_experiment.py", line 6, in <module>
+    hidden = model.transformer.h[100].output.save()
+IndexError: list index out of range
+```
+
+This points directly to your code, even though it actually ran in a compiled worker thread.
+
+### Exception Type Preservation
+
+NNsight preserves the original exception type, so you can still catch specific exceptions:
 
 ```python
-with model.trace("Hello") as tracer:
-    tracer.log("Layer 0 output shape:", model.transformer.h[0].output[0].shape)
-    tracer.log("Layer 0 output mean:", model.transformer.h[0].output[0].mean())
+try:
+    with model.trace("Hello"):
+        hidden = model.transformer.h[100].output.save()
+except IndexError:
+    print("Caught the IndexError!")  # This works!
+```
+
+### DEBUG Mode
+
+By default, NNsight hides its internal frames from tracebacks. If the default traceback isn't helpful, enable DEBUG mode to see the full execution path:
+
+```python
+from nnsight import CONFIG
+CONFIG.APP.DEBUG = True
+```
+
+This shows internal NNsight frames, which can help:
+- Understand where in the pipeline an error occurred
+- Provide more context when the user-facing traceback is unclear
+
+### Common Exceptions
+
+| Exception | Cause | Fix |
+|-----------|-------|-----|
+| `OutOfOrderError: Value was missed for model.layer.output.i0` | Accessed modules in wrong order within an invoke | Access modules in forward-pass order |
+| `ValueError: Execution complete but ... was not provided` | Mediator still waiting - module never called or gradient order wrong | Check module path exists; access gradients in reverse order |
+| `ValueError: Cannot return output of Envoy that is not interleaving` | Trace has no input, model never ran | Provide input to `.trace(input)` or use `.invoke()` |
+| `ValueError: Cannot invoke during an active model execution` | Tried to create invoke inside another invoke | Use sequential, non-nested invokes |
+| `ValueError: Cannot request ... in a backwards tracer` | Accessed `.output`/`.input` inside `backward()` instead of `.grad` | Define tensors before backward, access `.grad` inside |
+| `AttributeError: ... has no attribute X` | Nonexistent module accessed | Use `print(model)` to see available modules |
+| `AttributeError: Tokenizer not found` | Wrapped pre-loaded model without providing tokenizer | Provide `tokenizer=` when wrapping pre-loaded models |
+| `NotImplementedError: Batching not implemented` | Multiple invokes on base `NNsight` | Use `LanguageModel` for multiple invokes, or single invoke |
+
+**The `.i0` suffix** in error messages indicates iteration 0 (first call). In generation, you'd see `.i1`, `.i2`, etc.
+
+**Gradient errors show tensor IDs** (like `139820463417744.grad`) instead of module paths because gradients are tracked per-tensor, not per-module.
+
+---
+
+## Debugging Tips
+
+### 1. Use Print and Breakpoints
+
+Print works normally inside traces:
+
+```python
+with model.trace("Hello"):
+    out = model.transformer.h[0].output[0]
+    print("Shape:", out.shape)
+    print("Mean:", out.mean())
+```
+
+Use `breakpoint()` for interactive debugging:
+
+```python
+with model.trace("Hello"):
+    out = model.transformer.h[0].output
+    breakpoint()  # Drops into pdb
 ```
 
 ### 2. Enable Scan and Validate
@@ -1384,6 +1690,36 @@ If you're debugging and want to ensure invokes are isolated:
 CONFIG.APP.CROSS_INVOKER = False  # Now cross-invoke references will error
 ```
 
+### Barrier Synchronization
+
+When **both invokes access the same module**, you need to synchronize them so variables can be shared at that point:
+
+```python
+with llm.trace() as tracer:
+    
+    barrier = tracer.barrier(2)  # Create barrier for 2 participants
+    
+    with tracer.invoke("The Eiffel Tower is in"):
+        paris_embeddings = llm.transformer.wte.output
+        barrier()  # Wait here
+    
+    with tracer.invoke("_ _ _ _ _"):
+        barrier()  # Synchronize
+        llm.transformer.wte.output = paris_embeddings  # Now available!
+        patched_output = llm.lm_head.output[:, -1].save()
+```
+
+Without the barrier, the second invoke would fail with `paris_embeddings is not defined` because both invokes access `wte.output` and invokes normally run serially.
+
+### Re-wrapping the Same Model
+
+If you wrap the same PyTorch model with `NNsight` multiple times, hooks are properly cleaned up and re-applied (not stacked):
+
+```python
+model1 = NNsight(my_pytorch_model)
+model2 = NNsight(my_pytorch_model)  # Safe - hooks replaced, not duplicated
+```
+
 ---
 
 ## API Quick Reference
@@ -1405,10 +1741,10 @@ CONFIG.APP.CROSS_INVOKER = False  # Now cross-invoke references will error
 | `tracer.invoke(input)` | Add input to batch |
 | `tracer.barrier(n)` | Synchronization barrier |
 | `tracer.cache(...)` | Activation caching |
-| `tracer.log(...)` | Runtime logging |
 | `tracer.stop()` | Early termination |
 | `tracer.iter[slice]` | Iterate generation steps |
 | `tracer.all()` | Apply to all steps |
+| `tracer.result` | Get final output of traced function |
 
 ### Module Properties
 
