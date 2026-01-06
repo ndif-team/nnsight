@@ -2,6 +2,14 @@
 
 This document provides comprehensive guidance for AI agents working with the `nnsight` library. NNsight enables interpreting and manipulating the internals states of deep learning models through a deferred execution tracing system.
 
+### Related Resources
+
+- **[NNsight.md](./NNsight.md)** - Deep technical documentation covering nnsight's internal architecture (tracing, interleaving, Envoy system, vLLM integration, etc.)
+- **[Documentation](https://www.nnsight.net)** - Official docs with tutorials, guides, and API reference
+- **[Forum](https://discuss.ndif.us/)** - Community forum for questions, discussions, and troubleshooting
+
+---
+
 ## Quick Reference
 
 ```python

@@ -188,12 +188,37 @@ class VLLM(RemoteableMixin):
 
         return batched_inputs, batch_size
 
+    def generate(
+        self,
+        prompts: List[str],
+        params: List[NNsightSamplingParams],
+    ) -> Any:
+
+        return self.vllm_entrypoint.generate(prompts, sampling_params=params)
+
     def __call__(
         self,
         prompts: List[str],
         params: List[NNsightSamplingParams],
-        **kwargs,
     ) -> Any:
+
+        for param in params:
+            param.max_tokens = 1
+            param.min_tokens = 1
+
+        return self.generate(prompts, params)
+
+    def interleave(
+        self,
+        fn: Callable,
+        prompts: List[str],
+        params: List[NNsightSamplingParams],
+        **kwargs,
+    ):
+
+        if not self.dispatched:
+
+            self.dispatch()
 
         default_param = NNsightSamplingParams.from_optional()
 
@@ -229,30 +254,26 @@ class VLLM(RemoteableMixin):
                     ) == getattr(default_param, attr):
                         setattr(param, attr, value)
 
-        # Do VLLM generation with NNsight
-        outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params)
-
-        saves = {}
-
-        # Some of the output objects will have a saves attribute, which contains the saved variables
-        for output in outputs:
-            if hasattr(output, "saves"):
-                saves.update(output.saves)
-
-        # Save the variables in our local environment
-        for value in saves.values():
-
-            save(value)
-
-        # Push the variables to the interleaver frame
-        push_variables(self._interleaver.mediators[0].info.frame, saves)
-
-    def interleave(self, fn: Callable, *args, **kwargs):
-
         try:
-            fn(*args, **kwargs)
+            outputs = fn(prompts, params)
+
+            saves = {}
+
+            # Some of the output objects will have a saves attribute, which contains the saved variables
+            for output in outputs:
+                if hasattr(output, "saves"):
+                    saves.update(output.saves)
+
+            # Save the variables in our local environment
+            for value in saves.values():
+
+                save(value)
+
+            # Push the variables to the interleaver frame
+            push_variables(self._interleaver.mediators[0].info.frame, saves)
+
         finally:
-            self._interleaver.check_cache_full()
+
             self._interleaver.cancel()
 
 
