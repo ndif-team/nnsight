@@ -23,6 +23,8 @@ Interpret and manipulate the internals of deep learning models
 
 Originally developed in the [NDIF team](https://ndif.us/) at Northeastern University, nnsight supports local execution on any PyTorch model and remote execution on large models via the NDIF infrastructure.
 
+> 📖 For a deeper technical understanding of nnsight's internals (tracing, interleaving, the Envoy system, etc.), see **[NNsight.md](./NNsight.md)**.
+
 ## Installation
 
 ```bash
@@ -448,9 +450,11 @@ For more debugging tips, see the [documentation](https://www.nnsight.net).
 
 ---
 
-## More Examples
+## More Resources
 
-Find more examples and tutorials at [nnsight.net](https://www.nnsight.net)
+- **[Documentation](https://www.nnsight.net)** — Tutorials, guides, and API reference
+- **[NNsight.md](./NNsight.md)** — Deep technical documentation on nnsight
+- **[CLAUDE.md](./CLAUDE.md)** — Comprehensive guide for AI agents working with nnsight
 
 ---
 
