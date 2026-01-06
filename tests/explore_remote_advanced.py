@@ -7,7 +7,7 @@ from nnsight import LanguageModel, CONFIG
 import nnsight
 
 # Set API key
-CONFIG.API.APIKEY = "b5320d07763a43ad95644842a0d4ff09"
+CONFIG.API.APIKEY = "<key here>"
 
 model = LanguageModel("openai-community/gpt2")
 

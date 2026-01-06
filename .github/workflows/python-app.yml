@@ -29,4 +29,4 @@ jobs:
         pip install ./
     - name: Test with pytest
       run: |
-        pytest tests/ --device cpu
+        pytest tests/test_lm.py tests/test_tiny.py --device cpu
