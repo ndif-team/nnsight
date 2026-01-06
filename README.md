@@ -34,6 +34,8 @@ with model.trace('The Eiffel Tower is in the city of'):
 print(model.tokenizer.decode(output.logits.argmax(dim=-1)[0]))
 ```
 
+> **💡 Tip:** Always call `.save()` on values you want to access after the trace exits. Without `.save()`, values are garbage collected. You can also use `nnsight.save(value)` as an alternative.
+
 ---
 
 ## Accessing Activations
@@ -366,6 +368,7 @@ with model.trace("Hello"):
     
     # .save() marks the value to persist after the context exits
     hs = hs.save()
+    # Alternative: hs = nnsight.save(hs)
 
 # After exiting, hs contains the actual tensor
 print(hs.shape)  # torch.Size([1, 2, 768])

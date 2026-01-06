@@ -44,6 +44,7 @@ with model.trace("input text"):
 18. [Common Patterns](#common-patterns)
 19. [Critical Gotchas](#critical-gotchas)
 20. [Debugging Tips](#debugging-tips)
+21. [Configuration](#configuration)
 
 ---
 
@@ -309,6 +310,22 @@ with model.trace("Hello"):
     output = model.transformer.h[-1].output[0].save()
 ```
 
+**Two ways to save:**
+
+```python
+# Method 1: .save() on tensor (uses pymount C extension)
+output = model.transformer.h[-1].output[0].save()
+
+# Method 2: nnsight.save() - PREFERRED (works for all objects)
+import nnsight
+output = nnsight.save(model.transformer.h[-1].output[0])
+
+# nnsight.save() is preferred because:
+# - Works on any object (including those with their own .save() method)
+# - Doesn't require the pymount C extension
+# - More explicit about what's happening
+```
+
 ---
 
 ## Modifying Activations (Interventions)
@@ -460,13 +477,18 @@ decoded = model.tokenizer.decode(output[0])
 
 ### Iterating Over Generation Steps
 
-Use `tracer.iter[...]` to access specific generation steps:
+Use `tracer.iter[...]` to access specific generation steps. The `iter` property accepts:
+- **Slice**: `tracer.iter[:]` (all steps), `tracer.iter[1:3]` (steps 1-2)
+- **Int**: `tracer.iter[2]` (step 2 only)
+- **List**: `tracer.iter[[0, 2, 4]]` (specific steps)
+
+Each `iter` moves a cursor that tracks which generation step the mediator (worker thread) is requesting.
 
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
     logits = list().save()
     
-    # All steps
+    # All steps (slice)
     with tracer.iter[:]:
         logits.append(model.lm_head.output[0][-1].argmax(dim=-1))
     
@@ -474,8 +496,19 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 with model.generate("Hello", max_new_tokens=5) as tracer:
     logits = list().save()
     
-    # Steps 1-3 only
+    # Steps 1-3 only (slice)
     with tracer.iter[1:3]:
+        logits.append(model.lm_head.output)
+
+# Single step (int)
+with model.generate("Hello", max_new_tokens=5) as tracer:
+    with tracer.iter[0]:
+        first_logits = model.lm_head.output.save()
+
+# Specific steps (list)
+with model.generate("Hello", max_new_tokens=5) as tracer:
+    logits = list().save()
+    with tracer.iter[[0, 2, 4]]:
         logits.append(model.lm_head.output)
 ```
 
@@ -525,6 +558,17 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 
 **Important:** Gradients are accessed on **tensors** (not modules), and only inside a `with tensor.backward():` context.
 
+### How Backward Works
+
+When you use `with tensor.backward():`, nnsight creates a **completely separate interleaving session**:
+
+1. When you `import nnsight`, it monkey-patches `torch.Tensor.backward` to check if it's being used as a trace
+2. Inside the backward context, a new interleaving session runs with tensor gradient hooks
+3. You can ONLY access `.grad` on tensors inside this context - not `.output`, `.input`, etc.
+4. After the backward context exits, the original forward trace resumes
+
+This means: **get any `.output` values you need BEFORE entering the backward context**.
+
 ### Accessing Gradients
 
 ```python
@@ -537,6 +581,7 @@ with model.trace("Hello"):
     loss = logits.sum()
     
     # Access gradients ONLY inside a backward context
+    # This is a SEPARATE interleaving session
     with loss.backward():
         grad = hs.grad.save()
 
@@ -577,6 +622,28 @@ with model.trace("Hello"):
     with modified_logits.sum().backward():
         grad2 = hs.grad.save()
 ```
+
+### Standalone Backward (Outside a Trace)
+
+You can also use backward tracing on its own, without wrapping it in a `model.trace()`:
+
+```python
+# First, run a forward pass to get tensors
+with model.trace("Hello"):
+    hs = model.transformer.h[-1].output[0]
+    hs.requires_grad_(True)
+    hs = hs.save()  # Save the tensor for later
+    logits = model.lm_head.output.save()
+
+# Then, trace the backward pass separately
+loss = logits.sum()
+with loss.backward():
+    grad = hs.grad.save()
+
+print(grad.shape)
+```
+
+This is useful when you want to compute gradients after inspecting forward pass results.
 
 ---
 
@@ -1262,6 +1329,51 @@ import nnsight
 # Enable detailed error messages
 nnsight.CONFIG.APP.DEBUG = True
 nnsight.CONFIG.save()
+```
+
+---
+
+## Configuration
+
+NNsight has several configuration options accessible via `nnsight.CONFIG`:
+
+```python
+from nnsight import CONFIG
+
+# Debug mode - more verbose error messages
+CONFIG.APP.DEBUG = True
+
+# Cross-invoker variable sharing (default: True)
+# When True, variables from one invoke can be accessed in another
+# When False, each invoke is isolated (useful for debugging)
+CONFIG.APP.CROSS_INVOKER = True
+
+# Pymount - enables obj.save() on base Python objects (default: True)
+# Uses C extension to add .save() method to base object class
+# Set to False if you prefer nnsight.save() exclusively
+CONFIG.APP.PYMOUNT = True
+
+# Save config changes
+CONFIG.save()
+```
+
+### Cross-Invoker Variable Sharing
+
+By default, variables from one invoke can be used in another (because invokes run serially):
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke("Hello"):
+        embeddings = model.transformer.wte.output  # Captured here
+    
+    with tracer.invoke("World"):
+        model.transformer.wte.output = embeddings  # Used here (works because CROSS_INVOKER=True)
+```
+
+If you're debugging and want to ensure invokes are isolated:
+
+```python
+CONFIG.APP.CROSS_INVOKER = False  # Now cross-invoke references will error
 ```
 
 ---
