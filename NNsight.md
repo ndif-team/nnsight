@@ -908,8 +908,6 @@ You can trace into nested function calls:
 model.transformer.h[0].attn.source.attention_interface_0.source.some_inner_op.output
 ```
 
-**Note:** Don't use `.source` on a submodule from within another `.source`. Access the submodule directly instead.
-
 ---
 
 ### 4.4 Method Delegation and Tracing
