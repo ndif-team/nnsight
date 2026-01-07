@@ -2352,34 +2352,36 @@ vLLM integration provides high-performance inference with NNsight interventions.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  User Code                                              │
-│  with model.trace("Hello") as tracer:                  │
-│      logits = model.logits.output.save()               │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
+│  with model.trace("Hello") as tracer:                   │
+│      logits = model.logits.output.save()                │
+└──────┬─────────────────────────────────────────────────┘
+       |                
+       ▼
 ┌─────────────────────────────────────────────────────────┐
-│  VLLM Class                                             │
+│  VLLM Class                                             |
+|  - Instantiates empty 'meta' model                      │
 │  - Creates NNsightSamplingParams with serialized        │
 │    Mediator attached                                    │
-│  - Sends request to vLLM engine                        │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  NNsightGPUModelRunner                                  │
-│  - Deserializes Mediator from SamplingParams           │
-│  - Wraps model in NNsight                              │
-│  - Manages batch groups (flat ↔ unflatten)             │
-│  - Runs interleaving at multiple phases                │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  finish_nnsight                                         │
-│  - Lets intervention code interact with final output   │
-│  - Collects saved values                                │
-│  - Handles continuous batching cleanup                 │
-└─────────────────────────────────────────────────────────┘
+│  - Sends prompts + params to vLLM engine                │
+└───────┬───────────────────────────────────────▲─────────┘
+        │                                       |
+        |                                       |
+┌───────▼──────────────────────────────────────────────────────────────────┐
+│  NNsightLLMEngine                                                        |
+|       |            - Sends final result back to NNsightGPUModelRunner    |
+|       |              for interleaving and gathering saved values         |
+└───────|──────────────────────────────────────────────▲───────────────────┘
+        │                                              |
+        |                                              |
+┌───────▼──────────────────────────────────────────────▼──────────────────────────────────────────────────────┐
+|  NNsightGPUModelRunner - Pre-wrapped NNsight model                                                          │
+│  - Deserializes Mediator from SamplingParams          finish_nnsight()                                      │
+│  - Manages batch groups (flat ↔ unflatten)            4.) Lets intervention code interact with final output │
+│  - Runs interleaving at multiple phases               - Collects saved values                               |
+|    1.) Forward Pass                                   - Handles continuous batching cleanup                 |
+|    2.) Logits                                                                                               |
+|    3.) Sampling                                                                                             |
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 #### Usage
@@ -2585,9 +2587,9 @@ vLLM uses two types of parallel linear layers:
 │  └────┬────┘                    └────┬────┘                         │
 │       │                              │                              │
 │       ▼                              ▼                              │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │              all_gather() - collect all shards              │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │              all_gather() - collect all shards              │    │
+│  └─────────────────────────────────────────────────────────────┘    │
 │       │                              │                              │
 │       ▼                              ▼                              │
 │  ┌───────────────┐              ┌───────────────┐                   │
@@ -2596,14 +2598,14 @@ vLLM uses two types of parallel linear layers:
 │  └───────┬───────┘              └───────┬───────┘                   │
 │          │                              │                           │
 │          ▼                              ▼                           │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │           Intervention code runs (identical on all GPUs)    │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │           Intervention code runs (identical on all GPUs)    │    │
+│  └─────────────────────────────────────────────────────────────┘    │
 │          │                              │                           │
 │          ▼                              ▼                           │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │              split() - re-shard for forward pass            │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │              split() - re-shard for forward pass            │    │
+│  └─────────────────────────────────────────────────────────────┘    │
 │          │                              │                           │
 │          ▼                              ▼                           │
 │  ┌─────────┐                    ┌─────────┐                         │
