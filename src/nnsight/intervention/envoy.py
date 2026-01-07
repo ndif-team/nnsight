@@ -1097,24 +1097,48 @@ class Envoy(Batchable):
         else:
             super().__setattr__(key, value)
 
+    # Attributes managed internally by Envoy that should not be serialized as user attrs
+    _INTERNAL_ATTRS = frozenset({
+        "_module", "_source", "_interleaver", "_children", "_alias",
+        "_default_mediators", "path", "_fake_inputs", "_fake_output",
+    })
+
     def __getstate__(self):
+        """Serialize Envoy state, preserving user-defined attributes.
+
+        User-defined attributes (those not in _INTERNAL_ATTRS) are preserved
+        if they are pickleable. Unpickleable attributes are silently skipped.
+        """
+        import pickle
+
+        named_children = {}
+        user_attrs = {}
+
+        for key, value in self.__dict__.items():
+            if isinstance(value, Envoy):
+                named_children[key] = value
+            elif key not in self._INTERNAL_ATTRS:
+                try:
+                    pickle.dumps(value)
+                    user_attrs[key] = value
+                except (pickle.PicklingError, TypeError, AttributeError):
+                    pass
+
         return {
             "alias": self._alias,
             "children": self._children,
-            "named_children": {
-                key: value
-                for key, value in self.__dict__.items()
-                if isinstance(value, Envoy)
-            },
+            "named_children": named_children,
             "path": self.path,
             "default_mediators": self._default_mediators,
+            "user_attrs": user_attrs,
         }
 
     def __setstate__(self, state):
+        """Restore Envoy state, including user-defined attributes."""
         self._module = None
         self._source = None
-        self.fake_inputs = None
-        self.fake_output = None
+        self._fake_inputs = None
+        self._fake_output = None
 
         self._alias = state["alias"]
         self._children = state["children"]
@@ -1122,6 +1146,10 @@ class Envoy(Batchable):
 
         self.path = state["path"]
         self._default_mediators = state["default_mediators"]
+
+        # Restore user-defined attributes (new in fix for subclass instance attrs)
+        if "user_attrs" in state:
+            self.__dict__.update(state["user_attrs"])
 
 
 # TODO extend Envoy

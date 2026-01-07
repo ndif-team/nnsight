@@ -393,3 +393,98 @@ class TestTensorParallelism:
         assert next_token != " Paris"
         assert hs.shape == torch.Size([11, 3072])
         assert torch.all(hs[:, 2000:] == 0)
+
+
+# =============================================================================
+# Subclass Instance Attributes
+# =============================================================================
+
+
+class TestSubclassAttributes:
+    """Tests for VLLM subclass instance attribute access inside trace context."""
+
+    @torch.no_grad()
+    def test_instance_attr_in_trace(self, tp):
+        """Instance attributes should be accessible inside trace."""
+
+        class MyVLLM(VLLM):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.custom_attr = "custom_value"
+
+        model = MyVLLM(
+            "gpt2",
+            tensor_parallel_size=tp,
+            gpu_memory_utilization=0.1,
+            dispatch=True,
+        )
+
+        assert model.custom_attr == "custom_value"
+
+        with model.trace("Hello") as tracer:
+            assert model.custom_attr == "custom_value"
+
+    @torch.no_grad()
+    def test_property_with_self_access(self, tp):
+        """Properties accessing self.* should work inside trace."""
+
+        class MyVLLM(VLLM):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._data = "stored"
+
+            @property
+            def data(self):
+                return self._data
+
+        model = MyVLLM(
+            "gpt2",
+            tensor_parallel_size=tp,
+            gpu_memory_utilization=0.1,
+            dispatch=True,
+        )
+
+        assert model.data == "stored"
+
+        with model.trace("Hello") as tracer:
+            assert model.data == "stored"
+
+    @torch.no_grad()
+    def test_init_attrs(self, tp):
+        """Attributes set in __init__ should be accessible inside trace."""
+
+        class MyVLLM(VLLM):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.layer_names = ["layer1", "layer2"]
+                self.config = {"key": "value"}
+
+        model = MyVLLM(
+            "gpt2",
+            tensor_parallel_size=tp,
+            gpu_memory_utilization=0.1,
+            dispatch=True,
+        )
+
+        assert model.layer_names == ["layer1", "layer2"]
+        assert model.config == {"key": "value"}
+
+        with model.trace("Hello") as tracer:
+            assert model.layer_names == ["layer1", "layer2"]
+            assert model.config == {"key": "value"}
+
+    @torch.no_grad()
+    def test_dynamic_attrs(self, tp):
+        """Dynamically added attributes should be accessible inside trace."""
+        model = VLLM(
+            "gpt2",
+            tensor_parallel_size=tp,
+            gpu_memory_utilization=0.1,
+            dispatch=True,
+        )
+
+        model.dynamic_attr = "dynamic_value"
+        assert model.dynamic_attr == "dynamic_value"
+
+        with model.trace("Hello") as tracer:
+            assert model.dynamic_attr == "dynamic_value"
