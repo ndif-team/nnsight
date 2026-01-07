@@ -18,6 +18,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
 
 from ...intervention.envoy import Envoy
+from ...intervention.tracing.tracer import ScanningTracer
 from ...intervention.tracing.util import push_variables
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
@@ -248,6 +249,9 @@ class VLLM(RemoteableMixin):
         push_variables(self._interleaver.mediators[0].info.frame, saves)
 
     def interleave(self, fn: Callable, *args, **kwargs):
+        """Execute the traced function with vLLM, dispatching the engine if needed."""
+        if not self.dispatched and not isinstance(self._interleaver.tracer, ScanningTracer):
+            self.dispatch()
 
         try:
             fn(*args, **kwargs)
