@@ -6,8 +6,7 @@ from pydantic import BaseModel
 
 
 class ApiConfigModel(BaseModel):
-    HOST: str = "api.ndif.us"
-    SSL: bool = True
+    HOST: str = "https://api.ndif.us"
     ZLIB: bool = True
     APIKEY: Optional[str] = None
 
@@ -50,7 +49,7 @@ class ConfigModel(BaseModel):
         """Override config values from environment variables or Colab userdata."""
         if self.API.APIKEY is None:
             # Check environment variable first
-            env_key = os.environ.get("NDIF_API_KEY")
+            env_key = os.environ.get("NDIF_API_KEY", None)
             if env_key:
                 self.API.APIKEY = env_key
             else:
@@ -61,6 +60,10 @@ class ConfigModel(BaseModel):
                     self.API.APIKEY = userdata.get("NDIF_API_KEY")
                 except (ImportError, ModuleNotFoundError, Exception):
                     pass
+                
+        
+        if self.API.HOST is None:
+            self.API.HOST = os.environ.get("NDIF_HOST", None)
 
     def set_default_api_key(self, apikey: str):
 

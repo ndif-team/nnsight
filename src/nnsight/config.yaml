@@ -1,12 +1,11 @@
 API:
   APIKEY: null
-  HOST: api.ndif.us
-  SSL: true
+  HOST: https://api.ndif.us
   ZLIB: true
 APP:
   CACHE_DIR: ~/.cache/nnsight/
-  DEBUG: false
-  REMOTE_LOGGING: true
-  PYMOUNT: true
   CROSS_INVOKER: true
+  DEBUG: false
+  PYMOUNT: true
+  REMOTE_LOGGING: true
   TRACE_CACHING: false

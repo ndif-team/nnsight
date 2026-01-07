@@ -42,26 +42,27 @@ class RemoteBackend(Backend):
         host: str = None,
         blocking: bool = True,
         job_id: str = None,
-        ssl: bool = None,
         api_key: str = "",
         callback: str = "",
     ) -> None:
 
         self.model_key = model_key
 
-        self.host = host or os.environ.get("NDIF_HOST", None) or CONFIG.API.HOST
+        self.address = host or CONFIG.API.HOST
         self.api_key = (
             api_key or os.environ.get("NDIF_API_KEY", None) or CONFIG.API.APIKEY
         )
 
         self.job_id = job_id
-        self.ssl = CONFIG.API.SSL if ssl is None else ssl
         self.zlib = CONFIG.API.ZLIB
         self.blocking = blocking
         self.callback = callback
 
-        self.address = f"http{'s' if self.ssl else ''}://{self.host}"
-        self.ws_address = f"ws{'s' if CONFIG.API.SSL else ''}://{self.host}"
+        # Derive websocket protocol from HTTP protocol
+        if self.address.startswith("https://"):
+            self.ws_address = "wss://" + self.address[8:]
+        else:
+            self.ws_address = "ws://" + self.address[7:]
 
         self.job_status = None
 
