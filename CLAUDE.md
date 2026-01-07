@@ -1026,7 +1026,7 @@ with model.trace("Hello"):
     # Layer 1's output now equals layer 0's output
     layer1_out = model.transformer.h[1].output.save()
 
-assert torch.equal(layer0_out.value[0], layer1_out[0])
+assert torch.equal(layer0_out[0], layer1_out[0])
 ```
 
 ### Skipping Constraints
