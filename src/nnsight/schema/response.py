@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import io
-import logging
-from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict
+
+from ..log import log_status
 
 RESULT = Dict[str, Any]
 
@@ -36,12 +36,14 @@ class ResponseModel(BaseModel):
     def __str__(self) -> str:
         return f"[{self.id}] {self.status.name.ljust(10)} : {self.description}"
 
-    def log(self, logger: logging.Logger) -> ResponseModel:
-       
+    def log(self) -> ResponseModel:
+        """Log status update with nice single-line formatting."""
+        # Skip STREAM status (it's internal)
         if self.status == ResponseModel.JobStatus.STREAM:
             pass
         else:
-            logger.info(str(self))
+            # Use the new status display system
+            log_status(self.id, self.status.name, self.description or "")
 
         return self
 

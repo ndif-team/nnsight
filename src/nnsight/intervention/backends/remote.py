@@ -16,7 +16,6 @@ from tqdm.auto import tqdm
 from ... import __IPYTHON__, CONFIG, __version__
 from ..._c.py_mount import mount, unmount
 from ...intervention.serialization import load, save
-from ...log import remote_logger
 from ...schema.request import RequestModel
 from ...schema.response import RESULT, ResponseModel
 from ..tracing.tracer import Tracer
@@ -127,7 +126,7 @@ class RemoteBackend(Backend):
             raise RemoteException(f"{response.description}\nRemote exception.")
 
         # Log response for user
-        response.log(remote_logger)
+        response.log()
         self.job_status = response.status
 
         # If job is completed:
@@ -227,7 +226,8 @@ class RemoteBackend(Backend):
                     total=total_size,
                     unit="B",
                     unit_scale=True,
-                    desc="Downloading result",
+                    desc="⬇ Downloading",
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
                 ) as progress_bar:
                     # chunk_size=None so server determines chunk size.
                     for data in stream.iter_bytes(chunk_size=128 * 1024):
@@ -261,7 +261,8 @@ class RemoteBackend(Backend):
                     total=total_size,
                     unit="B",
                     unit_scale=True,
-                    desc="Downloading result",
+                    desc="⬇ Downloading",
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
                 ) as progress_bar:
                     # chunk_size=None so server determines chunk size.
                     async for data in stream.aiter_bytes(chunk_size=128 * 1024):
