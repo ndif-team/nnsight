@@ -4,12 +4,9 @@ from typing import Optional
 import yaml
 from pydantic import BaseModel
 
-from ..log import remote_logger
-
 
 class ApiConfigModel(BaseModel):
-    HOST: str = "api.ndif.us"
-    SSL: bool = True
+    HOST: str = "https://api.ndif.us"
     ZLIB: bool = True
     APIKEY: Optional[str] = None
 
@@ -32,15 +29,6 @@ class AppConfigModel(BaseModel):
     CROSS_INVOKER: bool = True
     TRACE_CACHING: bool = False
 
-    def __setattr__(self, name, value):
-        if name == "REMOTE_LOGGING":
-            self.on_remote_logging_change(value)
-        super().__setattr__(name, value)
-
-    def on_remote_logging_change(self, value: bool):
-        if value != self.REMOTE_LOGGING:
-            remote_logger.disabled = not value
-        self.__dict__["REMOTE_LOGGING"] = value
 
 
 class ConfigModel(BaseModel):
@@ -54,14 +42,14 @@ class ConfigModel(BaseModel):
             config = cls(**yaml.safe_load(file))
 
         config.from_env()
-
+        
         return config
 
     def from_env(self) -> None:
         """Override config values from environment variables or Colab userdata."""
         if self.API.APIKEY is None:
             # Check environment variable first
-            env_key = os.environ.get("NDIF_API_KEY")
+            env_key = os.environ.get("NDIF_API_KEY", None)
             if env_key:
                 self.API.APIKEY = env_key
             else:
@@ -72,6 +60,10 @@ class ConfigModel(BaseModel):
                     self.API.APIKEY = userdata.get("NDIF_API_KEY")
                 except (ImportError, ModuleNotFoundError, Exception):
                     pass
+                
+        
+        if self.API.HOST is None:
+            self.API.HOST = os.environ.get("NDIF_HOST", None)
 
     def set_default_api_key(self, apikey: str):
 

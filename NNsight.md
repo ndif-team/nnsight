@@ -35,6 +35,10 @@ This document provides an overview of the design choices and implementation deta
    - [Aliasing](#45-aliasing)
    - [Handling Conflicts](#46-handling-conflicts)
    - [Dispatching and Updates](#47-dispatching-and-updates)
+   - [Ad-hoc Module Calls](#48-ad-hoc-module-calls)
+   - [Device Utilities](#49-device-utilities)
+   - [Envoy Tree Navigation](#410-envoy-tree-navigation)
+   - [Accessing the Underlying Module](#411-accessing-the-underlying-module)
 5. [Features](#5-features)
    - [Saving Values](#51-saving-values)
    - [Ad-hoc Module Calls](#52-ad-hoc-module-calls)
@@ -54,8 +58,28 @@ This document provides an overview of the design choices and implementation deta
    - [LanguageModel](#63-languagemodel)
    - [DiffusionModel](#64-diffusionmodel)
    - [vLLM](#65-vllm)
-7. [Debugging](#7-debugging) *(coming soon)*
-8. [Remote Execution](#8-remote-execution) *(coming soon)*
+7. [Debugging](#7-debugging)
+   - [The Challenge](#71-the-challenge)
+   - [Exception Reconstruction](#72-exception-reconstruction)
+   - [Line Number Reconstruction](#73-line-number-reconstruction)
+   - [Where Exceptions Are Caught](#74-where-exceptions-are-caught)
+   - [DEBUG Mode](#75-debug-mode)
+   - [What Users See](#76-what-users-see)
+   - [Common Exceptions](#77-common-exceptions)
+   - [Debugging Strategies](#78-debugging-strategies)
+8. [Remote Execution](#8-remote-execution)
+   - [NDIF Overview](#81-ndif-overview)
+   - [Setup](#82-setup)
+   - [Basic Remote Execution](#83-basic-remote-execution)
+   - [Remote Model Parameters](#84-remote-model-parameters)
+   - [Saving Results](#85-saving-results)
+   - [Sessions for Remote Execution](#86-sessions-for-remote-execution)
+   - [Gradients Remotely](#87-gradients-remotely)
+   - [Python Module Whitelist](#88-python-module-whitelist)
+   - [Limitations](#89-limitations)
+   - [Hybrid Execution with tracer.local()](#810-hybrid-execution-with-tracerlocal)
+   - [Print Statements and Logging](#811-print-statements-and-logging)
+   - [Implementation Details](#812-implementation-details)
 9. [Extending NNsight](#9-extending-nnsight) *(coming soon)*
 
 ---
@@ -883,8 +907,6 @@ You can trace into nested function calls:
 # Trace into the attention_interface function itself
 model.transformer.h[0].attn.source.attention_interface_0.source.some_inner_op.output
 ```
-
-**Note:** Don't use `.source` on a submodule from within another `.source`. Access the submodule directly instead.
 
 ---
 
@@ -2328,34 +2350,36 @@ vLLM integration provides high-performance inference with NNsight interventions.
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  User Code                                              │
-│  with model.trace("Hello") as tracer:                  │
-│      logits = model.logits.output.save()               │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
+│  with model.trace("Hello") as tracer:                   │
+│      logits = model.logits.output.save()                │
+└──────┬─────────────────────────────────────────────────┘
+       |                
+       ▼
 ┌─────────────────────────────────────────────────────────┐
-│  VLLM Class                                             │
+│  VLLM Class                                             |
+|  - Instantiates empty 'meta' model                      │
 │  - Creates NNsightSamplingParams with serialized        │
 │    Mediator attached                                    │
-│  - Sends request to vLLM engine                        │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  NNsightGPUModelRunner                                  │
-│  - Deserializes Mediator from SamplingParams           │
-│  - Wraps model in NNsight                              │
-│  - Manages batch groups (flat ↔ unflatten)             │
-│  - Runs interleaving at multiple phases                │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  finish_nnsight                                         │
-│  - Lets intervention code interact with final output   │
-│  - Collects saved values                                │
-│  - Handles continuous batching cleanup                 │
-└─────────────────────────────────────────────────────────┘
+│  - Sends prompts + params to vLLM engine                │
+└───────┬───────────────────────────────────────▲─────────┘
+        │                                       |
+        |                                       |
+┌───────▼──────────────────────────────────────────────────────────────────┐
+│  NNsightLLMEngine                                                        |
+|       |            - Sends final result back to NNsightGPUModelRunner    |
+|       |              for interleaving and gathering saved values         |
+└───────|──────────────────────────────────────────────▲───────────────────┘
+        │                                              |
+        |                                              |
+┌───────▼──────────────────────────────────────────────▼──────────────────────────────────────────────────────┐
+|  NNsightGPUModelRunner - Pre-wrapped NNsight model                                                          │
+│  - Deserializes Mediator from SamplingParams          finish_nnsight()                                      │
+│  - Manages batch groups (flat ↔ unflatten)            4.) Lets intervention code interact with final output │
+│  - Runs interleaving at multiple phases               - Collects saved values                               |
+|    1.) Forward Pass                                   - Handles continuous batching cleanup                 |
+|    2.) Logits                                                                                               |
+|    3.) Sampling                                                                                             |
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 #### Usage
@@ -2561,9 +2585,9 @@ vLLM uses two types of parallel linear layers:
 │  └────┬────┘                    └────┬────┘                         │
 │       │                              │                              │
 │       ▼                              ▼                              │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │              all_gather() - collect all shards              │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │              all_gather() - collect all shards              │    │
+│  └─────────────────────────────────────────────────────────────┘    │
 │       │                              │                              │
 │       ▼                              ▼                              │
 │  ┌───────────────┐              ┌───────────────┐                   │
@@ -2572,14 +2596,14 @@ vLLM uses two types of parallel linear layers:
 │  └───────┬───────┘              └───────┬───────┘                   │
 │          │                              │                           │
 │          ▼                              ▼                           │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │           Intervention code runs (identical on all GPUs)    │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │           Intervention code runs (identical on all GPUs)    │    │
+│  └─────────────────────────────────────────────────────────────┘    │
 │          │                              │                           │
 │          ▼                              ▼                           │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │              split() - re-shard for forward pass            │   │
-│  └─────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │              split() - re-shard for forward pass            │    │
+│  └─────────────────────────────────────────────────────────────┘    │
 │          │                              │                           │
 │          ▼                              ▼                           │
 │  ┌─────────┐                    ┌─────────┐                         │

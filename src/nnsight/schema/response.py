@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import io
-import logging
-from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
 RESULT = Dict[str, Any]
+
 
 class ResponseModel(BaseModel):
 
@@ -35,15 +34,6 @@ class ResponseModel(BaseModel):
 
     def __str__(self) -> str:
         return f"[{self.id}] {self.status.name.ljust(10)} : {self.description}"
-
-    def log(self, logger: logging.Logger) -> ResponseModel:
-       
-        if self.status == ResponseModel.JobStatus.STREAM:
-            pass
-        else:
-            logger.info(str(self))
-
-        return self
 
     def pickle(self) -> bytes:
         """Pickles self and returns bytes.
@@ -75,5 +65,6 @@ class ResponseModel(BaseModel):
             return ResponseModel(
                 **torch.load(file, map_location="cpu", weights_only=False)
             )
-            
+
+
 ResponseModel.model_rebuild()

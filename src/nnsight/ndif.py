@@ -133,7 +133,7 @@ class NdifStatus(dict):
             Exception: If the request times out, with a DOWN status message.
         """
         try:
-            response = requests.get(f"http{'s' if {CONFIG.API.SSL} else ''}://{CONFIG.API.HOST}/status", timeout=(5, 30))
+            response = requests.get(f"{CONFIG.API.HOST}/status", timeout=(5, 30))
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             raise Exception(NdifStatus.Status._message(NdifStatus.Status.DOWN))
