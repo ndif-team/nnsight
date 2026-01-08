@@ -77,7 +77,7 @@ class JobStatusDisplay:
             None  # (job_id, status, description)
         )
         self._line_written = False
-        self._notebook_display_id: Optional[str] = None
+        self._display_handle = None
 
     def _format_elapsed(self) -> str:
         """Format elapsed time in current status."""
@@ -246,8 +246,8 @@ class JobStatusDisplay:
         return "".join(result)
 
     def _display_notebook(self, text: str, status_changed: bool, is_terminal: bool):
-        """Display in notebook using display_id for flicker-free updates."""
-        from IPython.display import display, update_display, HTML
+        """Display in notebook using DisplayHandle for flicker-free updates."""
+        from IPython.display import display, HTML
 
         html_text = self._ansi_to_html(text)
         html_content = HTML(
@@ -256,19 +256,17 @@ class JobStatusDisplay:
 
         if self.verbose and status_changed and self._line_written:
             # Verbose mode: create new display for new status, keep old one visible
-            self._notebook_display_id = f"nnsight_status_{id(self)}_{time.time()}"
-            display(html_content, display_id=self._notebook_display_id)
-        elif self._notebook_display_id is None:
+            self._display_handle = display(html_content, display_id=True)
+        elif self._display_handle is None:
             # First display
-            self._notebook_display_id = f"nnsight_status_{id(self)}"
-            display(html_content, display_id=self._notebook_display_id)
+            self._display_handle = display(html_content, display_id=True)
         else:
             # Update existing display in place (no flicker)
-            update_display(html_content, display_id=self._notebook_display_id)
+            self._display_handle.update(html_content)
 
         if is_terminal:
             # Reset for next job
-            self._notebook_display_id = None
+            self._display_handle = None
 
 
 class RemoteException(Exception):
