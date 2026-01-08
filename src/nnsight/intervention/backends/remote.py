@@ -72,9 +72,10 @@ class JobStatusDisplay:
         self.enabled = enabled
         self.verbose = verbose
         self.status_start_time: Optional[float] = None
-        self.job_id: Optional[str] = None
         self.spinner_idx = 0
-        self.last_status = None
+        self.last_response: Optional[Tuple[str, str, str]] = (
+            None  # (job_id, status, description)
+        )
         self._line_written = False
         self._notebook_display_id: Optional[str] = None
 
@@ -115,17 +116,27 @@ class JobStatusDisplay:
         self.spinner_idx += 1
         return spinner
 
-    def update(self, job_id: str, status_name: str, description: str = ""):
+    def update(self, job_id: str = "", status_name: str = "", description: str = ""):
         """Update the status display on a single line."""
         if not self.enabled:
             return
 
-        status_changed = status_name != self.last_status
+        # Use last response values if not provided (for refresh calls)
+        if not job_id and self.last_response:
+            job_id, status_name, description = self.last_response
+
+        if not job_id:
+            return
+
+        last_status = self.last_response[1] if self.last_response else None
+        status_changed = status_name != last_status
 
         # Reset timer when status changes
         if status_changed:
             self.status_start_time = time.time()
-            self.job_id = job_id
+
+        # Store the response
+        self.last_response = (job_id, status_name, description)
 
         icon, color = self._get_status_style(status_name)
         elapsed = self._format_elapsed()
@@ -157,7 +168,6 @@ class JobStatusDisplay:
         self._display(status_text, status_changed, is_terminal)
 
         self._line_written = True
-        self.last_status = status_name
 
     def _display(self, text: str, status_changed: bool, is_terminal: bool):
         """Display text, handling terminal vs notebook environments."""
@@ -565,10 +575,7 @@ class RemoteBackend(Backend):
                         response = sio.receive(timeout=timeout)[1]
                     except socketio.exceptions.TimeoutError:
                         # Refresh the status display to update spinner and elapsed time
-                        if self.job_id and self.job_status:
-                            self.status_display.update(
-                                self.job_id, self.job_status.name
-                            )
+                        self.status_display.update()
                         continue
 
                     # Convert to pydantic object.
@@ -630,10 +637,7 @@ class RemoteBackend(Backend):
                         response = (await sio.receive(timeout=timeout))[1]
                     except socketio.exceptions.TimeoutError:
                         # Refresh the status display to update spinner and elapsed time
-                        if self.job_id and self.job_status:
-                            self.status_display.update(
-                                self.job_id, self.job_status.name
-                            )
+                        self.status_display.update()
                         continue
 
                     # Convert to pydantic object.
