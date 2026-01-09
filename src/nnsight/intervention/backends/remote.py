@@ -71,6 +71,7 @@ class JobStatusDisplay:
     def __init__(self, enabled: bool = True, verbose: bool = False):
         self.enabled = enabled
         self.verbose = verbose
+        self.job_start_time: Optional[float] = None
         self.status_start_time: Optional[float] = None
         self.spinner_idx = 0
         self.last_response: Optional[Tuple[str, str, str]] = (
@@ -79,11 +80,11 @@ class JobStatusDisplay:
         self._line_written = False
         self._display_handle = None
 
-    def _format_elapsed(self) -> str:
-        """Format elapsed time in current status."""
-        if self.status_start_time is None:
+    def _format_time(self, start_time: Optional[float]) -> str:
+        """Format elapsed time from a given start time."""
+        if start_time is None:
             return "0.0s"
-        elapsed = time.time() - self.status_start_time
+        elapsed = time.time() - start_time
         if elapsed < 60:
             return f"{elapsed:.1f}s"
         elif elapsed < 3600:
@@ -94,6 +95,14 @@ class JobStatusDisplay:
             hours = int(elapsed // 3600)
             mins = int((elapsed % 3600) // 60)
             return f"{hours}h {mins}m"
+
+    def _format_elapsed(self) -> str:
+        """Format elapsed time in current status."""
+        return self._format_time(self.status_start_time)
+
+    def _format_total(self) -> str:
+        """Format total elapsed time since job started."""
+        return self._format_time(self.job_start_time)
 
     def _get_status_style(self, status_name: str) -> tuple:
         """Get icon and color for a status."""
@@ -128,24 +137,34 @@ class JobStatusDisplay:
         if not job_id:
             return
 
+        is_log = status_name == "LOG"
+        
         last_status = self.last_response[1] if self.last_response else None
-        status_changed = status_name != last_status
+        # LOG status should not be considered a status change for timer purposes
+        status_changed = status_name != last_status and not is_log
 
-        # Reset timer when status changes
+        # Track job start time (first status received)
+        if last_status is None:
+            self.job_start_time = time.time()
+
+        # Reset status timer when status changes (but not for LOG)
         if status_changed:
             self.status_start_time = time.time()
 
-        # Store the response
-        self.last_response = (job_id, status_name, description)
+        # Store the response (but not for LOG - so we go back to previous status on refresh)
+        if not is_log:
+            self.last_response = (job_id, status_name, description)
 
         icon, color = self._get_status_style(status_name)
-        elapsed = self._format_elapsed()
 
         # Build the status line
         # Format: ● STATUS (elapsed) [job_id] description
 
         is_terminal = status_name in ("COMPLETED", "ERROR", "NNSIGHT_ERROR")
         is_active = status_name in ("QUEUED", "RUNNING", "DISPATCHED")
+
+        # For terminal states, show total time; for others, show status elapsed time
+        elapsed = self._format_total() if is_terminal else self._format_elapsed()
 
         # For active states, show spinner
         if is_active:
@@ -154,29 +173,39 @@ class JobStatusDisplay:
             prefix = f"{color}{icon}{self.Colors.RESET}"
 
         # Build status text - full job ID shown so users can reference it
-        status_text = (
-            f"{prefix} "
-            f"{self.Colors.DIM}[{job_id}]{self.Colors.RESET} "
-            f"{color}{self.Colors.BOLD}{status_name.ljust(10)}{self.Colors.RESET} "
-            f"{self.Colors.DIM}({elapsed}){self.Colors.RESET}"
-        )
+        # LOG status does not show elapsed time
+        if is_log:
+            status_text = (
+                f"{prefix} "
+                f"{self.Colors.DIM}[{job_id}]{self.Colors.RESET} "
+                f"{color}{self.Colors.BOLD}{status_name.ljust(10)}{self.Colors.RESET}"
+            )
+        else:
+            status_text = (
+                f"{prefix} "
+                f"{self.Colors.DIM}[{job_id}]{self.Colors.RESET} "
+                f"{color}{self.Colors.BOLD}{status_name.ljust(10)}{self.Colors.RESET} "
+                f"{self.Colors.DIM}({elapsed}){self.Colors.RESET}"
+            )
 
         if description:
             status_text += f" {self.Colors.DIM}{description}{self.Colors.RESET}"
 
         # Display the status
-        self._display(status_text, status_changed, is_terminal)
+        # LOG status should print a newline so it's not cleared
+        print_newline = is_terminal or is_log
+        self._display(status_text, status_changed, print_newline)
 
         self._line_written = True
 
-    def _display(self, text: str, status_changed: bool, is_terminal: bool):
+    def _display(self, text: str, status_changed: bool, print_newline: bool = False):
         """Display text, handling terminal vs notebook environments."""
         if __IPYTHON__:
-            self._display_notebook(text, status_changed, is_terminal)
+            self._display_notebook(text, status_changed, print_newline)
         else:
-            self._display_terminal(text, status_changed, is_terminal)
+            self._display_terminal(text, status_changed, print_newline)
 
-    def _display_terminal(self, text: str, status_changed: bool, is_terminal: bool):
+    def _display_terminal(self, text: str, status_changed: bool, print_newline: bool = False):
         """Display in terminal with in-place updates."""
         # In verbose mode, print new line when status changes
         if self.verbose and status_changed and self._line_written:
@@ -187,7 +216,7 @@ class JobStatusDisplay:
 
         sys.stdout.write(text)
 
-        if is_terminal:
+        if print_newline:
             sys.stdout.write("\n")
 
         sys.stdout.flush()
@@ -245,7 +274,7 @@ class JobStatusDisplay:
         result.append("</span>" * open_spans)
         return "".join(result)
 
-    def _display_notebook(self, text: str, status_changed: bool, is_terminal: bool):
+    def _display_notebook(self, text: str, status_changed: bool, print_newline: bool = False):
         """Display in notebook using DisplayHandle for flicker-free updates."""
         from IPython.display import display, HTML
 
@@ -260,13 +289,13 @@ class JobStatusDisplay:
         elif self._display_handle is None:
             # First display
             self._display_handle = display(html_content, display_id=True)
+        elif print_newline:
+            # LOG status: create new display so it persists, then reset handle for next status
+            display(html_content)
+            self._display_handle = None
         else:
             # Update existing display in place (no flicker)
             self._display_handle.update(html_content)
-
-        if is_terminal:
-            # Reset for next job
-            self._display_handle = None
 
 
 class RemoteException(Exception):
