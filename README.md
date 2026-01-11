@@ -25,11 +25,69 @@ Originally developed in the [NDIF team](https://ndif.us/) at Northeastern Univer
 
 > 📖 For a deeper technical understanding of nnsight's internals (tracing, interleaving, the Envoy system, etc.), see **[NNsight.md](./NNsight.md)**.
 
+---
+
 ## Installation
 
 ```bash
 pip install nnsight
 ```
+
+---
+
+## Agents
+
+Inform LLM agents how to use nnsight using one of these methods:
+
+### Skills Repository
+
+**Claude Code**
+
+```bash
+# Open Claude Code terminal
+claude
+
+# Add the marketplace (one time)
+/plugin marketplace add https://github.com/ndif-team/skills.git
+
+# Install all skills
+/plugin install nnsight@skills
+```
+
+**OpenAI Codex**
+
+```bash
+# Open OpenAI Codex terminal
+codex
+
+# Install skills
+skill-installer install https://github.com/ndif-team/skills.git
+```
+
+### Context7 MCP
+
+Alternatively, use [Context7](https://github.com/upstash/context7) to provide up-to-date nnsight documentation directly to your LLM. Add `use context7` to your prompts or configure it in your MCP client:
+
+```json
+{
+  "mcpServers": {
+    "context7": {
+      "url": "https://mcp.context7.com/mcp"
+    }
+  }
+}
+```
+
+See the [Context7 README](https://github.com/upstash/context7/blob/master/README.md) for full installation instructions across different IDEs.
+
+### Documentation Files
+
+You can also add our documentation files directly to your agent's context:
+
+- **[llms.md](./llms.md)** — Comprehensive guide for AI agents working with nnsight
+- **[NNsight.md](./NNsight.md)** — Deep technical documentation on nnsight's internals
+
+---
 
 ## Quick Start
 
@@ -53,8 +111,6 @@ print(model.tokenizer.decode(output.logits.argmax(dim=-1)[0]))
 
 > **💡 Tip:** Always call `.save()` on values you want to access after the trace exits. Without `.save()`, values are garbage collected. You can also use `nnsight.save(value)` as an alternative.
 
----
-
 ## Accessing Activations
 
 ```python
@@ -73,8 +129,6 @@ with model.trace("The Eiffel Tower is in the city of"):
 ```
 
 **Note:** GPT-2 transformer layers return tuples where index 0 contains the hidden states.
-
----
 
 ## Modifying Activations
 
@@ -100,8 +154,6 @@ with model.trace("Hello"):
     
     result = model.transformer.h[-1].mlp.output.save()
 ```
-
----
 
 ## Batching with Invokers
 
@@ -143,7 +195,6 @@ with model.trace() as tracer:
         out_all = model.lm_head.output[:, -1].save()  # Shape: [3, vocab]
 ```
 
----
 
 ## Multi-Token Generation
 
@@ -193,7 +244,6 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 >         final = model.output.save()  # Now works!
 > ```
 
----
 
 ## Gradients
 
@@ -213,7 +263,6 @@ with model.trace("Hello"):
 print(grad.shape)
 ```
 
----
 
 ## Model Editing
 
@@ -236,7 +285,6 @@ assert not torch.all(out1 == 0)
 assert torch.all(out2 == 0)
 ```
 
----
 
 ## Scanning (Shape Inference)
 
@@ -249,7 +297,6 @@ with model.scan("Hello"):
 print(dim)  # 768
 ```
 
----
 
 ## Caching Activations
 
@@ -264,7 +311,6 @@ layer0_out = cache['model.transformer.h.0'].output
 print(cache.model.transformer.h[0].output[0].shape)
 ```
 
----
 
 ## Sessions
 
@@ -280,7 +326,6 @@ with model.session() as session:
         hs2 = model.transformer.h[0].output[0].save()
 ```
 
----
 
 ## Remote Execution (NDIF)
 
@@ -298,7 +343,6 @@ with model.trace("Hello", remote=True):
 
 Check available models at [nnsight.net/status](https://nnsight.net/status/)
 
----
 
 ## vLLM Integration
 
@@ -316,7 +360,6 @@ with model.trace("Hello", temperature=0.0, max_tokens=5) as tracer:
         logits.append(model.logits.output)
 ```
 
----
 
 ## NNsight for Any PyTorch Model
 
@@ -338,8 +381,6 @@ with model.trace(torch.rand(1, 5)):
     output = model.output.save()
 ```
 
----
-
 ## Source Tracing
 
 Access intermediate operations inside a module's forward pass. `.source` rewrites the forward method to hook into all operations:
@@ -355,8 +396,6 @@ print(model.transformer.h[0].attn.source)
 with model.trace("Hello"):
     attn_out = model.transformer.h[0].attn.source.attention_interface_0.output.save()
 ```
-
----
 
 ## Ad-hoc Module Application
 
@@ -454,7 +493,7 @@ For more debugging tips, see the [documentation](https://www.nnsight.net).
 
 - **[Documentation](https://www.nnsight.net)** — Tutorials, guides, and API reference
 - **[NNsight.md](./NNsight.md)** — Deep technical documentation on nnsight
-- **[CLAUDE.md](./CLAUDE.md)** — Comprehensive guide for AI agents working with nnsight
+- **[llms.md](./llms.md)** — Comprehensive guide for AI agents working with nnsight
 
 ---
 
