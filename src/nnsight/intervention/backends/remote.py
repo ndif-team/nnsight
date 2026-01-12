@@ -138,7 +138,7 @@ class JobStatusDisplay:
             return
 
         is_log = status_name == "LOG"
-        
+
         last_status = self.last_response[1] if self.last_response else None
         # LOG status should not be considered a status change for timer purposes
         status_changed = status_name != last_status and not is_log
@@ -205,7 +205,9 @@ class JobStatusDisplay:
         else:
             self._display_terminal(text, status_changed, print_newline)
 
-    def _display_terminal(self, text: str, status_changed: bool, print_newline: bool = False):
+    def _display_terminal(
+        self, text: str, status_changed: bool, print_newline: bool = False
+    ):
         """Display in terminal with in-place updates."""
         # In verbose mode, print new line when status changes
         if self.verbose and status_changed and self._line_written:
@@ -274,7 +276,9 @@ class JobStatusDisplay:
         result.append("</span>" * open_spans)
         return "".join(result)
 
-    def _display_notebook(self, text: str, status_changed: bool, print_newline: bool = False):
+    def _display_notebook(
+        self, text: str, status_changed: bool, print_newline: bool = False
+    ):
         """Display in notebook using DisplayHandle for flicker-free updates."""
         from IPython.display import display, HTML
 
@@ -405,9 +409,7 @@ class RemoteBackend(Backend):
         self.job_status = response.status
 
         if response.status == ResponseModel.JobStatus.ERROR:
-            self.status_display.update(
-                response.id, response.status.name, response.description or ""
-            )
+            self.status_display.update(response.id, response.status.name, "")
             raise RemoteException(f"{response.description}\nRemote exception.")
 
         # Log response for user (skip STREAM status - it's internal)
