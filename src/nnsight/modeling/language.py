@@ -207,18 +207,16 @@ class LanguageModel(TransformersModel):
 
     def _prepare_input(
         self,
-        *inputs: Tuple[
-            Union[
-                str,
-                List[str],
-                List[List[str]],
-                List[int],
-                List[List[int]],
-                torch.Tensor,
-                List[torch.Tensor],
-                Dict[str, Any],
-                BatchEncoding,
-            ]
+        *inputs: Union[
+            str,
+            List[str],
+            List[List[str]],
+            List[int],
+            List[List[int]],
+            torch.Tensor,
+            List[torch.Tensor],
+            Dict[str, Any],
+            BatchEncoding,
         ],
         input_ids: Union[
             List[int], List[List[int]], torch.Tensor, List[torch.Tensor]
@@ -226,7 +224,7 @@ class LanguageModel(TransformersModel):
         labels: Any = None,
         attention_mask: Any = None,
         **kwargs,
-    ) -> Tuple[BatchEncoding, int]:
+    ) -> Tuple[Tuple[()], Dict[str, Any]]:
         
         if input_ids is not None:
 

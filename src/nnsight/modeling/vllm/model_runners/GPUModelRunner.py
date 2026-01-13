@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.outputs import RequestOutput
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -186,7 +186,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model = VLLM(self.model)
 
-        self.nnsight_model.tokenizer = init_tokenizer_from_configs(self.model_config)
+        self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 
         self.nnsight_model._interleaver.mediators = []
 

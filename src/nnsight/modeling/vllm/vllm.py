@@ -5,7 +5,8 @@ import vllm
 
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.inputs import TokensPrompt
 
 from vllm import LLM, envs
 from vllm.distributed import (
@@ -18,6 +19,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
 
 from ...intervention.envoy import Envoy
+from ...intervention.tracing.tracer import ScanningTracer
 from ...intervention.tracing.util import push_variables
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
@@ -118,7 +120,9 @@ class VLLM(RemoteableMixin):
 
         _ROPE_DICT.clear()
 
-        self.tokenizer = init_tokenizer_from_configs(vllm_config.model_config)
+        self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+        if getattr(self.tokenizer, "pad_token", None) is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         return model
 
@@ -150,8 +154,42 @@ class VLLM(RemoteableMixin):
         params = []
 
         for arg in args:
+            if arg == []:
+                raise ValueError("Empty list of prompts is not allowed")
 
-            if not type(arg) is list:
+            if type(arg) is dict:
+                keys = set(arg.keys())
+                if "input_ids" in keys and keys.issubset(
+                    {"input_ids", "attention_mask"}
+                ):
+                    # is hf tokenizer result
+                    batch_input_ids = arg["input_ids"]
+                    batch_attention_mask = arg.get("attention_mask", None)
+                    if isinstance(batch_input_ids, torch.Tensor):
+                        batch_input_ids = batch_input_ids.tolist()
+                    if isinstance(batch_attention_mask, torch.Tensor):
+                        batch_attention_mask = batch_attention_mask.tolist()
+                    if batch_input_ids == []:
+                        raise ValueError("Empty list of token ids is not allowed")
+                    if isinstance(batch_input_ids[0], int):
+                        # list of token ids
+                        batch_input_ids = [batch_input_ids]
+                        batch_attention_mask = [batch_attention_mask]
+
+                    for input_ids, attention_mask in zip(
+                        batch_input_ids, batch_attention_mask
+                    ):
+                        prompt = TokensPrompt(
+                            prompt_token_ids=[
+                                t for t, m in zip(input_ids, attention_mask) if m != 0
+                            ]
+                        )
+                        prompts.append(prompt)
+                        params.append(NNsightSamplingParams(**kwargs))
+                    continue
+
+            if type(arg) is not list or isinstance(arg[0], int):
+                # if arg is a list of ints (token ids), we also need to wrap it in a list
                 arg = [arg]
 
             for i, prompt in enumerate(arg):
@@ -162,6 +200,9 @@ class VLLM(RemoteableMixin):
 
                 if kwargs != {}:
                     param.is_default_param = False
+
+                if type(prompt) is list and isinstance(prompt[0], int):
+                    prompt = TokensPrompt(prompt_token_ids=prompt)
 
                 prompts.append(prompt)
                 params.append(param)
@@ -248,6 +289,9 @@ class VLLM(RemoteableMixin):
         push_variables(self._interleaver.mediators[0].info.frame, saves)
 
     def interleave(self, fn: Callable, *args, **kwargs):
+        """Execute the traced function with vLLM, dispatching the engine if needed."""
+        if not self.dispatched and not isinstance(self._interleaver.tracer, ScanningTracer):
+            self.dispatch()
 
         try:
             fn(*args, **kwargs)

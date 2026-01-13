@@ -393,3 +393,111 @@ class TestTensorParallelism:
         assert next_token != " Paris"
         assert hs.shape == torch.Size([11, 3072])
         assert torch.all(hs[:, 2000:] == 0)
+
+
+# =============================================================================
+# Token Input Compatibility
+# =============================================================================
+
+
+class TestTokenInputs:
+    """Tests for token ID and HuggingFace tokenizer input compatibility."""
+
+    @torch.no_grad()
+    def test_single_token_list(self, vllm_gpt2, ET_prompt: str):
+        """Test passing a single list of token IDs."""
+        token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+
+        with vllm_gpt2.trace(token_ids, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
+        assert next_token == " Paris"
+
+    @torch.no_grad()
+    def test_batched_token_lists(self, vllm_gpt2, ET_prompt: str, MSG_prompt: str):
+        """Test passing multiple lists of token IDs."""
+        et_tokens = vllm_gpt2.tokenizer.encode(ET_prompt)
+        msg_tokens = vllm_gpt2.tokenizer.encode(MSG_prompt)
+
+        with vllm_gpt2.trace([et_tokens, msg_tokens], temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        assert logits.shape[0] == 2
+        tokens = vllm_gpt2.tokenizer.batch_decode(logits.argmax(dim=-1))
+        assert tokens == [" Paris", " New"]
+
+    @torch.no_grad()
+    def test_hf_tokenizer_dict_single(self, vllm_gpt2, ET_prompt: str):
+        """Test passing HuggingFace tokenizer output dict for single prompt."""
+        hf_output = vllm_gpt2.tokenizer(ET_prompt, return_tensors="pt")
+
+        with vllm_gpt2.trace(dict(hf_output), temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
+        assert next_token == " Paris"
+
+    @torch.no_grad()
+    def test_hf_tokenizer_dict_batched(
+        self, vllm_gpt2, ET_prompt: str, MSG_prompt: str
+    ):
+        """Test passing HuggingFace tokenizer output dict for batched prompts."""
+        hf_output = vllm_gpt2.tokenizer(
+            [ET_prompt, MSG_prompt], return_tensors="pt", padding=True
+        )
+
+        with vllm_gpt2.trace(dict(hf_output), temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        assert logits.shape[0] == 2
+        tokens = vllm_gpt2.tokenizer.batch_decode(logits.argmax(dim=-1))
+        assert tokens == [" Paris", " New"]
+
+    @torch.no_grad()
+    def test_hf_tokenizer_with_padding_mask(self, vllm_gpt2):
+        """Test that padding tokens are correctly filtered via attention_mask."""
+        short_prompt = "Hello"
+        long_prompt = "The Eiffel Tower is located in the city of"
+
+        hf_output = vllm_gpt2.tokenizer(
+            [short_prompt, long_prompt], return_tensors="pt", padding=True
+        )
+
+        with vllm_gpt2.trace(dict(hf_output), temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        assert logits.shape[0] == 2
+        tokens = vllm_gpt2.tokenizer.batch_decode(logits.argmax(dim=-1))
+        assert tokens[1] == " Paris"
+
+    @torch.no_grad()
+    def test_token_list_in_invoker(self, vllm_gpt2, ET_prompt: str):
+        """Test token list input within an invoker."""
+        token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+
+        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+            with tracer.invoke(token_ids):
+                logits = vllm_gpt2.logits.output.save()
+
+        next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
+        assert next_token == " Paris"
+
+    @torch.no_grad()
+    def test_mixed_string_and_token_invokers(
+        self, vllm_gpt2, ET_prompt: str, MSG_prompt: str
+    ):
+        """Test mixing string and token list inputs across invokers."""
+        et_tokens = vllm_gpt2.tokenizer.encode(ET_prompt)
+
+        with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
+            with tracer.invoke(et_tokens):
+                et_logits = vllm_gpt2.logits.output.save()
+
+            with tracer.invoke(MSG_prompt):
+                msg_logits = vllm_gpt2.logits.output.save()
+
+        et_token = vllm_gpt2.tokenizer.decode(et_logits.argmax(dim=-1))
+        msg_token = vllm_gpt2.tokenizer.decode(msg_logits.argmax(dim=-1))
+        assert et_token == " Paris"
+        assert msg_token == " New"
