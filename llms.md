@@ -1,4 +1,4 @@
-# CLAUDE.md - NNsight AI Agent Guide
+# llms.md - NNsight AI Agent Guide
 
 This document provides comprehensive guidance for AI agents working with the `nnsight` library. NNsight enables interpreting and manipulating the internals states of deep learning models through a deferred execution tracing system.
 

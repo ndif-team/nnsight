@@ -673,7 +673,7 @@ class Envoy(Batchable):
         except:
             return None
         
-    property
+    @property
     def devices(self) -> Optional[set[torch.device]]:
         """
         Get the devices the module is on. Finds all parameters and return their devices.
