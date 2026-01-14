@@ -7,7 +7,12 @@ Interpret and manipulate the internals of deep learning models
 </h3>
 
 <p align="center">
-| <a href="https://www.nnsight.net"><b>Documentation</b></a> | <a href="https://github.com/ndif-team/nnsight"><b>GitHub</b></a> | <a href="https://discord.gg/6uFJmCSwW7"><b>Discord</b></a> | <a href="https://discuss.ndif.us/"><b>Forum</b></a> | <a href="https://x.com/ndif_team"><b>Twitter</b></a> | <a href="https://arxiv.org/abs/2407.14561"><b>Paper</b></a> |
+<a href="https://www.nnsight.net"><b>Documentation</b></a> | <a href="https://github.com/ndif-team/nnsight"><b>GitHub</b></a> | <a href="https://discord.gg/6uFJmCSwW7"><b>Discord</b></a> | <a href="https://discuss.ndif.us/"><b>Forum</b></a> | <a href="https://x.com/ndif_team"><b>Twitter</b></a> | <a href="https://arxiv.org/abs/2407.14561"><b>Paper</b></a>
+</p>
+
+<p align="center">
+<a href="https://colab.research.google.com/github/ndif-team/nnsight/blob/main/NNsight_Walkthrough.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg"></img></a>
+<a href="https://deepwiki.com/ndif-team/nnsight"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></img></a>
 </p>
 
 ---
