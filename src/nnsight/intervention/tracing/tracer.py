@@ -357,7 +357,7 @@ class InterleavingTracer(Tracer):
         if self.args:
 
             invoker = self.invoke(*self.args, _info=self.info.copy())
-            
+
             invoker.__exit__(ExitTracingException, None, None)
 
             invoker.info.start_line = 0
@@ -407,9 +407,11 @@ class InterleavingTracer(Tracer):
         finally:
             self.mediators.clear()
 
-        self.push(self._frame.f_locals)
+        state = self.push(self._frame.f_locals)
 
         del self._frame
+
+        return state
 
     ### Public API ####
 
