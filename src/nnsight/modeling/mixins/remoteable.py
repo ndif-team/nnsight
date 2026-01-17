@@ -75,7 +75,6 @@ class RemoteableMixin(MetaMixin):
         return persistent_objects
 
     def _remoteable_model_key(self) -> str:
-
         raise NotImplementedError()
 
     @classmethod
