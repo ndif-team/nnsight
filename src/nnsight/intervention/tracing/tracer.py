@@ -558,6 +558,9 @@ class InterleavingTracer(Tracer):
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
 
+        for mediator in self.mediators:
+            mediator.intervention.__source__ = "".join(mediator.info.source)
+
         return state
 
     def __setstate__(self, state):

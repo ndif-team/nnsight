@@ -65,6 +65,15 @@ class RemoteableMixin(MetaMixin):
             **kwargs,
         )
 
+    def _remoteable_persistent_objects(self) -> dict:
+
+        persistent_objects = {"Interleaver": self._interleaver}
+
+        for envoy in self.modules():
+            persistent_objects[f"Module:{envoy.path}"] = envoy._module
+
+        return persistent_objects
+
     def _remoteable_model_key(self) -> str:
 
         raise NotImplementedError()
@@ -74,7 +83,7 @@ class RemoteableMixin(MetaMixin):
         raise NotImplementedError()
 
     def to_model_key(self) -> str:
-        
+
         import_path = f"{self._remoteable_model_key.__func__.__module__}.{self._remoteable_model_key.__func__.__qualname__.split('.')[0]}"
 
         return f"{import_path}:{self._remoteable_model_key()}"
@@ -98,19 +107,19 @@ class StreamTracer(Tracer):
         super().__init__(*args, **kwargs)
 
         self.frame = frame
-        
+
     @classmethod
     def register(cls, send_fn: Callable, recv_fn: Callable):
-        
+
         cls._send = send_fn
         cls._recv = recv_fn
-        
+
     @classmethod
     def deregister(cls):
-        
+
         cls._send = None
         cls._recv = None
-        
+
     def execute(self, fn: Callable):
 
         data = save(fn)
@@ -144,13 +153,14 @@ class StreamTracer(Tracer):
                 ctypes.pythonapi.PyFrame_LocalsToFast(
                     ctypes.py_object(self.frame), ctypes.c_int(0)
                 )
-        
+
+
 class RemoteTracer(Tracer):
 
     def local(self):
-        
+
         frame = inspect.currentframe().f_back
-        
+
         return StreamTracer(frame)
 
 
