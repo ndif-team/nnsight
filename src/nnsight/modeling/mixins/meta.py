@@ -57,9 +57,11 @@ class MetaMixin(LoadableMixin):
 
         self.dispatched = True
 
-    def interleave(self,  fn: Callable, *args, **kwargs):
+    def interleave(self, fn: Callable, *args, **kwargs):
 
-        if not self.dispatched and not isinstance(self._interleaver.tracer, ScanningTracer):
+        if not self.dispatched and not isinstance(
+            self._interleaver.tracer, ScanningTracer
+        ):
             self.dispatch()
 
             if isinstance(fn, torch.nn.Module):
@@ -74,3 +76,7 @@ class MetaMixin(LoadableMixin):
                 fn = fn.__func__.__get__(new_self, type(new_self))
 
         return super().interleave(fn, *args, **kwargs)
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self.dispatched = True

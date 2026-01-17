@@ -12,6 +12,7 @@ Interpret and manipulate the internals of deep learning models
 
 <p align="center">
 <a href="https://colab.research.google.com/github/ndif-team/nnsight/blob/main/NNsight_Walkthrough.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg"></img></a>
+<a href="https://deepwiki.com/ndif-team/nnsight"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></img></a>
 </p>
 
 ---

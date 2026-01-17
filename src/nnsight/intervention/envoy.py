@@ -672,7 +672,7 @@ class Envoy(Batchable):
             return next(self._module.parameters()).device
         except:
             return None
-        
+
     @property
     def devices(self) -> Optional[set[torch.device]]:
         """
@@ -1098,6 +1098,9 @@ class Envoy(Batchable):
             super().__setattr__(key, value)
 
     def __getstate__(self):
+
+        self._interleaver._persistent_id = "Interleaver"
+        self._module._persistent_id = f"Module:{self.path}"
         return {
             "alias": self._alias,
             "children": self._children,
@@ -1108,6 +1111,8 @@ class Envoy(Batchable):
             },
             "path": self.path,
             "default_mediators": self._default_mediators,
+            "interleaver": self._interleaver,
+            "module": self._module,
         }
 
     def __setstate__(self, state):
@@ -1122,6 +1127,8 @@ class Envoy(Batchable):
 
         self.path = state["path"]
         self._default_mediators = state["default_mediators"]
+        self._interleaver = state["interleaver"]
+        self._module = state["module"]
 
 
 # TODO extend Envoy

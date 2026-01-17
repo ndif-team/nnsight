@@ -178,7 +178,7 @@ class LanguageModel(TransformersModel):
         ],
         **kwargs,
     ):
-        
+
         if isinstance(inputs, torch.Tensor):
             if inputs.ndim == 1:
                 inputs = inputs.unsqueeze(0)
@@ -196,8 +196,6 @@ class LanguageModel(TransformersModel):
             isinstance(inputs, list) and isinstance(inputs[0], int)
         ):
             inputs = [inputs]
-
-        
 
         if not isinstance(inputs[0], str):
             inputs = [{"input_ids": ids} for ids in inputs]
@@ -225,7 +223,7 @@ class LanguageModel(TransformersModel):
         attention_mask: Any = None,
         **kwargs,
     ) -> Tuple[Tuple[()], Dict[str, Any]]:
-        
+
         if input_ids is not None:
 
             assert len(inputs) == 0
@@ -246,7 +244,7 @@ class LanguageModel(TransformersModel):
 
             if labels is not None:
                 labels = self._tokenize(labels, **kwargs)["input_ids"]
-        
+
         if attention_mask is not None:
             inputs["attention_mask"] = attention_mask
 
@@ -281,7 +279,7 @@ class LanguageModel(TransformersModel):
         if labels is not None:
 
             batched_labels = torch.cat((batched_labels, labels))
-            
+
         if attention_mask is not None:
 
             if self.tokenizer.padding_side == "left":
@@ -304,9 +302,24 @@ class LanguageModel(TransformersModel):
             {**new_batched_inputs, **batched_inputs, "labels": batched_labels},
         ), len(prepared_kwargs["input_ids"])
 
-
     def _remoteable_model_key(self) -> str:
         return super()._remoteable_model_key()
+
+    def _remoteable_persistent_objects(self) -> dict:
+        persistent_objects = super()._remoteable_persistent_objects()
+        persistent_objects["Tokenizer"] = self.tokenizer
+        return persistent_objects
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        self.tokenizer._persistent_id = "Tokenizer"
+        state["tokenizer"] = self.tokenizer
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self.tokenizer = state["tokenizer"]
+
 
 if TYPE_CHECKING:
 

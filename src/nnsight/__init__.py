@@ -95,6 +95,40 @@ from .modeling.base import NNsight
 from .modeling.language import LanguageModel
 from .intervention.tracing.base import Tracer
 from .intervention.tracing.globals import save
+from .intervention.tracing.util import ExceptionWrapper
+
+# Custom exception hook to show clean tracebacks for NNsight exceptions
+_original_excepthook = sys.excepthook
+
+
+def _nnsight_excepthook(exc_type, exc_value, exc_tb):
+    """Custom exception hook that prints clean tracebacks for NNsight exceptions."""
+    if isinstance(exc_value, ExceptionWrapper) and not CONFIG.APP.DEBUG:
+        # Print the reconstructed traceback with rich syntax highlighting
+        # Pass outer_tb to include user code frames from the call stack
+        exc_value.print_rich(file=sys.stderr, outer_tb=exc_tb)
+    else:
+        # Use the original exception hook for other exceptions or in DEBUG mode
+        _original_excepthook(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _nnsight_excepthook
+
+# Also handle IPython if available
+try:
+    _ipython = get_ipython()
+    if _ipython is not None:
+
+        def _nnsight_ipython_exception_handler(self, etype, evalue, tb, tb_offset=None):
+            """Custom IPython exception handler for NNsight exceptions."""
+            if isinstance(evalue, ExceptionWrapper) and not CONFIG.APP.DEBUG:
+                evalue.print_rich(file=sys.stderr, outer_tb=tb)
+            else:
+                self.showtraceback((etype, evalue, tb), tb_offset=tb_offset)
+
+        _ipython.set_custom_exc((ExceptionWrapper,), _nnsight_ipython_exception_handler)
+except (NameError, AttributeError):
+    pass
 
 
 def session(*args, **kwargs):
