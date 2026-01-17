@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 class ApiConfigModel(BaseModel):
     HOST: str = "https://api.ndif.us"
-    ZLIB: bool = True
+    COMPRESS: bool = True
     APIKEY: Optional[str] = None
 
 

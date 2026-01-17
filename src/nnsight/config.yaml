@@ -1,7 +1,7 @@
 API:
   APIKEY: null
   HOST: https://api.ndif.us
-  ZLIB: true
+  COMPRESS: true
 APP:
   CACHE_DIR: ~/.cache/nnsight/
   CROSS_INVOKER: true

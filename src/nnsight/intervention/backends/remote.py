@@ -12,6 +12,7 @@ import httpx
 import requests
 import socketio
 import torch
+import zstandard as zstd
 from tqdm.auto import tqdm
 
 from ... import __IPYTHON__, CONFIG, __version__
@@ -335,7 +336,7 @@ class RemoteBackend(Backend):
         )
 
         self.job_id = job_id
-        self.zlib = CONFIG.API.ZLIB
+        self.compress = CONFIG.API.COMPRESS
         self.blocking = blocking
         self.callback = callback
 
@@ -356,12 +357,12 @@ class RemoteBackend(Backend):
         interventions = super().__call__(tracer)
 
         data = RequestModel(interventions=interventions, tracer=tracer).serialize(
-            self.zlib
+            self.compress
         )
 
         headers = {
             "nnsight-model-key": self.model_key,
-            "nnsight-zlib": str(self.zlib),
+            "nnsight-compress": str(self.compress),
             "nnsight-version": __version__,
             "python-version": python_version,
             "ndif-api-key": self.api_key,
@@ -526,9 +527,21 @@ class RemoteBackend(Backend):
         # Move cursor to beginning of bytes.
         result_bytes.seek(0)
 
+        if self.compress:
+
+            cctx = zstd.ZstdDecompressor()
+            dst = io.BytesIO()
+
+            with cctx.stream_writer(dst, closefd=False) as writer:
+                while chunk := result_bytes.read(64 * 1024):
+                    writer.write(chunk)
+
+            result_bytes = dst
+
+            result_bytes.seek(0)
+
         # Decode bytes with pickle and then into pydantic object.
         result = torch.load(result_bytes, map_location="cpu", weights_only=False)
-
         # Close bytes
         result_bytes.close()
 
@@ -560,6 +573,19 @@ class RemoteBackend(Backend):
 
         # Move cursor to beginning of bytes.
         result_bytes.seek(0)
+
+        if self.compress:
+
+            cctx = zstd.ZstdDecompressor()
+            dst = io.BytesIO()
+
+            with cctx.stream_writer(dst, closefd=False) as writer:
+                while chunk := result_bytes.read(64 * 1024):
+                    writer.write(chunk)
+
+            result_bytes = dst
+
+            result_bytes.seek(0)
 
         # Decode bytes with pickle and then into pydantic object.
         result = torch.load(result_bytes, map_location="cpu", weights_only=False)
