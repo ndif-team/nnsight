@@ -11,13 +11,22 @@ This is useful for:
 
 The LocalSimulationBackend uses the same serialization/deserialization path
 as RemoteBackend but executes the reconstructed code locally on the same
-model instance.
+model instance. During deserialization, it blocks access to user modules
+to validate that all code is properly captured for server-side execution.
 """
 
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+
+# Modules available on NDIF servers
+SERVER_MODULES = {
+    'torch', 'numpy', 'transformers', 'accelerate', 'einops',
+    'collections', 'itertools', 'functools', 'operator', 'math',
+    'random', 'json', 're', 'typing', 'dataclasses', 'abc',
+}
 
 from ..serialization_source import (
     serialize_source_based,
@@ -123,8 +132,9 @@ class LocalSimulationBackend(Backend):
                 f"LocalSimulation: Serialization failed. This would also fail on NDIF.\n\n{e}"
             ) from e
 
-        # STEP 3: Deserialize into a fresh namespace
-        # This simulates what happens on the NDIF server
+        # STEP 3: Deserialize with user modules blocked
+        # This simulates NDIF where user modules don't exist
+        blocked = self._block_user_modules()
         try:
             namespace = deserialize_source_based(
                 payload,
@@ -138,6 +148,8 @@ class LocalSimulationBackend(Backend):
             raise SourceSerializationError(
                 f"LocalSimulation: Deserialization failed. This would also fail on NDIF.\n\n{e}"
             ) from e
+        finally:
+            self._restore_modules(blocked)
 
         # STEP 4: Execute the reconstructed code
         # We use the original compiled function, not the reconstructed one,
@@ -159,3 +171,37 @@ class LocalSimulationBackend(Backend):
     def get_last_payload(self) -> Optional[bytes]:
         """Return the last serialized payload for debugging."""
         return self._last_payload
+
+    def _block_user_modules(self) -> Dict[str, Any]:
+        """Block non-server modules from sys.modules and sys.path."""
+        blocked: Dict[str, Any] = {'modules': {}, 'paths': []}
+
+        # Block paths that could contain user modules
+        for path in list(sys.path):
+            if 'site-packages' in path or 'lib/python' in path:
+                continue
+            if path.endswith('/src') or '/src/nnsight' in path:
+                continue
+            blocked['paths'].append(path)
+            sys.path.remove(path)
+
+        # Block non-server modules
+        for name in list(sys.modules.keys()):
+            root = name.split('.')[0]
+            if root in SERVER_MODULES:
+                continue
+            if root in sys.stdlib_module_names:
+                continue
+            if 'nnsight' in name:
+                continue
+            blocked['modules'][name] = sys.modules.pop(name)
+
+        if self.verbose:
+            print(f"[LocalSimulation] Blocked {len(blocked['modules'])} modules, {len(blocked['paths'])} paths")
+
+        return blocked
+
+    def _restore_modules(self, blocked: Dict[str, Any]) -> None:
+        """Restore previously blocked modules and paths."""
+        sys.modules.update(blocked['modules'])
+        sys.path.extend(blocked['paths'])
