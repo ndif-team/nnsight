@@ -538,6 +538,38 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
     # Resolve module references, but also track type references for auto-discovery
     module_refs, resolution_errors = resolve_module_references(external_names, cls, source_file, start_line)
 
+    # Track server-available imports (modules, types, callables) so they can be
+    # resolved during reconstruction. This handles cases like "import torch.nn as nn"
+    # where 'nn' needs to be mapped to torch.nn on the server.
+    server_imports = {}
+    for name in external_names:
+        if name not in module_globals:
+            continue
+        value = module_globals[name]
+
+        # Record server-available types with their module path
+        if isinstance(value, type) and is_server_available_class(value):
+            type_module = getattr(value, '__module__', '')
+            type_name = value.__name__
+            if type_module:
+                server_imports[name] = {"type": "class", "module": type_module, "name": type_name}
+            continue
+
+        # Record server-available functions/decorators (like dataclass, abstractmethod)
+        if callable(value) and hasattr(value, '__module__'):
+            func_module = getattr(value, '__module__', '')
+            if func_module and is_server_available_module(func_module):
+                func_name = getattr(value, '__name__', name)
+                server_imports[name] = {"type": "callable", "module": func_module, "name": func_name}
+                continue
+
+        # Record server-available modules (e.g., nn -> torch.nn)
+        if isinstance(value, types.ModuleType):
+            mod_name = value.__name__
+            if is_server_available_module(mod_name):
+                server_imports[name] = {"type": "module", "module": mod_name}
+                continue
+
     # Find type references that need auto-discovery
     types_to_discover = []
     filtered_errors = []
@@ -601,6 +633,7 @@ def auto_discover_class(cls: type, discovered: Dict[str, Any] = None) -> Dict[st
             "line": start_line,
         },
         "module_refs": module_refs,
+        "server_imports": server_imports,
         "closure_vars": {},
         "type": "class",
         "instances": {},
@@ -2484,6 +2517,32 @@ def deserialize_source_based(
 
         # Add closure variables
         namespace.update(obj_data.get('closure_vars', {}))
+
+        # Resolve server-available imports (modules, types, callables)
+        # This handles cases like "import torch.nn as nn" where 'nn' needs to
+        # be mapped to torch.nn in the namespace before executing the source.
+        server_imports = obj_data.get('server_imports', {})
+        for ref_name, import_info in server_imports.items():
+            if ref_name in namespace:
+                continue
+            try:
+                import importlib
+                import_type = import_info.get('type')
+                mod_name = import_info.get('module', '')
+                obj_name = import_info.get('name', '')
+
+                if import_type == 'module':
+                    # Import the module (e.g., nn -> torch.nn)
+                    if mod_name:
+                        namespace[ref_name] = importlib.import_module(mod_name)
+                elif import_type in ('class', 'callable'):
+                    # Import the class or callable from its module
+                    if mod_name and obj_name:
+                        mod = importlib.import_module(mod_name)
+                        namespace[ref_name] = getattr(mod, obj_name)
+            except (ImportError, AttributeError):
+                # If import fails, continue (might be handled elsewhere)
+                pass
 
         # Extract source code and location info (handle both new and legacy format)
         source_data = obj_data.get('source', '')
