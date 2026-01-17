@@ -16,7 +16,8 @@ Key components:
     - CustomCloudUnpickler: Deserializes data with support for persistent object
       references (objects that shouldn't be serialized but looked up by ID).
     - make_function: Reconstructs a function from its serialized components.
-    - save/load: High-level API for serializing and deserializing objects.
+    - dumps/loads: High-level API for serializing and deserializing objects
+      (named to match the standard pickle module API).
 
 Persistent objects:
     Some objects (like model proxies or tensors) shouldn't be serialized directly
@@ -27,8 +28,8 @@ Example:
     >>> import serialization
     >>> def my_func(x, y=10):
     ...     return x + y
-    >>> data = serialization.save(my_func)
-    >>> restored = serialization.load(data)
+    >>> data = serialization.dumps(my_func)
+    >>> restored = serialization.loads(data)
     >>> restored(5)  # Returns 15
 """
 
@@ -37,11 +38,14 @@ import io
 import pickle
 import textwrap
 import types
-from builtins import open
-from typing import Any, Optional, Union
+from pathlib import Path
+from typing import Any, BinaryIO, Optional, Union
 
 import cloudpickle
 from cloudpickle.cloudpickle import _function_getstate, _get_cell_contents
+
+# Default pickle protocol - protocol 4 is available in Python 3.4+ and supports large objects
+DEFAULT_PROTOCOL = 4
 
 
 def make_function(
@@ -68,7 +72,7 @@ def make_function(
         source: The function's source code as a string. May be indented.
         name: The function's __name__ attribute.
         filename: Original filename where the function was defined. Used for
-            tracebacks and debugging. Falls back to "<pyson>" if None.
+            tracebacks and debugging. Falls back to "<serialization>" if None.
         qualname: The function's __qualname__ (qualified name including class).
         module: The function's __module__ attribute.
         doc: The function's docstring (__doc__).
@@ -128,7 +132,15 @@ def make_function(
         factory_source += f"    return {name}\n"
 
         # Compile and execute the factory, then call it with closure values
-        factory_code = compile(factory_source, filename or "<pyson>", "exec")
+        try:
+            factory_code = compile(
+                factory_source, filename or "<serialization>", "exec"
+            )
+        except SyntaxError as e:
+            raise ValueError(
+                f"Failed to compile source for function '{name}'. "
+                f"This may indicate corrupted serialized data or version incompatibility."
+            ) from e
         exec(factory_code, func_globals)
         factory = func_globals["_seri_factory_"]
         func = factory(*closure)
@@ -137,7 +149,13 @@ def make_function(
         #
         # We compile the entire source as a module, then find the specific
         # function's code object in the module's constants.
-        module_code = compile(source, filename or "<pyson>", "exec")
+        try:
+            module_code = compile(source, filename or "<serialization>", "exec")
+        except SyntaxError as e:
+            raise ValueError(
+                f"Failed to compile source for function '{name}'. "
+                f"This may indicate corrupted serialized data or version incompatibility."
+            ) from e
 
         # Search through the module's constants to find our function's code object
         func_code = None
@@ -224,7 +242,13 @@ class CustomCloudPickler(cloudpickle.Pickler):
         if hasattr(func, "__source__"):
             source = func.__source__
         else:
-            source = inspect.getsource(func)
+            try:
+                source = inspect.getsource(func)
+            except OSError as e:
+                raise pickle.PicklingError(
+                    f"Cannot serialize function '{func.__name__}': source code unavailable. "
+                    f"Attach source manually via func.__source__ = '...'. Original error: {e}"
+                ) from e
 
         # Use cloudpickle's internal helper to extract function state.
         # _function_getstate returns:
@@ -233,7 +257,7 @@ class CustomCloudPickler(cloudpickle.Pickler):
         state, slotstate = _function_getstate(func)
 
         # Extract all the metadata we need to reconstruct the function
-        globals = slotstate["__globals__"]
+        func_globals_captured = slotstate["__globals__"]
         defaults = slotstate["__defaults__"]
         kwdefaults = slotstate["__kwdefaults__"]
         annotations = slotstate["__annotations__"]
@@ -274,7 +298,7 @@ class CustomCloudPickler(cloudpickle.Pickler):
             annotations,
             defaults,
             kwdefaults,
-            globals,
+            func_globals_captured,
             closure,
             closure_names,
         )
@@ -338,11 +362,11 @@ class CustomCloudUnpickler(pickle.Unpickler):
         >>> # Any references to "model_ref_1" in the data are now resolved
     """
 
-    def __init__(self, file: io.IOBase, persistent_objects: Optional[dict] = None):
+    def __init__(self, file: BinaryIO, persistent_objects: Optional[dict] = None):
         """Initialize the unpickler with a file and optional persistent objects.
 
         Args:
-            file: File-like object containing pickle data.
+            file: Binary file-like object containing pickle data.
             persistent_objects: Optional dict mapping persistent IDs to objects.
                 Defaults to empty dict if not provided.
         """
@@ -371,7 +395,11 @@ class CustomCloudUnpickler(pickle.Unpickler):
         raise pickle.UnpicklingError(f"Unknown persistent id: {pid}")
 
 
-def save(obj: Any, path: Optional[str] = None) -> Optional[bytes]:
+def dumps(
+    obj: Any,
+    path: Optional[Union[str, Path]] = None,
+    protocol: int = DEFAULT_PROTOCOL,
+) -> Optional[bytes]:
     """Serialize an object using source-based function serialization.
 
     This is the high-level API for serializing objects with CustomCloudPickler.
@@ -381,7 +409,10 @@ def save(obj: Any, path: Optional[str] = None) -> Optional[bytes]:
     Args:
         obj: Any picklable object. Functions will be serialized by source code.
         path: Optional file path to write the serialized data to.
+            Accepts both string paths and pathlib.Path objects.
             If None, returns the serialized bytes directly.
+        protocol: Pickle protocol version to use. Defaults to DEFAULT_PROTOCOL (4).
+            Protocol 4 is available in Python 3.4+ and supports large objects.
 
     Returns:
         If path is None: The serialized data as bytes.
@@ -389,40 +420,45 @@ def save(obj: Any, path: Optional[str] = None) -> Optional[bytes]:
 
     Example:
         >>> # Serialize to bytes (for network transmission)
-        >>> data = save(my_function)
+        >>> data = dumps(my_function)
         >>> send_to_server(data)
         >>>
         >>> # Serialize to file (for persistence)
-        >>> save(my_function, "/path/to/function.pkl")
-
-    Note:
-        Uses pickle protocol 4 when serializing to bytes (for in-memory use).
-        Protocol 4 is available in Python 3.4+ and supports large objects.
+        >>> dumps(my_function, "/path/to/function.pkl")
+        >>>
+        >>> # Using pathlib.Path
+        >>> from pathlib import Path
+        >>> dumps(my_function, Path("./functions/my_func.pkl"))
     """
     if path is None:
         # In-memory serialization - return bytes directly
-        file = io.BytesIO()
-        # Use protocol 4 for better compatibility and large object support
-        CustomCloudPickler(file, protocol=4).dump(obj)
-        file.seek(0)
-        return file.read()
+        buffer = io.BytesIO()
+        CustomCloudPickler(buffer, protocol=protocol).dump(obj)
+        buffer.seek(0)
+        return buffer.read()
 
     # File-based serialization - write to disk
-    with open(path, "wb") as file:
-        CustomCloudPickler(file).dump(obj)
+    # Normalize to Path for consistent handling
+    path = Path(path)
+    with path.open("wb") as file:
+        CustomCloudPickler(file, protocol=protocol).dump(obj)
 
 
-def load(data: Union[str, bytes], persistent_objects: Optional[dict] = None) -> Any:
-    """Deserialize data that was serialized with save().
+def loads(
+    data: Union[str, bytes, Path],
+    persistent_objects: Optional[dict] = None,
+) -> Any:
+    """Deserialize data that was serialized with dumps().
 
     This is the high-level API for deserializing objects with CustomCloudUnpickler.
     Functions serialized by source code will be reconstructed by recompiling
     their source on the current Python version.
 
     Args:
-        data: Either:
+        data: One of:
             - bytes: Serialized data (e.g., received over network)
             - str: Path to a file containing serialized data
+            - Path: pathlib.Path to a file containing serialized data
         persistent_objects: Optional dictionary mapping persistent IDs to objects.
             Used to resolve objects that were serialized by reference rather
             than by value. See CustomCloudUnpickler for details.
@@ -433,23 +469,35 @@ def load(data: Union[str, bytes], persistent_objects: Optional[dict] = None) -> 
     Raises:
         pickle.UnpicklingError: If a persistent ID is encountered that isn't
             in the persistent_objects dictionary.
+        FileNotFoundError: If a file path is provided but the file doesn't exist.
 
     Example:
         >>> # Load from bytes (received over network)
         >>> data = receive_from_client()
-        >>> obj = load(data)
+        >>> obj = loads(data)
         >>>
-        >>> # Load from file
-        >>> obj = load("/path/to/function.pkl")
+        >>> # Load from file (string path)
+        >>> obj = loads("/path/to/function.pkl")
+        >>>
+        >>> # Load from file (pathlib.Path)
+        >>> from pathlib import Path
+        >>> obj = loads(Path("./functions/my_func.pkl"))
         >>>
         >>> # Load with persistent object resolution
         >>> persistent = {"model_proxy": actual_model}
-        >>> obj = load(data, persistent_objects=persistent)
+        >>> obj = loads(data, persistent_objects=persistent)
     """
     if isinstance(data, bytes):
         # In-memory deserialization from bytes
         return CustomCloudUnpickler(io.BytesIO(data), persistent_objects).load()
 
     # File-based deserialization - data is a file path
-    with open(data, "rb") as file:
+    # Normalize to Path for consistent handling
+    path = Path(data)
+    with path.open("rb") as file:
         return CustomCloudUnpickler(file, persistent_objects).load()
+
+
+# Backward-compatible aliases for existing code that uses save/load
+save = dumps
+load = loads
