@@ -126,121 +126,21 @@ class ExceptionWrapper(Exception):
 
         self.infos.append(info)
 
-    def __str__(self):
+    def _collect_frames(self, outer_tb=None):
         """
-        Generates a formatted traceback string with proper context.
-
-        Returns:
-            A string containing the formatted traceback with source code context
-        """
-
-        accumulator = 0
-        co_first_line = 0
-        filename = ""
-        co_name = ""
-
-        start_lines = {}
-        filename_mapping = {}
-        co_names = {}
-        source_lines = {}
-
-        for info in reversed(self.infos):
-
-            if isinstance(
-                info.frame, FrameType
-            ) and not info.frame.f_code.co_filename.startswith("<nnsight"):
-
-                accumulator = info.frame.f_code.co_firstlineno - 1
-                filename = info.frame.f_code.co_filename
-                co_name = info.frame.f_code.co_name
-
-            accumulator += info.start_line - 1
-
-            start_lines[info.filename] = accumulator
-            filename_mapping[info.filename] = filename
-            co_names[info.filename] = co_name
-            source_lines[info.filename] = info.source
-
-        traceback = self.original.__traceback__
-
-        tb_frames = []
-        current_tb = traceback
-
-        import linecache
-
-        while current_tb is not None:
-            frame = current_tb.tb_frame
-            filename = frame.f_code.co_filename
-            lineno = current_tb.tb_lineno
-            name = frame.f_code.co_name
-
-            # Case 1: <nnsight> - our traced code
-            if filename.startswith("<nnsight"):
-
-                fname = filename_mapping[filename]
-                start_line = start_lines[filename]
-                co_name = (
-                    co_names[filename]
-                    if "__nnsight_tracing_info__" in frame.f_locals
-                    else frame.f_code.co_name
-                )
-                source = source_lines[filename]
-
-                line_number = lineno - 1 + start_line
-
-                tb_frames.append(
-                    f'  File "{fname}", line {line_number+1 + co_first_line}, in {co_name}'
-                )
-                tb_frames.append(f"    {source[lineno-1].strip()}")
-
-            # Case 2: Skip internal nnsight code
-            elif "nnsight/" in filename:
-                if CONFIG.APP.DEBUG:
-                    tb_frames.append(f'  File "{filename}", line {lineno}, in {name}')
-                    try:
-                        line = linecache.getline(filename, lineno).strip()
-                        if line:
-                            tb_frames.append(f"    {line}")
-                    except:
-                        pass
-            # Case 3: Regular code - use normal traceback
-            else:
-                tb_frames.append(f'  File "{filename}", line {lineno}, in {name}')
-                try:
-                    line = linecache.getline(filename, lineno).strip()
-                    if line:
-                        tb_frames.append(f"    {line}")
-                except:
-                    pass
-
-            current_tb = current_tb.tb_next
-
-        traceback = (
-            ["Traceback (most recent call last):"]
-            + tb_frames
-            + [
-                "",  # Blank line before exception
-                f"{type(self.original).__name__}: {self.original}",
-            ]
-        )
-
-        return "\n".join(traceback)
-
-    def format_with_outer_tb(self, outer_tb=None):
-        """
-        Format the traceback including outer user frames.
+        Collect all traceback frames for display.
 
         Args:
             outer_tb: Optional outer traceback to include user frames from
 
         Returns:
-            Formatted traceback string
+            List of tuples: (filename, lineno, func_name, code_line, is_internal)
         """
         import linecache
 
-        tb_frames = []
+        frames = []
 
-        # First, add outer traceback frames (user code only, skip nnsight internals)
+        # First, collect outer traceback frames (skip nnsight internals and <nnsight> frames)
         if outer_tb is not None:
             current_tb = outer_tb
             while current_tb is not None:
@@ -249,19 +149,16 @@ class ExceptionWrapper(Exception):
                 lineno = current_tb.tb_lineno
                 name = frame.f_code.co_name
 
-                # Skip nnsight internal frames
                 if "nnsight/" not in fname and not fname.startswith("<nnsight"):
-                    tb_frames.append(f'  File "{fname}", line {lineno}, in {name}')
                     try:
                         line = linecache.getline(fname, lineno).strip()
-                        if line:
-                            tb_frames.append(f"    {line}")
                     except:
-                        pass
+                        line = ""
+                    frames.append((fname, lineno, name, line, False))
 
                 current_tb = current_tb.tb_next
 
-        # Now add the inner traceback (reconstructed from traced code)
+        # Build mappings for reconstructing <nnsight...> frames
         accumulator = 0
         co_first_line = 0
         filename = ""
@@ -287,8 +184,8 @@ class ExceptionWrapper(Exception):
             co_names[info.filename] = co_name
             source_lines[info.filename] = info.source
 
-        traceback_obj = self.original.__traceback__
-        current_tb = traceback_obj
+        # Collect inner traceback frames
+        current_tb = self.original.__traceback__
 
         while current_tb is not None:
             frame = current_tb.tb_frame
@@ -296,8 +193,8 @@ class ExceptionWrapper(Exception):
             lineno = current_tb.tb_lineno
             name = frame.f_code.co_name
 
-            # Case 1: <nnsight> - our traced code
             if fname.startswith("<nnsight"):
+                # Reconstruct to original user code location
                 real_fname = filename_mapping[fname]
                 start_line = start_lines[fname]
                 func_name = (
@@ -307,45 +204,56 @@ class ExceptionWrapper(Exception):
                 )
                 source = source_lines[fname]
                 line_number = lineno - 1 + start_line + 1 + co_first_line
+                code_line = source[lineno - 1].strip()
+                frames.append((real_fname, line_number, func_name, code_line, False))
 
-                tb_frames.append(
-                    f'  File "{real_fname}", line {line_number}, in {func_name}'
-                )
-                tb_frames.append(f"    {source[lineno-1].strip()}")
-
-            # Case 2: Skip internal nnsight code (unless DEBUG)
             elif "nnsight/" in fname:
+                # Internal nnsight code - only include in DEBUG mode
                 if CONFIG.APP.DEBUG:
-                    tb_frames.append(f'  File "{fname}", line {lineno}, in {name}')
                     try:
                         line = linecache.getline(fname, lineno).strip()
-                        if line:
-                            tb_frames.append(f"    {line}")
                     except:
-                        pass
+                        line = ""
+                    frames.append((fname, lineno, name, line, True))
 
-            # Case 3: Regular code
             else:
-                tb_frames.append(f'  File "{fname}", line {lineno}, in {name}')
+                # Regular code
                 try:
                     line = linecache.getline(fname, lineno).strip()
-                    if line:
-                        tb_frames.append(f"    {line}")
                 except:
-                    pass
+                    line = ""
+                frames.append((fname, lineno, name, line, False))
 
             current_tb = current_tb.tb_next
 
-        result = (
-            ["Traceback (most recent call last):"]
-            + tb_frames
-            + [
-                "",  # Blank line before exception
-                f"{type(self.original).__name__}: {self.original}",
-            ]
-        )
+        return frames
 
-        return "\n".join(result)
+    def format_traceback(self, outer_tb=None):
+        """
+        Format the traceback as a string.
+
+        Args:
+            outer_tb: Optional outer traceback to include user frames from
+
+        Returns:
+            Formatted traceback string
+        """
+        frames = self._collect_frames(outer_tb)
+
+        tb_lines = ["Traceback (most recent call last):"]
+        for fname, lineno, func_name, code_line, _ in frames:
+            tb_lines.append(f'  File "{fname}", line {lineno}, in {func_name}')
+            if code_line:
+                tb_lines.append(f"    {code_line}")
+
+        tb_lines.append("")  # Blank line before exception
+        tb_lines.append(f"{type(self.original).__name__}: {self.original}")
+
+        return "\n".join(tb_lines)
+
+    def __str__(self):
+        """Generates a formatted traceback string (without outer traceback)."""
+        return self.format_traceback(outer_tb=None)
 
     def print_rich(self, file=None, outer_tb=None):
         """
@@ -364,171 +272,42 @@ class ExceptionWrapper(Exception):
             from rich.console import Console
             from rich.syntax import Syntax
             from rich.text import Text
-            from rich.theme import Theme
 
             console = Console(file=file, force_terminal=None)
 
             # If terminal doesn't support color, fall back to plain text
             if not console.is_terminal:
-                print(self.format_with_outer_tb(outer_tb), file=file)
+                print(self.format_traceback(outer_tb), file=file)
                 return
 
         except ImportError:
             # Rich not available, fall back to plain text
-            print(self.format_with_outer_tb(outer_tb), file=file)
+            print(self.format_traceback(outer_tb), file=file)
             return
 
-        import linecache
+        # Collect all frames using shared logic
+        frames = self._collect_frames(outer_tb)
 
         console.print(Text("Traceback (most recent call last):", style="bold"))
 
-        # First, print outer traceback frames (user code only, skip nnsight internals)
-        if outer_tb is not None:
-            current_tb = outer_tb
-            while current_tb is not None:
-                frame = current_tb.tb_frame
-                fname = frame.f_code.co_filename
-                lineno = current_tb.tb_lineno
-                name = frame.f_code.co_name
+        for fname, lineno, func_name, code_line, is_internal in frames:
+            # Build location text with appropriate styling
+            location = Text()
+            dim = "dim " if is_internal else ""
+            location.append("  File ", style=f"{dim}")
+            location.append(f'"{fname}"', style=f"{dim}cyan")
+            location.append(", line ", style=f"{dim}")
+            location.append(str(lineno), style=f"{dim}yellow")
+            location.append(", in ", style=f"{dim}")
+            location.append(func_name, style=f"{dim}magenta")
+            console.print(location)
 
-                # Skip nnsight internal frames
-                if "nnsight/" not in fname and not fname.startswith("<nnsight"):
-                    location = Text()
-                    location.append("  File ", style="dim")
-                    location.append(f'"{fname}"', style="cyan")
-                    location.append(", line ", style="dim")
-                    location.append(str(lineno), style="yellow")
-                    location.append(", in ", style="dim")
-                    location.append(name, style="magenta")
-                    console.print(location)
-                    try:
-                        line = linecache.getline(fname, lineno).strip()
-                        if line:
-                            syntax = Syntax(
-                                line,
-                                "python",
-                                theme="monokai",
-                                background_color="default",
-                            )
-                            console.print("    ", end="")
-                            console.print(syntax)
-                    except:
-                        pass
-
-                current_tb = current_tb.tb_next
-
-        # Build the inner traceback with rich formatting
-        accumulator = 0
-        co_first_line = 0
-        filename = ""
-        co_name = ""
-
-        start_lines = {}
-        filename_mapping = {}
-        co_names = {}
-        source_lines = {}
-
-        for info in reversed(self.infos):
-            if isinstance(
-                info.frame, FrameType
-            ) and not info.frame.f_code.co_filename.startswith("<nnsight"):
-                accumulator = info.frame.f_code.co_firstlineno - 1
-                filename = info.frame.f_code.co_filename
-                co_name = info.frame.f_code.co_name
-
-            accumulator += info.start_line - 1
-
-            start_lines[info.filename] = accumulator
-            filename_mapping[info.filename] = filename
-            co_names[info.filename] = co_name
-            source_lines[info.filename] = info.source
-
-        traceback = self.original.__traceback__
-        current_tb = traceback
-
-        while current_tb is not None:
-            frame = current_tb.tb_frame
-            fname = frame.f_code.co_filename
-            lineno = current_tb.tb_lineno
-            name = frame.f_code.co_name
-
-            # Case 1: <nnsight> - our traced code
-            if fname.startswith("<nnsight"):
-                real_fname = filename_mapping[fname]
-                start_line = start_lines[fname]
-                func_name = (
-                    co_names[fname]
-                    if "__nnsight_tracing_info__" in frame.f_locals
-                    else frame.f_code.co_name
-                )
-                source = source_lines[fname]
-                line_number = lineno - 1 + start_line + 1 + co_first_line
-                code_line = source[lineno - 1].strip()
-
-                # Print file location
-                location = Text()
-                location.append("  File ", style="dim")
-                location.append(f'"{real_fname}"', style="cyan")
-                location.append(", line ", style="dim")
-                location.append(str(line_number), style="yellow")
-                location.append(", in ", style="dim")
-                location.append(func_name, style="magenta")
-                console.print(location)
-
-                # Print syntax-highlighted code (no background)
+            if code_line:
                 syntax = Syntax(
                     code_line, "python", theme="monokai", background_color="default"
                 )
                 console.print("    ", end="")
                 console.print(syntax)
-
-            # Case 2: Skip internal nnsight code (unless DEBUG)
-            elif "nnsight/" in fname:
-                if CONFIG.APP.DEBUG:
-                    location = Text()
-                    location.append("  File ", style="dim")
-                    location.append(f'"{fname}"', style="dim cyan")
-                    location.append(", line ", style="dim")
-                    location.append(str(lineno), style="dim yellow")
-                    location.append(", in ", style="dim")
-                    location.append(name, style="dim magenta")
-                    console.print(location)
-                    try:
-                        line = linecache.getline(fname, lineno).strip()
-                        if line:
-                            syntax = Syntax(
-                                line,
-                                "python",
-                                theme="monokai",
-                                background_color="default",
-                            )
-                            console.print("    ", end="")
-                            console.print(syntax)
-                    except:
-                        pass
-
-            # Case 3: Regular code - use normal traceback
-            else:
-                location = Text()
-                location.append("  File ", style="dim")
-                location.append(f'"{fname}"', style="cyan")
-                location.append(", line ", style="dim")
-                location.append(str(lineno), style="yellow")
-                location.append(", in ", style="dim")
-                location.append(name, style="magenta")
-                console.print(location)
-                try:
-                    line = linecache.getline(fname, lineno).strip()
-                    if line:
-                        syntax = Syntax(
-                            line, "python", theme="monokai", background_color="default"
-                        )
-                        console.print("    ", end="")
-                        console.print(syntax)
-                except:
-                    pass
-
-            current_tb = current_tb.tb_next
 
         # Print the exception type and message (with blank line before)
         console.print()
