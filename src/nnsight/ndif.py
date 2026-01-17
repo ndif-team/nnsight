@@ -6,14 +6,54 @@ from enum import Enum
 from importlib.metadata import distributions
 from io import StringIO
 from sys import stderr
-from typing import Union
+from typing import Union, types
 
 import requests
 from huggingface_hub import HfApi
 from rich.console import Console
 from rich.table import Table
+from cloudpickle import register_pickle_by_value
 
 from . import CONFIG
+
+
+def register(module: types.ModuleType):
+    """
+    Register a local module for serialization by value when executing remotely on NDIF.
+
+    When submitting code for remote execution on NDIF, any local modules that are not
+    installed on the server will cause a ``ModuleNotFoundError``. This function registers
+    a module so that its class definitions and function source code are serialized and
+    sent along with the request, allowing them to be rebuilt on the server.
+
+    This is a wrapper around ``cloudpickle.register_pickle_by_value``.
+
+    Args:
+        module: The module to register for serialization by value.
+
+    Note:
+        - Call this function after importing the module but before using any of its
+          contents in a remote context.
+        - The module's source code and definitions will be included in the serialized
+          payload, so keep registered modules reasonably sized.
+
+    Example:
+        >>> import mymodule
+        >>> from nnsight import LanguageModel
+        >>> from nnsight.ndif import register
+        >>>
+        >>> # Register the local module so it can be used remotely
+        >>> register(mymodule)
+        >>>
+        >>> # Now you can use functions/classes from mymodule in remote execution
+        >>> from mymodule.myfile import myfunction
+        >>>
+        >>> model = LanguageModel("meta-llama/Llama-3.1-70B")
+        >>> with model.generate("Hello", remote=True):
+        ...     result = myfunction(model)
+        ...     result.save()
+    """
+    register_pickle_by_value(module)
 
 
 # Critical packages that should be highlighted in red if mismatched
