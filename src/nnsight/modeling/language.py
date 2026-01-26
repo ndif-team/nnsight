@@ -203,6 +203,29 @@ class LanguageModel(TransformersModel):
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
 
+    # Parameters accepted by tokenizer.__call__ and tokenizer.pad
+    _TOKENIZER_KWARGS = {
+        "text_pair",
+        "text_target",
+        "text_pair_target",
+        "add_special_tokens",
+        "padding",
+        "truncation",
+        "max_length",
+        "stride",
+        "is_split_into_words",
+        "pad_to_multiple_of",
+        "padding_side",
+        "return_tensors",
+        "return_token_type_ids",
+        "return_attention_mask",
+        "return_overflowing_tokens",
+        "return_special_tokens_mask",
+        "return_offsets_mapping",
+        "return_length",
+        "verbose",
+    }
+
     def _prepare_input(
         self,
         *inputs: Union[
@@ -224,13 +247,24 @@ class LanguageModel(TransformersModel):
         **kwargs,
     ) -> Tuple[Tuple[()], Dict[str, Any]]:
 
+        # Extract tokenizer-specific kwargs
+        tokenizer_kwargs = {}
+        remaining_kwargs = {}
+        for k, v in kwargs.items():
+            if k in self._TOKENIZER_KWARGS:
+                tokenizer_kwargs[k] = v
+            else:
+                remaining_kwargs[k] = v
+
         if input_ids is not None:
 
             assert len(inputs) == 0
 
             inputs = (input_ids,)
 
-        assert len(inputs) == 1
+        if len(inputs) == 0:
+
+            return tuple(), {**remaining_kwargs}
 
         inputs = inputs[0]
 
@@ -240,15 +274,15 @@ class LanguageModel(TransformersModel):
             pass
         else:
 
-            inputs = self._tokenize(inputs, **kwargs)
+            inputs = self._tokenize(inputs, **tokenizer_kwargs)
 
             if labels is not None:
-                labels = self._tokenize(labels, **kwargs)["input_ids"]
+                labels = self._tokenize(labels, **tokenizer_kwargs)["input_ids"]
 
         if attention_mask is not None:
             inputs["attention_mask"] = attention_mask
 
-        return tuple(), {**inputs, "labels": labels}
+        return tuple(), {**inputs, "labels": labels, **remaining_kwargs}
 
     def _batch(
         self,
@@ -256,10 +290,15 @@ class LanguageModel(TransformersModel):
         **prepared_kwargs,
     ) -> Tuple[Dict[str, Any]]:
 
-        if batched_inputs is None:
-            return (tuple(), prepared_kwargs), len(prepared_kwargs["input_ids"])
-
         batched_inputs = batched_inputs[1]
+
+        if "input_ids" not in prepared_kwargs:
+            return (tuple(), {**prepared_kwargs, **batched_inputs}), 0
+
+        if "input_ids" not in batched_inputs:
+            return (tuple(), {**prepared_kwargs, **batched_inputs}), len(
+                prepared_kwargs["input_ids"]
+            )
 
         batched_labels = batched_inputs["labels"]
 
