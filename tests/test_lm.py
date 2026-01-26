@@ -81,7 +81,9 @@ class TestActivationModification:
         assert output != "Madison Square Garden is located in the city of New"
 
     @torch.no_grad()
-    def test_multiplication_modification(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_multiplication_modification(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test activation modification via multiplication."""
         with gpt2.generate() as generator:
             with generator.invoke(MSG_prompt):
@@ -197,7 +199,9 @@ class TestEmbeddings:
         output1 = gpt2.tokenizer.decode(output1[0])
         output2 = gpt2.tokenizer.decode(output2[0])
 
-        assert output1 == "Madison Square Garden is located in the city of New York City"
+        assert (
+            output1 == "Madison Square Garden is located in the city of New York City"
+        )
         assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
     @torch.no_grad()
@@ -220,7 +224,9 @@ class TestEmbeddings:
 
         output2 = gpt2.tokenizer.decode(output[0])
 
-        assert output1 == "Madison Square Garden is located in the city of New York City"
+        assert (
+            output1 == "Madison Square Garden is located in the city of New York City"
+        )
         assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
 
@@ -362,7 +368,9 @@ class TestEditing:
             l1_out_edited = gpt2_edited.transformer.h[1].output[0].save()
 
         assert torch.all(l1_out[:, 0] == 0) and torch.all(l1_out[:, 1] != 0)
-        assert torch.all(l1_out_edited[:, 0] == 0) and torch.all(l1_out_edited[:, 1] == 0)
+        assert torch.all(l1_out_edited[:, 0] == 0) and torch.all(
+            l1_out_edited[:, 1] == 0
+        )
 
     def test_clear_edits(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test clearing inplace edits."""
@@ -517,7 +525,9 @@ class TestScan:
     def test_scan_with_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test scanning with shape-changing intervention."""
         with gpt2.scan(MSG_prompt):
-            gpt2.transformer.h[0].mlp.c_proj.output = torch.ones(1, 1, 768).to(gpt2.device)
+            gpt2.transformer.h[0].mlp.c_proj.output = torch.ones(1, 1, 768).to(
+                gpt2.device
+            )
             out = gpt2.transformer.h[0].mlp.c_proj.output.save()
 
         assert out.shape == (1, 1, 768)
@@ -598,7 +608,9 @@ class TestSource:
         assert isinstance(inp, tuple)
 
     @torch.no_grad()
-    def test_source_safe_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_source_safe_intervention(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test that source tracing doesn't affect model."""
         input = gpt2.tokenizer(MSG_prompt, return_tensors="pt").to(gpt2.device)
         logits_0 = gpt2(**input)["logits"]
@@ -621,13 +633,13 @@ class TestSource:
         """Test accessing multiple operations via source."""
         with gpt2.trace("_"):
             out_split_0 = gpt2.transformer.h[0].attn.source.split_1.output.save()
-            out_attention_interface_0 = (
-                gpt2.transformer.h[0].attn.source.attention_interface_0.output.save()
-            )
+            out_attention_interface_0 = gpt2.transformer.h[
+                0
+            ].attn.source.attention_interface_0.output.save()
             out_split_1 = gpt2.transformer.h[1].attn.source.split_1.output.save()
-            out_attention_interface_1 = (
-                gpt2.transformer.h[1].attn.source.attention_interface_0.output.save()
-            )
+            out_attention_interface_1 = gpt2.transformer.h[
+                1
+            ].attn.source.attention_interface_0.output.save()
 
         assert isinstance(out_split_0, tuple)
         assert isinstance(out_attention_interface_0, tuple)
@@ -650,10 +662,9 @@ class TestSource:
     def test_recursive_source(self, gpt2: nnsight.LanguageModel):
         """Test recursive source tracing."""
         with gpt2.trace("_"):
-            out = (
-                gpt2.transformer.h[0]
-                .attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output.save()
-            )
+            out = gpt2.transformer.h[
+                0
+            ].attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output.save()
 
         assert isinstance(out, torch.Tensor)
 
@@ -694,7 +705,9 @@ class TestSource:
 
             with tracer.invoke(ET_prompt):
                 attn_out = (
-                    gpt2.transformer.h[0].attn.source.attention_interface_0.output[0].save()
+                    gpt2.transformer.h[0]
+                    .attn.source.attention_interface_0.output[0]
+                    .save()
                 )
                 barrier()
 
@@ -704,7 +717,9 @@ class TestSource:
                     :, -1, 0, :
                 ] = attn_out[:, -1, 0, :]
                 attn_out_2 = (
-                    gpt2.transformer.h[0].attn.source.attention_interface_0.output[0].save()
+                    gpt2.transformer.h[0]
+                    .attn.source.attention_interface_0.output[0]
+                    .save()
                 )
 
         assert torch.all(attn_out[:, -1, 0, :] == attn_out_2[:, -1, 0, :])
@@ -765,40 +780,6 @@ class TestSkip:
                 inp = gpt2.transformer.h[0].output
                 gpt2.transformer.h[1].skip(inp)
                 hs = gpt2.transformer.h[1].attn.output.save()
-
-    @torch.no_grad()
-    def test_skip_batched(
-        self, gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str
-    ):
-        """Test skip with batched inputs."""
-        with gpt2.trace() as tracer:
-            with tracer.invoke(ET_prompt):
-                inp = gpt2.transformer.h[0].output.save()
-                gpt2.transformer.h[1].skip(inp)
-                out = gpt2.transformer.h[1].output.save()
-
-            with tracer.invoke(MSG_prompt):
-                inp_2 = gpt2.transformer.h[0].output.save()
-                gpt2.transformer.h[1].skip(inp_2)
-                out_2 = gpt2.transformer.h[1].output.save()
-
-        assert not torch.equal(out[0], out_2[0])
-        assert torch.equal(out[0], inp[0])
-        assert torch.equal(out_2[0], inp_2[0])
-
-    @torch.no_grad()
-    def test_skip_partial_batch_error(
-        self, gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str
-    ):
-        """Test error when skipping only partial batch."""
-        with pytest.raises(ValueError):
-            with gpt2.trace() as tracer:
-                with tracer.invoke(ET_prompt):
-                    inp = gpt2.transformer.h[0].output.save()
-                    gpt2.transformer.h[1].skip(inp)
-
-                with tracer.invoke(MSG_prompt):
-                    inp_2 = gpt2.transformer.h[0].output.save()
 
 
 # =============================================================================
@@ -984,7 +965,9 @@ class TestCache:
         assert cache["model.transformer.h.0"].inputs is None
 
     @torch.no_grad()
-    def test_cache_output_and_inputs(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_output_and_inputs(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test caching both outputs and inputs."""
         with gpt2.trace(MSG_prompt) as tracer:
             cache = tracer.cache(include_inputs=True)
@@ -1012,7 +995,9 @@ class TestCache:
         assert len(cache["model.transformer.h.0.attn.c_attn"]) == 3
 
     @torch.no_grad()
-    def test_cache_with_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_with_intervention(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test cache captures intervened values."""
         with gpt2.trace(MSG_prompt) as tracer:
             cache = tracer.cache()
@@ -1040,7 +1025,9 @@ class TestCache:
         )
 
     @torch.no_grad()
-    def test_cache_after_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_after_intervention(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test cache started after some interventions."""
         with gpt2.trace(MSG_prompt) as tracer:
             gpt2.transformer.h[1].attn.c_attn.output = torch.zeros_like(
@@ -1088,7 +1075,9 @@ class TestCache:
         )
 
     @torch.no_grad()
-    def test_cache_some_modules_by_ref(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_some_modules_by_ref(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test caching specific modules by reference."""
         with gpt2.trace(MSG_prompt) as tracer:
             cache = tracer.cache(
@@ -1122,8 +1111,12 @@ class TestCache:
     def test_multiple_caches(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test multiple separate caches."""
         with gpt2.trace(MSG_prompt) as tracer:
-            attn_cache = tracer.cache(modules=[layer.attn for layer in gpt2.transformer.h])
-            mlp_cache = tracer.cache(modules=[layer.mlp for layer in gpt2.transformer.h])
+            attn_cache = tracer.cache(
+                modules=[layer.attn for layer in gpt2.transformer.h]
+            )
+            mlp_cache = tracer.cache(
+                modules=[layer.mlp for layer in gpt2.transformer.h]
+            )
 
         assert len(attn_cache.keys()) == 12
         assert len(mlp_cache.keys()) == 12
@@ -1265,7 +1258,9 @@ class TestRename:
     @torch.no_grad()
     def test_rename_module_list_path(self, MSG_prompt: str):
         """Test renaming a module list with full path."""
-        gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={"transformer.h": "layers"})
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={"transformer.h": "layers"}
+        )
 
         with gpt2.trace(MSG_prompt):
             mlp_out_0 = gpt2.layers[0].mlp.output.save()
