@@ -55,20 +55,31 @@ class Batcher:
                 if self.last_batch_group == [-1, -1]:
                     (self.batched_args, self.batched_kwargs), batch_size = (
                         batchable._batch(
-                            None, *self.batched_args, **self.batched_kwargs
+                            (self.batched_args, self.batched_kwargs),
+                            *self.batched_args,
+                            **self.batched_kwargs,
                         )
                     )
 
-                    self.last_batch_group[0] = 0
-                    self.last_batch_group[1] = batch_size
+                    if batch_size != 0:
+
+                        self.last_batch_group[0] = 0
+                        self.last_batch_group[1] = batch_size
+                    else:
+                        self.last_batch_group[1] = -2
 
                 (self.batched_args, self.batched_kwargs), batch_size = batchable._batch(
                     (self.batched_args, self.batched_kwargs), *args, **kwargs
                 )
 
-                self.last_batch_group = [sum(self.last_batch_group), batch_size]
+                if batch_size == 0:
+                    return (args, kwargs), None
 
-                self.needs_batching = True
+                if self.last_batch_group[0] != -1:
+                    self.needs_batching = True
+                    self.last_batch_group = [sum(self.last_batch_group), batch_size]
+                else:
+                    self.last_batch_group = [0, batch_size]
 
             return (args, kwargs), self.last_batch_group
 

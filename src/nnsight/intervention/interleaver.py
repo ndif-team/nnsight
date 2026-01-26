@@ -340,6 +340,16 @@ class Interleaver:
         """
         return getattr(self, "_interleaving", False)
 
+    @property
+    def started(self) -> bool:
+        """
+        Check if the interleaver is currently started.
+
+        Returns:
+            bool: True if the interleaver is started, False otherwise
+        """
+        return getattr(self, "_started", False)
+
     def __enter__(self):
 
         # Set the interleaving flag to True to indicate that the interleaver is currently interleaving.
@@ -354,9 +364,12 @@ class Interleaver:
                     continue
                 mediator.start(self)
 
+            self._started = True
+
         except:
             # Clear the interleaving flag on error.
             self._interleaving = False
+            self._started = False
             raise
 
         return self
@@ -365,7 +378,7 @@ class Interleaver:
 
         # Clear the interleaving flag on exit.
         self._interleaving = False
-
+        self._started = False
         # Clear the mediators that are no longer alive.
         self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
@@ -461,8 +474,7 @@ class Interleaver:
         # Set the current value to the value being provided.
         self.batcher.current_value = value
 
-        skip_count = 0
-        skip_values = []
+        skip = inspect._empty
 
         original_current = self.current
 
@@ -475,8 +487,7 @@ class Interleaver:
             try:
                 mediator.handle(provider)
             except SkipException as e:
-                skip_count += 1
-                skip_values.append(e.value)
+                skip = e.value
 
             if iterate and mediator.alive:
                 mediator.iteration_tracker[original_provider] += 1
@@ -488,19 +499,9 @@ class Interleaver:
         # Restore the original current value.
         self.batcher.current_value = original_value
 
-        if skip_count:
+        if skip is not inspect._empty:
 
-            if skip_count == len(self.mediators):
-
-                def _swap(*args):
-                    return torch.cat(args, dim=0)
-
-                skip_value = applyn(skip_values, _swap, torch.Tensor)
-                raise SkipException(skip_value)
-            else:
-                raise ValueError(
-                    f"A module skip must be applied to all the invokers defined in the tracer!"
-                )
+            raise SkipException(skip)
 
         return value
 
@@ -1029,8 +1030,7 @@ class Mediator:
         if self.info.frame is None:
             return
 
-        state =  self.info.frame.f_locals
-    
+        state = self.info.frame.f_locals
 
         state = {k: v for k, v in state.items() if not k.startswith(NNSIGHT_PREFIX)}
 

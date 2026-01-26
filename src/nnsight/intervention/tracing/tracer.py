@@ -315,7 +315,7 @@ class InterleavingTracer(Tracer):
 
         self.batcher = Batcher()
 
-        self._frame = None
+        self._mediator_frame = None
 
         super().__init__(*args, **kwargs, backend=backend)
 
@@ -346,44 +346,22 @@ class InterleavingTracer(Tracer):
             A callable function that executes the captured code block
         """
 
-        # If Envoy has a default mediators ( created via Envoy.edit() ), add them
-        if self.model._default_mediators:
-
-            for mediator in self.model._default_mediators:
-
-                self.mediators.append(mediator)
-
-        # If positional arguments were passed directly to a tracer, assume one invoker
-        if self.args:
-
-            invoker = self.invoke(*self.args, _info=self.info.copy())
-
-            invoker.__exit__(ExitTracingException, None, None)
-
-            invoker.info.start_line = 0
-
-            self.info.source = [
-                f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"
-            ]
-
         self.info.source = [
             f"def __nnsight_tracer_{abs(self.info.cache_key) if self.info.cache_key is not None else id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
             f"    {self.tracer_var_name}.pull()\n",
-            *self.info.source,
-            f"    {self.tracer_var_name}.get_frame()\n",
+            f"    with {self.tracer_var_name}.invoke(*{self.tracer_var_name}.args, **{self.tracer_var_name}.kwargs):\n",
+            f"        {self.tracer_var_name}._mediator_frame = {self.tracer_var_name}.get_frame()\n",
+            *[f"    {line}" if line.strip() else line for line in self.info.source],
+            f"    return {self.tracer_var_name}.get_frame()\n",
         ]
 
         self.info.start_line -= 1
-
-        self.args = tuple()
 
     def get_frame(self):
         """
         Get the frame of the tracer.
         """
-        self._frame = inspect.currentframe().f_back
-
-        return self._frame
+        return inspect.currentframe().f_back
 
     def execute(self, fn: Callable):
         """
@@ -391,25 +369,32 @@ class InterleavingTracer(Tracer):
         then creates an Interleaver to manage the interventions during model execution.
         """
 
-        fn(self.info, self)
-
-        args = self.batcher.batched_args
-        kwargs = {**self.batcher.batched_kwargs, **self.kwargs}
-
-        self.batcher.batched_args = tuple()
-        self.batcher.batched_kwargs = {}
-
         interleaver = self.model._interleaver
 
+        # If Envoy has a default mediators ( created via Envoy.edit() ), add them
+        if self.model._default_mediators:
+
+            for mediator in self.model._default_mediators:
+
+                self.mediators.append(mediator)
+
+        frame = fn(self.info, self)
+
         interleaver.initialize(self.mediators, self, batcher=self.batcher)
+
         try:
-            self.model.interleave(self.fn, *args, **kwargs)
+            self.model.interleave(self.fn)
         finally:
             self.mediators.clear()
 
-        state = self.push(self._frame.f_locals)
+        state = frame.f_locals
 
-        del self._frame
+        if self._mediator_frame is not None:
+            state = {**state, **self._mediator_frame.f_locals}
+
+        state = self.push(state)
+
+        self._mediator_frame = None
 
         return state
 

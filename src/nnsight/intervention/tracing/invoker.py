@@ -29,7 +29,7 @@ class Invoker(Tracer):
             **kwargs: Additional keyword arguments to pass to the traced function
         """
 
-        if tracer is not None and tracer.model.interleaving:
+        if tracer is not None and tracer.model._interleaver.started:
             raise ValueError(
                 "Cannot invoke during an active model execution / interleaving."
             )
