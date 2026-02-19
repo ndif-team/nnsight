@@ -1295,6 +1295,9 @@ class TestRename:
 
         assert mlp_result is not None
         assert mlp_out is not None
+        # Ensure the renamed forward call produces the same result as the original module
+        assert mlp_result.shape == mlp_out.shape
+        assert torch.allclose(mlp_result, mlp_out)
 
     @torch.no_grad()
     def test_rename_bidirectional_access(self, MSG_prompt: str):
