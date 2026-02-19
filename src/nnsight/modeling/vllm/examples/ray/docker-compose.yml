@@ -1,0 +1,82 @@
+# Multi-node Ray cluster for NNsight vLLM testing.
+#
+# Each container gets one GPU and acts as a separate Ray node,
+# forcing vLLM to place TP workers across containers with NCCL
+# communication over TCP (simulating real multi-node).
+#
+# Before running, update:
+#   - device_ids for each service to free GPUs on your machine
+#   - HF_CACHE: path to your HuggingFace cache (optional)
+#
+# Usage:
+#   docker compose up -d          # start cluster
+#   python test_multinode.py      # run tests from host
+#   docker compose down           # tear down
+
+services:
+  head:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ray-head
+    hostname: ray-head
+    networks:
+      - ray-multinode
+    ports:
+      - "6379:6379"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Change device_ids to a free GPU on your machine
+              device_ids: ["0"]
+              capabilities: [gpu]
+    environment:
+      - NCCL_P2P_DISABLE=1
+      - NCCL_SHM_DISABLE=1
+      - NCCL_SOCKET_IFNAME=eth0
+      - NCCL_DEBUG=INFO
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    shm_size: "1g"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        ray start --head --port=6379 --dashboard-host=0.0.0.0 --block
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ray-worker
+    hostname: ray-worker
+    networks:
+      - ray-multinode
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Change device_ids to a different free GPU
+              device_ids: ["1"]
+              capabilities: [gpu]
+    environment:
+      - NCCL_P2P_DISABLE=1
+      - NCCL_SHM_DISABLE=1
+      - NCCL_SOCKET_IFNAME=eth0
+      - NCCL_DEBUG=INFO
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+    shm_size: "1g"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        sleep 5
+        ray start --address=ray-head:6379 --block
+
+networks:
+  ray-multinode:
+    driver: bridge

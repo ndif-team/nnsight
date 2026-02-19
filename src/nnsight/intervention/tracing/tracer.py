@@ -2,6 +2,8 @@ import copy
 import inspect
 import re
 from dataclasses import dataclass
+
+
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
@@ -31,6 +33,8 @@ class Cache:
     transformations such as detaching from computation graph, moving to a
     specific device, or converting to a specific dtype.
     """
+
+    CACHE_PROVIDER_RE = re.compile(r"^(.+)\.([^.]+)\.i(\d+)$")
 
     @dataclass
     class Entry:
@@ -218,7 +222,7 @@ class Cache:
         """
 
         # Match pattern like "x.y.z.key.i1" into groups
-        match = re.match(r"^(.+)\.([^.]+)\.i(\d+)$", provider)
+        match = Cache.CACHE_PROVIDER_RE.match(provider)
 
         if match is None:
             return
@@ -319,6 +323,12 @@ class InterleavingTracer(Tracer):
 
         super().__init__(*args, **kwargs, backend=backend)
 
+    def __exit__(self, exc_type, exc_value, traceback):
+        result = super().__exit__(exc_type, exc_value, traceback)
+        del self.model
+        del self.fn
+        return result
+
     def capture(self):
         """
         Capture the code block within the 'with' statement.
@@ -353,18 +363,29 @@ class InterleavingTracer(Tracer):
 
                 self.mediators.append(mediator)
 
-        # If positional arguments were passed directly to a tracer, assume one invoker
-        if self.args:
+        # If  arguments were passed directly to a tracer, assume one invoker if their input contributes to batch size
+        if self.args or self.kwargs:
 
-            invoker = self.invoke(*self.args, _info=self.info.copy())
-            
-            invoker.__exit__(ExitTracingException, None, None)
+            batched_args, batched_kwargs, batch_size = self.model._prepare_input(
+                *self.args, **self.kwargs
+            )
 
-            invoker.info.start_line = 0
+            # If real input, create a root invoker (no other invokers can be created)
+            if batch_size:
 
-            self.info.source = [
-                f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"
-            ]
+                invoker = self.invoke(*self.args, **self.kwargs, _info=self.info.copy())
+
+                invoker.__exit__(ExitTracingException, None, None)
+
+                self.mediators[-1].info.start_line = 0
+
+                self.info.source = [
+                    f"    {self.tracer_var_name}.mediators[-1].info.frame = {self.tracer_var_name}.get_frame()\n"
+                ]
+            # Otherwise just pass kwargs through
+            else:
+                self.batcher.batched_args = batched_args
+                self.batcher.batched_kwargs = batched_kwargs
 
         self.info.source = [
             f"def __nnsight_tracer_{abs(self.info.cache_key) if self.info.cache_key is not None else id(self)}__(__nnsight_tracing_info__,{self.tracer_var_name}):\n",
@@ -394,7 +415,7 @@ class InterleavingTracer(Tracer):
         fn(self.info, self)
 
         args = self.batcher.batched_args
-        kwargs = {**self.batcher.batched_kwargs, **self.kwargs}
+        kwargs = self.batcher.batched_kwargs
 
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
@@ -407,9 +428,11 @@ class InterleavingTracer(Tracer):
         finally:
             self.mediators.clear()
 
-        self.push(self._frame.f_locals)
+        state = self.push(self._frame.f_locals)
 
         del self._frame
+
+        return state
 
     ### Public API ####
 
@@ -529,10 +552,10 @@ class InterleavingTracer(Tracer):
 
         This property allows access to the return values produced by the method being traced.
 
-        Example:
+        Examples:
             >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             >>> with model.generate("Hello World") as tracer:
-            >>>     result = tracer.result.save()
+            ...     result = tracer.result.save()
             >>> print(result)
 
         Returns:
@@ -555,6 +578,9 @@ class InterleavingTracer(Tracer):
         state["tracer_var_name"] = self.tracer_var_name
         state["batcher"] = self.batcher
         state["mediators"] = self.mediators
+
+        for mediator in self.mediators:
+            mediator.intervention.__source__ = "".join(mediator.info.source)
 
         return state
 

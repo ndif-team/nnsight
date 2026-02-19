@@ -1,3 +1,41 @@
+"""Remote backend for executing nnsight interventions on NDIF servers.
+
+This module provides the infrastructure for submitting intervention requests
+to a remote NDIF (Neural Network Distributed Inference Framework) server and
+receiving results back. It handles the complete lifecycle of remote job execution:
+
+    1. Serializing and submitting intervention requests via HTTP
+    2. Maintaining WebSocket connections for real-time status updates
+    3. Downloading and decompressing results
+    4. Displaying job progress to users (terminal and notebook)
+
+Architecture:
+    The remote execution flow uses a hybrid HTTP/WebSocket approach:
+    - HTTP POST to submit the initial request
+    - WebSocket for real-time status updates (QUEUED → RUNNING → COMPLETED)
+    - HTTP streaming to download large results
+
+    This design allows for efficient long-polling without blocking HTTP connections
+    while providing immediate feedback on job status changes.
+
+Key components:
+    - RemoteBackend: Main backend class that orchestrates remote execution
+    - JobStatusDisplay: Handles user-facing status output (terminal/notebook)
+    - LocalTracer: Tracer subclass for handling streamed remote values locally
+
+Modes of operation:
+    - Blocking: Wait for job completion via WebSocket (default)
+    - Non-blocking: Submit and poll for results separately
+    - Async: Asyncio-compatible versions of blocking operations
+
+        Examples:
+    >>> from nnsight import NNsight
+    >>> model = NNsight(model_key="openai-community/gpt2")
+    >>> with model.trace("Hello", remote=True):
+    ...     hidden = model.transformer.h[0].output.save()
+    >>> print(hidden.shape)
+"""
+
 from __future__ import annotations
 
 import inspect
@@ -9,9 +47,9 @@ from sys import version as python_version
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import httpx
-import requests
 import socketio
 import torch
+import zstandard as zstd
 from tqdm.auto import tqdm
 
 from ... import __IPYTHON__, CONFIG, __version__
@@ -20,11 +58,21 @@ from ...intervention.serialization import load, save
 from ...schema.request import RequestModel
 from ...schema.response import RESULT, ResponseModel
 from ..tracing.tracer import Tracer
+from ..tracing.util import wrap_exception
+from ...ndif import get_remote_env, get_local_env, register
 from .base import Backend
 
 
-def _supports_color():
-    """Check if the terminal supports color output."""
+def _supports_color() -> bool:
+    """Check if the terminal supports ANSI color output.
+
+    Checks environment variables and terminal capabilities to determine
+    if color output should be enabled. Respects NO_COLOR and FORCE_COLOR
+    environment variables per the no-color.org convention.
+
+    Returns:
+        True if color output is supported, False otherwise.
+    """
     if os.environ.get("NO_COLOR"):
         return False
     if os.environ.get("FORCE_COLOR"):
@@ -41,9 +89,22 @@ _SUPPORTS_COLOR = _supports_color()
 
 
 class JobStatusDisplay:
-    """Manages single-line status display for remote job execution."""
+    """Manages single-line status display for remote job execution.
 
-    # ANSI color codes
+    Provides a consistent user interface for displaying job status updates
+    in both terminal and Jupyter notebook environments. Features include:
+    - Animated spinners for active states (QUEUED, RUNNING)
+    - Color-coded status indicators
+    - Elapsed time tracking per status and total job time
+    - In-place line updates (no scrolling spam)
+    - Notebook-compatible HTML rendering
+
+    Args:
+        enabled: Whether to display status updates. Controlled by CONFIG.APP.REMOTE_LOGGING.
+        verbose: If True, preserve each status on its own line instead of overwriting.
+    """
+
+    # ANSI escape codes for terminal coloring (empty strings if color not supported)
     class Colors:
         RESET = "\033[0m" if _SUPPORTS_COLOR else ""
         BOLD = "\033[1m" if _SUPPORTS_COLOR else ""
@@ -56,7 +117,7 @@ class JobStatusDisplay:
         BLUE = "\033[34m" if _SUPPORTS_COLOR else ""
         WHITE = "\033[37m" if _SUPPORTS_COLOR else ""
 
-    # Status icons (Unicode)
+    # Unicode icons for each job status
     class Icons:
         RECEIVED = "◉"
         QUEUED = "◎"
@@ -78,34 +139,39 @@ class JobStatusDisplay:
             None  # (job_id, status, description)
         )
         self._line_written = False
-        self._display_handle = None
+        self._display_handle = None  # IPython DisplayHandle for flicker-free updates
 
     def _format_time(self, start_time: Optional[float]) -> str:
-        """Format elapsed time from a given start time."""
+        """Format elapsed time as human-readable string (e.g., '5.231s', '2m 30s', '1h 5m')."""
         if start_time is None:
-            return "0.0s"
+            return "0.000s" if self.verbose else "0.0s"
         elapsed = time.time() - start_time
+        # Use .3f precision in verbose mode, .1f otherwise
+        precision = 3 if self.verbose else 1
         if elapsed < 60:
-            return f"{elapsed:.1f}s"
+            return f"{elapsed:.{precision}f}s"
         elif elapsed < 3600:
             mins = int(elapsed // 60)
             secs = elapsed % 60
-            return f"{mins}m {secs:.0f}s"
+            if secs < 10:
+                return f"{mins}m {secs:.{precision}f}s"
+            else:
+                return f"{mins}m {secs:.0f}s"
         else:
             hours = int(elapsed // 3600)
             mins = int((elapsed % 3600) // 60)
             return f"{hours}h {mins}m"
 
     def _format_elapsed(self) -> str:
-        """Format elapsed time in current status."""
+        """Format time elapsed in current status phase."""
         return self._format_time(self.status_start_time)
 
     def _format_total(self) -> str:
-        """Format total elapsed time since job started."""
+        """Format total time elapsed since job was submitted."""
         return self._format_time(self.job_start_time)
 
-    def _get_status_style(self, status_name: str) -> tuple:
-        """Get icon and color for a status."""
+    def _get_status_style(self, status_name: str) -> Tuple[str, str]:
+        """Map status name to its display icon and color."""
         status_map = {
             "RECEIVED": (self.Icons.RECEIVED, self.Colors.CYAN),
             "QUEUED": (self.Icons.QUEUED, self.Colors.YELLOW),
@@ -113,20 +179,28 @@ class JobStatusDisplay:
             "RUNNING": (self.Icons.RUNNING, self.Colors.BLUE),
             "COMPLETED": (self.Icons.COMPLETED, self.Colors.GREEN),
             "ERROR": (self.Icons.ERROR, self.Colors.RED),
-            "NNSIGHT_ERROR": (self.Icons.ERROR, self.Colors.RED),
             "LOG": (self.Icons.LOG, self.Colors.DIM),
             "STREAM": (self.Icons.STREAM, self.Colors.CYAN),
         }
         return status_map.get(status_name, ("•", self.Colors.WHITE))
 
     def _get_spinner(self) -> str:
-        """Get next spinner frame."""
+        """Get next frame from the braille spinner animation."""
         spinner = self.Icons.SPINNER[self.spinner_idx % len(self.Icons.SPINNER)]
         self.spinner_idx += 1
         return spinner
 
     def update(self, job_id: str = "", status_name: str = "", description: str = ""):
-        """Update the status display on a single line."""
+        """Update the status display with new job information.
+
+        Args:
+            job_id: The remote job identifier.
+            status_name: Current status (RECEIVED, QUEUED, RUNNING, COMPLETED, ERROR, etc.)
+            description: Optional additional context to display.
+
+        If called with no arguments, refreshes the display with the last known status
+        (useful for updating spinner animation and elapsed time).
+        """
         if not self.enabled:
             return
 
@@ -160,7 +234,7 @@ class JobStatusDisplay:
         # Build the status line
         # Format: ● STATUS (elapsed) [job_id] description
 
-        is_terminal = status_name in ("COMPLETED", "ERROR", "NNSIGHT_ERROR")
+        is_terminal = status_name in ("COMPLETED", "ERROR")
         is_active = status_name in ("QUEUED", "RUNNING", "DISPATCHED")
 
         # For terminal states, show total time; for others, show status elapsed time
@@ -189,7 +263,11 @@ class JobStatusDisplay:
             )
 
         if description:
-            status_text += f" {self.Colors.DIM}{description}{self.Colors.RESET}"
+            # Don't dim LOG descriptions - they contain important user messages
+            if is_log:
+                status_text += f" {description}"
+            else:
+                status_text += f" {self.Colors.DIM}{description}{self.Colors.RESET}"
 
         # Display the status
         # LOG status should print a newline so it's not cleared
@@ -199,7 +277,7 @@ class JobStatusDisplay:
         self._line_written = True
 
     def _display(self, text: str, status_changed: bool, print_newline: bool = False):
-        """Display text, handling terminal vs notebook environments."""
+        """Route display to appropriate handler based on environment."""
         if __IPYTHON__:
             self._display_notebook(text, status_changed, print_newline)
         else:
@@ -208,7 +286,7 @@ class JobStatusDisplay:
     def _display_terminal(
         self, text: str, status_changed: bool, print_newline: bool = False
     ):
-        """Display in terminal with in-place updates."""
+        """Display in terminal using carriage return for in-place updates."""
         # In verbose mode, print new line when status changes
         if self.verbose and status_changed and self._line_written:
             sys.stdout.write("\n")
@@ -224,7 +302,7 @@ class JobStatusDisplay:
         sys.stdout.flush()
 
     def _ansi_to_html(self, text: str) -> str:
-        """Convert ANSI color codes to HTML spans."""
+        """Convert ANSI escape codes to HTML span elements with inline CSS."""
         import re
 
         # Map ANSI codes to CSS styles
@@ -279,8 +357,8 @@ class JobStatusDisplay:
     def _display_notebook(
         self, text: str, status_changed: bool, print_newline: bool = False
     ):
-        """Display in notebook using DisplayHandle for flicker-free updates."""
-        from IPython.display import display, HTML
+        """Display in Jupyter notebook using IPython DisplayHandle for flicker-free updates."""
+        from IPython.display import HTML, display
 
         html_text = self._ansi_to_html(text)
         html_content = HTML(
@@ -302,26 +380,98 @@ class JobStatusDisplay:
             self._display_handle.update(html_content)
 
 
+_PULLED_ENV = False
+
+
+def pull_env():
+    """Pull the NDIF environment information from the remote server, and register any locally-available modules not present remotely."""
+    global _PULLED_ENV
+    if not _PULLED_ENV:
+        local_env = get_local_env()
+
+        for package, version in local_env.get("packages", {}).items():
+            if version == "local":
+                register(package)
+
+        # remote_env = get_remote_env()
+        # local_modules = set(local_env.get("packages", {}).keys())
+        # remote_modules = set(remote_env.get("packages", {}).keys())
+        # missing_modules = local_modules - remote_modules
+        # for module in missing_modules:
+        #     register(module)
+        _PULLED_ENV = True
+
+
 class RemoteException(Exception):
-    pass
+    """Exception raised when a remote job fails on the NDIF server.
+
+    Wraps error information returned from the server, including tracebacks
+    from the remote execution environment.
+    """
+
+    def __init__(self, tb_string: str):
+        super().__init__(tb_string)
+        self.tb_string = tb_string
+
+    def __str__(self) -> str:
+        return self.tb_string
 
 
 class RemoteBackend(Backend):
-    """Backend to execute a context object via a remote service.
+    """Backend for executing nnsight interventions on a remote NDIF server.
 
-    Context object must inherit from RemoteMixin and implement its methods.
+    This backend serializes intervention graphs and submits them to a remote
+    service for execution on cloud-hosted models. It supports both synchronous
+    (blocking) and asynchronous execution modes.
+
+    The execution flow:
+        1. Serialize the intervention graph via RequestModel
+        2. Submit via HTTP POST, receive job ID
+        3. Listen for status updates via WebSocket
+        4. Download results when job completes
+
+    Args:
+        model_key: Identifier for the remote model (e.g., "openai-community/gpt2").
+        host: Remote server URL. Defaults to CONFIG.API.HOST.
+        blocking: If True (default), wait for job completion. If False, submit
+            and return immediately (use job_id to poll for results later).
+        job_id: Existing job ID to retrieve results for (non-blocking mode).
+        api_key: NDIF API key. Falls back to NDIF_API_KEY env var or CONFIG.
+        callback: Optional webhook URL to receive job completion notification.
+        verbose: If True, preserve each status update on its own line.
 
     Attributes:
-
-        url (str): Remote host url. Defaults to that set in CONFIG.API.HOST.
+        address: HTTP address of the remote server.
+        ws_address: WebSocket address (derived from HTTP address).
+        job_id: Current job ID (set after submission).
+        job_status: Last known job status.
+        compress: Whether to use zstd compression for requests/responses.
     """
+
+    # Class-level constants for HTTP timeouts
+    CONNECT_TIMEOUT: float = 10.0  # Timeout for establishing connection
+    READ_TIMEOUT: float = (
+        300.0  # Timeout for reading response (5 min for large requests)
+    )
+
+    # Type hints for instance attributes
+    model_key: str
+    address: str
+    ws_address: str
+    api_key: str
+    job_id: Optional[str]
+    compress: bool
+    blocking: bool
+    callback: str
+    job_status: Optional[Any]  # ResponseModel.JobStatus
+    status_display: JobStatusDisplay
 
     def __init__(
         self,
         model_key: str,
-        host: str = None,
+        host: Optional[str] = None,
         blocking: bool = True,
-        job_id: str = None,
+        job_id: Optional[str] = None,
         api_key: str = "",
         callback: str = "",
         verbose: bool = False,
@@ -330,87 +480,120 @@ class RemoteBackend(Backend):
         self.model_key = model_key
 
         self.address = host or CONFIG.API.HOST
+
+        # Validate URL protocol
+        if not self.address.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Invalid host URL: {self.address}. Must start with http:// or https://"
+            )
+
         self.api_key = (
             api_key or os.environ.get("NDIF_API_KEY", None) or CONFIG.API.APIKEY
         )
 
         self.job_id = job_id
-        self.zlib = CONFIG.API.ZLIB
+        self.compress = CONFIG.API.COMPRESS
         self.blocking = blocking
         self.callback = callback
 
-        # Derive websocket protocol from HTTP protocol
+        # Derive WebSocket protocol from HTTP protocol (https → wss, http → ws)
         if self.address.startswith("https://"):
             self.ws_address = "wss://" + self.address[8:]
         else:
             self.ws_address = "ws://" + self.address[7:]
 
+        self.verbose = verbose or CONFIG.APP.DEBUG
+
         self.job_status = None
         self.status_display = JobStatusDisplay(
             enabled=CONFIG.APP.REMOTE_LOGGING,
-            verbose=verbose,
+            verbose=self.verbose,
         )
 
     def request(self, tracer: Tracer) -> Tuple[bytes, Dict[str, str]]:
+        """Prepare a request payload and headers for submission to the remote server.
 
+        Extracts interventions from the tracer, serializes them into a RequestModel,
+        and builds the HTTP headers required by the NDIF API.
+
+        Args:
+            tracer: The tracer containing the intervention graph to execute.
+
+        Returns:
+            Tuple of (serialized_data, headers_dict) ready for HTTP POST.
+        """
         interventions = super().__call__(tracer)
 
+        pull_env()
+
         data = RequestModel(interventions=interventions, tracer=tracer).serialize(
-            self.zlib
+            self.compress
         )
+
+        if self.verbose:
+            print(f"[RemoteBackend] Payload: {len(data)} bytes")
 
         headers = {
             "nnsight-model-key": self.model_key,
-            "nnsight-zlib": str(self.zlib),
+            "nnsight-compress": str(self.compress),
             "nnsight-version": __version__,
             "python-version": python_version,
-            "ndif-api-key": self.api_key,
+            "ndif-api-key": self.api_key or "",
             "ndif-timestamp": str(time.time()),
-            "ndif-callback": self.callback,
+            "ndif-callback": self.callback or "",
         }
 
         return data, headers
 
-    def __call__(self, tracer=None):
+    def __call__(self, tracer: Optional[Tracer] = None) -> Optional[RESULT]:
+        """Execute the backend, dispatching to the appropriate request mode.
 
-        if tracer is not None and tracer.asynchronous:
-            return self.async_request(tracer)
+        Routes to async, blocking, or non-blocking execution based on the
+        tracer's configuration and the backend's blocking setting.
 
-        if self.blocking:
+        Args:
+            tracer: The tracer to execute. May be None for non-blocking result retrieval.
 
-            # Do blocking request.
-            return self.blocking_request(tracer)
+        Returns:
+            The execution result, or None if non-blocking and job not yet complete.
+        """
+        try:
+            if tracer is not None and tracer.asynchronous:
+                return self.async_request(tracer)
 
-        else:
-
-            # Otherwise we are getting the status / result of the existing job.
-            return self.non_blocking_request(tracer)
+            if self.blocking:
+                # Blocking mode: wait for completion via WebSocket
+                return self.blocking_request(tracer)
+            else:
+                # Non-blocking mode: submit or poll for existing job
+                return self.non_blocking_request(tracer)
+        except RemoteException as e:
+            raise wrap_exception(e, None) from None
 
     def handle_response(
         self, response: ResponseModel, tracer: Optional[Tracer] = None
     ) -> Optional[RESULT]:
-        """Handles incoming response data.
+        """Process an incoming response from the remote server.
 
-        Logs the response object.
-        If the job is completed, retrieve and stream the result from the remote endpoint.
-        Use torch.load to decode and load the `ResultModel` into memory.
-        Use the backend object's .handle_result method to handle the decoded result.
+        Handles all response types: status updates, errors, completion, and streaming.
+        Updates the status display and takes appropriate action based on job status.
 
         Args:
-            response (Any): Json data to concert to `ResponseModel`
-
-        Raises:
-            Exception: If the job's status is `ResponseModel.JobStatus.ERROR`
+            response: The response model from the server.
+            tracer: The original tracer, needed for STREAM responses to access model info.
 
         Returns:
-            ResponseModel: ResponseModel.
-        """
+            For COMPLETED status: the result data (URL string or actual data).
+            For other statuses: None (job still in progress).
 
+        Raises:
+            RemoteException: If the job status is ERROR.
+        """
         self.job_status = response.status
 
         if response.status == ResponseModel.JobStatus.ERROR:
             self.status_display.update(response.id, response.status.name, "")
-            raise RemoteException(f"{response.description}\nRemote exception.")
+            raise RemoteException(response.description)
 
         # Log response for user (skip STREAM status - it's internal)
         if response.status != ResponseModel.JobStatus.STREAM:
@@ -418,13 +601,13 @@ class RemoteBackend(Backend):
                 response.id, response.status.name, response.description or ""
             )
 
-        # If job is completed:
         if response.status == ResponseModel.JobStatus.COMPLETED:
-
+            # Job finished - return the result (may be data or URL to download)
             return response.data
 
         elif response.status == ResponseModel.JobStatus.STREAM:
-
+            # Server is streaming a function to execute locally
+            # This enables hybrid local/remote execution patterns
             model = getattr(tracer, "model", None)
 
             fn = load(response.data, model)
@@ -436,149 +619,222 @@ class RemoteBackend(Backend):
     def submit_request(
         self, data: bytes, headers: Dict[str, Any]
     ) -> Optional[ResponseModel]:
-        """Sends request to the remote endpoint and handles the response object.
+        """Submit the serialized request to the remote server via HTTP POST.
 
-        Raises:
-            Exception: If there was a status code other than 200 for the response.
+        Args:
+            data: Serialized request payload (potentially compressed).
+            headers: HTTP headers including API key, version info, etc.
 
         Returns:
-            (ResponseModel): Response.
-        """
+            The initial ResponseModel containing the assigned job ID.
 
+        Raises:
+            ConnectionError: If the server returns a non-200 status code.
+            httpx.TimeoutException: If the request times out.
+        """
         from ...schema.response import ResponseModel
 
         headers["Content-Type"] = "application/octet-stream"
 
-        response = requests.post(
-            f"{self.address}/request",
-            data=data,
-            headers=headers,
-        )
+        timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
+
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(
+                f"{self.address}/request",
+                content=data,
+                headers=headers,
+            )
 
         if response.status_code == 200:
+            response_model = ResponseModel(**response.json())
 
-            response = ResponseModel(**response.json())
+            # Store job ID for subsequent status checks
+            self.job_id = response_model.id
 
-            self.job_id = response.id
+            self.handle_response(response_model)
 
-            self.handle_response(response)
-
-            return response
-
+            return response_model
         else:
+            # Extract error message from response
             try:
                 msg = response.json()["detail"]
-            except:
-                msg = response.reason
+            except Exception:
+                msg = response.reason_phrase
             raise ConnectionError(msg)
 
     def get_response(self) -> Optional[RESULT]:
-        """Retrieves and handles the response object from the remote endpoint.
+        """Poll the server for the current job status (non-blocking mode).
 
-        Raises:
-            Exception: If there was a status code other than 200 for the response.
+        Used when not connected via WebSocket to check if a previously
+        submitted job has completed.
 
         Returns:
-            (ResponseModel): Response.
-        """
+            The result if job is complete, None otherwise.
 
+        Raises:
+            Exception: If the server returns a non-200 status code.
+            httpx.TimeoutException: If the request times out.
+        """
         from ...schema.response import ResponseModel
 
-        response = requests.get(
-            f"{self.address}/response/{self.job_id}",
-            headers={"ndif-api-key": self.api_key},
-        )
+        timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
+
+        with httpx.Client(timeout=timeout) as client:
+            response = client.get(
+                f"{self.address}/response/{self.job_id}",
+                headers={"ndif-api-key": self.api_key},
+            )
 
         if response.status_code == 200:
-
-            response = ResponseModel(**response.json())
-
-            return self.handle_response(response)
-
+            response_model = ResponseModel(**response.json())
+            return self.handle_response(response_model)
         else:
+            raise Exception(response.reason_phrase)
 
-            raise Exception(response.reason)
+    def _decompress_and_load(self, result_bytes: io.BytesIO) -> RESULT:
+        """Decompress (if needed) and deserialize result bytes.
 
-    def get_result(self, url: str, content_length: float = None) -> RESULT:
+        Args:
+            result_bytes: BytesIO containing the downloaded result data.
 
-        result_bytes = io.BytesIO()
+        Returns:
+            The deserialized result object.
+        """
+
+        if self.verbose:
+            result_bytes.seek(0)
+            print(f"[RemoteBackend] Result: {result_bytes.getbuffer().nbytes} bytes")
+
         result_bytes.seek(0)
-        # Get result from result url using job id.
 
-        with httpx.Client() as client:
+        # Decompress if compression was enabled
+        if self.compress:
+            cctx = zstd.ZstdDecompressor()
+            dst = io.BytesIO()
+
+            with cctx.stream_writer(dst, closefd=False) as writer:
+                while chunk := result_bytes.read(64 * 1024):
+                    writer.write(chunk)
+
+            result_bytes.close()
+            result_bytes = dst
+            result_bytes.seek(0)
+
+        # Deserialize with torch.load (handles tensors and pickled objects)
+        result = torch.load(result_bytes, map_location="cpu", weights_only=False)
+        result_bytes.close()
+
+        return result
+
+    def _fetch_result_if_url(self, result: Any) -> RESULT:
+        """Download result if it's a URL reference, otherwise return as-is.
+
+        Args:
+            result: Either the actual result data, a URL string, or a tuple of (url, content_length).
+
+        Returns:
+            The deserialized result object.
+        """
+        if isinstance(result, str):
+            return self.get_result(result)
+        elif isinstance(result, (tuple, list)):
+            return self.get_result(*result)
+        return result
+
+    async def _async_fetch_result_if_url(self, result: Any) -> RESULT:
+        """Async version of _fetch_result_if_url()."""
+        if isinstance(result, str):
+            return await self.async_get_result(result)
+        elif isinstance(result, (tuple, list)):
+            return await self.async_get_result(*result)
+        return result
+
+    def get_result(self, url: str, content_length: Optional[float] = None) -> RESULT:
+        """Download and deserialize the result from the server.
+
+        For large results, the server returns a URL instead of inline data.
+        This method streams the result with a progress bar, decompresses
+        if needed, and deserializes via torch.load.
+
+        Args:
+            url: URL to download the result from (typically a presigned S3 URL).
+            content_length: Optional content length hint for progress bar.
+
+        Returns:
+            The deserialized result object.
+        """
+        result_bytes = io.BytesIO()
+
+        timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
+
+        # Stream download with progress bar
+        with httpx.Client(timeout=timeout) as client:
             with client.stream("GET", url) as stream:
-
-                # Total size of incoming data.
-                total_size = content_length or float(stream.headers["Content-length"])
+                # Handle missing Content-Length header gracefully
+                total_size = content_length or float(
+                    stream.headers.get("Content-length", 0)
+                )
 
                 with tqdm(
-                    total=total_size,
+                    total=total_size or None,  # None for indeterminate progress
                     unit="B",
                     unit_scale=True,
                     desc="⬇ Downloading",
                     bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
                 ) as progress_bar:
-                    # chunk_size=None so server determines chunk size.
                     for data in stream.iter_bytes(chunk_size=128 * 1024):
                         progress_bar.update(len(data))
                         result_bytes.write(data)
 
-        # Move cursor to beginning of bytes.
-        result_bytes.seek(0)
+        return self._decompress_and_load(result_bytes)
 
-        # Decode bytes with pickle and then into pydantic object.
-        result = torch.load(result_bytes, map_location="cpu", weights_only=False)
-
-        # Close bytes
-        result_bytes.close()
-
-        return result
-
-    async def async_get_result(self, url: str, content_length: float = None) -> RESULT:
-
+    async def async_get_result(
+        self, url: str, content_length: Optional[float] = None
+    ) -> RESULT:
+        """Async version of get_result(). See get_result() for full documentation."""
         result_bytes = io.BytesIO()
-        result_bytes.seek(0)
-        # Get result from result url using job id.
 
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
+
+        # Stream download with progress bar (async version)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("GET", url) as stream:
-
-                # Total size of incoming data.
-                total_size = content_length or float(stream.headers["Content-length"])
+                # Handle missing Content-Length header gracefully
+                total_size = content_length or float(
+                    stream.headers.get("Content-length", 0)
+                )
 
                 with tqdm(
-                    total=total_size,
+                    total=total_size or None,  # None for indeterminate progress
                     unit="B",
                     unit_scale=True,
                     desc="⬇ Downloading",
                     bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
                 ) as progress_bar:
-                    # chunk_size=None so server determines chunk size.
                     async for data in stream.aiter_bytes(chunk_size=128 * 1024):
                         progress_bar.update(len(data))
                         result_bytes.write(data)
 
-        # Move cursor to beginning of bytes.
-        result_bytes.seek(0)
-
-        # Decode bytes with pickle and then into pydantic object.
-        result = torch.load(result_bytes, map_location="cpu", weights_only=False)
-
-        # Close bytes
-        result_bytes.close()
-
-        return result
+        return self._decompress_and_load(result_bytes)
 
     def blocking_request(self, tracer: Tracer) -> Optional[RESULT]:
-        """Send intervention request to the remote service while waiting for updates via websocket.
+        """Execute the intervention request and wait for completion via WebSocket.
+
+        This is the primary execution path for remote jobs. It establishes a
+        WebSocket connection for real-time status updates while the job executes
+        on the server.
 
         Args:
-            request (RequestModel):Request.
-        """
+            tracer: The tracer containing the intervention graph.
 
-        # Create a socketio connection to the server.
+        Returns:
+            The execution result after the job completes.
+
+        Raises:
+            RemoteException: If the job fails on the server.
+        """
+        # Establish WebSocket connection for real-time updates
         with socketio.SimpleClient(reconnection_attempts=10) as sio:
-            # Connect
             sio.connect(
                 self.ws_address,
                 socketio_path="/ws/socket.io",
@@ -586,61 +842,45 @@ class RemoteBackend(Backend):
                 wait_timeout=10,
             )
 
+            # Prepare and submit the request
             data, headers = self.request(tracer)
-
-            headers["ndif-session_id"] = sio.sid
-
-            # Submit request via
-            response = self.submit_request(data, headers)
+            headers["ndif-session_id"] = sio.sid  # Link WebSocket to this request
+            self.submit_request(data, headers)
 
             try:
+                # Register callback for streaming values back to server
                 LocalTracer.register(lambda data: self.stream_send(data, sio))
-                # Loop until
-                while True:
 
-                    # Use timeout only when remote logging is enabled to update spinner/elapsed time
-                    timeout = 0.1 if CONFIG.APP.REMOTE_LOGGING else None
+                # Main event loop: receive status updates until completion
+                while True:
+                    # Short timeout enables spinner animation updates
+                    timeout = None
+                    if CONFIG.APP.REMOTE_LOGGING:
+                        timeout = 0.001 if self.status_display.verbose else 0.1
                     try:
                         response = sio.receive(timeout=timeout)[1]
                     except socketio.exceptions.TimeoutError:
-                        # Refresh the status display to update spinner and elapsed time
+                        # No message received - refresh display (updates spinner/elapsed time)
                         self.status_display.update()
                         continue
 
-                    # Convert to pydantic object.
+                    # Parse and handle the response
                     response = ResponseModel.unpickle(response)
-                    # Handle the response.
                     result = self.handle_response(response, tracer=tracer)
-                    # Break when completed.
+
                     if result is not None:
-
-                        # If the response has no result data, it was too big and we need to stream it from the server.
-                        if isinstance(result, str):
-                            result = self.get_result(result)
-                        elif isinstance(result, (tuple, list)):
-                            result = self.get_result(*result)
-
+                        # Job completed - download result if it's a URL
+                        result = self._fetch_result_if_url(result)
                         tracer.push(result)
-
                         return result
-
-            except Exception as e:
-
-                raise e
 
             finally:
                 LocalTracer.deregister()
 
     async def async_request(self, tracer: Tracer) -> Optional[RESULT]:
-        """Send intervention request to the remote service while waiting for updates via websocket.
-
-        Args:
-            request (RequestModel):Request.
-        """
-
-        # Create a socketio connection to the server.
+        """Async version of blocking_request(). See blocking_request() for full documentation."""
+        # Establish async WebSocket connection
         async with socketio.AsyncSimpleClient(reconnection_attempts=10) as sio:
-            # Connect
             await sio.connect(
                 self.ws_address,
                 socketio_path="/ws/socket.io",
@@ -649,59 +889,46 @@ class RemoteBackend(Backend):
             )
 
             data, headers = self.request(tracer)
-
             headers["ndif-session_id"] = sio.sid
-
-            # Submit request via
-            response = self.submit_request(data, headers)
+            self.submit_request(data, headers)
 
             try:
                 LocalTracer.register(lambda data: self.stream_send(data, sio))
-                # Loop until
-                while True:
 
-                    # Use timeout only when remote logging is enabled to update spinner/elapsed time
-                    timeout = 0.1 if CONFIG.APP.REMOTE_LOGGING else None
+                # Async event loop
+                while True:
+                    # Short timeout enables spinner animation updates
+                    timeout = None
+                    if CONFIG.APP.REMOTE_LOGGING:
+                        timeout = 0.001 if self.status_display.verbose else 0.1
                     try:
                         response = (await sio.receive(timeout=timeout))[1]
                     except socketio.exceptions.TimeoutError:
-                        # Refresh the status display to update spinner and elapsed time
                         self.status_display.update()
                         continue
 
-                    # Convert to pydantic object.
                     response = ResponseModel.unpickle(response)
-                    # Handle the response.
                     result = self.handle_response(response, tracer=tracer)
-                    # Break when completed.
+
                     if result is not None:
-
-                        # If the response has no result data, it was too big and we need to stream it from the server.
-                        if isinstance(result, str):
-                            result = await self.async_get_result(result)
-                        elif isinstance(result, (tuple, list)):
-                            result = await self.async_get_result(*result)
-
+                        result = await self._async_fetch_result_if_url(result)
                         tracer.push(result)
-
                         return result
-
-            except Exception as e:
-
-                raise e
 
             finally:
                 LocalTracer.deregister()
 
     def stream_send(self, values: Dict[int, Any], sio: socketio.SimpleClient):
-        """Upload some value to the remote service for some job id.
+        """Send computed values back to the server during hybrid execution.
+
+        When the server streams a function to execute locally (via STREAM status),
+        local results may need to be uploaded back. This method serializes and
+        sends those values over the WebSocket connection.
 
         Args:
-            value (Any): Value to upload
-            job_id (str): Job id.
-            sio (socketio.SimpleClient): Connected websocket client.
+            values: Dictionary of values to send (keyed by intervention ID).
+            sio: The active WebSocket client connection.
         """
-
         data = save(values)
 
         sio.emit(
@@ -709,80 +936,94 @@ class RemoteBackend(Backend):
             data=(data, self.job_id),
         )
 
-    def non_blocking_request(self, tracer: Tracer):
-        """Send intervention request to the remote service if request provided. Otherwise get job status.
+    def non_blocking_request(self, tracer: Tracer) -> Optional[RESULT]:
+        """Submit a job or poll for results without blocking.
 
-        Sets CONFIG.API.JOB_ID on initial request as to later get the status of said job.
+        This mode allows submitting a job and retrieving results in separate calls,
+        useful for long-running jobs or when you want to do other work while waiting.
 
-        When job is completed, clear CONFIG.API.JOB_ID to request a new job.
+        First call (job_id is None): Submits the request and stores the job_id.
+        Subsequent calls (job_id is set): Polls for completion and returns result.
 
         Args:
-            request (RequestModel): Request if submitting a new request. Defaults to None
+            tracer: The tracer to execute (used only on first call).
+
+        Returns:
+            None on first call (job submitted).
+            The result on subsequent calls if job is complete, None if still running.
         """
-
         if self.job_id is None:
-
+            # First call: submit the job
             data, headers = self.request(tracer)
-
-            # Submit request via
-            response = self.submit_request(data, headers)
-
-            self.job_id = response.id
-
+            self.submit_request(data, headers)
+            # job_id is set by submit_request
         else:
-
+            # Subsequent calls: poll for result
             result = self.get_response()
-
-            if isinstance(result, str):
-                result = self.get_result(result)
-            elif isinstance(result, (tuple, list)):
-                result = self.get_result(*result)
-
+            if result is not None:
+                result = self._fetch_result_if_url(result)
             return result
 
 
 class LocalTracer(Tracer):
+    """Tracer subclass for executing streamed functions locally during hybrid execution.
+
+    When the server streams a function to execute on the client (via STREAM response),
+    LocalTracer handles the local execution and sends results back to the server.
+
+    This enables hybrid execution patterns where some computations happen locally
+    (e.g., on user's GPU) while others happen remotely.
+
+    Class Attributes:
+        _send: Callback function to send values back to the server (set via register()).
+    """
 
     _send: Callable = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        self.remotes = set()
+        self.remotes = set()  # Track objects marked for remote upload
 
     @classmethod
     def register(cls, send_fn: Callable):
-
+        """Register the send callback for uploading values to the server."""
         cls._send = send_fn
 
     @classmethod
     def deregister(cls):
-
+        """Clear the send callback after execution completes."""
         cls._send = None
 
     def _save_remote(self, obj: Any):
-
+        """Mark an object for upload back to the server."""
         self.remotes.add(id(obj))
 
     def execute(self, fn: Callable):
+        """Execute a streamed function with remote value tracking.
 
+        Args:
+            fn: The function streamed from the server to execute locally.
+        """
+        # Mount the remote-saving hook so the function can mark values for upload
         mount(self._save_remote, "remote")
 
         fn(self, self.info)
 
         unmount("remote")
 
-        return
-
     def push(self):
+        """Push local state and send remote-marked values back to server.
 
+        Inspects the caller's local variables, pushes them to the parent tracer,
+        then filters for remote-marked objects and sends them to the server.
+        """
         # Find the frame where the traced code is executing
         state_frame = inspect.currentframe().f_back
-
         state = state_frame.f_locals
 
         super().push(state)
 
+        # Filter to only objects marked for remote upload
         state = {k: v for k, v in state.items() if id(v) in self.remotes}
 
         LocalTracer._send(state)

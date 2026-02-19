@@ -1,13 +1,14 @@
 import os
+import warnings
 from typing import Optional
-
+import sys
 import yaml
 from pydantic import BaseModel
 
 
 class ApiConfigModel(BaseModel):
     HOST: str = "https://api.ndif.us"
-    ZLIB: bool = True
+    COMPRESS: bool = True
     APIKEY: Optional[str] = None
 
 
@@ -29,6 +30,17 @@ class AppConfigModel(BaseModel):
     CROSS_INVOKER: bool = True
     TRACE_CACHING: bool = False
 
+    def __setattr__(self, name, value):
+        if name == "TRACE_CACHING" and value is True:
+            warnings.warn(
+                "TRACE_CACHING is deprecated. Trace caching (source, AST, and code object caching) "
+                "is now always enabled. Setting TRACE_CACHING has no effect and will be "
+                "removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        super().__setattr__(name, value)
+
 
 class ConfigModel(BaseModel):
     API: ApiConfigModel = ApiConfigModel()
@@ -41,6 +53,7 @@ class ConfigModel(BaseModel):
             config = cls(**yaml.safe_load(file))
 
         config.from_env()
+        config.from_cli()
 
         return config
 
@@ -64,6 +77,12 @@ class ConfigModel(BaseModel):
         host = os.environ.get("NDIF_HOST", None)
         if host:
             self.API.HOST = host
+
+    def from_cli(self) -> None:
+
+        args = sys.argv
+        if "-d" in args or "--debug" in args:
+            self.APP.DEBUG = True
 
     def set_default_api_key(self, apikey: str):
 

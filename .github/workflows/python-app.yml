@@ -29,4 +29,4 @@ jobs:
         pip install ./
     - name: Test with pytest
       run: |
-        pytest tests/test_lm.py tests/test_tiny.py --device cpu
+        pytest tests/test_lm.py tests/test_tiny.py tests/test_0516_features.py tests/test_debug.py tests/test_memory_cleanup.py tests/test_multiple_wrappers.py tests/test_source.py --device cpu

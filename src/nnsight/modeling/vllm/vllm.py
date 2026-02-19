@@ -1,14 +1,24 @@
 from ... import NNS_VLLM_VERSION
 
-import torch
 import vllm
+
+# Check vLLM version compatibility
+_installed_version = getattr(vllm, "__version__", "unknown")
+if _installed_version != NNS_VLLM_VERSION:
+    raise ImportError(
+        f"nnsight requires vLLM version {NNS_VLLM_VERSION}, but found {_installed_version}. "
+        f"Please install the correct version:\n\n"
+        f"    pip install vllm=={NNS_VLLM_VERSION}\n"
+    )
+
+import torch
 
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.inputs import TokensPrompt
 
-from vllm import LLM, envs
+from vllm import LLM
 from vllm.distributed import (
     destroy_distributed_environment,
     destroy_model_parallel,
@@ -24,6 +34,7 @@ from ...intervention.tracing.util import push_variables
 from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
+from ...intervention.serialization import save as serialize
 from ... import save
 from .engines.engine import NNsightLLMEngine
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
@@ -32,9 +43,6 @@ if TYPE_CHECKING:
     from torch.nn import Module
 
     from vllm.transformers_utils.tokenizer import AnyTokenizer
-
-
-envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
 
 
 class VLLM(RemoteableMixin):
@@ -133,6 +141,10 @@ class VLLM(RemoteableMixin):
         destroy_model_parallel()
         destroy_distributed_environment()
 
+        if kwargs.get("distributed_executor_backend") == "ray":
+            from .executors.ray_workaround import NNsightRayExecutor
+            kwargs["distributed_executor_backend"] = NNsightRayExecutor
+
         llm = LLM(
             repo_id,
             worker_cls="nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker",
@@ -149,6 +161,15 @@ class VLLM(RemoteableMixin):
     def _prepare_input(
         self, *args, **kwargs
     ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
+        """Normalize user inputs into ``((prompts, params), kwargs, batch_size)``.
+
+        Accepts strings, token ID lists, or HuggingFace tokenizer
+        outputs and converts them into vLLM-compatible prompt objects
+        with :class:`NNsightSamplingParams`.
+
+        Returns:
+            Tuple of ``((prompts, params), kwargs, batch_size)``.
+        """
 
         prompts = []
         params = []
@@ -207,17 +228,20 @@ class VLLM(RemoteableMixin):
                 prompts.append(prompt)
                 params.append(param)
 
-        return (prompts, params), {}
+        kwargs = kwargs if not args else {}
+
+        return (prompts, params), kwargs, len(prompts)
 
     def _batch(
         self, batched_inputs, prompts, params, **kwargs
     ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
+        """Combine multiple invokes' prompts and sampling params into a single batch."""
 
-        batch_size = len(prompts)
+        kwargs = {**kwargs, **batched_inputs[1]}
 
-        if batched_inputs is None:
+        if len(batched_inputs[0]) == 0:
 
-            return ((prompts, params), kwargs), batch_size
+            return (prompts, params), kwargs
 
         batched_args = batched_inputs[0]
         batched_kwargs = batched_inputs[1]
@@ -225,9 +249,7 @@ class VLLM(RemoteableMixin):
         batched_args[0].extend(prompts)
         batched_args[1].extend(params)
 
-        batched_kwargs.update(kwargs)
-
-        return batched_inputs, batch_size
+        return batched_args, batched_kwargs
 
     def __call__(
         self,
@@ -235,21 +257,26 @@ class VLLM(RemoteableMixin):
         params: List[NNsightSamplingParams],
         **kwargs,
     ) -> Any:
+        """Execute vLLM generation with NNsight interventions.
+
+        Attaches mediators to sampling params so the vLLM workers can
+        deserialize and run intervention code, then collects saved
+        variables from the outputs.
+        """
 
         default_param = NNsightSamplingParams.from_optional()
-
-        kwargs.pop("hook", None)
 
         param_idx = 0
 
         # Find the sampling params associated with each mediator
         for mediator in self._interleaver.mediators:
 
-            batch_start, batch_size = mediator.batch_group
-
             # If its the only invoker in the batch group, set the batch size to the total number of prompts
-            if batch_size == -1:
+            if mediator.batch_group is None:
                 batch_size = len(params)
+
+            else:
+                batch_size = mediator.batch_group[1]
 
             # For each prompt in the batch group associated with the mediator
             for i in range(batch_size):
@@ -259,7 +286,14 @@ class VLLM(RemoteableMixin):
                 # If its the first prompt in the batch group, it will transfer the mediator to the workers
                 if i == 0:
 
-                    param.mediator = mediator
+                    mediator.intervention.__source__ = "".join(mediator.info.source)
+                    param.extra_args = {"nnsight_mediator": serialize(mediator)}
+
+                else:
+                    # Mark subsequent prompts as batch members so the worker
+                    # can associate them with the same mediator, even if the
+                    # scheduler splits them across steps.
+                    param.extra_args = {"nnsight_batch_member": True}
 
                 param_idx += 1
 
@@ -290,7 +324,9 @@ class VLLM(RemoteableMixin):
 
     def interleave(self, fn: Callable, *args, **kwargs):
         """Execute the traced function with vLLM, dispatching the engine if needed."""
-        if not self.dispatched and not isinstance(self._interleaver.tracer, ScanningTracer):
+        if not self.dispatched and not isinstance(
+            self._interleaver.tracer, ScanningTracer
+        ):
             self.dispatch()
 
         try:
@@ -299,8 +335,21 @@ class VLLM(RemoteableMixin):
             self._interleaver.check_cache_full()
             self._interleaver.cancel()
 
+    def _remoteable_persistent_objects(self) -> dict:
+        persistent_objects = super()._remoteable_persistent_objects()
+        persistent_objects["Tokenizer"] = self.tokenizer
+        return persistent_objects
 
-if TYPE_CHECKING:
+    def __getstate__(self):
 
-    class VLLM(VLLM, LLM):
-        pass
+        state = super().__getstate__()
+        state["vllm_entrypoint"] = None
+        if self.tokenizer is not None:
+            self.tokenizer._persistent_id = "Tokenizer"
+        state["tokenizer"] = self.tokenizer
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self.vllm_entrypoint = state["vllm_entrypoint"]
+        self.tokenizer = state["tokenizer"]

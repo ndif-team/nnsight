@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import warnings
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from transformers import (
@@ -10,14 +10,10 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BatchEncoding,
-    PreTrainedModel,
     PreTrainedTokenizer,
 )
-from transformers.generation.utils import GenerationMixin
-
 
 from ..intervention.envoy import Envoy
-from ..intervention.tracing.tracer import InterleavingTracer
 from ..util import WrapperModule
 from .transformers import TransformersModel
 
@@ -46,8 +42,16 @@ class LanguageModel(TransformersModel):
     """
 
     class Generator(WrapperModule):
+        """Wrapper module that captures the final generation output.
+
+        Contains a :class:`Streamer` submodule that receives tokens
+        during generation. The generator output can be accessed via
+        ``model.generator.output`` inside a trace, though
+        ``tracer.result`` is preferred for new code.
+        """
 
         class Streamer(WrapperModule):
+            """Streamer that receives tokens during generation and passes them through as a module call."""
 
             def put(self, *args):
                 return self(*args)
@@ -134,6 +138,12 @@ class LanguageModel(TransformersModel):
             setattr(generation_config, "compile_config", compile_config)
 
     def __nnsight_generate__(self, *args, **kwargs):
+        """Custom generation entry point used when ``.generate()`` is called as a tracing context.
+
+        Sets up iteration tracking via ``max_new_tokens``, injects a
+        streamer for token-by-token access, and wraps the final output
+        through the :attr:`generator` module.
+        """
 
         max_new_tokens = kwargs.get("max_new_tokens", None)
 
@@ -178,7 +188,10 @@ class LanguageModel(TransformersModel):
         ],
         **kwargs,
     ):
-        
+        """
+        Tokenizes the inputs.
+        """
+
         if isinstance(inputs, torch.Tensor):
             if inputs.ndim == 1:
                 inputs = inputs.unsqueeze(0)
@@ -197,13 +210,33 @@ class LanguageModel(TransformersModel):
         ):
             inputs = [inputs]
 
-        
-
         if not isinstance(inputs[0], str):
             inputs = [{"input_ids": ids} for ids in inputs]
             return self.tokenizer.pad(inputs, return_tensors="pt", **kwargs)
 
         return self.tokenizer(inputs, return_tensors="pt", padding=True, **kwargs)
+
+    _TOKENIZER_KWARGS = {
+        "text_pair",
+        "text_target",
+        "text_pair_target",
+        "add_special_tokens",
+        "padding",
+        "truncation",
+        "max_length",
+        "stride",
+        "is_split_into_words",
+        "pad_to_multiple_of",
+        "padding_side",
+        "return_tensors",
+        "return_token_type_ids",
+        "return_attention_mask",
+        "return_overflowing_tokens",
+        "return_special_tokens_mask",
+        "return_offsets_mapping",
+        "return_length",
+        "verbose",
+    }
 
     def _prepare_input(
         self,
@@ -224,16 +257,33 @@ class LanguageModel(TransformersModel):
         labels: Any = None,
         attention_mask: Any = None,
         **kwargs,
-    ) -> Tuple[Tuple[()], Dict[str, Any]]:
-        
+    ) -> tuple[tuple[Any], dict[str, Any], int]:
+        """Normalize user inputs into a ``(args, kwargs, batch_size)`` tuple.
+
+        Handles tokenization of strings, tensor reshaping, and
+        separation of tokenizer-specific kwargs from model kwargs.
+
+        Returns:
+            Tuple of ``(args, kwargs, batch_size)`` ready for the
+            model's forward pass or for :meth:`_batch`.
+        """
+
+        tokenizer_kwargs = {}
+        remaining_kwargs = {}
+        for k, v in kwargs.items():
+            if k in self._TOKENIZER_KWARGS:
+                tokenizer_kwargs[k] = v
+            else:
+                remaining_kwargs[k] = v
+
         if input_ids is not None:
-
             assert len(inputs) == 0
-
             inputs = (input_ids,)
 
-        assert len(inputs) == 1
+        if len(inputs) == 0:
+            return tuple(), remaining_kwargs, 0
 
+        assert len(inputs) == 1
         inputs = inputs[0]
 
         if isinstance(inputs, dict):
@@ -242,26 +292,38 @@ class LanguageModel(TransformersModel):
             pass
         else:
 
-            inputs = self._tokenize(inputs, **kwargs)
+            inputs = self._tokenize(inputs, **tokenizer_kwargs)
 
             if labels is not None:
-                labels = self._tokenize(labels, **kwargs)["input_ids"]
-        
+                labels = self._tokenize(labels, **tokenizer_kwargs)["input_ids"]
+
         if attention_mask is not None:
             inputs["attention_mask"] = attention_mask
 
-        return tuple(), {**inputs, "labels": labels}
+        return (
+            tuple(),
+            {**inputs, "labels": labels, **remaining_kwargs},
+            len(inputs["input_ids"]),
+        )
 
     def _batch(
         self,
         batched_inputs: Optional[Tuple[Tuple[BatchEncoding], Dict[str, Any]]],
         **prepared_kwargs,
-    ) -> Tuple[Dict[str, Any]]:
+    ) -> tuple[tuple[Any], dict[str, Any]]:
+        """Combine multiple invokes' prepared inputs into a single padded batch.
 
-        if batched_inputs is None:
-            return (tuple(), prepared_kwargs), len(prepared_kwargs["input_ids"])
+        Re-pads token sequences so they share a common length and
+        preserves attention masks from earlier invokes.
+
+        Returns:
+            Tuple of ``(args, kwargs)`` representing the combined batch.
+        """
 
         batched_inputs = batched_inputs[1]
+
+        if "input_ids" not in batched_inputs:
+            return tuple(), {**prepared_kwargs, **batched_inputs}
 
         batched_labels = batched_inputs["labels"]
 
@@ -281,20 +343,21 @@ class LanguageModel(TransformersModel):
         if labels is not None:
 
             batched_labels = torch.cat((batched_labels, labels))
-            
-        if attention_mask is not None:
 
-            if self.tokenizer.padding_side == "left":
+        new_attention_mask = prepared_kwargs.get("attention_mask", None)
+        n_old = attention_mask.shape[0] if attention_mask is not None else 0
+        left = self.tokenizer.padding_side == "left"
 
-                new_batched_inputs["attention_mask"][
-                    : attention_mask.shape[0], -attention_mask.shape[1] :
-                ] = attention_mask
+        combined_mask = torch.zeros_like(new_batched_inputs["attention_mask"])
 
-            else:
+        for row_start, mask in [(0, attention_mask), (n_old, new_attention_mask)]:
+            if mask is not None:
+                if left:
+                    combined_mask[row_start : row_start + mask.shape[0], -mask.shape[1] :] = mask
+                else:
+                    combined_mask[row_start : row_start + mask.shape[0], : mask.shape[1]] = mask
 
-                new_batched_inputs["attention_mask"][
-                    : attention_mask.shape[0], : attention_mask.shape[1]
-                ] = attention_mask
+        new_batched_inputs["attention_mask"] = combined_mask
 
         batched_inputs.pop("input_ids", None)
         batched_inputs.pop("attention_mask", None)
@@ -302,15 +365,22 @@ class LanguageModel(TransformersModel):
         return (
             tuple(),
             {**new_batched_inputs, **batched_inputs, "labels": batched_labels},
-        ), len(prepared_kwargs["input_ids"])
-
+        )
 
     def _remoteable_model_key(self) -> str:
         return super()._remoteable_model_key()
 
-if TYPE_CHECKING:
+    def _remoteable_persistent_objects(self) -> dict:
+        persistent_objects = super()._remoteable_persistent_objects()
+        persistent_objects["Tokenizer"] = self.tokenizer
+        return persistent_objects
 
-    class LanguageModel(GenerationMixin, LanguageModel, PreTrainedModel):
+    def __getstate__(self):
+        state = super().__getstate__()
+        self.tokenizer._persistent_id = "Tokenizer"
+        state["tokenizer"] = self.tokenizer
+        return state
 
-        def generate(self, *args, **kwargs) -> Union[InterleavingTracer, Any]:
-            return super().generate(*args, **kwargs)
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        self.tokenizer = state["tokenizer"]

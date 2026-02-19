@@ -105,6 +105,14 @@ def convert(fn: Callable, wrap: Callable, name: str):
     module_globals = inspect.getmodule(fn).__dict__
 
     tree = ast.parse(source)
+
+    # Strip decorators — they're irrelevant to operation tracing and can fail
+    # when re-executed outside the original class context (e.g. transformers'
+    # @auto_docstring tries cls.__mro__ which fails on a bare function).
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            node.decorator_list = []
+
     transformer = FunctionCallWrapper(name)
     tree = transformer.visit(tree)
     ast.fix_missing_locations(tree)
@@ -126,11 +134,8 @@ def convert(fn: Callable, wrap: Callable, name: str):
     else:
         # Fallback: convert to source if tree structure is unexpected
         code_obj = compile(_ast_to_source(tree), filename, "exec")
-    try:
-        exec(code_obj, global_namespace, local_namespace)
-    except Exception as exc:
-        ee = exc
-        breakpoint()
+
+    exec(code_obj, global_namespace, local_namespace)
 
     fn = local_namespace[fn.__name__]
 

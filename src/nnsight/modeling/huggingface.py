@@ -8,8 +8,31 @@ from typing_extensions import Self
 
 from .mixins import RemoteableMixin
 
+ID_CACHE = {}
+
 
 class HuggingFaceModel(RemoteableMixin):
+    """Base class for NNsight wrappers around HuggingFace Hub models.
+
+    Adds HuggingFace repository handling (repo ID, revision) and
+    persistent edit export/import on top of :class:`RemoteableMixin`.
+
+    Args:
+        repo_id (str): HuggingFace repository ID (e.g. ``"openai-community/gpt2"``)
+            or a pre-loaded ``torch.nn.Module``.
+        *args: Forwarded to the parent mixin chain.
+        revision (Optional[str]): Git revision (branch, tag, or commit hash)
+            of the model repository. Defaults to ``None`` (latest).
+        import_edits (Union[bool, str]): If ``True``, import previously
+            exported edits using the default variant. If a string, use
+            it as the variant name. Defaults to ``False``.
+        **kwargs: Forwarded to the parent mixin chain and ultimately to
+            the model loading function.
+
+    Attributes:
+        repo_id (str): The HuggingFace repository ID.
+        revision (Optional[str]): The repository revision.
+    """
 
     def __init__(
         self,
@@ -45,12 +68,18 @@ class HuggingFaceModel(RemoteableMixin):
         export_dir: Optional[str] = None,
         variant: str = "__default__",
     ):
-        """TODO
+        """Export persistent model edits to disk.
+
+        Edits created via ``model.edit(inplace=True)`` are serialized
+        and saved so they can be reloaded later with :meth:`import_edits`.
 
         Args:
-            name (Optional[str], optional): _description_. Defaults to None.
-            export_dir (Optional[str], optional): _description_. Defaults to None.
-            variant (str, optional): _description_. Defaults to '__default__'.
+            name (Optional[str]): Export name. Defaults to a name
+                derived from the HuggingFace repo ID.
+            export_dir (Optional[str]): Directory to save exports.
+                Defaults to the HuggingFace cache under ``nnsight/exports``.
+            variant (str): Named variant for this set of edits.
+                Defaults to ``'__default__'``.
         """
 
         if name is None:
@@ -70,12 +99,18 @@ class HuggingFaceModel(RemoteableMixin):
         export_dir: Optional[str] = None,
         variant: str = "__default__",
     ):
-        """TODO
+        """Import previously exported model edits from disk.
+
+        Loads edits that were saved with :meth:`export_edits` and
+        applies them as persistent in-place edits on this model.
 
         Args:
-            name (Optional[str], optional): _description_. Defaults to None.
-            export_dir (Optional[str], optional): _description_. Defaults to None.
-            variant (str, optional): _description_. Defaults to '__default__'.
+            name (Optional[str]): Export name. Defaults to a name
+                derived from the HuggingFace repo ID.
+            export_dir (Optional[str]): Directory to load exports from.
+                Defaults to the HuggingFace cache under ``nnsight/exports``.
+            variant (str): Named variant to load.
+                Defaults to ``'__default__'``.
         """
 
         if name is None:
@@ -91,7 +126,10 @@ class HuggingFaceModel(RemoteableMixin):
 
     def _remoteable_model_key(self) -> str:
 
-        repo_id = HfApi().model_info(self.repo_id).id
+        if self.repo_id not in ID_CACHE:
+            ID_CACHE[self.repo_id] = HfApi().model_info(self.repo_id).id
+
+        repo_id = ID_CACHE[self.repo_id]
 
         return json.dumps(
             {

@@ -1,40 +1,33 @@
 import pickle
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.executor.abstract import UniProcExecutor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-from vllm import envs
 
 
 class NNsightLLMEngine(LLMEngine):
+    """Custom vLLM engine that collects saved intervention results from finished requests.
+
+    After each engine step, finished requests are forwarded to the
+    model runner's ``finish_nnsight()`` method to gather any variables
+    that were ``.save()``-ed during intervention execution.
+    """
 
     def step(self):
 
         request_outputs = super().step()
 
-        finished_requests = []
+        finished_req_ids = [ro.request_id for ro in request_outputs if ro.finished]
 
-        for request_output in request_outputs:
-            if request_output.finished:
-                finished_requests.append(request_output)
-
-        if len(finished_requests) > 0:
-            model_executor = self.engine_core.engine_core.model_executor
-
-            if isinstance(model_executor, UniProcExecutor):
-                saves = model_executor.collective_rpc(
-                    "finish_nnsight",
-                    args=(finished_requests,),
-                    single_value=True,
-                )
-            elif isinstance(model_executor, MultiprocExecutor):
-                saves = model_executor.collective_rpc(
-                    "finish_nnsight",
-                    args=(finished_requests,),
-                    unique_reply_rank=model_executor.output_rank,
-                    non_block=False,
-                    timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
-                )
-
-            finished_requests[0].saves = saves
+        if finished_req_ids:
+            results = self.engine_core.collective_rpc(
+                "finish_nnsight",
+                args=(finished_req_ids,),
+            )
+            # results is a list (one per worker). Rank-0 returns pickled bytes, others None.
+            saves_bytes = next((r for r in results if r is not None), None)
+            if saves_bytes:
+                saves = pickle.loads(saves_bytes)
+                for ro in request_outputs:
+                    if ro.finished:
+                        ro.saves = saves
+                        break
 
         return request_outputs

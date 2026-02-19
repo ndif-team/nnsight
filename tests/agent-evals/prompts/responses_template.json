@@ -1,0 +1,82 @@
+{
+  "agent_name": "claude_code",
+  "timestamp": "",
+  "responses": {
+    "basic_01_trace_and_save": {
+      "code": "",
+      "notes": ""
+    },
+    "basic_02_logits_and_prediction": {
+      "code": "",
+      "notes": ""
+    },
+    "basic_03_zero_activations": {
+      "code": "",
+      "notes": ""
+    },
+    "basic_04_access_input": {
+      "code": "",
+      "notes": ""
+    },
+    "basic_05_clone_before_modify": {
+      "code": "",
+      "notes": ""
+    },
+    "intermediate_01_multiple_invokers": {
+      "code": "",
+      "notes": ""
+    },
+    "intermediate_02_activation_patching": {
+      "code": "",
+      "notes": ""
+    },
+    "intermediate_03_generation": {
+      "code": "",
+      "notes": ""
+    },
+    "intermediate_04_iter_generation": {
+      "code": "",
+      "notes": ""
+    },
+    "intermediate_05_gradients": {
+      "code": "",
+      "notes": ""
+    },
+    "intermediate_06_promptless_invoke": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_01_sessions": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_02_model_editing": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_03_caching": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_04_skip_module": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_05_scan_mode": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_06_barrier_sync": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_07_logit_lens": {
+      "code": "",
+      "notes": ""
+    },
+    "advanced_08_steering_vector": {
+      "code": "",
+      "notes": ""
+    }
+  }
+}

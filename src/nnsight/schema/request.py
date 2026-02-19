@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import io
-import zlib
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Union
+import zstandard as zstd
+from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import BaseModel, ConfigDict
 from ..intervention.serialization import save, load
+
 if TYPE_CHECKING:
-    from .. import NNsight
     from ..intervention.tracing.tracer import Tracer
 else:
     Tracer = Any
+
 
 class RequestModel(BaseModel):
 
@@ -19,30 +20,34 @@ class RequestModel(BaseModel):
     interventions: Callable
     tracer: Tracer
 
-    
-    def serialize(self, _zlib:bool) -> bytes:
-                
-        data = save(self)
-                
-        if _zlib:
+    def serialize(self, compress: bool = False) -> bytes:
 
-            data = zlib.compress(data)
-                
+        self.interventions.__source__ = "".join(self.tracer.info.source)
+
+        data = save(self)
+
+        if compress:
+
+            data = zstd.ZstdCompressor(level=6).compress(data)
+
         return data
 
     @staticmethod
-    def deserialize(model: "NNsight", request:bytes,  _zlib:bool) -> RequestModel:
-        
-        if _zlib:
+    def deserialize(
+        request: bytes, persistent_objects: dict = None, compress: bool = False
+    ) -> RequestModel:
 
-            request = zlib.decompress(request)
+        if compress:
+
+            request = zstd.ZstdDecompressor().decompress(request)
 
         with io.BytesIO(request) as data:
 
             data.seek(0)
 
-            request:RequestModel = load(data.read(), model)
-        
+            request: RequestModel = load(data.read(), persistent_objects)
+
         return request
+
 
 RequestModel.model_rebuild()

@@ -53,6 +53,8 @@ with model.trace("input text"):
 19. [Critical Gotchas](#critical-gotchas)
 20. [Debugging Tips](#debugging-tips)
 21. [Configuration](#configuration)
+22. [Performance Tips](#performance-tips)
+23. [Development & Testing Notes](#development--testing-notes)
 
 ---
 
@@ -111,33 +113,37 @@ You MUST access modules (and their .output, .input, etc.) in the order they exec
 Accessing layer 5's output before layer 2 will result in a deadlock or error!
 */
 
-### Prompt-less Invokers
+### Empty Invokes (Prompt-less Invokers)
 
-Call `.invoke()` with **no arguments** to run intervention code on the **entire batch** from all previous invokes:
+Call `.invoke()` with **no arguments** to create an **empty invoke** that operates on the **entire batch** from all previous input invokes:
 
 ```python
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
         out_1 = model.lm_head.output[:, -1].save()  # Shape: [1, vocab]
-    
+
     with tracer.invoke(["World", "Test"]):
         out_2 = model.lm_head.output[:, -1].save()  # Shape: [2, vocab]
-    
-    # No-arg invoke: operates on ALL 3 inputs batched together
+
+    # Empty invoke: operates on ALL 3 inputs batched together
     with tracer.invoke():
         out_all = model.lm_head.output[:, -1].save()  # Shape: [3, vocab]
-    
-    # Another no-arg invoke: same batch
+
+    # Another empty invoke: same full batch
     with tracer.invoke():
         out_all_2 = model.lm_head.output[:, -1].save()  # Shape: [3, vocab]
 
 # out_all contains the same data as concatenating out_1 and out_2
 ```
 
-This is useful for:
-- Running different intervention logic on the same batch
-- Accessing the combined batch after setting up individual invokes
-- Comparing interventions across the full batch
+Empty invokes are useful for:
+- **Batch-wide operations**: Access the combined batch from all input invokes
+- **Breaking up interventions**: Since modules must be accessed in forward-pass order within a single invoke, use multiple empty invokes to access the same module multiple times (each empty invoke is a separate thread)
+- **Comparing interventions**: Run different intervention logic on the same batch in separate invokes
+
+**Important**: Empty invokes don't trigger `_batch()`, so they work even on base `NNsight` models that don't implement batching. You can always use one input invoke + any number of empty invokes, even without implementing `_prepare_input()`/`_batch()`.
+
+**Note**: At least one input invoke must precede any empty invokes — without input data, the model has nothing to execute on.
 
 ### Key Properties
 
@@ -350,7 +356,7 @@ with model.trace("Hello"):
 
 ### The `.save()` Method
 
-**Critical:** Values are garbage collected unless you call `.save()`:
+**Critical:** Values are garbage collected unless you save them:
 
 ```python
 with model.trace("Hello"):
@@ -361,21 +367,19 @@ with model.trace("Hello"):
     output = model.transformer.h[-1].output[0].save()
 ```
 
-**Two ways to save:**
+**Two ways to save — prefer `nnsight.save()`:**
 
 ```python
-# Method 1: .save() on tensor (uses pymount C extension)
-output = model.transformer.h[-1].output[0].save()
-
-# Method 2: nnsight.save() - PREFERRED (works for all objects)
 import nnsight
+
+# PREFERRED: nnsight.save() — works on any object, no C extension needed
 output = nnsight.save(model.transformer.h[-1].output[0])
 
-# nnsight.save() is preferred because:
-# - Works on any object (including those with their own .save() method)
-# - Doesn't require the pymount C extension
-# - More explicit about what's happening
+# ALSO WORKS: obj.save() — backwards-compatible method form
+output = model.transformer.h[-1].output[0].save()
 ```
+
+**Always use `nnsight.save()` for non-tensor values** like shape integers, lists, or dicts. The `obj.save()` method form relies on a C extension (pymount) that injects `.save()` onto every Python object at runtime. It exists for backwards compatibility with NNsight 0.4 code, but `nnsight.save()` is safer because it works even on objects that define their own `.save()` method (which would shadow NNsight's version). See [NNsight.md § 5.1](./NNsight.md) for implementation details.
 
 ---
 
@@ -538,28 +542,28 @@ Each `iter` moves a cursor that tracks which generation step the mediator (worke
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
     logits = list().save()
-    
+
     # All steps (slice)
-    with tracer.iter[:]:
+    for step in tracer.iter[:]:
         logits.append(model.lm_head.output[0][-1].argmax(dim=-1))
-    
+
 # Or specific steps
 with model.generate("Hello", max_new_tokens=5) as tracer:
     logits = list().save()
-    
+
     # Steps 1-3 only (slice)
-    with tracer.iter[1:3]:
+    for step in tracer.iter[1:3]:
         logits.append(model.lm_head.output)
 
 # Single step (int)
 with model.generate("Hello", max_new_tokens=5) as tracer:
-    with tracer.iter[0]:
+    for step in tracer.iter[0]:
         first_logits = model.lm_head.output.save()
 
 # Specific steps (list)
 with model.generate("Hello", max_new_tokens=5) as tracer:
     logits = list().save()
-    with tracer.iter[[0, 2, 4]]:
+    for step in tracer.iter[[0, 2, 4]]:
         logits.append(model.lm_head.output)
 ```
 
@@ -568,12 +572,12 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
     outputs = list().save()
-    
-    with tracer.iter[:] as step_idx:
+
+    for step_idx in tracer.iter[:]:
         if step_idx == 2:
             # Only intervene on step 2
             model.transformer.h[0].output[0][:] = 0
-        
+
         outputs.append(model.transformer.h[-1].output[0])
 ```
 
@@ -582,9 +586,9 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 ```python
 with model.generate("Hello", max_new_tokens=3) as tracer:
     hidden_states = list().save()
-    
+
     # Apply to all generation steps for all descendants
-    with tracer.all():
+    for step in tracer.all():
         model.transformer.h[0].output[0][:] = 0
         hidden_states.append(model.transformer.h[-1].output)
 ```
@@ -605,20 +609,20 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 
 ### ⚠️ Critical Footgun: Unbounded Iteration
 
-**When using `tracer.iter[:]` or `tracer.all()`, code AFTER the iter block never executes.**
+**When using `tracer.iter[:]` or `tracer.all()`, code AFTER the iter loop never executes.**
 
 These unbounded iterators don't know when to stop — they wait forever for the "next" iteration. When generation finishes:
 
 1. The iterator is still waiting for more iterations
 2. NNsight issues a warning (not an error)
-3. **All code after the iter block is skipped**
+3. **All code after the iter loop is skipped**
 
 ```python
 # WRONG:
 with model.generate("Hello", max_new_tokens=3) as tracer:
-    with tracer.iter[:]:
+    for step in tracer.iter[:]:
         hidden = model.transformer.h[-1].output.save()
-    
+
     # ⚠️ THIS NEVER EXECUTES!
     final_logits = model.output.save()
 
@@ -631,9 +635,9 @@ print(final_logits)  # NameError: 'final_logits' is not defined
    ```python
    with model.generate("Hello", max_new_tokens=3) as tracer:
        with tracer.invoke():  # First invoker - handles iteration
-           with tracer.iter[:]:
+           for step in tracer.iter[:]:
                hidden = model.transformer.h[-1].output.save()
-       
+
        with tracer.invoke():  # Second invoker - runs after generation
            final_logits = model.output.save()  # Now runs!
    ```
@@ -834,12 +838,16 @@ model.clear_edits()
 Get shapes and types without running the full model:
 
 ```python
+import nnsight
+
 with model.scan("Hello"):
-    # Access shape information
-    dim = model.transformer.h[0].output[0].shape[-1]
-    
+    # Access shape information - must use .save() to persist outside the context
+    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+
 print(dim)  # e.g., 768
 ```
+
+**Important:** Even though `model.scan()` uses fake tensors for lightweight execution, it is still a tracing context. You **must** use `.save()` (or `nnsight.save()`) on any value you want to access after the `with model.scan(...)` block exits. This is the same rule as `model.trace()` — values defined inside the context are garbage collected unless explicitly saved. Use `nnsight.save()` for non-tensor values like shape integers.
 
 ### Validation Mode
 
@@ -1060,8 +1068,8 @@ next_token = model.tokenizer.decode(logits.argmax(dim=-1))
 ```python
 with model.trace("Hello", max_tokens=5) as tracer:
     logits = list().save()
-    
-    with tracer.iter[:]:
+
+    for step in tracer.iter[:]:
         logits.append(model.logits.output)
 ```
 
@@ -1083,7 +1091,7 @@ with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
 with model.trace(max_tokens=3) as tracer:
     with tracer.invoke("Hello", temperature=0.8, top_p=0.95):
         samples = list().save()
-        with tracer.iter[:]:
+        for step in tracer.iter[:]:
             samples.append(model.samples.output.item())
 ```
 
@@ -1132,7 +1140,7 @@ with model.generate("Hello", max_new_tokens=5, remote=True) as tracer:
     
     # Or iterate over generation steps
     logits = list().save()
-    with tracer.iter[:]:
+    for step in tracer.iter[:]:
         logits.append(model.lm_head.output[0][-1].argmax(dim=-1))
 
 print(model.tokenizer.decode(output[0]))
@@ -1293,14 +1301,20 @@ with model.trace("Hello"):
 
 ### Activation Patching
 
+**Important:** When both invokes access the same module (here `transformer.h[5]`), you **must** use a barrier to synchronize them. Without the barrier, `clean_hs` will not be defined when the second invoke tries to use it.
+
 ```python
 with model.trace() as tracer:
+    barrier = tracer.barrier(2)  # Synchronize 2 invokes
+
     # Clean run
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[0][:, -1, :].save()
-    
+        clean_hs = model.transformer.h[5].output[0][:, -1, :]
+        barrier()  # Signal: clean_hs is now available
+
     # Patched run
     with tracer.invoke("The Colosseum is in"):
+        barrier()  # Wait until invoke 1 has materialized clean_hs
         model.transformer.h[5].output[0][:, -1, :] = clean_hs
         patched_logits = model.lm_head.output.save()
 ```
@@ -1489,11 +1503,12 @@ with model.trace("Hello"):
     print(shape)  # torch.Size([1, 5, 768])
 ```
 
-Use `.scan()` if you need shapes **without** running the model:
+Use `.scan()` if you need shapes **without** running the model (remember to save values you need outside the context):
 
 ```python
+import nnsight
 with model.scan("Hello"):
-    shape = model.transformer.h[0].output[0].shape  # Shape via fake tensors
+    shape = nnsight.save(model.transformer.h[0].output[0].shape)  # Shape via fake tensors
 ```
 
 ### 8. Generation vs Trace
@@ -1516,6 +1531,50 @@ with model.trace("Hello"):
     device = model.transformer.h[0].output[0].device
     noise = torch.randn(768).to(device)  # Match device!
     model.transformer.h[0].output[0][:, -1, :] += noise
+```
+
+### 10. Cross-Invoke Same-Module Access Requires Barriers
+
+When two invokes **both access the same module** (e.g., both read `transformer.h[5].output`), you **must** use a barrier. Without it, the variable captured in invoke 1 will not be materialized when invoke 2 tries to use it, resulting in a `NameError`.
+
+```python
+# WRONG - clean_hs is not defined when invoke 2 runs
+with model.trace() as tracer:
+    with tracer.invoke("Hello"):
+        clean_hs = model.transformer.h[5].output[0][:, -1, :]
+    with tracer.invoke("World"):
+        model.transformer.h[5].output[0][:, -1, :] = clean_hs  # NameError!
+        logits = model.lm_head.output.save()
+
+# CORRECT - barrier synchronizes the invokes
+with model.trace() as tracer:
+    barrier = tracer.barrier(2)
+    with tracer.invoke("Hello"):
+        clean_hs = model.transformer.h[5].output[0][:, -1, :]
+        barrier()  # Invoke 1 waits here after materializing clean_hs
+    with tracer.invoke("World"):
+        barrier()  # Invoke 2 waits until invoke 1 has passed its barrier
+        model.transformer.h[5].output[0][:, -1, :] = clean_hs  # Now available
+        logits = model.lm_head.output.save()
+```
+
+**Rule of thumb:** If two invokes access `.output` or `.input` on the same module and you want to share a value between them, always use a barrier.
+
+### 11. `.save()` Is Required in All Tracing Contexts (Including Scan)
+
+`.save()` is needed to persist values outside **any** tracing context — this includes `model.trace()`, `model.generate()`, `model.session()`, **and** `model.scan()`. Even though scan uses fake tensors for lightweight execution, it is still a tracing context that garbage-collects unsaved values.
+
+```python
+# WRONG - dim is lost after scan exits
+with model.scan("Hello"):
+    dim = model.transformer.h[0].output[0].shape[-1]
+print(dim)  # Error or undefined
+
+# CORRECT - use nnsight.save() for non-tensor values like ints
+import nnsight
+with model.scan("Hello"):
+    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+print(dim)  # 768
 ```
 
 ---
@@ -1573,12 +1632,12 @@ This shows internal NNsight frames, which can help:
 |-----------|-------|-----|
 | `OutOfOrderError: Value was missed for model.layer.output.i0` | Accessed modules in wrong order within an invoke | Access modules in forward-pass order |
 | `ValueError: Execution complete but ... was not provided` | Mediator still waiting - module never called or gradient order wrong | Check module path exists; access gradients in reverse order |
-| `ValueError: Cannot return output of Envoy that is not interleaving` | Trace has no input, model never ran | Provide input to `.trace(input)` or use `.invoke()` |
+| `ValueError: The model did not execute` | Trace has no input, model never ran | Provide input to `.trace(input)` or use `.invoke(input)` |
 | `ValueError: Cannot invoke during an active model execution` | Tried to create invoke inside another invoke | Use sequential, non-nested invokes |
 | `ValueError: Cannot request ... in a backwards tracer` | Accessed `.output`/`.input` inside `backward()` instead of `.grad` | Define tensors before backward, access `.grad` inside |
 | `AttributeError: ... has no attribute X` | Nonexistent module accessed | Use `print(model)` to see available modules |
 | `AttributeError: Tokenizer not found` | Wrapped pre-loaded model without providing tokenizer | Provide `tokenizer=` when wrapping pre-loaded models |
-| `NotImplementedError: Batching not implemented` | Multiple invokes on base `NNsight` | Use `LanguageModel` for multiple invokes, or single invoke |
+| `NotImplementedError: Batching is not implemented` | Multiple input invokes on base `NNsight` | Implement `_prepare_input()`/`_batch()` (see `LanguageModel`), or use one input invoke + empty invokes |
 
 **The `.i0` suffix** in error messages indicates iteration 0 (first call). In generation, you'd see `.i1`, `.i2`, etc.
 
@@ -1742,8 +1801,8 @@ model2 = NNsight(my_pytorch_model)  # Safe - hooks replaced, not duplicated
 | `tracer.barrier(n)` | Synchronization barrier |
 | `tracer.cache(...)` | Activation caching |
 | `tracer.stop()` | Early termination |
-| `tracer.iter[slice]` | Iterate generation steps |
-| `tracer.all()` | Apply to all steps |
+| `tracer.iter[slice]` | Iterate generation steps (use as `for step in tracer.iter[:]`) |
+| `tracer.all()` | Apply to all steps (use as `for step in tracer.all()`) |
 | `tracer.result` | Get final output of traced function |
 
 ### Module Properties
@@ -1759,6 +1818,85 @@ model2 = NNsight(my_pytorch_model)  # Safe - hooks replaced, not duplicated
 
 
 **Note on `.grad`:** Access gradients on **tensors** only inside a `with tensor.backward():` context. See [Gradients and Backpropagation](#gradients-and-backpropagation).
+
+---
+
+## Performance Tips
+
+### Where NNsight Overhead Lives
+
+Each `with model.trace(...)` has a fixed ~0.3ms setup cost (source extraction, AST parsing, compilation, thread creation). Per-intervention cost is much smaller (~0.03-0.2ms per `.output`/`.input` access). The fixed cost is constant regardless of model size, so it becomes negligible for real models.
+
+### Key Optimization: Consolidate Traces
+
+The single biggest performance win is putting multiple interventions in one trace instead of using separate traces:
+
+```python
+# BAD (~6ms): 12 separate traces, each pays ~0.3ms setup
+for layer in model.transformer.h:
+    with model.trace(prompt):
+        hidden = layer.output.save()
+
+# GOOD (~0.7ms): 1 trace, 12 saves amortize setup to ~0.03ms each
+with model.trace(prompt):
+    hiddens = []
+    for layer in model.transformer.h:
+        hiddens.append(layer.output.save())
+```
+
+### Automatic Caching
+
+Source lines, AST nodes, and compiled code objects are all automatically cached per trace site. Running the same `with model.trace(...)` in a loop only compiles on the first iteration. The cache key is `(filename, line_number, function_name, tracer_type)`, so different tracer types (InterleavingTracer vs Invoker) are cached independently. The `TRACE_CACHING` config is deprecated (caching is now always enabled).
+
+### Configuration for Performance
+
+- `CONFIG.APP.PYMOUNT = False` -- Disables the C extension that mounts `.save()` on all objects. Use `nnsight.save()` instead. Negligible performance difference since pymount is now mounted once and never unmounted.
+- `CONFIG.APP.CROSS_INVOKER = False` -- Disables cross-invoke variable sharing. Small savings from skipping variable injection.
+
+For detailed performance analysis, see [NNsight.md Section 10](./NNsight.md).
+
+---
+
+## Development & Testing Notes
+
+Tips for working on nnsight internals or writing tests/benchmarks:
+
+### Common Errors and What They Mean
+
+- **`ValueError: The model did not execute`** -- You're accessing `.output`/`.input` but the model never ran. Either the trace had no input, or you're outside a trace context. When writing benchmarks with closures (e.g., `lambda` or functions defined in a loop), check that the closure captures the correct wrapper variable. Fix: provide input to `.trace(input)` or `tracer.invoke(input)`.
+
+- **`NotImplementedError: Batching is not implemented`** -- Multiple input invokes (invokes with arguments) require `_prepare_input()` and `_batch()` methods on the model class. Base `NNsight`/`Envoy` doesn't implement these. Options: (1) Use `LanguageModel` which implements batching, (2) implement a custom `_prepare_input()`/`_batch()` on your model class, or (3) use one input invoke + empty invokes (empty invokes operate on the full batch and don't trigger `_batch()`).
+
+- **`AttributeError: 'Info' object has no attribute 'pull'`** -- Can occur with certain source cache interactions. The source cache stores parsed AST nodes, and if the cache returns stale data for a different context, it can hit missing attributes. This is a known edge case. Try `Globals.cache.clear()` from `nnsight.intervention.tracing.globals` to reset the cache.
+
+### Writing Benchmarks
+
+- **Define trace functions at module level**, not inside loops. nnsight extracts source via `inspect.getsourcelines()`, which needs the function's source to be readable from a file. Functions defined inside `-c` strings or dynamically can cause issues.
+- **Closure scoping matters.** When defining benchmark functions in a loop, Python closures capture variables by reference. A function defined inside `for wrapper in [w1, w2]:` will use the *last* value of `wrapper` unless you bind it explicitly (e.g., `def fn(w=wrapper): ...`).
+- **Warmup before timing.** The first trace at a given call site compiles code objects; subsequent calls hit the cache. Always run 2-3 warmup iterations before measuring.
+- **Use `time.perf_counter()` for wall-clock timing** and `cProfile` for function-level breakdown. For GPU, call `torch.cuda.synchronize()` before start/stop.
+
+### Key Source Files for Performance Work
+
+| File | Role |
+|------|------|
+| `intervention/tracing/base.py` | `Tracer.capture()` -- source extraction, AST parsing, `Info` creation |
+| `intervention/backends/base.py` | `Backend.__call__()` -- code compilation, code object caching, exec |
+| `intervention/tracing/globals.py` | `Globals.enter()/exit()` -- pymount lifecycle, `TracingCache` |
+| `intervention/interleaver.py` | Hook dispatch, thread management, mediator event loop |
+| `intervention/tracing/tracer.py` | `InterleavingTracer.compile()` -- function wrapping |
+| `intervention/tracing/invoker.py` | `Invoker.compile()` -- function wrapping with try/catch |
+
+### Running Tests
+
+```bash
+# Full validation suite
+pytest tests/test_lm.py tests/test_tiny.py tests/test_0516_features.py \
+  tests/test_debug.py tests/test_memory_cleanup.py tests/test_multiple_wrappers.py --device cpu
+
+# Quick smoke test
+pytest tests/test_tiny.py --device cpu -x
+```
 
 ---
 

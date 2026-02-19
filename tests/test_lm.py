@@ -81,7 +81,9 @@ class TestActivationModification:
         assert output != "Madison Square Garden is located in the city of New"
 
     @torch.no_grad()
-    def test_multiplication_modification(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_multiplication_modification(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test activation modification via multiplication."""
         with gpt2.generate() as generator:
             with generator.invoke(MSG_prompt):
@@ -197,7 +199,9 @@ class TestEmbeddings:
         output1 = gpt2.tokenizer.decode(output1[0])
         output2 = gpt2.tokenizer.decode(output2[0])
 
-        assert output1 == "Madison Square Garden is located in the city of New York City"
+        assert (
+            output1 == "Madison Square Garden is located in the city of New York City"
+        )
         assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
     @torch.no_grad()
@@ -220,7 +224,9 @@ class TestEmbeddings:
 
         output2 = gpt2.tokenizer.decode(output[0])
 
-        assert output1 == "Madison Square Garden is located in the city of New York City"
+        assert (
+            output1 == "Madison Square Garden is located in the city of New York City"
+        )
         assert output2 == "_ _ _ _ _ _ _ _ _ New York City"
 
 
@@ -362,7 +368,9 @@ class TestEditing:
             l1_out_edited = gpt2_edited.transformer.h[1].output[0].save()
 
         assert torch.all(l1_out[:, 0] == 0) and torch.all(l1_out[:, 1] != 0)
-        assert torch.all(l1_out_edited[:, 0] == 0) and torch.all(l1_out_edited[:, 1] == 0)
+        assert torch.all(l1_out_edited[:, 0] == 0) and torch.all(
+            l1_out_edited[:, 1] == 0
+        )
 
     def test_clear_edits(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test clearing inplace edits."""
@@ -490,6 +498,62 @@ class TestInvokerBatching:
         assert torch.equal(out_3, out_4)
         assert torch.equal(torch.concatenate([out_1, out_2, out_5]), out_3)
 
+    @torch.no_grad()
+    def test_invoke_list_attention_mask(self, gpt2: nnsight.LanguageModel):
+        """Test that attention masks are correct when batching invokes with lists.
+
+        When an invoke passes a list of prompts with different lengths, the
+        shorter prompts get internal padding. When _batch combines this with
+        another invoke, it must preserve the attention masks from both the old
+        batch AND the new invoke. Previously only the old batch's mask was
+        restored, causing padding tokens in the new invoke to be treated as
+        real tokens.
+        """
+        prompts = ["Hi", "A B C", "D"]
+
+        # Method 1: all prompts as a single list (ground truth)
+        with gpt2.trace(prompts):
+            list_logits = gpt2.lm_head.output[:, -1].save()
+
+        # Method 2: single invoke + list invoke
+        with gpt2.trace() as tracer:
+            with tracer.invoke("Hi"):
+                pass
+            with tracer.invoke(["A B C", "D"]):
+                pass
+            with tracer.invoke():
+                invoke_logits = gpt2.lm_head.output[:, -1].save()
+
+        assert torch.allclose(list_logits, invoke_logits, atol=1e-5)
+
+        # Method 3: list invoke + single invoke
+        with gpt2.trace(["A B C", "D", "Hi"]):
+            list_logits2 = gpt2.lm_head.output[:, -1].save()
+
+        with gpt2.trace() as tracer:
+            with tracer.invoke(["A B C", "D"]):
+                pass
+            with tracer.invoke("Hi"):
+                pass
+            with tracer.invoke():
+                invoke_logits2 = gpt2.lm_head.output[:, -1].save()
+
+        assert torch.allclose(list_logits2, invoke_logits2, atol=1e-5)
+
+        # Method 4: list invoke + list invoke
+        with gpt2.trace(["Hi", "A B C", "The quick brown fox", "D"]):
+            list_logits3 = gpt2.lm_head.output[:, -1].save()
+
+        with gpt2.trace() as tracer:
+            with tracer.invoke(["Hi", "A B C"]):
+                pass
+            with tracer.invoke(["The quick brown fox", "D"]):
+                pass
+            with tracer.invoke():
+                invoke_logits3 = gpt2.lm_head.output[:, -1].save()
+
+        assert torch.allclose(list_logits3, invoke_logits3, atol=1e-5)
+
 
 # =============================================================================
 # Scanning and Validation
@@ -517,7 +581,9 @@ class TestScan:
     def test_scan_with_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test scanning with shape-changing intervention."""
         with gpt2.scan(MSG_prompt):
-            gpt2.transformer.h[0].mlp.c_proj.output = torch.ones(1, 1, 768).to(gpt2.device)
+            gpt2.transformer.h[0].mlp.c_proj.output = torch.ones(1, 1, 768).to(
+                gpt2.device
+            )
             out = gpt2.transformer.h[0].mlp.c_proj.output.save()
 
         assert out.shape == (1, 1, 768)
@@ -598,7 +664,9 @@ class TestSource:
         assert isinstance(inp, tuple)
 
     @torch.no_grad()
-    def test_source_safe_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_source_safe_intervention(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test that source tracing doesn't affect model."""
         input = gpt2.tokenizer(MSG_prompt, return_tensors="pt").to(gpt2.device)
         logits_0 = gpt2(**input)["logits"]
@@ -621,13 +689,13 @@ class TestSource:
         """Test accessing multiple operations via source."""
         with gpt2.trace("_"):
             out_split_0 = gpt2.transformer.h[0].attn.source.split_1.output.save()
-            out_attention_interface_0 = (
-                gpt2.transformer.h[0].attn.source.attention_interface_0.output.save()
-            )
+            out_attention_interface_0 = gpt2.transformer.h[
+                0
+            ].attn.source.attention_interface_0.output.save()
             out_split_1 = gpt2.transformer.h[1].attn.source.split_1.output.save()
-            out_attention_interface_1 = (
-                gpt2.transformer.h[1].attn.source.attention_interface_0.output.save()
-            )
+            out_attention_interface_1 = gpt2.transformer.h[
+                1
+            ].attn.source.attention_interface_0.output.save()
 
         assert isinstance(out_split_0, tuple)
         assert isinstance(out_attention_interface_0, tuple)
@@ -650,10 +718,9 @@ class TestSource:
     def test_recursive_source(self, gpt2: nnsight.LanguageModel):
         """Test recursive source tracing."""
         with gpt2.trace("_"):
-            out = (
-                gpt2.transformer.h[0]
-                .attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output.save()
-            )
+            out = gpt2.transformer.h[
+                0
+            ].attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output.save()
 
         assert isinstance(out, torch.Tensor)
 
@@ -694,7 +761,9 @@ class TestSource:
 
             with tracer.invoke(ET_prompt):
                 attn_out = (
-                    gpt2.transformer.h[0].attn.source.attention_interface_0.output[0].save()
+                    gpt2.transformer.h[0]
+                    .attn.source.attention_interface_0.output[0]
+                    .save()
                 )
                 barrier()
 
@@ -704,7 +773,9 @@ class TestSource:
                     :, -1, 0, :
                 ] = attn_out[:, -1, 0, :]
                 attn_out_2 = (
-                    gpt2.transformer.h[0].attn.source.attention_interface_0.output[0].save()
+                    gpt2.transformer.h[0]
+                    .attn.source.attention_interface_0.output[0]
+                    .save()
                 )
 
         assert torch.all(attn_out[:, -1, 0, :] == attn_out_2[:, -1, 0, :])
@@ -815,45 +886,57 @@ class TestIteration:
         """Test tracer.iter and tracer.all() equivalence."""
         with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
             logits_all = list().save()
-            with tracer.all():
+            for step in tracer.all():
                 logits_all.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
         with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
             logits_iter = list().save()
-            with tracer.iter[:]:
+            for step in tracer.iter[:]:
                 logits_iter.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
         assert len(logits_all) == 3
         assert len(logits_iter) == 3
-        assert gpt2.tokenizer.batch_decode(logits_all) == [" New", " York", " City"]
-        assert gpt2.tokenizer.batch_decode(logits_iter) == [" New", " York", " City"]
+
+        assert gpt2.tokenizer.batch_decode(logits_all) == [" New York City"]
+        assert gpt2.tokenizer.batch_decode(logits_iter) == [" New York City"]
+
+    @torch.no_grad()
+    def test_iter_with_block(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+        """Test that the with-block iter syntax still works."""
+        with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
+            logits = list().save()
+            with tracer.iter[:]:
+                logits.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
+
+        assert len(logits) == 3
+        assert gpt2.tokenizer.batch_decode(logits) == [" New York City"]
 
     @torch.no_grad()
     def test_iter_slice(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test iteration with slice."""
         with gpt2.generate(MSG_prompt, max_new_tokens=5) as tracer:
             logits = list().save()
-            with tracer.iter[1:3]:
+            for step in tracer.iter[1:3]:
                 logits.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
         assert len(logits) == 2
-        assert gpt2.tokenizer.batch_decode(logits) == [" York", " City"]
+        assert gpt2.tokenizer.batch_decode(logits) == [" York City"]
 
     @torch.no_grad()
     def test_iter_idx(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test iteration with index."""
         with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
             hs = list().save()
-            with tracer.iter[0]:
+            for step in tracer.iter[0]:
                 hs.append(gpt2.transformer.h[0].output[0])
-            with tracer.iter[1]:
+            for step in tracer.iter[1]:
                 hs.append(gpt2.transformer.h[1].output[0])
-            with tracer.iter[2]:
+            for step in tracer.iter[2]:
                 hs.append(gpt2.transformer.h[2].output[0])
 
         with gpt2.generate(MSG_prompt, max_new_tokens=3) as tracer:
             hs_2 = list().save()
-            with tracer.iter[:3] as idx:
+            for idx in tracer.iter[:3]:
                 hs_2.append(gpt2.transformer.h[idx].output[0])
 
         assert all([torch.equal(h, h_2) for h, h_2 in zip(hs, hs_2)])
@@ -864,18 +947,18 @@ class TestIteration:
         with gpt2.generate(max_new_tokens=5) as tracer:
             with tracer.invoke(MSG_prompt):
                 logits_1 = list().save()
-                with tracer.iter[1:3]:
+                for step in tracer.iter[1:3]:
                     logits_1.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
             with tracer.invoke(MSG_prompt):
                 logits_2 = list().save()
-                with tracer.iter[:3]:
+                for step in tracer.iter[:3]:
                     logits_2.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
         assert len(logits_1) == 2
         assert len(logits_2) == 3
-        assert gpt2.tokenizer.batch_decode(logits_1) == [" York", " City"]
-        assert gpt2.tokenizer.batch_decode(logits_2) == [" New", " York", " City"]
+        assert gpt2.tokenizer.batch_decode(logits_1) == [" York City"]
+        assert gpt2.tokenizer.batch_decode(logits_2) == [" New York City"]
 
     @torch.no_grad()
     @pytest.mark.skips
@@ -884,7 +967,7 @@ class TestIteration:
         with gpt2.generate("_", max_new_tokens=3) as tracer:
             arr_gen = list().save()
 
-            with tracer.iter[:] as it:
+            for it in tracer.iter[:]:
                 if it != 1:
                     arr_gen.append(gpt2.transformer.h[1].output[0])
                 else:
@@ -911,7 +994,7 @@ class TestIteration:
                 out = gpt2.transformer.h[0].output[0].clone().save()
 
             with tracer.invoke():
-                with tracer.iter[0]:
+                for step in tracer.iter[0]:
                     gpt2.transformer.h[0].output[0][:] = 0
 
             with tracer.invoke():
@@ -927,7 +1010,7 @@ class TestIteration:
         with gpt2.generate("_", max_new_tokens=5) as tracer:
             out = gpt2.transformer.h[0].output[0].clone().save()
 
-            with tracer.iter[2:4]:
+            for step in tracer.iter[2:4]:
                 logits.append(gpt2.lm_head.output.save())
 
         assert isinstance(out, torch.Tensor)
@@ -941,12 +1024,12 @@ class TestIteration:
         with gpt2.generate(max_new_tokens=3) as tracer:
             with tracer.invoke(ET_prompt):
                 logits_1 = list().save()
-                with tracer.iter[:]:
+                for step in tracer.iter[:]:
                     logits_1.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
             with tracer.invoke(MSG_prompt):
                 logits_2 = list().save()
-                with tracer.iter[0:3]:
+                for step in tracer.iter[0:3]:
                     logits_2.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
         assert all(
@@ -961,7 +1044,7 @@ class TestIteration:
         """Test iteration accessing different layers."""
         with gpt2.trace(MSG_prompt, max_new_tokens=3) as tracer:
             logits = list()
-            with tracer.iter[:]:
+            for step in tracer.iter[:]:
                 logits.append(gpt2.lm_head.output[0][-1].argmax(dim=-1))
 
 
@@ -984,7 +1067,9 @@ class TestCache:
         assert cache["model.transformer.h.0"].inputs is None
 
     @torch.no_grad()
-    def test_cache_output_and_inputs(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_output_and_inputs(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test caching both outputs and inputs."""
         with gpt2.trace(MSG_prompt) as tracer:
             cache = tracer.cache(include_inputs=True)
@@ -1012,7 +1097,9 @@ class TestCache:
         assert len(cache["model.transformer.h.0.attn.c_attn"]) == 3
 
     @torch.no_grad()
-    def test_cache_with_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_with_intervention(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test cache captures intervened values."""
         with gpt2.trace(MSG_prompt) as tracer:
             cache = tracer.cache()
@@ -1040,7 +1127,9 @@ class TestCache:
         )
 
     @torch.no_grad()
-    def test_cache_after_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_after_intervention(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test cache started after some interventions."""
         with gpt2.trace(MSG_prompt) as tracer:
             gpt2.transformer.h[1].attn.c_attn.output = torch.zeros_like(
@@ -1088,7 +1177,9 @@ class TestCache:
         )
 
     @torch.no_grad()
-    def test_cache_some_modules_by_ref(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+    def test_cache_some_modules_by_ref(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
         """Test caching specific modules by reference."""
         with gpt2.trace(MSG_prompt) as tracer:
             cache = tracer.cache(
@@ -1122,8 +1213,12 @@ class TestCache:
     def test_multiple_caches(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
         """Test multiple separate caches."""
         with gpt2.trace(MSG_prompt) as tracer:
-            attn_cache = tracer.cache(modules=[layer.attn for layer in gpt2.transformer.h])
-            mlp_cache = tracer.cache(modules=[layer.mlp for layer in gpt2.transformer.h])
+            attn_cache = tracer.cache(
+                modules=[layer.attn for layer in gpt2.transformer.h]
+            )
+            mlp_cache = tracer.cache(
+                modules=[layer.mlp for layer in gpt2.transformer.h]
+            )
 
         assert len(attn_cache.keys()) == 12
         assert len(mlp_cache.keys()) == 12
@@ -1265,7 +1360,9 @@ class TestRename:
     @torch.no_grad()
     def test_rename_module_list_path(self, MSG_prompt: str):
         """Test renaming a module list with full path."""
-        gpt2 = nnsight.LanguageModel("openai-community/gpt2", rename={"transformer.h": "layers"})
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={"transformer.h": "layers"}
+        )
 
         with gpt2.trace(MSG_prompt):
             mlp_out_0 = gpt2.layers[0].mlp.output.save()
@@ -1418,11 +1515,11 @@ class TestMiscellaneous:
             strm = list()
             strm.save()
 
-            with tracer.iter[2:6]:
+            for step in tracer.iter[2:6]:
                 hs.append(gpt2.transformer.h[-2].output[0])
                 strm.append(gpt2.generator.streamer.output)
 
-            with tracer.iter[6:8]:
+            for step in tracer.iter[6:8]:
                 hs.append(gpt2.transformer.h[-2].output[0])
                 strm.append(gpt2.generator.streamer.output)
 
@@ -1440,11 +1537,11 @@ class TestMiscellaneous:
 
             strm.append(gpt2.generator.streamer.output)
 
-            with tracer.iter[2:6]:
+            for step in tracer.iter[2:6]:
                 hs.append(gpt2.transformer.h[-2].output[0])
                 strm.append(gpt2.generator.streamer.output)
 
-            with tracer.iter[6:8]:
+            for step in tracer.iter[6:8]:
                 hs.append(gpt2.transformer.h[-2].output[0])
                 strm.append(gpt2.generator.streamer.output)
 

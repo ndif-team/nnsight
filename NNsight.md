@@ -81,6 +81,16 @@ This document provides an overview of the design choices and implementation deta
    - [Print Statements and Logging](#811-print-statements-and-logging)
    - [Implementation Details](#812-implementation-details)
 9. [Extending NNsight](#9-extending-nnsight) *(coming soon)*
+10. [Performance](#10-performance)
+    - [Overhead Summary](#101-overhead-summary)
+    - [Detailed Overhead Breakdown](#102-detailed-overhead-breakdown)
+    - [Where the Overhead Comes From](#103-where-the-overhead-comes-from)
+    - [Configuration Options](#104-configuration-options)
+    - [Configuration Comparison](#105-configuration-comparison)
+    - [NNsight vs PyTorch Hooks](#106-nnsight-vs-pytorch-hooks)
+    - [Performance Best Practices](#107-performance-best-practices)
+    - [When NNsight Makes Sense](#108-when-nnsight-makes-sense)
+    - [Profiling Your Own Code](#109-profiling-your-own-code)
 
 ---
 
@@ -802,15 +812,18 @@ def output(self, value):
 When using `.scan()` (shape inference without full execution), fake inputs/outputs are populated:
 
 ```python
+import nnsight
+
 with model.scan("Hello"):
     # Runs with fake tensors, populates _fake_output
-    shape = model.transformer.h[0].output[0].shape
+    # To persist a value outside the scan, use .save() or nnsight.save()
+    shape = nnsight.save(model.transformer.h[0].output[0].shape)
 
-# After scanning, can access outside trace
+# After scanning, can also access _fake_output directly on the module
 print(model.transformer.h[0]._fake_output.shape)
 ```
 
-The `_fake_output` and `_fake_inputs` attributes store these fake values, allowing access outside a trace after scanning.
+The `_fake_output` and `_fake_inputs` attributes store these fake values on the module, allowing access outside a trace after scanning. Note that regular variables defined inside `.scan()` still require `.save()` to persist, just like any other tracing context.
 
 ---
 
@@ -1264,37 +1277,24 @@ with model.trace("Hello"):
 print(hidden)  # Error! hidden is no longer valid
 ```
 
-#### The Solution: `.save()`
+#### How Saving Works
+
+Under the hood, saving is simple. A global set (`Globals.saves`) tracks which objects should persist. The save function just adds the object's `id()` to that set and returns the object unchanged:
 
 ```python
-with model.trace("Hello"):
-    hidden = model.transformer.h[0].output[0].save()  # Mark for persistence
-
-print(hidden)  # Works! hidden contains the saved tensor
+# From globals.py — this is the entire mechanism
+def save(object: Any):
+    Globals.saves.add(id(object))
+    return object
 ```
 
-#### Implementation: Pymounting
+When the trace exits, any object whose `id()` is in this set is kept; everything else is garbage collected.
 
-NNsight uses a C extension (`py_mount.c`) to add `.save()` to Python's base `object` class. This allows calling `.save()` on any value:
+#### Two Ways to Save
 
-```c
-// From py_mount.c
-static PyObject* mount_function(PyObject* self, PyObject* args) {
-    // ...
-    PyObject *dict = get_dict(&PyBaseObject_Type);
-    PyDict_SetItemString(dict, mount_point, method);
-    PyType_Modified(&PyBaseObject_Type);
-    // ...
-}
-```
+There are two equivalent APIs that both call the same underlying function:
 
-This mounts the `save` function directly onto `PyBaseObject_Type`, making it available on all Python objects.
-
-**Limitation:** Objects that already define `.save()` (like some PyTorch classes) won't use NNsight's version.
-
-#### The Preferred Alternative: `nnsight.save()`
-
-For objects that already have `.save()`, or when pymounting is disabled:
+**1. `nnsight.save(obj)` — the standalone function (preferred)**
 
 ```python
 import nnsight
@@ -1305,16 +1305,59 @@ with model.trace("Hello"):
 print(hidden)  # Works
 ```
 
+This is a plain function call. It works on any object (tensors, ints, lists, dicts, etc.) regardless of configuration or whether the object has its own `.save()` method.
+
+**2. `obj.save()` — the method form (backwards compatibility)**
+
+```python
+with model.trace("Hello"):
+    hidden = model.transformer.h[0].output[0].save()
+
+print(hidden)  # Works
+```
+
+This is syntactically convenient, but making it work requires an unusual mechanism: Python objects don't normally have a `.save()` method. NNsight adds one at runtime using a C extension.
+
+#### Implementation: Pymount (Why `obj.save()` Exists)
+
+In NNsight 0.4 and earlier, `.save()` was the only API for persisting values, and it was central to every example and tutorial. When NNsight 0.5 introduced the new thread-based architecture, we needed to maintain backwards compatibility with all existing code that used `obj.save()`.
+
+The challenge: `.save()` must work on **any** Python object — not just tensors, but also ints (`shape[-1].save()`), lists (`list().save()`), and arbitrary values. Python doesn't let you add methods to `object` at the Python level, so NNsight uses a **C extension** (`py_mount.c`) that directly modifies CPython's type system:
+
+```c
+// From py_mount.c — injects a method onto every Python object
+static PyObject* mount_function(PyObject* self, PyObject* args) {
+    // ...
+    // Add the method to PyBaseObject_Type (the C-level `object` type)
+    PyObject *dict = get_dict(&PyBaseObject_Type);
+    PyDict_SetItemString(dict, mount_point, method);
+    PyType_Modified(&PyBaseObject_Type);
+    // ...
+}
+```
+
+This modifies `PyBaseObject_Type->tp_dict` — the dictionary of Python's base `object` class — at the C level. Since every Python type inherits from `object`, this makes `.save()` available on every object in the interpreter.
+
+**Lifecycle:** The method is only mounted while a trace is active. `Globals.enter()` calls `mount(Object.save, "save")` when the first trace starts, and `Globals.exit()` calls `unmount("save")` when the last trace exits. A `stack` counter handles nesting, so the method stays mounted through nested traces and is only removed when all traces have exited.
+
+**Limitations of pymount:**
+
+- **Method shadowing:** Objects that already define their own `.save()` method (like some PyTorch classes) will use their own version, not NNsight's. This can cause silent bugs where `.save()` appears to work but doesn't actually mark the value for persistence.
+- **Global mutation:** It modifies the type system for the entire Python interpreter, not just NNsight code.
+- **C extension dependency:** Requires the compiled `py_mount.c` extension to be available.
+
+#### Which to Use
+
+**Prefer `nnsight.save()`** — it is a plain function call with no special machinery, works on all objects regardless of whether they define their own `.save()`, and doesn't depend on the pymount C extension. `obj.save()` exists for backwards compatibility with NNsight 0.4 code.
+
 #### Configuration
 
-Pymounting has some performance cost and can be disabled:
+Pymount can be disabled if you exclusively use `nnsight.save()`:
 
 ```python
 from nnsight import CONFIG
 CONFIG.APP.PYMOUNT = False  # Disable obj.save(), use nnsight.save() instead
 ```
-
-The `.save()` method was added primarily for backwards compatibility with NNsight 0.4. New code can use either approach.
 
 ---
 
@@ -1383,9 +1426,9 @@ By default, `iteration = 0`, meaning the Mediator requests the first call to eac
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
     logits = list().save()
-    
+
     # Iterate over ALL generation steps
-    with tracer.iter[:]:
+    for step in tracer.iter[:]:
         logits.append(model.lm_head.output.save())
 ```
 
@@ -1398,7 +1441,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 | `tracer.iter[1:4]` | Steps 1, 2, 3 |
 | `tracer.iter[::2]` | Every other step |
 
-When you enter a `with tracer.iter[...]` block, it:
+When you use `for step in tracer.iter[...]`, it:
 
 1. Sets the Mediator's iteration to `None` (unbounded) or specific values
 2. Loops, advancing the iteration cursor each time
@@ -1408,7 +1451,7 @@ When you enter a `with tracer.iter[...]` block, it:
 
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
-    with tracer.all():
+    for step in tracer.all():
         # Runs for every generation step
         model.transformer.h[0].output[0][:] = 0
 ```
@@ -1435,11 +1478,11 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 
 #### Step Index in Iteration
 
-The `with tracer.iter[:] as step_idx` pattern provides the current step:
+The `for step_idx in tracer.iter[:]` pattern provides the current step:
 
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
-    with tracer.iter[:] as step_idx:
+    for step_idx in tracer.iter[:]:
         if step_idx == 2:
             # Only intervene on step 2
             model.transformer.h[0].output[0][:] = 0
@@ -1458,9 +1501,9 @@ When you use an unbounded iterator (`iter[:]`, `iter[start:]`, or `all()`), the 
 ```python
 # FOOTGUN EXAMPLE:
 with model.generate("Hello", max_new_tokens=3) as tracer:
-    with tracer.iter[:]:
+    for step in tracer.iter[:]:
         hidden = model.transformer.h[-1].output.save()
-    
+
     # ⚠️ WARNING: This line NEVER executes!
     final_logits = model.output.save()
 
@@ -1469,7 +1512,7 @@ print(hidden)       # Works - defined inside iter
 print(final_logits) # NameError: 'final_logits' is not defined!
 ```
 
-**Why this happens:** The unbounded iterator keeps waiting for iteration 4, 5, 6... but generation stopped after 3 tokens. The code after the `with tracer.iter[:]` block never runs.
+**Why this happens:** The unbounded iterator keeps waiting for iteration 4, 5, 6... but generation stopped after 3 tokens. The code after the `for step in tracer.iter[:]` loop never runs.
 
 **Solutions:**
 
@@ -1477,9 +1520,9 @@ print(final_logits) # NameError: 'final_logits' is not defined!
    ```python
    with model.generate("Hello", max_new_tokens=3) as tracer:
        with tracer.invoke():  # First invoker - handles iteration
-           with tracer.iter[:]:
+           for step in tracer.iter[:]:
                hidden = model.transformer.h[-1].output.save()
-       
+
        with tracer.invoke():  # Second invoker - runs after generation
            final_logits = model.output.save()  # Now runs!
    ```
@@ -1489,7 +1532,7 @@ print(final_logits) # NameError: 'final_logits' is not defined!
 
 2. **Use bounded iteration** (if you know the count):
    ```python
-   with tracer.iter[:3]:  # Explicitly stop after 3 iterations
+   for step in tracer.iter[:3]:  # Explicitly stop after 3 iterations
        hidden = model.transformer.h[-1].output.save()
    
    final_logits = model.output.save()  # Now runs!
@@ -1750,35 +1793,45 @@ Barriers synchronize execution across multiple invokes.
 
 #### The Problem
 
-With multiple invokes, each runs as a separate thread. Sometimes you need to:
+With multiple invokes, each runs as a separate thread. When **both invokes access the same module** (e.g., both read `transformer.h[5].output`), the variable captured in invoke 1 will not be available to invoke 2 without explicit synchronization. This results in a `NameError` at runtime.
 
-1. Wait for one invoke to complete something before another proceeds
-2. Share a value from invoke 1 to invoke 2 at a specific point
+```python
+# BROKEN - both invokes access transformer.h[1], clean_hs is undefined in invoke 2
+with model.trace() as tracer:
+    with tracer.invoke("Hello"):
+        clean_hs = model.transformer.h[1].output[0]
 
-While cross-invoker variable sharing (push/pull) handles simple cases, barriers provide explicit synchronization points.
+    with tracer.invoke("World"):
+        model.transformer.h[1].output[0] = clean_hs  # NameError: clean_hs is not defined
+```
+
+#### When Barriers Are Required
+
+**Rule:** If two invokes access `.output` or `.input` on the **same module** and you want to share a value between them, you must use a barrier.
 
 #### Usage
 
-Consider replacing layer 1's output in invoke 2 with invoke 1's value:
+Use `tracer.barrier(n)` to create a barrier for `n` participants. Each invoke calls `barrier()` at the synchronization point. The barrier ensures all participants have reached their barrier call before any proceed past it.
 
 ```python
 with model.trace() as tracer:
-    with tracer.invoke("Hello"):
-        layer1_out = model.transformer.h[1].output[0]  # Invoke 1 gets value
-        # Barrier: wait here until invoke 2 is ready
-    
-    with tracer.invoke("World"):
-        # Invoke 2 needs layer1_out, but it's not available yet
-        model.transformer.h[1].output[0] = layer1_out
-```
+    barrier = tracer.barrier(2)  # Create barrier for 2 invokes
 
-The problem: invoke 1's `layer1_out` isn't available until invoke 1 reaches layer 1. But invoke 2 might try to use it at layer 0.
+    with tracer.invoke("Hello"):
+        clean_hs = model.transformer.h[1].output[0]
+        barrier()  # Invoke 1 waits here - clean_hs is now materialized
+
+    with tracer.invoke("World"):
+        barrier()  # Invoke 2 waits until invoke 1 has passed its barrier
+        model.transformer.h[1].output[0] = clean_hs  # Now available!
+        output = model.lm_head.output.save()
+```
 
 Barriers ensure the correct ordering by:
 
-1. Invoke 2 requests a barrier at a specific provider
-2. When that provider is reached, invoke 1 is resumed to provide the value
-3. Invoke 2 then continues with the value available
+1. Invoke 1 captures the value and calls `barrier()`, signaling it has materialized the variable
+2. Invoke 2 calls `barrier()`, which blocks until invoke 1 has also reached its barrier
+3. After both have synchronized, invoke 2 proceeds with the shared variable now available
 
 #### Implementation
 
@@ -1799,13 +1852,18 @@ def handle_barrier_event(self, provider, participants):
 
 Scanning runs the model with **fake tensors** to determine shapes and validate interventions without full execution.
 
+**Important:** `model.scan()` is a tracing context, so `.save()` is still required to persist values outside the block. Use `nnsight.save()` for non-tensor values like shape integers.
+
 #### Usage
 
 ```python
+import nnsight
+
 with model.scan("Hello"):
     # Access shapes without running real computation
-    dim = model.transformer.h[0].output[0].shape[-1]
-    
+    # Must use .save() to persist values outside the scan context
+    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+
     # Validate slicing
     model.transformer.h[0].output[0][:, 10] = 0  # Will fail if seq_len < 11
 
@@ -2084,6 +2142,41 @@ When you call `model.generate(...)` as a trace context, Envoy's `__getattr__` ch
 
 To support multiple invokes with different inputs in a single forward pass, model classes must implement batching.
 
+#### Input Invokes vs Empty Invokes
+
+There are two types of invokes, and the distinction is central to how batching works:
+
+- **Input invokes** — `tracer.invoke(input)` — provide input data that contributes to the batch. Each input invoke gets a `batch_group = [start, size]` specifying its slice of the batch dimension.
+
+- **Empty invokes** — `tracer.invoke()` (no arguments) — operate on the **entire** batch from all previous input invokes. They get `batch_group = None`, so `narrow()` returns the full batch and `swap()` replaces the full batch.
+
+```python
+with model.trace() as tracer:
+    # Input invoke: batch_group = [0, 1], sees only its own slice
+    with tracer.invoke("Hello"):
+        out1 = model.output.save()        # Shape: [1, ...]
+
+    # Input invoke: batch_group = [1, 1], sees only its own slice
+    with tracer.invoke("World"):
+        out2 = model.output.save()        # Shape: [1, ...]
+
+    # Empty invoke: batch_group = None, sees the FULL batch
+    with tracer.invoke():
+        out_all = model.output.save()     # Shape: [2, ...]
+
+    # Another empty invoke: also sees the full batch
+    with tracer.invoke():
+        out_all2 = model.output.save()    # Shape: [2, ...]
+```
+
+Empty invokes are useful for:
+
+1. **Batch-wide operations** — running intervention logic on the combined batch from all previous input invokes.
+2. **Breaking up interventions** — since modules must be accessed in forward-pass order within a single invoke, you can use multiple empty invokes to access the same module multiple times without order conflicts. Each empty invoke is a separate thread with its own execution sequence.
+3. **Comparing interventions** — defining different intervention logic in separate empty invokes that all operate on the same batch.
+
+**Important:** Empty invokes require at least one prior input invoke. Without any input invoke, the model has no data to execute on.
+
 #### Abstract Methods
 
 The `Batchable` base class (from `intervention/batching.py`) defines:
@@ -2091,17 +2184,18 @@ The `Batchable` base class (from `intervention/batching.py`) defines:
 ```python
 class Batchable:
     def _prepare_input(self, *inputs, **kwargs):
-        """Normalize user input to a consistent format."""
-        return inputs, kwargs
-    
+        """Normalize user input. Returns (args, kwargs, batch_size).
+        batch_size=0 for empty invokes."""
+        if inputs or kwargs:
+            return inputs, kwargs, 1
+        return inputs, kwargs, 0
+
     def _batch(self, batched_input, *args, **kwargs):
         """Combine multiple invokes' inputs into one batch."""
-        raise NotImplementedError(
-            "Batching not implemented for this model"
-        )
+        raise NotImplementedError(...)
 ```
 
-**Without `_batch()` implemented, your model cannot use multiple invokes with inputs.**
+**Without `_batch()` implemented, your model cannot use multiple input invokes.** You can still use one input invoke plus any number of empty invokes, since empty invokes don't trigger `_batch()`.
 
 #### How Batching Works
 
@@ -2109,42 +2203,44 @@ When you define multiple invokes:
 
 ```python
 with model.trace() as tracer:
-    with tracer.invoke("Hello"):
+    with tracer.invoke("Hello"):    # Input invoke
         ...
-    with tracer.invoke("World"):
+    with tracer.invoke("World"):    # Input invoke (triggers _batch)
+        ...
+    with tracer.invoke():           # Empty invoke (no _batch needed)
         ...
 ```
 
 The `Batcher`:
 
 1. Calls `_prepare_input()` for each invoke's input
-2. Calls `_batch()` to combine them
-3. Tracks `batch_group` for each invoke: `[start_idx, batch_size]`
-4. During interleaving, `narrow()` extracts each invoke's slice
+2. For the first input invoke, stores the prepared input directly
+3. For subsequent input invokes, calls `_batch()` to combine them
+4. Tracks `batch_group` for each invoke: `[start_idx, batch_size]` for input invokes, `None` for empty invokes
+5. During interleaving, `narrow()` extracts each invoke's slice (or returns the full batch for empty invokes)
 
 #### LanguageModel Batching Example
+
+`LanguageModel` is the reference implementation for batching. It handles tokenization, padding, and attention mask construction:
 
 ```python
 class LanguageModel:
     def _prepare_input(self, *inputs, input_ids=None, **kwargs):
-        # Normalize to BatchEncoding
+        # Normalize to BatchEncoding (tokenize strings, handle tensors, etc.)
         if isinstance(inputs[0], str):
             inputs = self._tokenize(inputs[0])
-        return tuple(), {**inputs}
-    
+        return tuple(), {**inputs}, len(inputs["input_ids"])
+
     def _batch(self, batched_inputs, **prepared_kwargs):
-        if batched_inputs is None:
-            # First invoke
-            return (tuple(), prepared_kwargs), len(prepared_kwargs["input_ids"])
-        
-        # Combine with padding
+        # Combine with padding via tokenizer.pad()
         combined = self.tokenizer.pad([
-            *batched_inputs["input_ids"],
-            *prepared_kwargs["input_ids"],
+            *batched_inputs[1]["input_ids"].tolist(),
+            *prepared_kwargs["input_ids"].tolist(),
         ])
-        
-        return (tuple(), combined), len(prepared_kwargs["input_ids"])
+        return tuple(), {**combined, **batched_inputs[1]}
 ```
+
+To implement batching for a custom model, override both `_prepare_input()` and `_batch()` on your model class (which inherits from `Envoy`, which inherits from `Batchable`).
 
 ---
 
@@ -2248,9 +2344,9 @@ The `.generate()` method works as a tracing context:
 
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
-    with tracer.iter[:]:
+    for step in tracer.iter[:]:
         logits = model.lm_head.output.save()
-    
+
     output = tracer.result.save()
 ```
 
@@ -2308,9 +2404,9 @@ model = DiffusionModel("stabilityai/stable-diffusion-2-1")
 
 with model.generate("A cat sitting on a mat", num_inference_steps=50) as tracer:
     # Access UNet at each denoising step
-    with tracer.iter[:] as step:
+    for step in tracer.iter[:]:
         unet_out = model.unet.output.save()
-    
+
     output = tracer.result.save()
 
 output.images[0].save("cat.png")
@@ -2323,8 +2419,8 @@ The `num_inference_steps` parameter sets the iteration count:
 ```python
 with model.generate("A landscape", num_inference_steps=30) as tracer:
     noise_preds = list().save()
-    
-    with tracer.iter[:] as step:
+
+    for step in tracer.iter[:]:
         # Intervene on specific steps
         if step < 10:
             # Early denoising - high-level structure
@@ -2352,34 +2448,32 @@ vLLM integration provides high-performance inference with NNsight interventions.
 │  User Code                                              │
 │  with model.trace("Hello") as tracer:                   │
 │      logits = model.logits.output.save()                │
-└──────┬─────────────────────────────────────────────────┘
-       |                
-       ▼
+└──────┬──────────────────────────────────────────────────┘
+       |
+       v
 ┌─────────────────────────────────────────────────────────┐
-│  VLLM Class                                             |
-|  - Instantiates empty 'meta' model                      │
-│  - Creates NNsightSamplingParams with serialized        │
-│    Mediator attached                                    │
+│  VLLM Class                                             │
+│  - Instantiates empty 'meta' model for envoy tree       │
+│  - Serializes mediator into extra_args on SamplingParams │
+│  - If Ray: swaps "ray" for NNsightRayExecutor class     │
 │  - Sends prompts + params to vLLM engine                │
 └───────┬───────────────────────────────────────▲─────────┘
-        │                                       |
-        |                                       |
-┌───────▼──────────────────────────────────────────────────────────────────┐
-│  NNsightLLMEngine                                                        |
-|       |            - Sends final result back to NNsightGPUModelRunner    |
-|       |              for interleaving and gathering saved values         |
-└───────|──────────────────────────────────────────────▲───────────────────┘
-        │                                              |
-        |                                              |
-┌───────▼──────────────────────────────────────────────▼──────────────────────────────────────────────────────┐
-|  NNsightGPUModelRunner - Pre-wrapped NNsight model                                                          │
-│  - Deserializes Mediator from SamplingParams          finish_nnsight()                                      │
-│  - Manages batch groups (flat ↔ unflatten)            4.) Lets intervention code interact with final output │
-│  - Runs interleaving at multiple phases               - Collects saved values                               |
-|    1.) Forward Pass                                   - Handles continuous batching cleanup                 |
-|    2.) Logits                                                                                               |
-|    3.) Sampling                                                                                             |
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+        │                                       │
+┌───────v───────────────────────────────────────┼──────────────────────┐
+│  NNsightLLMEngine                             │                      │
+│       │            - Detects finished requests │                      │
+│       │            - Calls finish_nnsight() to collect saved values   │
+└───────┼───────────────────────────────────────▲──────────────────────┘
+        │                                       │
+┌───────v───────────────────────────────────────┴──────────────────────────────────────────┐
+│  NNsightGPUModelRunner - Pre-wrapped NNsight model                                       │
+│  - Deserializes mediator from extra_args          finish_nnsight()                       │
+│  - Manages batch groups (flat <-> unflatten)      4.) Handles "result" provider          │
+│  - Runs interleaving at multiple phases           - Collects saved values from frames    │
+│    1.) Forward Pass                               - Returns pickled bytes                │
+│    2.) Logits                                                                            │
+│    3.) Sampling                                                                          │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 #### Usage
@@ -2391,34 +2485,42 @@ model = VLLM("gpt2", tensor_parallel_size=1, dispatch=True)
 
 with model.trace("Hello", temperature=0.0, max_tokens=5) as tracer:
     logits = list().save()
-    
-    with tracer.iter[:]:
+
+    for step in tracer.iter[:]:
         logits.append(model.logits.output)
-    
+
     output = tracer.result.save()
 
 print(output)
+```
+
+For multi-GPU with Ray:
+
+```python
+model = VLLM("gpt2", tensor_parallel_size=2, distributed_executor_backend="ray", dispatch=True)
 ```
 
 ---
 
 #### Model Loading
 
-vLLM loads models through its own infrastructure. NNsight wraps the loaded model:
+vLLM loads models through its own infrastructure. NNsight wraps the loaded model.
+
+**User-side (`_load`):** Creates a `vllm.LLM` with `worker_cls="nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"`. If `distributed_executor_backend="ray"`, the string is replaced with `NNsightRayExecutor` (a custom executor class). After creation, the engine class is patched to `NNsightLLMEngine`.
+
+**Worker-side (`NNsightGPUModelRunner.load_model`):**
 
 ```python
 class NNsightGPUModelRunner(GPUModelRunner):
     def load_model(self, *args, **kwargs):
         # vLLM loads the model normally
         super().load_model(*args, **kwargs)
-        
+
         # Wrap in NNsight
         self.nnsight_model = VLLM(self.model)
-        
-        # Use vLLM-specific batcher
+
+        # Use vLLM-specific batcher with tensor parallelism hooks
         self.nnsight_model._interleaver.batcher = VLLMBatcher()
-        
-        # Add tensor parallelism hooks
         self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 ```
 
@@ -2426,40 +2528,42 @@ The `VLLMBatcher.wrap()` adds hooks to all modules specifically for handling ten
 
 ---
 
-#### Mediator Transport via SamplingParams
+#### Mediator Transport via extra_args
 
 The challenge: Mediators (intervention code) are created in user code but must execute inside vLLM's model runner, potentially on different processes.
 
-**Solution:** Attach mediators to vLLM's `SamplingParams`:
+**Solution:** Serialize mediators into the built-in `SamplingParams.extra_args` dict:
 
 ```python
-class NNsightSamplingParams(SamplingParams):
-    mediator: Optional[Mediator | bytes] = None
-    
-    def __reduce__(self):
-        state = structs.asdict(self)
-        
-        # Serialize mediator for transport
-        if isinstance(self.mediator, Mediator):
-            state["mediator"] = save(self.mediator)
-        
-        return (rebuild, (state,))
+# In VLLM.__call__() — user process
+param.extra_args = {"nnsight_mediator": serialize(mediator)}
+
+# Subsequent prompts in the same invoke:
+param.extra_args = {"nnsight_batch_member": True}
 ```
 
 When a trace is created:
 1. Intervention code is compiled into a Mediator
-2. Mediator is serialized to bytes
-3. Bytes are attached to `NNsightSamplingParams`
-4. vLLM passes SamplingParams through its pipeline
+2. Mediator is serialized to bytes via `serialize()` and stored in `extra_args["nnsight_mediator"]`
+3. Subsequent prompts in the same invoke get `extra_args["nnsight_batch_member"] = True`
+4. vLLM passes SamplingParams (with `extra_args`) through its pipeline — survives both msgpack (multiprocessing) and pickle (Ray)
 5. Model runner deserializes and executes the Mediator
 
 ```python
-# In model runner
-if isinstance(new_req.sampling_params.mediator, bytes):
-    new_req.sampling_params.mediator = load(
-        new_req.sampling_params.mediator, model
-    )
+# In NNsightRequestHelper.process_new_reqs() — worker process
+extra_args = getattr(new_req.sampling_params, 'extra_args', None)
+mediator_bytes = extra_args.get("nnsight_mediator") if extra_args else None
+
+if mediator_bytes is not None:
+    self.last_mediator = load(mediator_bytes, model._remoteable_persistent_objects())
+    model._interleaver.mediators.append(self.last_mediator)
+
+elif extra_args and extra_args.get("nnsight_batch_member"):
+    # Associate with the most recently deserialized mediator
+    self.num_prompts_in_mediator[self.last_mediator] += 1
 ```
+
+`NNsightSamplingParams` is a thin subclass used only for type identification — no custom `__reduce__()` or mediator field needed.
 
 ---
 
@@ -2471,27 +2575,29 @@ vLLM uses a **flat tensor format** for efficiency. Standard NNsight uses `[batch
 
 ```
 Standard NNsight:
-  Prompt 1: [1, 5, 768]  →  batch_group = [0, 1]
-  Prompt 2: [1, 3, 768]  →  batch_group = [1, 1]
+  Prompt 1: [1, 5, 768]  ->  batch_group = [0, 1]
+  Prompt 2: [1, 3, 768]  ->  batch_group = [1, 1]
 
 vLLM (flat):
-  All tokens: [8, 768]   →  batch_group = [0, 5] for prompt 1
-                             batch_group = [5, 3] for prompt 2
+  All tokens: [8, 768]   ->  batch_group = [0, 5] for prompt 1
+                              batch_group = [5, 3] for prompt 2
 ```
 
-**Solution:** Track batch groups differently during forward pass vs. after sampling:
+**Solution:** Track batch groups differently during forward pass vs. after:
 
 ```python
 class NNsightRequestHelper:
-    def process_new_reqs(self, new_reqs, model):
-        for new_req in new_reqs:
-            mediator = new_req.sampling_params.mediator
-            batch_size = len(new_req.prompt_token_ids)  # Token count
-            
+    def process_batch_groups(self, num_tokens_scheduled, requests, model):
+        batch_start = 0
+        for req_id, num_tokens in num_tokens_scheduled.items():
+            mediator = self.mediators.get(req_id)
+            if mediator is None:
+                batch_start += num_tokens
+                continue
             # Batch group is [start_token, num_tokens] during forward
-            batch_start = sum(model._interleaver.batcher.last_batch_group)
-            mediator.batch_group = [batch_start, batch_size]
-    
+            mediator.batch_group = [batch_start, num_tokens]
+            batch_start += num_tokens
+
     def unflatten(self, model):
         # After forward, switch to [start_prompt, num_prompts]
         batch_start = 0
@@ -2503,7 +2609,7 @@ class NNsightRequestHelper:
 
 This allows:
 - During forward pass: interventions work on token-level tensors
-- After sampling: interventions work on prompt-level outputs
+- After forward: interventions work on prompt-level outputs (logits, samples)
 
 ---
 
@@ -2513,32 +2619,30 @@ vLLM separates execution into distinct phases. NNsight interleaves at each:
 
 ```python
 def execute_model(self, scheduler_output, intermediate_tensors=None):
-    # Phase 1: Model forward pass
+    Globals.enter()
     with self.nnsight_model._interleaver:
-        super().execute_model(scheduler_output, intermediate_tensors)
-        
+        # Phase 1: Model forward pass
+        return_value = super().execute_model(scheduler_output, intermediate_tensors)
+
         # Switch batch groups from tokens to prompts
         self.nnsight_request_helper.unflatten(self.nnsight_model)
-        
+
         # Phase 2: Logits (hooked separately)
-        logits = self.model.logits(self.execute_model_state.logits, hook=True)
+        if self.execute_model_state is not None:
+            logits = self.nnsight_model.logits(
+                self.execute_model_state.logits, hook=True
+            )
+    Globals.exit()
 
 def _sample(self, *args, **kwargs):
-    # Phase 3: Sampling
+    Globals.enter()
     with self.nnsight_model._interleaver:
+        # Phase 3: Sampling
         sampler_output = super()._sample(*args, **kwargs)
-        
-        # Hook sampled tokens
         sampler_output.sampled_token_ids = self.model.samples(
             sampler_output.sampled_token_ids, hook=True
         )
-
-def finish_nnsight(self, finished_requests):
-    # Phase 4: Final output
-    with self.nnsight_model._interleaver:
-        finished_requests[0] = self.nnsight_model._interleaver.handle(
-            "result", finished_requests[0]
-        )
+    Globals.exit()
 ```
 
 **Wrapper Modules:**
@@ -2552,10 +2656,10 @@ Like `Generator` in LanguageModel, VLLM has wrapper modules for key outputs:
 
 ```python
 with model.trace("Hello", max_tokens=5) as tracer:
-    with tracer.iter[:]:
+    for step in tracer.iter[:]:
         # Access logits at each step
         step_logits = model.logits.output.save()
-        
+
         # Access sampled tokens
         tokens = model.samples.output.save()
 ```
@@ -2575,39 +2679,39 @@ vLLM uses two types of parallel linear layers:
 | `ColumnParallelLinear` | Output sharded across GPUs | Each GPU has `1/N` of output columns |
 | `RowParallelLinear` | Input sharded, output reduced | Each GPU processes `1/N` of input |
 
-**The Solution: Gather → Intervene → Reshard**
+**The Solution: Gather -> Intervene -> Reshard**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  GPU 0                          GPU 1                               │
 │  ┌─────────┐                    ┌─────────┐                         │
-│  │ Shard 0 │                    │ Shard 1 │   ← Sharded tensor      │
+│  │ Shard 0 │                    │ Shard 1 │   <- Sharded tensor     │
 │  └────┬────┘                    └────┬────┘                         │
 │       │                              │                              │
-│       ▼                              ▼                              │
+│       v                              v                              │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │              all_gather() - collect all shards              │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │       │                              │                              │
-│       ▼                              ▼                              │
+│       v                              v                              │
 │  ┌───────────────┐              ┌───────────────┐                   │
-│  │ Full Tensor   │              │ Full Tensor   │   ← Complete      │
+│  │ Full Tensor   │              │ Full Tensor   │   <- Complete     │
 │  │ [all shards]  │              │ [all shards]  │     (identical)   │
 │  └───────┬───────┘              └───────┬───────┘                   │
 │          │                              │                           │
-│          ▼                              ▼                           │
+│          v                              v                           │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │           Intervention code runs (identical on all GPUs)    │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │          │                              │                           │
-│          ▼                              ▼                           │
+│          v                              v                           │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │              split() - re-shard for forward pass            │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │          │                              │                           │
-│          ▼                              ▼                           │
+│          v                              v                           │
 │  ┌─────────┐                    ┌─────────┐                         │
-│  │ Shard 0 │                    │ Shard 1 │   ← Sharded again       │
+│  │ Shard 0 │                    │ Shard 1 │   <- Sharded again      │
 │  └─────────┘                    └─────────┘                         │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -2622,14 +2726,14 @@ class VLLMBatcher(Batcher):
         def pre_input_hook(module, args, kwargs):
             self.current_module = module
             self.type = "input"
-            
+
             if isinstance(module, RowParallelLinear):
                 self.parallel = module.input_is_parallel
-        
+
         def pre_output_hook(module, args, output):
             self.current_module = module
             self.type = "output"
-            
+
             if isinstance(module, ColumnParallelLinear):
                 self.parallel = not module.gather_output
 ```
@@ -2645,7 +2749,7 @@ def check_gathered(self):
                 self.current_value = tensor_model_parallel_all_gather(
                     self.current_value
                 )
-        
+
         elif isinstance(self.current_module, RowParallelLinear):
             if self.type == "input":
                 # Gather sharded input
@@ -2657,7 +2761,7 @@ def check_gathered(self):
                 self.current_value = tensor_model_parallel_all_reduce(
                     self.current_value
                 )
-        
+
         self.gathered = True
 ```
 
@@ -2671,11 +2775,11 @@ def post_output_hook(module, args, output):
             output = split_tensor_along_last_dim(
                 output, num_partitions=module.tp_size
             )[module.tp_rank].contiguous()
-        
+
         elif isinstance(self.current_module, RowParallelLinear):
             # Undo all_reduce by dividing
             output = output / module.tp_size
-    
+
     return output
 ```
 
@@ -2685,58 +2789,111 @@ def post_output_hook(module, args, output):
 
 #### Continuous Batching Support
 
-vLLM uses continuous batching: new requests join and finished requests leave mid-execution. NNsight handles this by continuously updating batch groups:
+vLLM uses continuous batching: new requests join and finished requests leave mid-execution. NNsight handles this through `NNsightRequestHelper`, which maintains a `mediators` dict keyed by request ID (independent of vLLM's internal request tracking):
 
 ```python
-def process_finished_reqs(self, finished_request_ids, requests, model):
-    batch_start = 0
-    seen_mediators = set()
-    
-    for req_id, req in requests.items():
-        if req_id in finished_request_ids:
-            continue  # Skip finished
-        
-        mediator = req.sampling_params.mediator
-        
-        if mediator in seen_mediators:
-            mediator.batch_group[1] += 1  # Increment size
-        else:
-            seen_mediators.add(mediator)
-            mediator.batch_group = [batch_start, 1]  # New group
-        
-        batch_start += 1
+class NNsightRequestHelper:
+    def __init__(self):
+        self.mediators: Dict[str, Any] = {}  # req_id -> Mediator
+        self.last_mediator = None             # persists across calls
+
+    def process_batch_groups(self, num_tokens_scheduled, requests, model):
+        batch_start = 0
+        seen_mediators = set()
+        for req_id, num_tokens in num_tokens_scheduled.items():
+            mediator = self.mediators.get(req_id)
+            if mediator is None:
+                batch_start += num_tokens
+                continue
+            if mediator in seen_mediators:
+                mediator.batch_group[1] += num_tokens
+            else:
+                seen_mediators.add(mediator)
+                mediator.batch_group = [batch_start, num_tokens]
+            batch_start += num_tokens
 ```
 
-When requests finish, `finish_nnsight()`:
-1. Runs final interleaving for the "result" phase
-2. Collects saved values from mediator frames
-3. Cancels the mediator
-4. Updates batch groups for remaining requests
+When requests finish, `finish_nnsight()` receives a list of finished request IDs from the engine:
+1. Matches request IDs to stored mediators
+2. Runs final interleaving for the "result" provider
+3. Collects saved values from mediator frames
+4. Returns pickled bytes (survives msgpack transport in multiprocessing mode)
+5. Cleans up mediator entries
 
 ```python
-def finish_nnsight(self, finished_requests):
-    # Let interventions interact with final output
-    with self.nnsight_model._interleaver:
-        finished_requests[0] = self.nnsight_model._interleaver.handle(
-            "result", finished_requests[0]
-        )
-    
-    # Collect saved values
-    result = {}
-    for req in finished_requests:
-        mediator = req.sampling_params.mediator
-        frame = mediator.info.frame
-        
-        for key, value in frame.items():
+def finish_nnsight(self, finished_req_ids: list[str]) -> Optional[bytes]:
+    # Match finished engine-level req_ids to stored mediators
+    for req_id, mediator in self.nnsight_request_helper.mediators.items():
+        internal_id = req_id.split("-")[0]
+        if internal_id in finished_req_id_set:
+            matched.append((internal_id, mediator))
+
+    # Run "result" phase and collect saves
+    for internal_id, mediator in matched:
+        with self.nnsight_model._interleaver:
+            self.nnsight_model._interleaver.handle("result", outputs)
+            mediator.cancel()
+
+    # Extract saved values from mediator frames
+    for _, mediator in matched:
+        for key, value in mediator.info.frame.f_locals.items():
             if id(value) in Globals.saves:
-                result[key] = value
-    
-    # Cleanup
-    for req_id in finished_request_ids:
-        req.sampling_params.mediator.cancel()
-    
-    return result
+                saves[key] = value
+
+    return pickle.dumps(saves)
 ```
+
+---
+
+#### Ray Distributed Executor
+
+vLLM supports a `"ray"` executor backend that uses Ray actors instead of multiprocessing for tensor-parallel workers. This enables multi-node inference where TP workers run on different machines.
+
+**The Problem:** vLLM v0.15.1 + Ray 2.53.0 have a compatibility issue where Ray actor processes crash during construction. When Ray creates a `RayWorkerWrapper` actor, it imports `vllm.v1.executor.ray_utils`, which transitively imports heavy vLLM submodules (`vllm.multimodal`, etc.) at module level. These imports conflict with Ray's internal gRPC event engine (grpcio's `cygrpc` C extension) during actor construction, causing a segfault with no Python traceback. The same imports work fine during actor **method execution** (after construction).
+
+**The Fix:** `NNsightRayExecutor` subclasses `RayDistributedExecutor` and swaps in `LazyRayWorkerWrapper` (which defers heavy imports to `__init__` time) before creating workers. It also handles three Ray initialization scenarios — connecting to a local Ray, joining a remote cluster via `RAY_ADDRESS`, or starting a fresh cluster:
+
+```python
+class NNsightRayExecutor(RayDistributedExecutor):
+    def _init_executor(self) -> None:
+        import os, ray, subprocess
+        import vllm.v1.executor.ray_utils as ray_utils
+        import vllm.v1.executor.ray_executor as ray_exec
+        ray_utils.RayWorkerWrapper = LazyRayWorkerWrapper
+        ray_exec.RayWorkerWrapper = LazyRayWorkerWrapper
+        self.forward_dag = None
+
+        if not ray.is_initialized():
+            ray_address = os.environ.get("RAY_ADDRESS")
+            try:
+                ray.init(address="auto")           # local Ray already running
+            except (ConnectionError, ValueError, RuntimeError):
+                if ray_address:
+                    subprocess.run(                 # join remote cluster as driver-only node
+                        ["ray", "start", f"--address={ray_address}",
+                         "--num-gpus=0", "--num-cpus=0"],
+                        check=True, capture_output=True,
+                    )
+                    ray.init(address="auto")
+                else:
+                    ray.init()                      # start fresh local cluster
+
+        # ... placement group creation, VLLM_HOST_IP fix, _init_workers_ray ...
+```
+
+In `VLLM._load()`, the string `"ray"` is replaced with this class:
+
+```python
+if kwargs.get("distributed_executor_backend") == "ray":
+    from .executors.ray_workaround import NNsightRayExecutor
+    kwargs["distributed_executor_backend"] = NNsightRayExecutor
+```
+
+vLLM's `EngineArgs.distributed_executor_backend` accepts `type[Executor]`, so passing a class directly is supported. This works with multiprocessing mode because vLLM pickles the executor class to the EngineCore subprocess, where `_init_executor()` runs and swaps in the lazy wrapper before any Ray actors are created. No env var overrides needed.
+
+The rest of the NNsight integration (`worker_cls`, `collective_rpc`, `execute_model`, mediator transport via `extra_args`) works identically across Ray and multiprocessing backends.
+
+**Multi-node support:** For multi-node tensor parallelism (TP workers on different machines), set `RAY_ADDRESS` to an existing Ray cluster's GCS address (`host:6379`, **not** `ray://host:port`). The executor joins the cluster as a driver-only node and places workers across available nodes. See [`src/nnsight/modeling/vllm/README.md`](src/nnsight/modeling/vllm/README.md) for full architectural details, and [`src/nnsight/modeling/vllm/examples/multi_node_with_ray/`](src/nnsight/modeling/vllm/examples/multi_node_with_ray/) for a Docker-based multi-node example.
 
 ---
 
@@ -3051,7 +3208,6 @@ ValueError: Cannot return output of Envoy that is not interleaving nor has a fak
 
 **Common causes:**
 1. `.trace()` called with no input and no invokes
-2. `.trace()` called with only keyword arguments (base `NNsight` requires positional args)
 
 **Fix:** Provide input to `.trace(input)` or use `.invoke()`:
 
@@ -3401,7 +3557,7 @@ In local execution, `.save()` marks values to persist after the trace. In remote
 # WRONG: Local list won't be updated
 logits_l = list()
 with model.generate("Hello", max_new_tokens=5, remote=True) as tracer:
-    with tracer.all():
+    for step in tracer.all():
         logits_l.append(model.lm_head.output[0].save())
     print(f"List length is {len(logits_l)}")  # Shows 5 on server
 
@@ -3416,7 +3572,7 @@ The list is populated on the server, but the local `logits_l` is never updated.
 # CORRECT: Create list inside trace and save it
 with model.generate("Hello", max_new_tokens=5, remote=True) as tracer:
     logits_l = list().save()  # Create inside trace
-    with tracer.all():
+    for step in tracer.all():
         logits_l.append(model.lm_head.output[0].save())
 
 assert len(logits_l) == 5  # Works!
@@ -3793,3 +3949,236 @@ The entire session is serialized as one intervention, executed sequentially on t
 
 *Coming soon!*
 
+
+---
+
+---
+
+## 10. Performance
+
+NNsight adds overhead compared to raw PyTorch, but this overhead is **fixed per trace** and becomes negligible as model compute increases. This section explains where the overhead comes from, how it scales, and how to minimize it in production.
+
+---
+
+### 10.1 Overhead Model
+
+NNsight overhead has two components:
+
+| Component | Cost | Scaling |
+|-----------|------|---------|
+| **Trace setup** (fixed) | ~0.3ms | Once per `with model.trace(...)` |
+| **Per-intervention** | ~0.03-0.2ms | Per `.output`/`.input` access |
+
+The trace setup cost is constant regardless of model size, so it becomes a smaller fraction of total time as models get larger:
+
+```
+Model hidden dim     Bare forward    With nnsight    Overhead ratio
+────────────────────────────────────────────────────────────────────
+64                   0.10ms          0.54ms          5.4x
+256                  0.17ms          0.61ms          3.6x
+512                  0.30ms          0.77ms          2.6x
+1024                 0.34ms          0.79ms          2.3x
+2048                 0.92ms          1.40ms          1.5x
+```
+
+*12-layer MLP, CPU, batch size 1, single `.output.save()`*
+
+The same pattern holds for larger batch sizes:
+
+```
+Batch size           Bare forward    With nnsight    Overhead ratio
+────────────────────────────────────────────────────────────────────
+1                    0.36ms          0.81ms          2.3x
+8                    0.51ms          0.90ms          1.8x
+32                   0.84ms          1.35ms          1.6x
+128                  1.31ms          1.92ms          1.5x
+```
+
+*12-layer MLP, hidden=512, CPU, single `.output.save()`*
+
+**Key takeaway:** For real-world models (billions of parameters, GPU compute, generation loops), the ~0.3ms fixed cost is noise. NNsight overhead only matters for micro-benchmarks with tiny models.
+
+---
+
+### 10.2 Where the Overhead Comes From
+
+Each `with model.trace(...)` block triggers a pipeline of operations before and during model execution. Here is what that pipeline costs, measured via `cProfile` over 500 traced iterations of a 12-layer MLP:
+
+#### Trace setup phase (~0.15ms, cached)
+
+| Operation | Cost/trace | What it does |
+|-----------|-----------|--------------|
+| `inspect.getsourcelines()` | ~0.07ms | Reads source code of the calling function (cached after first call) |
+| AST parsing (`ast.generic_visit`) | ~0.13ms | Walks AST to find `with` block boundaries (cached after first call) |
+| `builtins.compile()` | ~0.05ms | Compiles extracted source into Python code object (cached after first call) |
+| `get_non_nnsight_frame()` | ~0.02ms | Walks call stack to find user frame |
+| `push_variables()` | ~0.02ms | Injects variables into generated code frame via `ctypes` |
+
+**Source extraction, AST parsing, and code compilation** are all cached after the first call for a given trace site. Subsequent calls to the same `with model.trace(...)` at the same source location skip these entirely. The cache key is `(filename, line_number, function_name, tracer_type)`, so traces in a loop are compiled once. This means the trace setup phase drops from ~0.35ms (first call) to ~0.15ms (subsequent calls).
+
+#### Execution phase (~0.15ms)
+
+| Operation | Cost/trace | What it does |
+|-----------|-----------|--------------|
+| Thread creation | ~0.06ms | Spawns worker thread for intervention code |
+| Hook dispatch (`handle`, `handle_value_event`) | ~0.05ms | PyTorch hook → mediator event queue → worker thread |
+| Lock synchronization | ~0.04ms | Thread coordination between model and intervention code |
+
+**Threading** is required for the interleaving model: your intervention code runs in a worker thread that blocks on `.output` until the model's forward pass reaches that module. The main thread and worker thread coordinate via event queues and locks.
+
+**Hook dispatch** is the per-module cost of intercepting `forward()` calls. Each module in the model gets an input hook and an output hook that check whether any mediator has requested values from that module.
+
+---
+
+### 10.3 Caching Behavior
+
+NNsight automatically caches all stages of trace compilation. When the same trace site is executed repeatedly (e.g., in a loop), the extracted source, parsed AST, and compiled code object are all cached and reused. Only the first call pays the full compilation cost; subsequent calls skip source extraction, AST parsing, and compilation entirely.
+
+```python
+for prompt in dataset:
+    with model.trace(prompt):  # Full compile on first iteration, cached for all subsequent
+        hidden = model.transformer.h[5].output.save()
+```
+
+The cache key is `(filename, line_number, function_name, tracer_type)`, so `InterleavingTracer` and `Invoker` code objects are cached independently even when they originate from the same source location. The `TRACE_CACHING` config option is deprecated — caching is now always enabled.
+
+To clear the cache (e.g., after modifying source code at runtime):
+
+```python
+from nnsight.intervention.tracing.globals import Globals
+Globals.cache.clear()
+```
+
+---
+
+### 10.4 Performance Best Practices
+
+#### 1. Consolidate interventions into a single trace
+
+The fixed per-trace cost (~0.3ms) means that 12 separate traces cost ~10x more than 1 trace with 12 interventions:
+
+```python
+# SLOW (~6ms): 12 traces, each pays full setup cost
+for layer in model.transformer.h:
+    with model.trace(prompt):
+        hidden = layer.output.save()
+
+# FAST (~0.7ms): 1 trace, 12 saves amortize setup cost
+with model.trace(prompt):
+    hiddens = []
+    for layer in model.transformer.h:
+        hiddens.append(layer.output.save())
+```
+
+This is the single most impactful optimization. Consolidating from N traces to 1 trace gives roughly an Nx speedup.
+
+#### 2. Use `nnsight.save()` over `.save()` when `PYMOUNT` is not needed
+
+The `.save()` method form relies on pymount, a C extension that injects `.save()` onto every Python object by modifying `PyBaseObject_Type`. This is convenient but has a one-time cost on first trace entry. If you exclusively use the function form, you can disable it:
+
+```python
+from nnsight import CONFIG
+import nnsight
+
+CONFIG.APP.PYMOUNT = False
+
+with model.trace("Hello"):
+    hidden = nnsight.save(model.transformer.h[0].output)
+```
+
+In practice the performance difference is negligible since pymount is now mounted once and never unmounted, but `nnsight.save()` is also more explicit and avoids edge cases where objects define their own `.save()` method.
+
+#### 4. Minimize invoke count when possible
+
+Each invoke spawns a separate worker thread. If you don't need separate logical batches, use a single implicit invoke:
+
+```python
+# Slightly slower: explicit invoke adds thread overhead
+with model.trace() as tracer:
+    with tracer.invoke(prompt):
+        hidden = model.transformer.h[5].output.save()
+
+# Slightly faster: implicit invoke
+with model.trace(prompt):
+    hidden = model.transformer.h[5].output.save()
+```
+
+Multiple invokes are necessary when you need separate batch entries (e.g., clean vs. patched runs), but avoid them for single-input traces.
+
+#### 5. Use sessions for cross-trace variable sharing, not performance
+
+Sessions (`model.session()`) add a small amount of overhead (~0.2ms) per trace compared to standalone traces. Their value is enabling cross-trace variable sharing and conditional logic, not performance:
+
+```python
+# Use sessions when you need cross-trace references
+with model.session() as session:
+    with model.trace("Hello"):
+        hs = model.transformer.h[0].output  # captured for next trace
+    with model.trace("World"):
+        model.transformer.h[0].output = hs  # cross-trace sharing
+        out = model.output.save()
+```
+
+---
+
+### 10.5 Profiling Your Own Code
+
+To measure nnsight overhead in your specific setup:
+
+```python
+import time
+import torch
+
+# For GPU: sync before timing
+torch.cuda.synchronize()
+start = time.perf_counter()
+
+with model.trace(prompt):
+    hidden = model.transformer.h[5].output.save()
+
+torch.cuda.synchronize()
+end = time.perf_counter()
+
+print(f"Trace time: {(end - start) * 1000:.2f}ms")
+```
+
+For function-level breakdown, use `cProfile`:
+
+```python
+import cProfile
+import pstats
+
+with cProfile.Profile() as pr:
+    for _ in range(100):
+        with model.trace(prompt):
+            hidden = model.transformer.h[5].output.save()
+
+stats = pstats.Stats(pr)
+stats.sort_stats('tottime')
+stats.print_stats(20)
+```
+
+The key functions to look for in profiles:
+
+| Function | What it measures |
+|----------|-----------------|
+| `base.py:capture` | Total trace setup (source + AST + compile) |
+| `base.py:__call__` (Backend) | Code compilation + exec |
+| `interleaver.py:handle` | Per-module hook dispatch overhead |
+| `interleaver.py:nnsight_forward` | Total interleaved forward pass |
+| `{built-in method builtins.compile}` | Python code compilation (should be ~2 on repeated calls) |
+| `{built-in method _thread.start_new_thread}` | Worker thread creation |
+
+---
+
+### 10.6 Known Remaining Bottlenecks
+
+These are the current bottleneck areas, listed in order of impact:
+
+1. **Thread creation** (~0.06ms/trace) -- Each invoke spawns a new OS thread. A thread pool could amortize this, but would be a larger architectural change.
+
+2. **Hook dispatch overhead** (~0.05ms/trace) -- Every module in the model gets input/output hooks checked, even modules that have no interventions. The cost scales with the number of modules in the model.
+
+3. **Lock synchronization** (~0.04ms/trace) -- Thread coordination between the main thread (model forward pass) and worker threads (intervention code). This is the fundamental floor for the interleaving model.
+
+4. **`push_variables` / `ctypes.PyFrame_LocalsToFast`** (~0.02ms/trace) -- Variable injection into generated frames via ctypes. Required for cross-invoke variable sharing (`CROSS_INVOKER`). Now batched to a single `PyFrame_LocalsToFast` call per frame update.

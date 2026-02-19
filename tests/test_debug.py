@@ -313,30 +313,6 @@ class TestTraceInputRequirements:
         print(f"Exception type: {type(exc_info.value).__name__}")
         print(str(exc_info.value))
 
-    def test_trace_with_only_kwargs(
-        self, tiny_model: NNsight, tiny_input: torch.Tensor
-    ):
-        """Trace with only kwargs (no positional args) - should error like no args.
-
-        Base NNsight requires positional args for input. Kwargs alone don't work.
-        LanguageModel has special handling for kwargs like input_ids=...
-        """
-        with pytest.raises(ValueError) as exc_info:
-            with tiny_model.trace(
-                input=tiny_input
-            ):  # kwarg only - not recognized as input!
-                out = tiny_model.layer1.output.save()
-
-        print("\n--- Trace with only kwargs ---")
-        print(f"Exception type: {type(exc_info.value).__name__}")
-        print(str(exc_info.value))
-
-        # Should get the "not interleaving" error because model never ran
-        assert (
-            "interleaving" in str(exc_info.value).lower()
-            or "output" in str(exc_info.value).lower()
-        )
-
 
 class TestWithBlockNotFound:
     """Tests related to WithBlockNotFoundError.

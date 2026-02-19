@@ -12,6 +12,14 @@ from vllm.model_executor.layers.linear import (
 
 
 class VLLMBatcher(Batcher):
+    """Batcher that handles tensor-parallel gather/split for vLLM.
+
+    vLLM's ``ColumnParallelLinear`` and ``RowParallelLinear`` layers
+    shard tensors across GPUs. When NNsight intervention code accesses
+    inputs or outputs of these layers, this batcher transparently
+    gathers the sharded tensors so the user sees the full (unsharded)
+    values, then splits them back before returning control to vLLM.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
