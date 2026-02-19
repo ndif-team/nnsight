@@ -1344,12 +1344,18 @@ class TestRename:
         )
 
         with gpt2.trace(MSG_prompt) as tracer:
-            # Save output via both paths
-            original_path_out = gpt2.transformer.h[0].mlp.output.save()
-            alias_path_out = gpt2.first_layer.mlp.output.save()
+            cache = tracer.cache()
 
-        # Access via tracer's cache using both paths
-        assert torch.equal(original_path_out, alias_path_out)
+        # Verify that both aliased and original paths resolve to the same cached entry
+        assert torch.equal(
+            cache["model.transformer.h.0"].output[0],
+            cache.model.first_layer.output[0],
+        )
+        # Also verify using attribute access for the original path
+        assert torch.equal(
+            cache.model.transformer.h[0].output[0],
+            cache.model.first_layer.output[0],
+        )
 
     @torch.no_grad()
     def test_rename_nested_module_access(self, MSG_prompt: str):
