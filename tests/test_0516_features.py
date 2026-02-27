@@ -195,3 +195,9 @@ class TestExceptionHandling:
             with gpt2.trace("Hello world"):
                 # 'nonexistent' attribute doesn't exist
                 output = gpt2.transformer.nonexistent.output.save()
+
+    def test_empty_prompt_error_message(self, gpt2: nnsight.LanguageModel):
+        """Test that empty prompts raise an actionable error."""
+        with pytest.raises(ValueError, match="zero tokens"):
+            with gpt2.trace(""):
+                hidden = gpt2.transformer.h[0].output[0].save()

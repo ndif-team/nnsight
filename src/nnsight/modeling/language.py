@@ -300,6 +300,16 @@ class LanguageModel(TransformersModel):
         if attention_mask is not None:
             inputs["attention_mask"] = attention_mask
 
+        tokenized_input_ids = inputs.get("input_ids", None)
+        if (
+            isinstance(tokenized_input_ids, torch.Tensor)
+            and tokenized_input_ids.shape[-1] == 0
+        ):
+            raise ValueError(
+                "Input produced zero tokens after tokenization. "
+                "Pass a non-empty prompt or non-empty `input_ids`."
+            )
+
         return (
             tuple(),
             {**inputs, "labels": labels, **remaining_kwargs},
