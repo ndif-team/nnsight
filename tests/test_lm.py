@@ -1399,6 +1399,121 @@ class TestRename:
         assert mlp_out_0 is not None
         assert mlp_out_1 is not None
 
+    @torch.no_grad()
+    def test_rename_forward_call(self, MSG_prompt: str):
+        """Test calling forward method on renamed module.
+
+        This tests the fix from PR #325/#330 - forward methods should work
+        on renamed modules (e.g., model.my_mlp(x) instead of model.mlp(x)).
+        """
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={"transformer.h.0.mlp": "my_mlp"}
+        )
+
+        with gpt2.trace(MSG_prompt):
+            # Get the hidden states from attention output to pass to MLP
+            attn_out = gpt2.transformer.h[0].attn.output[0]
+            # Call forward on the renamed module
+            mlp_result = gpt2.my_mlp(attn_out).save()
+            # Also get the normal output for comparison
+            mlp_out = gpt2.transformer.h[0].mlp.output.save()
+
+        assert mlp_result is not None
+        assert mlp_out is not None
+        # Ensure the renamed forward call produces the same result as the original module
+        assert mlp_result.shape == mlp_out.shape
+        assert torch.allclose(mlp_result, mlp_out)
+
+    @torch.no_grad()
+    def test_rename_bidirectional_access(self, MSG_prompt: str):
+        """Test that both original and alias names return identical outputs.
+
+        This ensures renaming creates a true alias, not a copy.
+        """
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={"mlp": "feedforward"}
+        )
+
+        with gpt2.trace(MSG_prompt):
+            # Access via original name
+            original_out = gpt2.transformer.h[0].mlp.output.save()
+            # Access via alias name
+            alias_out = gpt2.transformer.h[0].feedforward.output.save()
+
+        assert torch.equal(original_out, alias_out)
+
+    @torch.no_grad()
+    def test_rename_multiple_aliases(self, MSG_prompt: str):
+        """Test that a single module can have multiple aliases."""
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2",
+            rename={".transformer": ["model", "backbone"]}
+        )
+
+        with gpt2.trace(MSG_prompt):
+            # Access via original name
+            original_out = gpt2.transformer.h[0].mlp.output.save()
+            # Access via first alias
+            alias1_out = gpt2.model.h[0].mlp.output.save()
+            # Access via second alias
+            alias2_out = gpt2.backbone.h[0].mlp.output.save()
+
+        assert torch.equal(original_out, alias1_out)
+        assert torch.equal(original_out, alias2_out)
+
+    @torch.no_grad()
+    def test_rename_with_cache(self, MSG_prompt: str):
+        """Test that cache access works with renamed modules."""
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={"transformer.h.0": "first_layer"}
+        )
+
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache()
+
+        # Verify that both aliased and original paths resolve to the same cached entry
+        assert torch.equal(
+            cache["model.transformer.h.0"].output[0],
+            cache.model.first_layer.output[0],
+        )
+        # Also verify using attribute access for the original path
+        assert torch.equal(
+            cache.model.transformer.h[0].output[0],
+            cache.model.first_layer.output[0],
+        )
+
+    @torch.no_grad()
+    def test_rename_nested_module_access(self, MSG_prompt: str):
+        """Test accessing nested attributes on renamed modules."""
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={"transformer": "model"}
+        )
+
+        with gpt2.trace(MSG_prompt):
+            # Access deeply nested modules via alias and original (adjacent to avoid out-of-order)
+            attn_out = gpt2.model.h[0].attn.output[0].save()
+            original_attn = gpt2.transformer.h[0].attn.output[0].save()
+            mlp_out = gpt2.model.h[0].mlp.output.save()
+
+        assert attn_out is not None
+        assert mlp_out is not None
+        assert torch.equal(attn_out, original_attn)
+
+    @torch.no_grad()
+    def test_rename_input_access(self, MSG_prompt: str):
+        """Test accessing input on renamed modules."""
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={"mlp": "ffn"}
+        )
+
+        with gpt2.trace(MSG_prompt):
+            # Access input via original name
+            original_input = gpt2.transformer.h[0].mlp.input.save()
+            # Access input via alias
+            alias_input = gpt2.transformer.h[0].ffn.input.save()
+
+        assert torch.equal(original_input[0][0], alias_input[0][0])
+
 
 # =============================================================================
 # Miscellaneous
