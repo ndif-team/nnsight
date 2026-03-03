@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pkgutil
 import sys
-import sysconfig
+
 from enum import Enum
 from importlib.metadata import distributions, packages_distributions
 from io import StringIO
@@ -389,8 +389,7 @@ def get_local_env() -> dict:
             # Fallback to distribution name if no import mapping found
             packages[dist_name] = version
 
-    # Get stdlib and site-packages paths to filter them out
-    stdlib_path = sysconfig.get_paths()["stdlib"]
+    # Get site-packages paths to filter them out
     site_packages_paths = set()
     for path in sys.path:
         if "site-packages" in path or "dist-packages" in path:
@@ -399,12 +398,11 @@ def get_local_env() -> dict:
     # Discover local modules from sys.path (not in stdlib or site-packages)
     for importer, module_name, is_pkg in pkgutil.iter_modules():
         if module_name not in packages and not module_name.startswith("_"):
+            if module_name in sys.stdlib_module_names:
+                continue
             # Check if this module comes from a local path
             if hasattr(importer, "path"):
                 module_path = importer.path
-                # Skip stdlib and site-packages
-                if module_path.startswith(stdlib_path):
-                    continue
                 if any(module_path.startswith(sp) for sp in site_packages_paths):
                     continue
                 # This is a local module
