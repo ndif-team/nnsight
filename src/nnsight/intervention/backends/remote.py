@@ -47,6 +47,7 @@ from sys import version as python_version
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import httpx
+import anyio
 import socketio
 import torch
 import zstandard as zstd
