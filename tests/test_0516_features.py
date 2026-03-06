@@ -32,7 +32,7 @@ class TestKeywordOnlyTraceArgs:
         input_ids = torch.tensor([[1, 2, 3, 4, 5]])
 
         with gpt2.trace(input_ids=input_ids):
-            hidden = gpt2.transformer.h[0].output[0].save()
+            hidden = gpt2.transformer.h[0].output.save()
 
         assert hidden is not None
         assert isinstance(hidden, torch.Tensor)
@@ -45,7 +45,7 @@ class TestKeywordOnlyTraceArgs:
         attention_mask = torch.tensor([[1, 1, 1, 1, 1]])
 
         with gpt2.trace(input_ids=input_ids, attention_mask=attention_mask):
-            hidden = gpt2.transformer.h[0].output[0].save()
+            hidden = gpt2.transformer.h[0].output.save()
 
         assert hidden is not None
         assert hidden.shape[1] == 5
@@ -65,7 +65,7 @@ class TestCustomFunctions:
 
         def analyze_layer(model, layer_idx=0):
             """Custom analysis function."""
-            return model.transformer.h[layer_idx].output[0].mean(dim=-1)
+            return model.transformer.h[layer_idx].output.mean(dim=-1)
 
         with gpt2.trace("The quick brown fox"):
             result = analyze_layer(gpt2, layer_idx=5).save()
@@ -81,7 +81,7 @@ class TestCustomFunctions:
             """Compute mean across multiple layers."""
             outputs = []
             for i in range(num_layers):
-                outputs.append(model.transformer.h[i].output[0].mean())
+                outputs.append(model.transformer.h[i].output.mean())
             return sum(outputs)
 
         with gpt2.trace("Test input"):
@@ -102,7 +102,7 @@ class TestLocalSimulation:
     def test_basic_local_simulation(self, gpt2: nnsight.LanguageModel):
         """Test that remote='local' simulates serialization correctly."""
         with gpt2.trace("Hello world", remote="local"):
-            hidden = gpt2.transformer.h[0].output[0].save()
+            hidden = gpt2.transformer.h[0].output.save()
 
         assert hidden is not None
         assert isinstance(hidden, torch.Tensor)
@@ -116,7 +116,7 @@ class TestLocalSimulation:
             """A function to test serialization."""
             layer_outputs = []
             for i in range(3):
-                layer_outputs.append(model.transformer.h[i].output[0].mean())
+                layer_outputs.append(model.transformer.h[i].output.mean())
             return sum(layer_outputs)
 
         with gpt2.trace("Test input", remote="local"):
@@ -138,9 +138,9 @@ class TestMultiInvoker:
         """Test that config kwargs allow sub-invokers."""
         with gpt2.generate(max_new_tokens=3) as tracer:
             with tracer.invoke("Hello"):
-                hidden_1 = gpt2.transformer.h[0].output[0].save()
+                hidden_1 = gpt2.transformer.h[0].output.save()
             with tracer.invoke("Goodbye"):
-                hidden_2 = gpt2.transformer.h[0].output[0].save()
+                hidden_2 = gpt2.transformer.h[0].output.save()
 
         assert hidden_1 is not None
         assert hidden_2 is not None
@@ -152,9 +152,9 @@ class TestMultiInvoker:
         """Test that multiple invokers can access different layers independently."""
         with gpt2.trace() as tracer:
             with tracer.invoke("Hello world"):
-                hidden_layer_0 = gpt2.transformer.h[0].output[0].save()
+                hidden_layer_0 = gpt2.transformer.h[0].output.save()
             with tracer.invoke("Goodbye world"):
-                hidden_layer_5 = gpt2.transformer.h[5].output[0].save()
+                hidden_layer_5 = gpt2.transformer.h[5].output.save()
 
         # Both should be valid tensors with correct hidden dim
         assert hidden_layer_0 is not None
