@@ -98,8 +98,6 @@ class Envoy(Batchable):
 
         self._default_mediators: List[Mediator] = []
 
-        self._children: List[Envoy] = []
-
         self._fake_inputs = inspect._empty
         self._fake_output = inspect._empty
 
@@ -113,6 +111,13 @@ class Envoy(Batchable):
 
         if rename is not None:
             self._alias.build(self)
+
+    @property
+    def _children(self) -> List[Envoy]:
+        """
+        Get the children of the Envoy.
+        """
+        return [envoy for envoy in self.__dict__.values() if isinstance(envoy, Envoy)]
 
     def __getitem__(self, key: str) -> Envoy:
         """
@@ -822,8 +827,6 @@ class Envoy(Batchable):
             interleaver=self._interleaver,
         )
 
-        self._children.append(envoy)
-
         setattr(self._module, name, module)
 
         # If the module already has a sub-module named 'input' or 'output',
@@ -889,16 +892,16 @@ class Envoy(Batchable):
         Used when loading the real weights (dispatching) and need to replace the underlying modules.
         """
 
-        i = 0
+        for name, existing_child in self._module.named_children():
 
-        for i, child in enumerate(module.children()):
+            if hasattr(module, name):
 
-            self._children[i]._update(child)
+                child = getattr(module, name)
 
-        # Handle extra modules added after initialization: issues/376
-        for name, child in list(self._module.named_children())[i + 1 :]:
+                self.__dict__[name]._update(child)
 
-            setattr(module, name, child)
+            else:
+                setattr(module, name, existing_child)
 
         self._module = module
         self._module.__path__ = self.path
@@ -1128,10 +1131,14 @@ class Envoy(Batchable):
             key: The attribute name
             value: The attribute value
         """
+
         if key != "_module" and isinstance(value, torch.nn.Module):
             self._add_envoy(value, key)
         else:
-            super().__setattr__(key, value)
+            if "_module" in self.__dict__ and hasattr(self._module, key):
+                return setattr(self._module, key, value)
+            else:
+                super().__setattr__(key, value)
 
     def __getstate__(self):
 
