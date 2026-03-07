@@ -138,7 +138,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         def process_batch_groups(
             self,
             num_tokens_scheduled: Dict[str, int],
-            requests,
+            batch_req_ids: List[str],
             model: VLLM,
         ) -> None:
 
@@ -146,7 +146,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             mediators = []
 
-            for req_id, num_tokens in num_tokens_scheduled.items():
+            # Iterate in input_batch order (batch_req_ids) rather than
+            # scheduler dict order, because input_batch.condense() and
+            # _may_reorder_batch() can reorder requests after the scheduler
+            # builds num_scheduled_tokens.  The model's tensors (including
+            # sampled_token_ids) follow input_batch order.
+            for req_id in batch_req_ids:
+
+                num_tokens = num_tokens_scheduled.get(req_id)
+                if num_tokens is None:
+                    continue
 
                 mediator = self.mediators.get(req_id)
 
@@ -307,8 +316,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
             scheduler_output.scheduled_new_reqs, self.nnsight_model
         )
 
+        # Use input_batch.req_ids for the actual batch order after
+        # condense()/reorder, not the scheduler dict order.
         self.nnsight_request_helper.process_batch_groups(
-            scheduler_output.num_scheduled_tokens, self.requests, self.nnsight_model
+            scheduler_output.num_scheduled_tokens,
+            self.input_batch.req_ids,
+            self.nnsight_model,
         )
 
         self.nnsight_model._interleaver.batcher.needs_batching = (

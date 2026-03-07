@@ -439,7 +439,7 @@ class TestBackwardTracerRestrictions:
         print("CORRECT pattern:")
         print("  with model.trace('Hello'):")
         print(
-            "      hs = model.transformer.h[-1].output[0]  # Get tensor BEFORE backward"
+            "      hs = model.transformer.h[-1].output  # Get tensor BEFORE backward"
         )
         print("      loss = model.lm_head.output.sum()")
         print("      with loss.backward():")
