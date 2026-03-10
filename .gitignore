@@ -10,3 +10,4 @@ __pycache__/
 .nfs*
 nnsight.log
 src/nnsight/_c/**.so
+src/nnsight/_version.py
