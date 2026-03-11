@@ -360,6 +360,40 @@ class TestTokenInputs:
         assert et_token == " Paris"
         assert msg_token == " New"
 
+    @torch.no_grad()
+    def test_dict_input_ids_without_attention_mask(self, vllm_gpt2, ET_prompt: str):
+        """Test dict with input_ids but no attention_mask (issue #622)."""
+        token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
+
+        with vllm_gpt2.trace({"input_ids": token_ids}, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
+        assert next_token == " Paris"
+
+    @torch.no_grad()
+    def test_dict_input_ids_tensor_without_attention_mask(self, vllm_gpt2, ET_prompt: str):
+        """Test dict with tensor input_ids but no attention_mask (issue #622)."""
+        hf_output = vllm_gpt2.tokenizer(ET_prompt, return_tensors="pt")
+        input_dict = {"input_ids": hf_output["input_ids"]}
+
+        with vllm_gpt2.trace(input_dict, temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
+        assert next_token == " Paris"
+
+    @torch.no_grad()
+    def test_dict_input_ids_with_attention_mask(self, vllm_gpt2, ET_prompt: str):
+        """Test dict with both input_ids and attention_mask still works."""
+        hf_output = vllm_gpt2.tokenizer(ET_prompt, return_tensors="pt")
+
+        with vllm_gpt2.trace(dict(hf_output), temperature=0.0, top_p=1):
+            logits = vllm_gpt2.logits.output.save()
+
+        next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
+        assert next_token == " Paris"
+
 
 # =============================================================================
 # Ray Distributed Executor
