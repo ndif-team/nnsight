@@ -245,7 +245,8 @@ class VLLM(RemoteableMixin):
                     if isinstance(batch_input_ids[0], int):
                         # single sequence of token ids
                         batch_input_ids = [batch_input_ids]
-                        batch_attention_mask = [batch_attention_mask]
+                        if batch_attention_mask is not None:
+                            batch_attention_mask = [batch_attention_mask]
 
                     if len(batch_input_ids) > 1:
                         raise ValueError(
@@ -254,12 +255,15 @@ class VLLM(RemoteableMixin):
                         )
 
                     input_ids = batch_input_ids[0]
-                    attention_mask = batch_attention_mask[0]
-                    prompt = TokensPrompt(
-                        prompt_token_ids=[
-                            t for t, m in zip(input_ids, attention_mask) if m != 0
-                        ]
-                    )
+                    attention_mask = batch_attention_mask[0] if batch_attention_mask is not None else None
+                    if attention_mask is not None:
+                        prompt = TokensPrompt(
+                            prompt_token_ids=[
+                                t for t, m in zip(input_ids, attention_mask) if m != 0
+                            ]
+                        )
+                    else:
+                        prompt = TokensPrompt(prompt_token_ids=input_ids)
                     prompts.append(prompt)
                     params.append(NNsightSamplingParams(**kwargs))
                     lora_requests.append(lora_request)
