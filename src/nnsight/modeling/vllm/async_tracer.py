@@ -35,7 +35,7 @@ class AsyncInterleavingTracer(RemoteInterleavingTracer):
             self.model.dispatch()
 
         # Serialize mediators into the sampling params.
-        prompts, params = self.model._prepare_generation(*args, **kwargs)
-        self.prepared = (prompts, params, kwargs)
+        prompts, params, lora_requests = self.model._prepare_generation(*args, **kwargs)
+        self.prepared = (prompts, params, lora_requests, kwargs)
 
         self.mediators.clear()

@@ -29,6 +29,7 @@ class AsyncVLLMBackend(Backend):
         self._prompts = None
         self._params = None
         self._kwargs = None
+        self._lora_requests = None
 
     def __call__(self, tracer: Optional["AsyncInterleavingTracer"] = None):
         if tracer is not None:
@@ -47,7 +48,7 @@ class AsyncVLLMBackend(Backend):
 
             # Grab prepared data from the tracer (not the model).
             if tracer.prepared is not None:
-                self._prompts, self._params, self._kwargs = tracer.prepared
+                self._prompts, self._params, self._lora_requests, self._kwargs = tracer.prepared
 
             return
 
@@ -70,9 +71,10 @@ class AsyncVLLMBackend(Backend):
         request_id = str(uuid.uuid4())
         prompt = self._prompts[0]
         param = self._params[0]
+        lora_request = self._lora_requests[0]
 
         async for output in self.model.vllm_entrypoint.generate(
-            prompt, param, request_id
+            prompt, param, request_id, lora_request=lora_request
         ):
             finished = [output.request_id] if output.finished else None
             results = await self.model.vllm_entrypoint.collective_rpc(

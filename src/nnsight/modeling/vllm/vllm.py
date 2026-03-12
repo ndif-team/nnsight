@@ -205,7 +205,7 @@ class VLLM(RemoteableMixin):
         return meta_model
 
     def _prepare_input(
-        self, *args, **kwargs
+        self, *args, lora_request=None, **kwargs
     ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
         """Normalize a single user input into ``((prompts, params), kwargs, batch_size)``.
 
@@ -222,6 +222,7 @@ class VLLM(RemoteableMixin):
 
         prompts = []
         params = []
+        lora_requests = []
 
         for arg in args:
             if arg == []:
@@ -261,6 +262,7 @@ class VLLM(RemoteableMixin):
                     )
                     prompts.append(prompt)
                     params.append(NNsightSamplingParams(**kwargs))
+                    lora_requests.append(lora_request)
                     continue
 
             if type(arg) is list and isinstance(arg[0], int):
@@ -290,36 +292,38 @@ class VLLM(RemoteableMixin):
 
             prompts.append(prompt)
             params.append(param)
+            lora_requests.append(lora_request)
 
         kwargs = kwargs if not args else {}
 
-        return (prompts, params), kwargs, len(prompts)
+        return (prompts, params, lora_requests), kwargs, len(prompts)
 
     def _batch(
-        self, batched_inputs, prompts, params, **kwargs
-    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
+        self, batched_inputs, prompts, params, lora_requests, **kwargs
+    ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any], List[Any]], int]:
         """Combine multiple invokes' prompts and sampling params into a single batch."""
 
         kwargs = {**kwargs, **batched_inputs[1]}
 
         if len(batched_inputs[0]) == 0:
 
-            return (prompts, params), kwargs
+            return (prompts, params, lora_requests), kwargs
 
         batched_args = batched_inputs[0]
         batched_kwargs = batched_inputs[1]
 
         batched_args[0].extend(prompts)
         batched_args[1].extend(params)
-
+        batched_args[2].extend(lora_requests)
         return batched_args, batched_kwargs
 
     def _prepare_generation(
         self,
         prompts: List[str],
         params: List[NNsightSamplingParams],
+        lora_requests: List[Any],
         **kwargs,
-    ) -> Tuple[List[str], List[NNsightSamplingParams]]:
+    ) -> Tuple[List[str], List[NNsightSamplingParams], List[Any]]:
         """Serialize mediators and attach them to sampling params.
 
         Collects all input mediators from the interleaver, serializes
@@ -372,12 +376,13 @@ class VLLM(RemoteableMixin):
                 ) == getattr(default_param, attr):
                     setattr(param, attr, value)
 
-        return prompts, params
+        return prompts, params, lora_requests
 
     def __call__(
         self,
         prompts: List[str],
         params: List[NNsightSamplingParams],
+        lora_requests: List[Any],
         **kwargs,
     ) -> Any:
         """Execute synchronous vLLM generation with NNsight interventions.
@@ -385,10 +390,10 @@ class VLLM(RemoteableMixin):
         Each mediator maps to exactly one prompt/param (1:1).
         """
 
-        prompts, params = self._prepare_generation(prompts, params, **kwargs)
+        prompts, params, lora_requests = self._prepare_generation(prompts, params, lora_requests, **kwargs)
 
         # Do VLLM generation with NNsight
-        outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params)
+        outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_requests)
 
         saves = {}
 
