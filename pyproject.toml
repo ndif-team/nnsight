@@ -57,7 +57,7 @@ diffusers = [
 
 
 vllm = [
-    "vllm>=0.12",
+    "vllm==0.15.1",
     "triton==3.5.0",
 ]
 
