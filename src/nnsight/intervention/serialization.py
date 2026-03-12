@@ -37,6 +37,7 @@ import dataclasses
 import inspect
 import io
 import linecache
+import os
 import pickle
 import textwrap
 import tokenize
@@ -74,7 +75,7 @@ def _register_source_with_linecache(filename: Optional[str], source: str) -> Non
     if not filename:
         return
 
-    if linecache.getlines(filename):
+    if os.path.isfile(filename):
         return
 
     lines = source.splitlines(keepends=True)

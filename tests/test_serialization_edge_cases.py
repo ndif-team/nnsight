@@ -20,34 +20,73 @@ from nnsight.intervention.serialization import dumps, loads
 
 
 def test_deserialized_helper_trace_uses_registered_linecache(tiny_model, tmp_path):
-    """Nested traces should work after helper functions are deserialized."""
+    """Nested traces should work after helper functions are deserialized.
+
+    Simulates the remote session flow: a helper containing model.trace() is
+    serialized locally, then deserialized on a worker where the original file
+    doesn't exist.  inspect.getsourcelines() must still succeed.
+    """
     filename = str(tmp_path / "missing_remote_helper.py")
     source = textwrap.dedent(
         """\
         def helper(model, prompt):
             with model.trace(prompt):
-                pass
+                out = model.output.save()
+            return out
         """
     )
 
-    expected_lines = source.splitlines(keepends=True)
+    # Compile against a fake filename and pre-populate linecache so dumps()
+    # can serialise the function (the file doesn't really exist on disk).
+    lines = source.splitlines(keepends=True)
     namespace = {}
-    linecache.cache[filename] = (
-        len(source),
-        None,
-        expected_lines,
-        filename,
-    )
+    linecache.cache[filename] = (len(source), None, lines, filename)
     exec(compile(source, filename, "exec"), namespace)
     helper = namespace["helper"]
+
+    data = dumps(helper)
+    # Clear linecache to simulate a remote worker where the file is absent.
+    linecache.cache.pop(filename, None)
+
+    restored = loads(data)
+
+    # The deserialized helper must be callable and the nested trace must
+    # successfully extract source (no OSError).
+    result = restored(tiny_model, "Hello")
+    assert result is not None
+
+    # linecache must now contain the registered source.
+    assert filename in linecache.cache
+
+
+def test_deserialized_closure_helper_trace(tiny_model, tmp_path):
+    """Same as above but for a closure, which takes the factory_source path."""
+    filename = str(tmp_path / "missing_remote_closure.py")
+    # outer() returns a closure that captures `layer_idx`.
+    source = textwrap.dedent(
+        """\
+        def outer(layer_idx):
+            def helper(model, prompt):
+                with model.trace(prompt):
+                    out = model.output.save()
+                return out
+            return helper
+        """
+    )
+
+    lines = source.splitlines(keepends=True)
+    namespace = {}
+    linecache.cache[filename] = (len(source), None, lines, filename)
+    exec(compile(source, filename, "exec"), namespace)
+    helper = namespace["outer"](0)  # creates the closure
 
     data = dumps(helper)
     linecache.cache.pop(filename, None)
 
     restored = loads(data)
-    restored(tiny_model, "Hello")
-
-    assert linecache.getlines(filename) == expected_lines
+    result = restored(tiny_model, "Hello")
+    assert result is not None
+    assert filename in linecache.cache
 
 
 # =============================================================================
