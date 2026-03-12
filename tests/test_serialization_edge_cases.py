@@ -9,12 +9,45 @@ Run with: pytest tests/test_serialization_edge_cases.py -v
 """
 
 import sys
+import linecache
+import textwrap
 import pytest
 import torch
 
 sys.path.insert(0, "tests")
 
 from nnsight.intervention.serialization import dumps, loads
+
+
+def test_deserialized_helper_trace_uses_registered_linecache(tiny_model, tmp_path):
+    """Nested traces should work after helper functions are deserialized."""
+    filename = str(tmp_path / "missing_remote_helper.py")
+    source = textwrap.dedent(
+        """\
+        def helper(model, prompt):
+            with model.trace(prompt):
+                pass
+        """
+    )
+
+    expected_lines = source.splitlines(keepends=True)
+    namespace = {}
+    linecache.cache[filename] = (
+        len(source),
+        None,
+        expected_lines,
+        filename,
+    )
+    exec(compile(source, filename, "exec"), namespace)
+    helper = namespace["helper"]
+
+    data = dumps(helper)
+    linecache.cache.pop(filename, None)
+
+    restored = loads(data)
+    restored(tiny_model, "Hello")
+
+    assert linecache.getlines(filename) == expected_lines
 
 
 # =============================================================================

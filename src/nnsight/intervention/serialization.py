@@ -36,6 +36,7 @@ Examples:
 import dataclasses
 import inspect
 import io
+import linecache
 import pickle
 import textwrap
 import tokenize
@@ -66,6 +67,21 @@ _DATACLASS_GENERATED_METHODS = frozenset(
 
 # Default pickle protocol - protocol 4 is available in Python 3.4+ and supports large objects
 DEFAULT_PROTOCOL = 4
+
+
+def _register_source_with_linecache(filename: Optional[str], source: str) -> None:
+    """Register reconstructed source so inspect can recover it by filename."""
+    if not filename:
+        return
+
+    if linecache.getlines(filename):
+        return
+
+    lines = source.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+
+    linecache.cache[filename] = (len(source), None, lines, filename)
 
 
 def _extract_lambda_source(source: str, code: types.CodeType) -> str:
@@ -463,6 +479,7 @@ def make_function(
     """
     # Remove any leading indentation (e.g., if function was defined inside a class)
     source = textwrap.dedent(source)
+    linecache_source = source
 
     # Set up the global namespace for the reconstructed function.
     # This is a minimal globals dict - full globals are added by _source_function_setstate.
@@ -497,6 +514,8 @@ def make_function(
             indented_source = textwrap.indent(source, "    ")
             factory_source += indented_source + "\n"
             factory_source += f"    return {name}\n"
+
+        linecache_source = factory_source
 
         # Compile and execute the factory, then call it with closure values
         try:
@@ -555,6 +574,7 @@ def make_function(
     # Attach original source for re-serialization (inspect.getsource won't work
     # because line numbers don't match the original file)
     func.__source__ = source
+    _register_source_with_linecache(filename, linecache_source)
 
     return func
 
