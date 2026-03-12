@@ -406,12 +406,12 @@ class InterleavingTracer(Tracer):
 
         return self._frame
 
-    def execute(self, fn: Callable):
-        """
-        First executes the parent Tracer's execute method to set up the context,
-        then creates an Interleaver to manage the interventions during model execution.
-        """
+    def _setup_interleaver(self, fn: Callable):
+        """Run compiled user code, collect batched args, and initialize the interleaver.
 
+        Returns:
+            (args, kwargs): The batched positional and keyword arguments.
+        """
         fn(self.info, self)
 
         args = self.batcher.batched_args
@@ -421,8 +421,18 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_kwargs = {}
 
         interleaver = self.model._interleaver
-
         interleaver.initialize(self.mediators, self, batcher=self.batcher)
+
+        return args, kwargs
+
+    def execute(self, fn: Callable):
+        """
+        First executes the parent Tracer's execute method to set up the context,
+        then creates an Interleaver to manage the interventions during model execution.
+        """
+
+        args, kwargs = self._setup_interleaver(fn)
+
         try:
             self.model.interleave(self.fn, *args, **kwargs)
         finally:

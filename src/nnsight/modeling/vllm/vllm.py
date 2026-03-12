@@ -207,17 +207,19 @@ class VLLM(RemoteableMixin):
     def _prepare_input(
         self, *args, lora_request=None, **kwargs
     ) -> Tuple[Tuple[Tuple[Any], Dict[str, Any]], int]:
-        """Normalize a single user input into ``((prompts, params), kwargs, batch_size)``.
+        """Normalize a single user input into ``((prompts, params, lora_requests), kwargs, batch_size)``.
 
-        Accepts a single string, a single token ID list, or a single-sequence
-        HuggingFace tokenizer output and converts it into a vLLM-compatible
-        prompt with :class:`NNsightSamplingParams`.
+        Accepts one of:
+        - A string prompt (e.g. ``"Hello world"``)
+        - A list of token IDs (e.g. ``[101, 2023, ...]``)
+        - A HuggingFace tokenizer output dict with ``input_ids`` and
+          optional ``attention_mask``
 
-        Each invoke must contain exactly one prompt.  To process multiple
+        Each invoke must contain exactly one prompt. To process multiple
         prompts, use separate ``tracer.invoke()`` calls.
 
         Returns:
-            Tuple of ``((prompts, params), kwargs, batch_size)``.
+            Tuple of ``((prompts, params, lora_requests), kwargs, batch_size)``.
         """
 
         prompts = []
@@ -228,79 +230,83 @@ class VLLM(RemoteableMixin):
             if arg == []:
                 raise ValueError("Empty list of prompts is not allowed")
 
+            # --- HuggingFace tokenizer dict (e.g. tokenizer("hello")) ---
             if type(arg) is dict:
                 keys = set(arg.keys())
-                if "input_ids" in keys and keys.issubset(
-                    {"input_ids", "attention_mask"}
-                ):
-                    # is hf tokenizer result
-                    batch_input_ids = arg["input_ids"]
-                    batch_attention_mask = arg.get("attention_mask", None)
-                    if isinstance(batch_input_ids, torch.Tensor):
-                        batch_input_ids = batch_input_ids.tolist()
-                    if isinstance(batch_attention_mask, torch.Tensor):
-                        batch_attention_mask = batch_attention_mask.tolist()
-                    if batch_input_ids == []:
-                        raise ValueError("Empty list of token ids is not allowed")
-                    if isinstance(batch_input_ids[0], int):
-                        # single sequence of token ids
-                        batch_input_ids = [batch_input_ids]
-                        if batch_attention_mask is not None:
-                            batch_attention_mask = [batch_attention_mask]
-
-                    if len(batch_input_ids) > 1:
-                        raise ValueError(
-                            "Multiple prompts per invoke are not supported. "
-                            "Use separate tracer.invoke() calls for each prompt."
-                        )
-
-                    input_ids = batch_input_ids[0]
-                    attention_mask = batch_attention_mask[0] if batch_attention_mask is not None else None
-                    if attention_mask is not None:
-                        prompt = TokensPrompt(
-                            prompt_token_ids=[
-                                t for t, m in zip(input_ids, attention_mask) if m != 0
-                            ]
-                        )
-                    else:
-                        prompt = TokensPrompt(prompt_token_ids=input_ids)
+                if "input_ids" in keys and keys.issubset({"input_ids", "attention_mask"}):
+                    prompt = self._parse_hf_tokenizer_dict(arg)
                     prompts.append(prompt)
                     params.append(NNsightSamplingParams(**kwargs))
                     lora_requests.append(lora_request)
                     continue
 
+            # --- Token ID list (e.g. [101, 2023, ...]) ---
             if type(arg) is list and isinstance(arg[0], int):
-                # single list of token ids
-                arg = [arg]
+                prompt = TokensPrompt(prompt_token_ids=arg)
+
+            # --- String prompt (e.g. "Hello world") ---
             elif type(arg) is not list:
-                # single string
-                arg = [arg]
+                prompt = arg
+
+            # --- Multi-prompt list (not supported) ---
             else:
-                # arg is a list but not of ints — reject multi-prompt
                 raise ValueError(
                     "Multiple prompts per invoke are not supported. "
                     "Use separate tracer.invoke() calls for each prompt."
                 )
 
-            prompt = arg[0]
-
-            param = NNsightSamplingParams(
-                **kwargs,
-            )
-
-            if kwargs != {}:
+            param = NNsightSamplingParams(**kwargs)
+            if kwargs:
                 param.is_default_param = False
-
-            if type(prompt) is list and isinstance(prompt[0], int):
-                prompt = TokensPrompt(prompt_token_ids=prompt)
 
             prompts.append(prompt)
             params.append(param)
             lora_requests.append(lora_request)
 
+        # If args were provided, kwargs were already consumed as sampling params above.
         kwargs = kwargs if not args else {}
 
         return (prompts, params, lora_requests), kwargs, len(prompts)
+
+    def _parse_hf_tokenizer_dict(self, arg: dict) -> TokensPrompt:
+        """Convert a HuggingFace tokenizer output dict to a vLLM ``TokensPrompt``.
+
+        Handles tensor-to-list conversion, single vs batched sequences,
+        and attention mask filtering.
+        """
+        batch_input_ids = arg["input_ids"]
+        batch_attention_mask = arg.get("attention_mask", None)
+
+        # Convert tensors to lists
+        if isinstance(batch_input_ids, torch.Tensor):
+            batch_input_ids = batch_input_ids.tolist()
+        if isinstance(batch_attention_mask, torch.Tensor):
+            batch_attention_mask = batch_attention_mask.tolist()
+
+        if batch_input_ids == []:
+            raise ValueError("Empty list of token ids is not allowed")
+
+        # Normalize single sequence to batch format
+        if isinstance(batch_input_ids[0], int):
+            batch_input_ids = [batch_input_ids]
+            if batch_attention_mask is not None:
+                batch_attention_mask = [batch_attention_mask]
+
+        if len(batch_input_ids) > 1:
+            raise ValueError(
+                "Multiple prompts per invoke are not supported. "
+                "Use separate tracer.invoke() calls for each prompt."
+            )
+
+        input_ids = batch_input_ids[0]
+        attention_mask = batch_attention_mask[0] if batch_attention_mask is not None else None
+
+        # Filter out masked tokens if attention mask is provided
+        if attention_mask is not None:
+            return TokensPrompt(
+                prompt_token_ids=[t for t, m in zip(input_ids, attention_mask) if m != 0]
+            )
+        return TokensPrompt(prompt_token_ids=input_ids)
 
     def _batch(
         self, batched_inputs, prompts, params, lora_requests, **kwargs
@@ -321,7 +327,7 @@ class VLLM(RemoteableMixin):
         batched_args[2].extend(lora_requests)
         return batched_args, batched_kwargs
 
-    def _prepare_generation(
+    def _serialize_mediators(
         self,
         prompts: List[str],
         params: List[NNsightSamplingParams],
@@ -336,7 +342,7 @@ class VLLM(RemoteableMixin):
         defaults.
 
         Returns:
-            ``(prompts, params)`` with mediator data attached.
+            ``(prompts, params, lora_requests)`` with mediator data attached.
         """
 
         default_param = NNsightSamplingParams.from_optional()
@@ -394,7 +400,7 @@ class VLLM(RemoteableMixin):
         Each mediator maps to exactly one prompt/param (1:1).
         """
 
-        prompts, params, lora_requests = self._prepare_generation(prompts, params, lora_requests, **kwargs)
+        prompts, params, lora_requests = self._serialize_mediators(prompts, params, lora_requests, **kwargs)
 
         # Do VLLM generation with NNsight
         outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_requests)
@@ -417,11 +423,7 @@ class VLLM(RemoteableMixin):
     def trace(self, *inputs, **kwargs):
         if self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
             from .async_backend import AsyncVLLMBackend
-            from .async_tracer import AsyncInterleavingTracer
-
             kwargs['backend'] = AsyncVLLMBackend(self)
-            # Bypass RemoteableMixin to pass custom tracer_cls.
-            return Envoy.trace(self, *inputs, tracer_cls=AsyncInterleavingTracer, **kwargs)
         return super().trace(*inputs, **kwargs)
 
     def interleave(self, fn: Callable, *args, **kwargs):

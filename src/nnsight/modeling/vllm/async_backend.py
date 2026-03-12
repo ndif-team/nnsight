@@ -1,27 +1,26 @@
 import pickle
 import uuid
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from ...intervention.backends.base import Backend
 from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.util import wrap_exception
 
 if TYPE_CHECKING:
-    from .async_tracer import AsyncInterleavingTracer
     from .vllm import VLLM
 else:
-    AsyncInterleavingTracer = Any
     VLLM = Any
 
 
 class AsyncVLLMBackend(Backend):
     """Backend for async vLLM generation that returns an async generator.
 
-    Dual-call pattern:
-    - ``__call__(tracer)``: Called from ``__exit__``. Compiles and executes
-      the traced function which stores prepared data on the tracer.
-    - ``__call__()``: Called by user via ``tracer.backend()``. Returns an async
-      generator that streams ``RequestOutput`` objects from ``AsyncLLM``.
+    Usage pattern:
+    - ``__call__(tracer)``: Called from ``__exit__``. Compiles the traced
+      code, sets up mediators via ``_setup_interleaver()``, serializes them
+      into sampling params, and stores the prepared data on this backend.
+    - ``__call__()``: Called by user via ``tracer.backend()``. Returns an
+      async generator that streams ``RequestOutput`` objects from ``AsyncLLM``.
     """
 
     def __init__(self, model: "VLLM"):
@@ -31,28 +30,45 @@ class AsyncVLLMBackend(Backend):
         self._kwargs = None
         self._lora_requests = None
 
-    def __call__(self, tracer: Optional["AsyncInterleavingTracer"] = None):
+    def _compile_and_execute(self, tracer):
+        """Compile traced code, set up mediators, and serialize them.
+
+        Uses ``tracer._setup_interleaver()`` directly instead of going
+        through ``tracer.execute()`` / ``model.interleave()``, since the
+        async path only needs to serialize mediators — not run the model.
+        """
+        fn = Backend.__call__(self, tracer)
+
+        try:
+            Globals.enter()
+
+            # Set up mediators and collect batched args (shared with sync path).
+            args, kwargs = tracer._setup_interleaver(fn)
+
+            if not self.model.dispatched:
+                self.model.dispatch()
+
+            # Serialize mediators into sampling params.
+            prompts, params, lora_requests = self.model._serialize_mediators(
+                *args, **kwargs
+            )
+            self._prompts = prompts
+            self._params = params
+            self._lora_requests = lora_requests
+            self._kwargs = kwargs
+
+            tracer.mediators.clear()
+        except Exception as e:
+            raise wrap_exception(e, tracer.info) from None
+        finally:
+            Globals.exit()
+
+    def __call__(self, tracer=None):
         if tracer is not None:
-            # Compile step: call base Backend.__call__ to get compiled function
-            fn = super().__call__(tracer)
-
-            # Execute step: run the compiled function which sets up mediators
-            # and prepares generation data on the tracer.
-            try:
-                Globals.enter()
-                tracer.execute(fn)
-            except Exception as e:
-                raise wrap_exception(e, tracer.info) from None
-            finally:
-                Globals.exit()
-
-            # Grab prepared data from the tracer (not the model).
-            if tracer.prepared is not None:
-                self._prompts, self._params, self._lora_requests, self._kwargs = tracer.prepared
-
+            self._compile_and_execute(tracer)
             return
 
-        # No tracer: return async generator for streaming
+        # No tracer: return async generator for streaming.
         return self._stream()
 
     async def _stream(self):
