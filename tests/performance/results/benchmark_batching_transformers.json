@@ -1,0 +1,272 @@
+{
+  "metadata": {
+    "model": "Qwen/Qwen2.5-7B",
+    "backend": "transformers",
+    "device": "cuda (NVIDIA A100 80GB PCIe)",
+    "warmup": 3,
+    "runs": 5,
+    "scenarios": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "timestamp": "2026-03-12T23:20:57.689912"
+  },
+  "scenarios": {
+    "hook_overhead": {
+      "raw": {
+        "mean_ms": 38.302,
+        "std_ms": 1.555,
+        "min_ms": 36.556,
+        "max_ms": 39.848
+      },
+      "empty_trace": {
+        "mean_ms": 46.99,
+        "std_ms": 0.437,
+        "min_ms": 46.417,
+        "max_ms": 47.509
+      },
+      "single_save": {
+        "mean_ms": 51.095,
+        "std_ms": 4.811,
+        "min_ms": 47.453,
+        "max_ms": 59.022
+      },
+      "overhead_empty": 1.227,
+      "overhead_single": 1.334
+    },
+    "mediator_scaling": {
+      "1": {
+        "mean_ms": 48.428,
+        "std_ms": 1.527,
+        "min_ms": 47.148,
+        "max_ms": 50.604
+      },
+      "2": {
+        "mean_ms": 48.604,
+        "std_ms": 0.18,
+        "min_ms": 48.346,
+        "max_ms": 48.77
+      },
+      "4": {
+        "mean_ms": 53.211,
+        "std_ms": 3.006,
+        "min_ms": 51.563,
+        "max_ms": 58.567
+      },
+      "8": {
+        "mean_ms": 58.125,
+        "std_ms": 0.262,
+        "min_ms": 57.755,
+        "max_ms": 58.473
+      },
+      "16": {
+        "mean_ms": 77.565,
+        "std_ms": 0.74,
+        "min_ms": 76.737,
+        "max_ms": 78.403
+      },
+      "regression": {
+        "slope_ms_per_mediator": 1.961,
+        "intercept_ms": 45.031,
+        "r_squared": 0.9822
+      }
+    },
+    "sequential_vs_batched": {
+      "1": {
+        "raw_batched": {
+          "mean_ms": 37.549,
+          "std_ms": 1.594,
+          "min_ms": 36.551,
+          "max_ms": 40.36
+        },
+        "nnsight_batched": {
+          "mean_ms": 49.015,
+          "std_ms": 1.217,
+          "min_ms": 47.901,
+          "max_ms": 50.947
+        },
+        "overhead_ratio": 1.305,
+        "overhead_abs_ms": 11.47,
+        "throughput_raw": 26.6,
+        "throughput_nn": 20.4
+      },
+      "2": {
+        "raw_batched": {
+          "mean_ms": 36.867,
+          "std_ms": 0.782,
+          "min_ms": 36.179,
+          "max_ms": 37.713
+        },
+        "nnsight_batched": {
+          "mean_ms": 49.756,
+          "std_ms": 0.611,
+          "min_ms": 49.135,
+          "max_ms": 50.769
+        },
+        "overhead_ratio": 1.35,
+        "overhead_abs_ms": 12.89,
+        "throughput_raw": 54.2,
+        "throughput_nn": 40.2
+      },
+      "4": {
+        "raw_batched": {
+          "mean_ms": 36.519,
+          "std_ms": 0.279,
+          "min_ms": 36.266,
+          "max_ms": 36.995
+        },
+        "nnsight_batched": {
+          "mean_ms": 53.282,
+          "std_ms": 1.025,
+          "min_ms": 52.033,
+          "max_ms": 54.426
+        },
+        "overhead_ratio": 1.459,
+        "overhead_abs_ms": 16.76,
+        "throughput_raw": 109.5,
+        "throughput_nn": 75.1
+      },
+      "8": {
+        "raw_batched": {
+          "mean_ms": 29.077,
+          "std_ms": 0.422,
+          "min_ms": 28.775,
+          "max_ms": 29.81
+        },
+        "nnsight_batched": {
+          "mean_ms": 50.303,
+          "std_ms": 1.458,
+          "min_ms": 49.367,
+          "max_ms": 52.726
+        },
+        "overhead_ratio": 1.73,
+        "overhead_abs_ms": 21.23,
+        "throughput_raw": 275.1,
+        "throughput_nn": 159.0
+      },
+      "16": {
+        "raw_batched": {
+          "mean_ms": 35.936,
+          "std_ms": 5.602,
+          "min_ms": 33.17,
+          "max_ms": 45.945
+        },
+        "nnsight_batched": {
+          "mean_ms": 68.898,
+          "std_ms": 1.346,
+          "min_ms": 67.096,
+          "max_ms": 70.6
+        },
+        "overhead_ratio": 1.917,
+        "overhead_abs_ms": 32.96,
+        "throughput_raw": 445.2,
+        "throughput_nn": 232.2
+      },
+      "32": {
+        "raw_batched": {
+          "mean_ms": 45.927,
+          "std_ms": 8.828,
+          "min_ms": 36.356,
+          "max_ms": 53.558
+        },
+        "nnsight_batched": {
+          "mean_ms": 97.235,
+          "std_ms": 0.863,
+          "min_ms": 96.245,
+          "max_ms": 98.479
+        },
+        "overhead_ratio": 2.117,
+        "overhead_abs_ms": 51.31,
+        "throughput_raw": 696.8,
+        "throughput_nn": 329.1
+      }
+    },
+    "hol_blocking": {
+      "save_only": {
+        "sequential": {
+          "mean_ms": 303.376,
+          "std_ms": 4.796,
+          "min_ms": 299.033,
+          "max_ms": 309.276
+        },
+        "batched": {
+          "mean_ms": 50.997,
+          "std_ms": 0.531,
+          "min_ms": 50.49,
+          "max_ms": 51.699
+        },
+        "speedup": 5.949
+      },
+      "light": {
+        "sequential": {
+          "mean_ms": 302.765,
+          "std_ms": 17.996,
+          "min_ms": 290.437,
+          "max_ms": 334.381
+        },
+        "batched": {
+          "mean_ms": 54.474,
+          "std_ms": 2.864,
+          "min_ms": 52.165,
+          "max_ms": 59.04
+        },
+        "speedup": 5.558
+      },
+      "medium": {
+        "sequential": {
+          "mean_ms": 305.402,
+          "std_ms": 6.653,
+          "min_ms": 298.795,
+          "max_ms": 316.281
+        },
+        "batched": {
+          "mean_ms": 60.862,
+          "std_ms": 0.978,
+          "min_ms": 59.537,
+          "max_ms": 61.689
+        },
+        "speedup": 5.018
+      },
+      "heavy": {
+        "sequential": {
+          "mean_ms": 304.633,
+          "std_ms": 6.831,
+          "min_ms": 298.276,
+          "max_ms": 315.596
+        },
+        "batched": {
+          "mean_ms": 63.412,
+          "std_ms": 1.842,
+          "min_ms": 62.001,
+          "max_ms": 66.51
+        },
+        "speedup": 4.804
+      }
+    },
+    "cuda_sync": {
+      "save_only": {
+        "mean_ms": 39.311,
+        "std_ms": 0.552,
+        "min_ms": 38.882,
+        "max_ms": 40.235
+      },
+      "value_read": {
+        "mean_ms": 43.168,
+        "std_ms": 8.271,
+        "min_ms": 39.123,
+        "max_ms": 57.939
+      },
+      "in_place_modify": {
+        "mean_ms": 39.619,
+        "std_ms": 0.581,
+        "min_ms": 39.217,
+        "max_ms": 40.635
+      },
+      "delta_read_pct": 9.81,
+      "delta_inplace_pct": 0.78
+    }
+  }
+}
