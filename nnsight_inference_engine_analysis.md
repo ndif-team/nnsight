@@ -318,23 +318,116 @@ However, the collapse is more modest than the paper predicted (21× → 2.3× fo
 
 ---
 
-## 7. Key Architectural Observations
+## 7. Three Critical Bottlenecks
 
-### Why the Overhead Exists
+The benchmark results reveal three distinct performance bottlenecks. **Bottleneck 1 is a per-request fixed tax. Bottlenecks 2 and 3 degrade batching benefit specifically.**
 
-1. **Hooks on all modules:** ~842 hooks fire per forward pass, but only 1-2 match. The rest are pure iteration overhead.
-2. **Serial mediator processing:** The `_thread.lock`-based protocol enforces strict main↔worker alternation. No parallelism between workers.
-3. **Wrapper modules:** Container modules (DecoderLayer, Attention, MLP) have Y=0 GPU time but still have hooks — always pure overhead.
+---
 
-### What Would Reduce Overhead
+### Bottleneck 1: Inactive Hook Overhead (per-request)
 
-| Optimization | Potential Reduction | Note |
+**Every `model.trace()` call pays a fixed overhead from hooks firing on all ~N modules, even when only 1-2 are accessed.**
+
+Evidence (Qwen2.5-7B, A100):
+
+| Measurement | Time | Overhead vs raw |
 |---|---|---|
-| **Selective hooks** (only on accessed modules) | ~99.8% fewer hook calls | Requires knowing accessed modules at trace compile time |
-| **Parallel worker dispatch** (for read-only) | M× speedup at match points | Breaks for write interventions (race conditions on shared tensor) |
-| **Mediator indexing** (hash map per provider) | O(1) instead of O(M) per hook | Simple data structure change |
-| **CUDA graphs** for non-intervened sections | Near-zero overhead for clean segments | Incompatible with current hook-everywhere design |
+| Raw forward (no hooks) | 38.3 ms | — |
+| Empty trace (mediator immediately dies) | 47.0 ms | **+8.7 ms (+23%)** |
+| Single `.save()` at 1 layer | 51.1 ms | **+12.8 ms (+33%)** |
 
-### The Fundamental Tension
+The empty trace creates one mediator that runs `pass` and terminates. After the first hook processes the END event, all remaining ~799 hooks see a dead mediator. Yet they still cost +8.7ms. The single-save case adds only 4ms more — confirming that **most overhead is hooks firing, not the intervention itself.**
 
-NNsight's architecture trades **performance for generality**. The hook-on-everything + serial-mediator design allows intervention at any module with any operation, but pays O(modules × mediators) overhead even when only a tiny fraction of modules are accessed. For lightweight read-only workloads this is acceptable (~40% overhead at M=1). For heavy interventions batched together, the serial mediator protocol becomes the dominant cost.
+**Where the 8.7ms comes from** — per hook call (×~800 hooks × 2 input/output = ~1600 calls):
+
+```
+Per hook call (even with dead mediator):
+  ├─ PyTorch hook dispatch                        ~1 μs
+  ├─ module.__path__ access                       ~0.1 μs
+  ├─ f"{provider}.output" string allocation        ~0.2 μs
+  ├─ self.handle() call                           ~0.1 μs
+  │   ├─ batcher.current_value save/restore        ~0.3 μs
+  │   ├─ skip_count=0, skip_values=[] alloc        ~0.2 μs
+  │   ├─ for mediator in self.mediators:           ~0.1 μs
+  │   │   ├─ self.current = mediator               ~0.1 μs
+  │   │   ├─ iterate_provider() → f-string alloc   ~0.3 μs
+  │   │   ├─ mediator.handle() → has_value check   ~0.2 μs
+  │   │   └─ iteration_tracker check               ~0.1 μs
+  │   └─ restore original_current, return          ~0.2 μs
+  └─ return output                                 ~0.1 μs
+  ≈ 3-5 μs total per hook call
+```
+
+1600 calls × ~5 μs ≈ 8 ms. This matches the benchmark.
+
+**This bottleneck exists for every request**, regardless of batch size or intervention complexity. A user running `model.trace()` with a single lightweight `.save()` pays the same hook tax as a complex multi-invoke trace.
+
+**Why it's actionable:** If we could skip `handle()` for modules no mediator will access, we eliminate ~99.7% of these calls (e.g., 2 accessed out of 800). The cost of a set lookup (`if module.__path__ not in active_set: return`) at the top of each hook is ~50ns — negligible compared to the ~5μs saved per skipped hook. The challenge is populating `active_set` before the trace runs; options include AST analysis of the compiled intervention code, caching active modules from prior runs of the same trace site, or a lightweight scan pass.
+
+---
+
+### Bottleneck 2: Batched Mediator Scaling (batching penalty)
+
+**Each additional invoke adds a mediator, and every hook iterates all M mediators → O(N_modules × M) scaling.**
+
+Evidence (Qwen2.5-7B, A100):
+
+| M (mediators) | Time | Per-mediator cost |
+|---|---|---|
+| 1 | 48.0 ms | — |
+| 2 | 48.6 ms | +0.6 ms |
+| 4 | 53.2 ms | +1.3 ms/med |
+| 8 | 58.1 ms | +1.4 ms/med |
+| 16 | 77.6 ms | +2.0 ms/med |
+| **Linear fit** | **1.96 ms/mediator** | **R² = 0.982** |
+
+This is the `for mediator in self.mediators` loop in `Interleaver.handle()` (line 490). Each mediator adds: `self.current = mediator` + `iterate_provider()` (f-string alloc) + `mediator.handle()` (queue check) + `iteration_tracker` increment → ~5 Python operations per hook per mediator.
+
+The impact on batching throughput (Scenario 3):
+
+| B | Raw batched | NNsight batched | Overhead | Throughput gap |
+|---|---|---|---|---|
+| 1 | 37.5 ms | 49.0 ms | 1.30× | 27 vs 20 req/s |
+| 8 | 29.1 ms | 50.3 ms | 1.73× | 275 vs 159 req/s |
+| 32 | 45.9 ms | 97.2 ms | **2.12×** | 697 vs 329 req/s |
+
+Raw batching scales nearly free in the bandwidth-bound regime (GPU was idle anyway). NNsight batching pays an additional ~2ms per invoke of mediator iteration overhead. At B=32, the absolute gap is +51ms and throughput is less than half of raw.
+
+**This bottleneck only impacts batching** — single-invoke traces pay for M=1 only (which is Bottleneck 1). But it means that the more you batch, the worse the overhead ratio becomes, directly undermining the primary motivation for batching.
+
+**Relationship to Bottleneck 1:** These share the same mechanism (the mediator loop inside `handle()`). Bottleneck 1 is the fixed cost of the loop executing at all on ~800 hooks. Bottleneck 2 is the marginal cost of each additional iteration. Fixing Bottleneck 1 (skip inactive hooks) would also reduce Bottleneck 2, since the mediator loop wouldn't run on skipped hooks.
+
+---
+
+### Bottleneck 3: Slow Mediator Blocking (batching penalty for heavy interventions)
+
+**The serial lock-step protocol means one slow mediator blocks the main thread, which blocks the entire batch.**
+
+Evidence (Qwen2.5-7B, B=8):
+
+| Intervention weight | Batched time | Speedup vs sequential |
+|---|---|---|
+| `save_only` (baseline) | 51 ms | **5.95×** |
+| `light` (.mean()) | 54 ms | **5.56×** |
+| `medium` (hidden×hidden matmul) | 61 ms | **5.02×** |
+| `heavy` (SAE-like, 2× large matmul) | 63 ms | **4.80×** |
+
+Speedup drops 5.95× → 4.80× (19% reduction) as intervention weight increases. The mechanism: when a mediator match occurs, `mediator.respond(value)` wakes the worker thread, which runs user code (the intervention), and the main thread blocks on `event_queue.wait()` until the worker finishes. During this time, no other mediator can proceed and no GPU kernel can launch.
+
+On GPT-2 the effect is steeper (4.48× → 3.13×, 30% drop) because the model forward pass is shorter relative to intervention cost.
+
+**This bottleneck only impacts batching with non-trivial interventions.** Lightweight `.save()`-only workloads don't trigger it. The severity scales with: (a) intervention compute time, (b) number of mediators with heavy work, (c) how small the model forward pass is relative to intervention cost.
+
+---
+
+### Summary: Impact Matrix
+
+| Bottleneck | Affects | Mechanism | Measured impact (Qwen, A100) |
+|---|---|---|---|
+| **1. Inactive hooks** | **Every request** | ~800 hooks fire `handle()` on all modules, ~99.7% are no-ops | +8.7ms fixed overhead (23% of raw forward) |
+| **2. Batched mediators** | **Batching only** | Each invoke adds a mediator to the per-hook loop | +1.96 ms/mediator; overhead ratio 1.30× → 2.12× at B=32 |
+| **3. Slow mediators** | **Batching + heavy interventions** | Serial lock-step blocks main thread during worker execution | Speedup drops 19% (save→heavy at B=8) |
+
+Bottleneck 1 is the most impactful for the common case (single-invoke traces with light interventions). Bottleneck 2 is the primary limiter of batching throughput. Bottleneck 3 is a secondary batching penalty that compounds with Bottleneck 2 when interventions are compute-heavy.
+
+Fixing Bottleneck 1 (selective hooks via active module set) would also partially address Bottleneck 2, since the mediator loop wouldn't execute on skipped hooks. Bottleneck 3 requires a different approach (parallel worker dispatch for read-only interventions, or async intervention execution).
