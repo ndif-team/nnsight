@@ -121,7 +121,7 @@ class TransformersModel(HuggingFaceModel):
         with init_empty_weights():
             model = self.automodel.from_config(
                 self.config,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,
                 trust_remote_code=trust_remote_code,
                 attn_implementation=kwargs.get("attn_implementation"),
             )
