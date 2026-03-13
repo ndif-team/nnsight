@@ -160,6 +160,13 @@ class Cache:
             return dict.__getitem__(self, key)
 
         def __getattr__(self, attr: str):
+            # Guard against access during unpickling: pickle uses __new__
+            # (skipping __init__) then restores state, so _path may not
+            # exist yet when __getattr__ is called.  Without this guard
+            # torch.load() triggers infinite recursion (issue #501).
+            if attr == "_path":
+                raise AttributeError(attr)
+
             path = self._path + "." + attr if self._path != "" else attr
 
             if any(key.startswith(path) for key in self):
