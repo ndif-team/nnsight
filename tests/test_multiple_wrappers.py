@@ -326,3 +326,15 @@ class TestMultipleWrapperEdgeCases:
 
         # Gradients should be the same
         assert torch.allclose(grad1, grad2)
+
+    def test_bert_wrapper_construction_with_output_modules(self):
+        from transformers import BertConfig, BertForMaskedLM
+
+        with pytest.warns(UserWarning, match="pre-defined a `output` attribute"):
+            wrapper = NNsight(BertForMaskedLM(BertConfig()))
+
+        assert (
+            wrapper.bert.encoder.layer[0].output.path
+            == "model.bert.encoder.layer.0.output"
+        )
+        assert hasattr(type(wrapper.bert.encoder.layer[0]), "nns_output")
