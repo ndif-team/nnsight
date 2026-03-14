@@ -166,36 +166,79 @@ def sudo_drop_caches():
 # Experiments
 # ---------------------------------------------------------------------------
 
+def _patch_hf_workers(n_workers: int):
+    """Set the number of worker threads for from_pretrained shard loading.
+
+    Supports both transformers v5 (GLOBAL_WORKERS) and v4 (env var).
+    Returns a restore function.
+    """
+    try:
+        import transformers.core_model_loading as cml
+        original = cml.GLOBAL_WORKERS
+        cml.GLOBAL_WORKERS = n_workers
+
+        def restore():
+            cml.GLOBAL_WORKERS = original
+        return restore
+    except (ImportError, AttributeError):
+        pass
+
+    # Fallback: transformers v4 env var API
+    old_enable = os.environ.get("HF_ENABLE_PARALLEL_LOADING")
+    old_workers = os.environ.get("HF_PARALLEL_LOADING_WORKERS")
+    os.environ["HF_ENABLE_PARALLEL_LOADING"] = "1"
+    os.environ["HF_PARALLEL_LOADING_WORKERS"] = str(n_workers)
+
+    def restore():
+        if old_enable is None:
+            os.environ.pop("HF_ENABLE_PARALLEL_LOADING", None)
+        else:
+            os.environ["HF_ENABLE_PARALLEL_LOADING"] = old_enable
+        if old_workers is None:
+            os.environ.pop("HF_PARALLEL_LOADING_WORKERS", None)
+        else:
+            os.environ["HF_PARALLEL_LOADING_WORKERS"] = old_workers
+    return restore
+
+
 def run_hf(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
-           revision: str = "main") -> TimingResult:
-    """Load via LanguageModel with load_format='from_pretrained'."""
+           workers: int = 4, revision: str = "main") -> TimingResult:
+    """Load via LanguageModel with load_format='from_pretrained'.
+
+    Args:
+        workers: Number of worker threads for HF shard loading.
+    """
     from nnsight import LanguageModel
 
     max_memory = build_max_memory(gpu_ids)
+    restore = _patch_hf_workers(workers)
 
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
+    try:
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
 
-    model = LanguageModel(
-        model_id,
-        load_format="from_pretrained",
-        device_map="auto",
-        max_memory=max_memory,
-        torch_dtype=dtype,
-        revision=revision,
-        dispatch=True,
-    )
+        model = LanguageModel(
+            model_id,
+            load_format="from_pretrained",
+            device_map="auto",
+            max_memory=max_memory,
+            torch_dtype=dtype,
+            revision=revision,
+            dispatch=True,
+        )
 
-    torch.cuda.synchronize()
-    wall = time.perf_counter() - t0
+        torch.cuda.synchronize()
+        wall = time.perf_counter() - t0
 
-    peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
-    peak_cpu = get_process_rss_mb()
-    unload_model(model)
+        peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
+        peak_cpu = get_process_rss_mb()
+        unload_model(model)
+    finally:
+        restore()
 
     return TimingResult(
         experiment="hf",
-        config={},
+        config={"workers": workers},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
         peak_cpu_mem_mb=peak_cpu,
@@ -294,14 +337,18 @@ def verify_outputs(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
 # ---------------------------------------------------------------------------
 
 EXPERIMENT_CONFIGS = {
-    "hf": [("hf", {})],
+    "hf": [("hf", {"workers": w}) for w in [4, 8, 16]],
     "runai": [("runai", {"concurrency": c}) for c in [4, 8, 16]],
 }
 
 
 def run_single_config(exp_name, config, model_id, gpu_ids, dtype, revision):
     if exp_name == "hf":
-        return run_hf(model_id, gpu_ids, dtype, revision)
+        return run_hf(
+            model_id, gpu_ids, dtype,
+            workers=config.get("workers", 4),
+            revision=revision,
+        )
     elif exp_name == "runai":
         return run_runai(
             model_id, gpu_ids, dtype,
