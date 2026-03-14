@@ -201,7 +201,7 @@ def _patch_hf_workers(n_workers: int):
     return restore
 
 
-def run_hf(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
+def run_hf(model_id: str, gpu_ids: list[int],
            workers: int = 4, revision: str = "main") -> TimingResult:
     """Load via LanguageModel with load_format='from_pretrained'.
 
@@ -222,7 +222,6 @@ def run_hf(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
             load_format="from_pretrained",
             device_map="auto",
             max_memory=max_memory,
-            torch_dtype=dtype,
             revision=revision,
             dispatch=True,
         )
@@ -245,7 +244,7 @@ def run_hf(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
     )
 
 
-def run_runai(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
+def run_runai(model_id: str, gpu_ids: list[int],
               concurrency: int = 16, revision: str = "main") -> TimingResult:
     """Load via LanguageModel with run:ai streaming + from_pretrained."""
     from nnsight import LanguageModel
@@ -259,7 +258,6 @@ def run_runai(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
         model_id,
         device_map="auto",
         max_memory=max_memory,
-        torch_dtype=dtype,
         concurrency=concurrency,
         revision=revision,
         dispatch=True,
@@ -285,7 +283,7 @@ def run_runai(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
 # Correctness verification
 # ---------------------------------------------------------------------------
 
-def verify_outputs(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
+def verify_outputs(model_id: str, gpu_ids: list[int],
                    revision: str = "main") -> bool:
     """Load with both paths, run same prompt, compare logits."""
     from nnsight import LanguageModel
@@ -299,7 +297,7 @@ def verify_outputs(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
     model_hf = LanguageModel(
         model_id, load_format="from_pretrained",
         device_map="auto", max_memory=max_memory,
-        torch_dtype=dtype, revision=revision, dispatch=True,
+        revision=revision, dispatch=True,
     )
     with model_hf.trace(prompt):
         logits_hf = model_hf.lm_head.output.save()
@@ -310,7 +308,7 @@ def verify_outputs(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
     # run:ai path
     model_runai = LanguageModel(
         model_id, device_map="auto", max_memory=max_memory,
-        torch_dtype=dtype, revision=revision, dispatch=True,
+        revision=revision, dispatch=True,
     )
     with model_runai.trace(prompt):
         logits_runai = model_runai.lm_head.output.save()
@@ -342,16 +340,16 @@ EXPERIMENT_CONFIGS = {
 }
 
 
-def run_single_config(exp_name, config, model_id, gpu_ids, dtype, revision):
+def run_single_config(exp_name, config, model_id, gpu_ids, revision):
     if exp_name == "hf":
         return run_hf(
-            model_id, gpu_ids, dtype,
+            model_id, gpu_ids,
             workers=config.get("workers", 4),
             revision=revision,
         )
     elif exp_name == "runai":
         return run_runai(
-            model_id, gpu_ids, dtype,
+            model_id, gpu_ids,
             concurrency=config.get("concurrency", 16),
             revision=revision,
         )
@@ -368,8 +366,6 @@ def main():
     parser.add_argument("--revision", default="main")
     parser.add_argument("--gpus", default=None,
                         help="Comma-separated GPU IDs (default: all)")
-    parser.add_argument("--dtype", default="bfloat16",
-                        choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--experiments", nargs="+",
                         default=list(EXPERIMENT_CONFIGS.keys()),
                         choices=list(EXPERIMENT_CONFIGS.keys()))
@@ -381,10 +377,6 @@ def main():
                         help="Skip output correctness verification")
     parser.add_argument("--output", default=None, help="JSON output file")
     args = parser.parse_args()
-
-    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16,
-                 "float32": torch.float32}
-    dtype = dtype_map[args.dtype]
 
     if args.gpus:
         gpu_ids = [int(x) for x in args.gpus.split(",")]
@@ -411,7 +403,6 @@ def main():
     print(f"Model:       {args.model}")
     print(f"Model size:  {model_size_gb:.1f} GB")
     print(f"GPUs:        {gpu_ids}")
-    print(f"Dtype:       {args.dtype}")
     print(f"Repeats:     {args.repeats}")
     print(f"Experiments: {args.experiments}")
     print(f"run:ai:      {'available' if has_runai else 'NOT installed'}")
@@ -443,7 +434,7 @@ def main():
 
     # Correctness verification
     if not args.no_verify and has_runai and len(args.experiments) > 1:
-        ok = verify_outputs(args.model, gpu_ids, dtype, args.revision)
+        ok = verify_outputs(args.model, gpu_ids, args.revision)
         if not ok:
             print("\n  WARNING: Output mismatch between loading paths!")
         else:
@@ -469,7 +460,7 @@ def main():
                 try:
                     result = run_single_config(
                         exp_name, config, args.model, gpu_ids,
-                        dtype, args.revision,
+                        args.revision,
                     )
                     result.config["repeat"] = rep
                     bw = model_size_gb / result.wall_time_s if result.wall_time_s > 0 else 0
@@ -518,7 +509,7 @@ def main():
         with open(args.output, "w") as f:
             json.dump({
                 "model": args.model, "model_size_gb": model_size_gb,
-                "gpus": gpu_ids, "dtype": args.dtype, "results": out,
+                "gpus": gpu_ids, "results": out,
             }, f, indent=2)
         print(f"\nResults saved to {args.output}")
 
