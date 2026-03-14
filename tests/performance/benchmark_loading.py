@@ -247,7 +247,7 @@ def run_hf(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
 
 def run_runai(model_id: str, gpu_ids: list[int], dtype: torch.dtype,
               concurrency: int = 16, revision: str = "main") -> TimingResult:
-    """Load via LanguageModel with default run:ai streamer."""
+    """Load via LanguageModel with run:ai streaming + from_pretrained."""
     from nnsight import LanguageModel
 
     max_memory = build_max_memory(gpu_ids)
