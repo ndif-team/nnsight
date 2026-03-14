@@ -866,7 +866,7 @@ class Envoy(Batchable):
                 {},
             )
 
-            self.__class__ = new_cls
+            object.__setattr__(self, "__class__", new_cls)
 
         # Get the normal proxy mount point
         mount = getattr(Envoy, mount_point)
