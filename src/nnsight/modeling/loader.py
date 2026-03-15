@@ -234,6 +234,11 @@ class LazyRunAITensor:
         tensor = self._cache.get(self._shard_path, self._key)
         return tensor[idx]
 
+    def to(self, *args, **kwargs):
+        """Materialize the tensor and move it to the target device/dtype."""
+        tensor = self._cache.get(self._shard_path, self._key)
+        return tensor.to(*args, **kwargs)
+
     @property
     def dtype(self) -> torch.dtype:
         return self._dtype

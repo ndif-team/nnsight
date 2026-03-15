@@ -110,7 +110,7 @@ def build_max_memory(gpu_ids: list[int]) -> dict:
     max_memory = {}
     for i in range(torch.cuda.device_count()):
         if i in gpu_ids:
-            mem = torch.cuda.get_device_properties(i).total_mem
+            mem = torch.cuda.get_device_properties(i).total_memory
             max_memory[i] = int(mem * 0.9)
         else:
             max_memory[i] = 0
