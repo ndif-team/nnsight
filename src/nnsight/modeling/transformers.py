@@ -81,11 +81,14 @@ class TransformersModel(HuggingFaceModel):
         # Default: try run:ai streamer, fall back to from_pretrained if not installed
         if load_format != "from_pretrained":
             try:
-                model = self._load_streamed(repo_id, revision=revision, **kwargs)
+                eager = load_format == "runai_eager"
+                model = self._load_streamed(
+                    repo_id, revision=revision, eager=eager, **kwargs,
+                )
                 self.config = model.config
                 return model
             except ImportError:
-                if load_format == "runai_streamer":
+                if load_format in ("runai_streamer", "runai_eager"):
                     raise  # explicit request — don't swallow the error
                 # else load_format is None (default) — fall through silently
 
@@ -100,21 +103,34 @@ class TransformersModel(HuggingFaceModel):
         repo_id: str,
         revision: Optional[str] = None,
         concurrency: int = 16,
+        eager: bool = False,
         **kwargs,
     ) -> PreTrainedModel:
         """Load model using run:ai SafetensorsStreamer for fast disk I/O.
 
-        Streams all weights to a CPU dict via run:ai's O_DIRECT backend,
-        then delegates to ``from_pretrained(None, state_dict=...)`` for
+        When *eager* is False (default), builds a lazy state dict whose
+        values stream shard-by-shard on first ``__getitem__`` access —
+        peak CPU memory is ~2-3 shards instead of the full model.
+
+        When *eager* is True, streams **all** shards into a CPU dict
+        up-front (the pre-0.5 behaviour).  Useful for benchmarking.
+
+        In both cases, ``from_pretrained(None, state_dict=...)`` handles
         weight renaming, conversion, dtype casting, device placement,
         and tied weight resolution.
         """
-        # Import early so ImportError propagates to _load() before doing work
-        from runai_model_streamer import SafetensorsStreamer  # noqa: F401
-        from .loader import resolve_shard_paths, stream_to_state_dict
+        from .loader import (
+            resolve_shard_paths,
+            build_lazy_state_dict,
+            stream_to_state_dict,
+        )
 
         shard_paths = resolve_shard_paths(repo_id, revision=revision)
-        state_dict = stream_to_state_dict(shard_paths, concurrency=concurrency)
+
+        if eager:
+            state_dict = stream_to_state_dict(shard_paths, concurrency=concurrency)
+        else:
+            state_dict = build_lazy_state_dict(shard_paths, concurrency=concurrency)
 
         # Resolve concrete model class — Auto classes reject None as path
         model_class = self.automodel._model_mapping[type(self.config)]
