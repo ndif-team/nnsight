@@ -3,9 +3,9 @@
 Compares wall-clock time, peak GPU/CPU memory, and output correctness for
 loading HuggingFace models through nnsight's LanguageModel interface:
 
-  hf          — standard from_pretrained (safetensors on-disk → threaded loading)
-  runai_eager — run:ai O_DIRECT streaming, all shards into a CPU dict first
-  runai_lazy  — run:ai O_DIRECT streaming, shard-by-shard lazy loading
+  hf          — standard from_pretrained (safetensors mmap → threaded loading)
+  runai_eager — run:ai streaming (read + pthreads), all shards into a CPU dict first
+  runai_lazy  — run:ai streaming (read + pthreads), shard-by-shard lazy loading
 
 Page cache invalidation between experiments:
   By default, uses posix_fadvise(FADV_DONTNEED) on model shard files to evict
@@ -54,7 +54,8 @@ class TimingResult:
     config: dict
     wall_time_s: float
     peak_gpu_mem_mb: float = 0.0
-    peak_cpu_mem_mb: float = 0.0
+    peak_rss_mb: float = 0.0
+    peak_private_mb: float = 0.0
     disk_read_gib: Optional[float] = None
     net_rx_gib: Optional[float] = None
     net_tx_gib: Optional[float] = None
@@ -99,6 +100,71 @@ def get_process_rss_mb() -> float:
     except Exception:
         pass
     return 0.0
+
+
+def get_private_dirty_mb() -> float:
+    """Private dirty memory in MB via /proc/self/smaps_rollup.
+
+    Returns only Private_Dirty — pages the process allocated and wrote to.
+    Excludes Private_Clean (which includes MAP_PRIVATE mmap read-only pages
+    like safetensors mmap that don't actually consume extra physical RAM
+    beyond the page cache).
+    """
+    private_kb = 0
+    try:
+        with open("/proc/self/smaps_rollup") as f:
+            for line in f:
+                if line.startswith("Private_Dirty:"):
+                    private_kb += int(line.split()[1])
+    except Exception:
+        return get_process_rss_mb()  # fallback
+    return private_kb / 1024
+
+
+class PeakMemMonitor:
+    """Context manager that polls process memory in a background thread.
+
+    Tracks both RSS (total resident, including shared mmap pages) and
+    private memory (excluding shared pages like safetensors mmap).
+    Records the peak of each observed during the context.
+    """
+
+    def __init__(self, interval: float = 0.1):
+        self.interval = interval
+        self.peak_rss_mb: float = 0.0
+        self.peak_private_mb: float = 0.0
+        self._stop = False
+        self._thread = None
+
+    def _poll(self):
+        while not self._stop:
+            rss = get_process_rss_mb()
+            private = get_private_dirty_mb()
+            if rss > self.peak_rss_mb:
+                self.peak_rss_mb = rss
+            if private > self.peak_private_mb:
+                self.peak_private_mb = private
+            time.sleep(self.interval)
+
+    def __enter__(self):
+        import threading
+        self.peak_rss_mb = get_process_rss_mb()
+        self.peak_private_mb = get_private_dirty_mb()
+        self._stop = False
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop = True
+        self._thread.join(timeout=2)
+        # One final sample
+        rss = get_process_rss_mb()
+        private = get_private_dirty_mb()
+        if rss > self.peak_rss_mb:
+            self.peak_rss_mb = rss
+        if private > self.peak_private_mb:
+            self.peak_private_mb = private
 
 
 def get_gpu_mem_allocated_mb(gpu_ids: list[int]) -> float:
@@ -319,23 +385,23 @@ def run_hf(model_id: str, gpu_ids: list[int],
     restore = _patch_hf_workers(workers)
 
     try:
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
+        with PeakMemMonitor() as mem:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
 
-        model = LanguageModel(
-            model_id,
-            load_format="from_pretrained",
-            device_map="auto",
-            max_memory=max_memory,
-            revision=revision,
-            dispatch=True,
-        )
+            model = LanguageModel(
+                model_id,
+                load_format="from_pretrained",
+                device_map="auto",
+                max_memory=max_memory,
+                revision=revision,
+                dispatch=True,
+            )
 
-        torch.cuda.synchronize()
-        wall = time.perf_counter() - t0
+            torch.cuda.synchronize()
+            wall = time.perf_counter() - t0
 
         peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
-        peak_cpu = get_process_rss_mb()
         unload_model(model)
     finally:
         restore()
@@ -345,7 +411,8 @@ def run_hf(model_id: str, gpu_ids: list[int],
         config={"workers": workers},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
-        peak_cpu_mem_mb=peak_cpu,
+        peak_rss_mb=mem.peak_rss_mb,
+        peak_private_mb=mem.peak_private_mb,
     )
 
 
@@ -356,33 +423,38 @@ def run_runai_eager(model_id: str, gpu_ids: list[int],
     from nnsight import LanguageModel
 
     max_memory = build_max_memory(gpu_ids)
+    restore = _patch_hf_workers(concurrency)
 
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
+    try:
+        with PeakMemMonitor() as mem:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
 
-    model = LanguageModel(
-        model_id,
-        load_format="runai_eager",
-        device_map="auto",
-        max_memory=max_memory,
-        concurrency=concurrency,
-        revision=revision,
-        dispatch=True,
-    )
+            model = LanguageModel(
+                model_id,
+                load_format="runai_eager",
+                device_map="auto",
+                max_memory=max_memory,
+                concurrency=concurrency,
+                revision=revision,
+                dispatch=True,
+            )
 
-    torch.cuda.synchronize()
-    wall = time.perf_counter() - t0
+            torch.cuda.synchronize()
+            wall = time.perf_counter() - t0
 
-    peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
-    peak_cpu = get_process_rss_mb()
-    unload_model(model)
+        peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
+        unload_model(model)
+    finally:
+        restore()
 
     return TimingResult(
         experiment="runai_eager",
         config={"concurrency": concurrency},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
-        peak_cpu_mem_mb=peak_cpu,
+        peak_rss_mb=mem.peak_rss_mb,
+        peak_private_mb=mem.peak_private_mb,
     )
 
 
@@ -393,32 +465,37 @@ def run_runai_lazy(model_id: str, gpu_ids: list[int],
     from nnsight import LanguageModel
 
     max_memory = build_max_memory(gpu_ids)
+    restore = _patch_hf_workers(concurrency)
 
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
+    try:
+        with PeakMemMonitor() as mem:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
 
-    model = LanguageModel(
-        model_id,
-        device_map="auto",
-        max_memory=max_memory,
-        concurrency=concurrency,
-        revision=revision,
-        dispatch=True,
-    )
+            model = LanguageModel(
+                model_id,
+                device_map="auto",
+                max_memory=max_memory,
+                concurrency=concurrency,
+                revision=revision,
+                dispatch=True,
+            )
 
-    torch.cuda.synchronize()
-    wall = time.perf_counter() - t0
+            torch.cuda.synchronize()
+            wall = time.perf_counter() - t0
 
-    peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
-    peak_cpu = get_process_rss_mb()
-    unload_model(model)
+        peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
+        unload_model(model)
+    finally:
+        restore()
 
     return TimingResult(
         experiment="runai_lazy",
         config={"concurrency": concurrency},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
-        peak_cpu_mem_mb=peak_cpu,
+        peak_rss_mb=mem.peak_rss_mb,
+        peak_private_mb=mem.peak_private_mb,
     )
 
 
@@ -576,6 +653,11 @@ def main():
         print("ERROR: No valid experiments. Exiting.")
         sys.exit(1)
 
+    # Ensure model is downloaded before any experiments or cache operations
+    from huggingface_hub import snapshot_download
+    print(f"Downloading model (if needed): {args.model}")
+    snapshot_download(args.model, revision=args.revision)
+
     # Resolve model size
     model_size_gb = resolve_model_size_gb(args.model, args.revision)
 
@@ -634,6 +716,14 @@ def main():
     # Run experiments
     all_results = []
     for exp_name in args.experiments:
+        # Reset cache state between experiment groups so that e.g.
+        # runai_eager's 61 GB CPU footprint doesn't warm the cache
+        # for the next group (runai_lazy).
+        gc.collect()
+        drop_caches()
+        if args.warmup:
+            warm_model_pages(args.model, args.revision)
+
         print(f"\n{'=' * 60}")
         print(f"Experiment: {exp_name}")
         print(f"{'=' * 60}")
@@ -673,7 +763,8 @@ def main():
                     print(f"    wall_time:    {result.wall_time_s:.2f}s")
                     print(f"    bw:           {bw:.2f} GB/s")
                     print(f"    peak_gpu_mem: {result.peak_gpu_mem_mb:.0f} MB")
-                    print(f"    peak_cpu_mem: {result.peak_cpu_mem_mb:.0f} MB")
+                    print(f"    peak_rss:     {result.peak_rss_mb:.0f} MB")
+                    print(f"    peak_private: {result.peak_private_mb:.0f} MB")
                     if result.disk_read_gib is not None:
                         print(f"    disk_read:    {result.disk_read_gib:.3f} GiB")
                     if result.net_rx_gib is not None:
@@ -698,7 +789,8 @@ def main():
     print("SUMMARY")
     print(f"{'=' * 60}")
     hdr = (f"{'Experiment':<14} {'Config':<28} {'Wall (s)':<10} "
-           f"{'BW (GB/s)':<10} {'GPU (MB)':<10} {'CPU (MB)':<10} {'Disk (GiB)':<10}")
+           f"{'BW (GB/s)':<10} {'GPU (MB)':<10} {'RSS (MB)':<10} "
+           f"{'Private (MB)':<12} {'Disk (GiB)':<10}")
     print(hdr)
     print("-" * len(hdr))
     for r in all_results:
@@ -710,7 +802,8 @@ def main():
         bw = model_size_gb / r.wall_time_s if r.wall_time_s > 0 else 0
         disk_str = f"{r.disk_read_gib:.3f}" if r.disk_read_gib is not None else "n/a"
         print(f"{r.experiment:<14} {config_str:<28} {r.wall_time_s:<10.2f} "
-              f"{bw:<10.2f} {r.peak_gpu_mem_mb:<10.0f} {r.peak_cpu_mem_mb:<10.0f} {disk_str:<10}")
+              f"{bw:<10.2f} {r.peak_gpu_mem_mb:<10.0f} {r.peak_rss_mb:<10.0f} "
+              f"{r.peak_private_mb:<12.0f} {disk_str:<10}")
 
     # JSON output
     if args.output:
@@ -718,7 +811,8 @@ def main():
             "experiment": r.experiment, "config": r.config,
             "wall_time_s": r.wall_time_s,
             "peak_gpu_mem_mb": r.peak_gpu_mem_mb,
-            "peak_cpu_mem_mb": r.peak_cpu_mem_mb,
+            "peak_rss_mb": r.peak_rss_mb,
+            "peak_private_mb": r.peak_private_mb,
             "disk_read_gib": r.disk_read_gib,
             "net_rx_gib": r.net_rx_gib,
             "net_tx_gib": r.net_tx_gib,

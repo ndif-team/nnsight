@@ -61,8 +61,12 @@ vllm = [
     "triton==3.5.0",
 ]
 
+runai = [
+    "runai-model-streamer",
+    "runai-model-streamer-s3",
+]
 
-all = ["nnsight[test,diffusers,vllm]"]
+all = ["nnsight[test,diffusers,vllm,runai]"]
 
 [project.urls]
 Homepage = "https://github.com/ndif-team/nnsight"
