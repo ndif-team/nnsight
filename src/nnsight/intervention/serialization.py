@@ -42,6 +42,7 @@ import pickle
 import textwrap
 import tokenize
 import types
+import uuid
 from pathlib import Path
 from typing import Any, BinaryIO, Optional, Union
 
@@ -485,6 +486,10 @@ def make_function(
     # Set up the global namespace for the reconstructed function.
     # This is a minimal globals dict - full globals are added by _source_function_setstate.
     func_globals = {"__builtins__": __builtins__, **base_globals}
+
+    if filename is not None and not filename.startswith("<"):
+
+        filename = f"{uuid.uuid4().hex[:8]} {filename}"
 
     if closure_values and closure_names:
         # CLOSURE HANDLING: Functions with closures require special treatment.
