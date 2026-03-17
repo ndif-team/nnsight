@@ -81,6 +81,85 @@ def _parse_safetensors_keys(
     return key_map, shard_key_counts
 
 
+class RunAIBatchShardCache:
+    """Batch shard cache — loads an entire shard before serving any tensor.
+
+    Streams a shard on first access, caches all its tensors, and evicts the
+    shard once every key has been consumed.  Workers block until the full
+    shard is loaded (no overlap between disk I/O and GPU transfers within
+    a shard).
+
+    Retained for benchmarking against the incremental :class:`RunAIShardCache`.
+    """
+
+    def __init__(self, concurrency: int) -> None:
+        self._concurrency = concurrency
+        self._lock = threading.Lock()
+        self._shards: dict[str, dict[str, torch.Tensor]] = {}
+        self._refcounts: dict[str, int] = {}
+        self._loading: dict[str, threading.Event] = {}
+        self._errors: dict[str, Exception] = {}
+
+    def register(self, shard_path: str, num_keys: int) -> None:
+        """Set the initial refcount for a shard (= number of keys it holds)."""
+        self._refcounts[shard_path] = num_keys
+
+    def get(self, shard_path: str, key: str) -> torch.Tensor:
+        """Return the cloned tensor for *key*, streaming the shard if needed."""
+        while True:
+            with self._lock:
+                if shard_path in self._errors:
+                    raise self._errors[shard_path]
+
+                if shard_path in self._shards:
+                    return self._pop_tensor(shard_path, key)
+
+                if shard_path in self._loading:
+                    event = self._loading[shard_path]
+                else:
+                    event = threading.Event()
+                    self._loading[shard_path] = event
+                    break
+
+            event.wait()
+
+        try:
+            shard_dict = self._stream_shard(shard_path)
+            with self._lock:
+                self._shards[shard_path] = shard_dict
+                del self._loading[shard_path]
+            event.set()
+        except Exception as e:
+            with self._lock:
+                self._errors[shard_path] = e
+                self._loading.pop(shard_path, None)
+            event.set()
+            raise
+
+        with self._lock:
+            return self._pop_tensor(shard_path, key)
+
+    def _pop_tensor(self, shard_path: str, key: str) -> torch.Tensor:
+        tensor = self._shards[shard_path].pop(key)
+        self._refcounts[shard_path] -= 1
+        if self._refcounts[shard_path] == 0:
+            del self._shards[shard_path]
+            del self._refcounts[shard_path]
+        return tensor
+
+    def _stream_shard(self, shard_path: str) -> dict[str, torch.Tensor]:
+        from runai_model_streamer import SafetensorsStreamer
+
+        os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(self._concurrency)
+
+        shard_dict: dict[str, torch.Tensor] = {}
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_files([shard_path], device="cpu")
+            for name, tensor in streamer.get_tensors():
+                shard_dict[name] = tensor.clone()
+        return shard_dict
+
+
 class RunAIShardCache:
     """Incremental shard cache with per-tensor notification.
 
@@ -227,22 +306,28 @@ class LazyRunAITensor:
 def build_lazy_state_dict(
     shard_paths: list[str],
     concurrency: int = 16,
+    stream: bool = True,
     pin_memory: bool = False,
 ) -> dict[str, LazyRunAITensor]:
-    """Build a lazy state dict backed by run:ai incremental streaming.
+    """Build a lazy state dict backed by run:ai streaming.
 
     Values are :class:`LazyRunAITensor` instances that stream the
-    underlying safetensors shard on first ``__getitem__`` access.  Tensors
-    are streamed incrementally (one-by-one) and workers are notified
-    immediately, enabling pipelined disk I/O and GPU transfers.  Shards
+    underlying safetensors shard on first ``__getitem__`` access.  Shards
     are evicted from CPU memory once all their keys have been consumed,
     keeping peak RSS to ~2-3 shards instead of the full model.
 
     Args:
         shard_paths: Paths to ``.safetensors`` shard files.
         concurrency: Passed to ``RUNAI_STREAMER_CONCURRENCY``.
+        stream: If True (default), use incremental per-tensor streaming
+            (:class:`RunAIShardCache`) — tensors are available as soon as
+            they are read, enabling pipelined disk I/O and GPU transfers.
+            If False, use batch shard loading
+            (:class:`RunAIBatchShardCache`) — an entire shard is loaded
+            before any tensor is served.
         pin_memory: Pin cloned tensors to page-locked memory for faster
-            GPU transfers via ``cudaMemcpyAsync``.
+            GPU transfers via ``cudaMemcpyAsync``.  Only used when
+            *stream* is True.
 
     Returns:
         Dict mapping checkpoint key names to :class:`LazyRunAITensor`.
@@ -252,7 +337,10 @@ def build_lazy_state_dict(
 
     key_map, shard_key_counts = _parse_safetensors_keys(shard_paths)
 
-    cache = RunAIShardCache(concurrency, pin_memory=pin_memory)
+    if stream:
+        cache = RunAIShardCache(concurrency, pin_memory=pin_memory)
+    else:
+        cache = RunAIBatchShardCache(concurrency)
     for shard_path, count in shard_key_counts.items():
         cache.register(shard_path, count)
 

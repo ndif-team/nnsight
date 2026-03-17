@@ -10,7 +10,7 @@
 #   ./run_benchmark.sh                              # interactive, network nvme, cold+warm
 #   ./run_benchmark.sh --storage tmp --cache cold   # interactive, local /tmp, cold only
 #   ./run_benchmark.sh --sbatch                     # submit as Slurm job
-#   ./run_benchmark.sh -- --experiments hf runai_lazy --no-verify
+#   ./run_benchmark.sh -- --experiments hf runai_stream --no-verify
 #
 set -euo pipefail
 

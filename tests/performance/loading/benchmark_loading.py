@@ -1,10 +1,12 @@
-"""Benchmark: nnsight LanguageModel loading — two paths compared.
+"""Benchmark: nnsight LanguageModel loading — four paths compared.
 
 Compares wall-clock time, peak GPU/CPU memory, and output correctness for
 loading HuggingFace models through nnsight's LanguageModel interface:
 
-  hf          — standard from_pretrained (safetensors mmap → threaded loading)
-  runai_lazy  — run:ai streaming (read + pthreads), incremental tensor-by-tensor loading
+  hf                  — standard from_pretrained (safetensors mmap → threaded loading)
+  runai_batch         — run:ai O_DIRECT streaming, batch shard loading (entire shard before serving)
+  runai_stream        — run:ai O_DIRECT streaming, incremental per-tensor notification
+  runai_stream_pinned — run:ai incremental + pinned CPU memory for faster GPU transfers
 
 Page cache invalidation between experiments:
   By default, uses posix_fadvise(FADV_DONTNEED) on model shard files to evict
@@ -22,9 +24,9 @@ Usage:
   python benchmark_loading.py --model meta-llama/Llama-3.1-8B --warmup --no-drop-caches
 
   # Specific experiments
-  python benchmark_loading.py --model Qwen/Qwen2.5-7B-Instruct --experiments hf runai_lazy
+  python benchmark_loading.py --model Qwen/Qwen2.5-7B-Instruct --experiments hf runai_stream
 
-  # Both methods, 3 repeats, JSON output
+  # All four methods, 3 repeats, JSON output
   python benchmark_loading.py --model meta-llama/Llama-3.1-8B --repeats 3 --output results.json
 """
 
@@ -415,10 +417,13 @@ def run_hf(model_id: str, gpu_ids: list[int],
     )
 
 
-def run_runai_lazy(model_id: str, gpu_ids: list[int],
-                   concurrency: int = 16,
-                   revision: str = "main") -> TimingResult:
-    """Load via run:ai — lazy shard-by-shard streaming (new default)."""
+def run_runai(model_id: str, gpu_ids: list[int],
+              experiment: str = "runai_batch",
+              concurrency: int = 16,
+              stream: bool = False,
+              pin_memory: bool = False,
+              revision: str = "main") -> TimingResult:
+    """Load via run:ai lazy state dict with configurable cache strategy."""
     from nnsight import LanguageModel
 
     max_memory = build_max_memory(gpu_ids)
@@ -434,6 +439,8 @@ def run_runai_lazy(model_id: str, gpu_ids: list[int],
                 device_map="auto",
                 max_memory=max_memory,
                 concurrency=concurrency,
+                stream=stream,
+                pin_memory=pin_memory,
                 revision=revision,
                 dispatch=True,
             )
@@ -447,7 +454,7 @@ def run_runai_lazy(model_id: str, gpu_ids: list[int],
         restore()
 
     return TimingResult(
-        experiment="runai_lazy",
+        experiment=experiment,
         config={"concurrency": concurrency},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
@@ -494,9 +501,12 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
     print(f"\n  Verifying output correctness (prompt: {prompt!r})...")
 
     # Map experiment name → extra kwargs for LanguageModel
+    # All runai variants produce identical weights — only verify one
     load_kwargs = {
-        "hf":          {"load_format": "from_pretrained"},
-        "runai_lazy":  {},  # default path
+        "hf":                   {"load_format": "from_pretrained"},
+        "runai_batch":          {"stream": False},
+        "runai_stream":         {"stream": True},
+        "runai_stream_pinned":  {"stream": True, "pin_memory": True},
     }
 
     # Decide baseline order: prefer hf first
@@ -532,18 +542,30 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
 # Main
 # ---------------------------------------------------------------------------
 
-ALL_EXPERIMENTS = ["hf", "runai_lazy"]
+ALL_EXPERIMENTS = ["hf", "runai_batch", "runai_stream", "runai_stream_pinned"]
 
 EXPERIMENT_CONFIGS = {
-    "hf":          [("hf",          {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
-    "runai_lazy":  [("runai_lazy",  {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "hf":                   [("hf",                   {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
+    "runai_batch":          [("runai_batch",          {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "runai_stream":         [("runai_stream",         {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "runai_stream_pinned":  [("runai_stream_pinned",  {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
 }
 
 _RUNNERS = {
-    "hf":          lambda mid, gids, cfg, rev: run_hf(
-                       mid, gids, workers=cfg.get("workers", 4), revision=rev),
-    "runai_lazy":  lambda mid, gids, cfg, rev: run_runai_lazy(
-                       mid, gids, concurrency=cfg.get("concurrency", 16), revision=rev),
+    "hf":                   lambda mid, gids, cfg, rev: run_hf(
+                                mid, gids, workers=cfg.get("workers", 4), revision=rev),
+    "runai_batch":          lambda mid, gids, cfg, rev: run_runai(
+                                mid, gids, experiment="runai_batch",
+                                concurrency=cfg.get("concurrency", 16),
+                                stream=False, pin_memory=False, revision=rev),
+    "runai_stream":         lambda mid, gids, cfg, rev: run_runai(
+                                mid, gids, experiment="runai_stream",
+                                concurrency=cfg.get("concurrency", 16),
+                                stream=True, pin_memory=False, revision=rev),
+    "runai_stream_pinned":  lambda mid, gids, cfg, rev: run_runai(
+                                mid, gids, experiment="runai_stream_pinned",
+                                concurrency=cfg.get("concurrency", 16),
+                                stream=True, pin_memory=True, revision=rev),
 }
 
 
@@ -556,7 +578,7 @@ def run_single_config(exp_name, config, model_id, gpu_ids, revision):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark nnsight model loading: hf vs runai_lazy"
+        description="Benchmark nnsight model loading: hf vs runai_batch vs runai_stream vs runai_stream_pinned"
     )
     parser.add_argument("--model", default="openai-community/gpt2",
                         help="HuggingFace model ID")
@@ -595,7 +617,7 @@ def main():
     except ImportError:
         has_runai = False
 
-    runai_exps = {"runai_lazy"}
+    runai_exps = {"runai_batch", "runai_stream", "runai_stream_pinned"}
     if not has_runai:
         skipped = [e for e in args.experiments if e in runai_exps]
         if skipped:

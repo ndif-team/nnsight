@@ -76,6 +76,7 @@ class TransformersModel(HuggingFaceModel):
     ) -> PreTrainedModel:
 
         load_format = kwargs.pop("load_format", None)
+        stream = kwargs.pop("stream", True)
         pin_memory = kwargs.pop("pin_memory", False)
         self._load_config(repo_id, revision=revision, **kwargs)
 
@@ -84,7 +85,7 @@ class TransformersModel(HuggingFaceModel):
             try:
                 model = self._load_streamed(
                     repo_id, revision=revision,
-                    pin_memory=pin_memory, **kwargs,
+                    stream=stream, pin_memory=pin_memory, **kwargs,
                 )
                 self.config = model.config
                 return model
@@ -104,6 +105,7 @@ class TransformersModel(HuggingFaceModel):
         repo_id: str,
         revision: Optional[str] = None,
         concurrency: int = 16,
+        stream: bool = True,
         pin_memory: bool = False,
         **kwargs,
     ) -> PreTrainedModel:
@@ -123,7 +125,10 @@ class TransformersModel(HuggingFaceModel):
         )
 
         shard_paths = resolve_shard_paths(repo_id, revision=revision)
-        state_dict = build_lazy_state_dict(shard_paths, concurrency=concurrency, pin_memory=pin_memory)
+        state_dict = build_lazy_state_dict(
+            shard_paths, concurrency=concurrency,
+            stream=stream, pin_memory=pin_memory,
+        )
 
         # Resolve concrete model class — Auto classes reject None as path
         model_class = self.automodel._model_mapping[type(self.config)]
