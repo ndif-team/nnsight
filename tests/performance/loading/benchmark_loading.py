@@ -1,11 +1,10 @@
-"""Benchmark: nnsight LanguageModel loading — three paths compared.
+"""Benchmark: nnsight LanguageModel loading — two paths compared.
 
 Compares wall-clock time, peak GPU/CPU memory, and output correctness for
 loading HuggingFace models through nnsight's LanguageModel interface:
 
   hf          — standard from_pretrained (safetensors mmap → threaded loading)
-  runai_eager — run:ai streaming (read + pthreads), all shards into a CPU dict first
-  runai_lazy  — run:ai streaming (read + pthreads), shard-by-shard lazy loading
+  runai_lazy  — run:ai streaming (read + pthreads), incremental tensor-by-tensor loading
 
 Page cache invalidation between experiments:
   By default, uses posix_fadvise(FADV_DONTNEED) on model shard files to evict
@@ -25,7 +24,7 @@ Usage:
   # Specific experiments
   python benchmark_loading.py --model Qwen/Qwen2.5-7B-Instruct --experiments hf runai_lazy
 
-  # All three methods, 3 repeats, JSON output
+  # Both methods, 3 repeats, JSON output
   python benchmark_loading.py --model meta-llama/Llama-3.1-8B --repeats 3 --output results.json
 """
 
@@ -416,48 +415,6 @@ def run_hf(model_id: str, gpu_ids: list[int],
     )
 
 
-def run_runai_eager(model_id: str, gpu_ids: list[int],
-                    concurrency: int = 16,
-                    revision: str = "main") -> TimingResult:
-    """Load via run:ai — stream ALL shards into CPU dict, then from_pretrained."""
-    from nnsight import LanguageModel
-
-    max_memory = build_max_memory(gpu_ids)
-    restore = _patch_hf_workers(concurrency)
-
-    try:
-        with PeakMemMonitor() as mem:
-            torch.cuda.synchronize()
-            t0 = time.perf_counter()
-
-            model = LanguageModel(
-                model_id,
-                load_format="runai_eager",
-                device_map="auto",
-                max_memory=max_memory,
-                concurrency=concurrency,
-                revision=revision,
-                dispatch=True,
-            )
-
-            torch.cuda.synchronize()
-            wall = time.perf_counter() - t0
-
-        peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
-        unload_model(model)
-    finally:
-        restore()
-
-    return TimingResult(
-        experiment="runai_eager",
-        config={"concurrency": concurrency},
-        wall_time_s=wall,
-        peak_gpu_mem_mb=peak_gpu,
-        peak_rss_mb=mem.peak_rss_mb,
-        peak_private_mb=mem.peak_private_mb,
-    )
-
-
 def run_runai_lazy(model_id: str, gpu_ids: list[int],
                    concurrency: int = 16,
                    revision: str = "main") -> TimingResult:
@@ -539,7 +496,6 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
     # Map experiment name → extra kwargs for LanguageModel
     load_kwargs = {
         "hf":          {"load_format": "from_pretrained"},
-        "runai_eager": {"load_format": "runai_eager"},
         "runai_lazy":  {},  # default path
     }
 
@@ -576,19 +532,16 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
 # Main
 # ---------------------------------------------------------------------------
 
-ALL_EXPERIMENTS = ["hf", "runai_eager", "runai_lazy"]
+ALL_EXPERIMENTS = ["hf", "runai_lazy"]
 
 EXPERIMENT_CONFIGS = {
     "hf":          [("hf",          {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
-    "runai_eager": [("runai_eager", {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
     "runai_lazy":  [("runai_lazy",  {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
 }
 
 _RUNNERS = {
     "hf":          lambda mid, gids, cfg, rev: run_hf(
                        mid, gids, workers=cfg.get("workers", 4), revision=rev),
-    "runai_eager": lambda mid, gids, cfg, rev: run_runai_eager(
-                       mid, gids, concurrency=cfg.get("concurrency", 16), revision=rev),
     "runai_lazy":  lambda mid, gids, cfg, rev: run_runai_lazy(
                        mid, gids, concurrency=cfg.get("concurrency", 16), revision=rev),
 }
@@ -603,7 +556,7 @@ def run_single_config(exp_name, config, model_id, gpu_ids, revision):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark nnsight model loading: hf vs runai_eager vs runai_lazy"
+        description="Benchmark nnsight model loading: hf vs runai_lazy"
     )
     parser.add_argument("--model", default="openai-community/gpt2",
                         help="HuggingFace model ID")
@@ -642,7 +595,7 @@ def main():
     except ImportError:
         has_runai = False
 
-    runai_exps = {"runai_eager", "runai_lazy"}
+    runai_exps = {"runai_lazy"}
     if not has_runai:
         skipped = [e for e in args.experiments if e in runai_exps]
         if skipped:

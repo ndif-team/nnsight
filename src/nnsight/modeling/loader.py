@@ -82,23 +82,29 @@ def _parse_safetensors_keys(
 
 
 class RunAIShardCache:
-    """Thread-safe shard cache with automatic eviction.
+    """Incremental shard cache with per-tensor notification.
 
-    Streams a shard on first access, caches all its tensors, and evicts the
-    shard once every key has been consumed.  At most ~2-3 shards live in
-    memory concurrently (one being consumed, one pre-loaded by another
-    worker).
+    Instead of loading an entire shard before serving any tensor,
+    stores tensors one-by-one as Run:AI produces them and wakes
+    waiting workers immediately.  This enables pipelining between
+    disk I/O (loader thread) and GPU transfers (worker threads).
 
     Thread coordination handles up to ``GLOBAL_WORKERS`` concurrent callers
     from transformers' ``ThreadPoolExecutor``.
     """
 
-    def __init__(self, concurrency: int) -> None:
+    def __init__(self, concurrency: int, pin_memory: bool = False) -> None:
         self._concurrency = concurrency
+        self._pin_memory = pin_memory
         self._lock = threading.Lock()
-        self._shards: dict[str, dict[str, torch.Tensor]] = {}
+        self._condition = threading.Condition(self._lock)
+
+        # Per-tensor storage (flat, not grouped by shard)
+        self._tensors: dict[str, torch.Tensor] = {}
+
+        # Shard-level tracking
         self._refcounts: dict[str, int] = {}
-        self._loading: dict[str, threading.Event] = {}
+        self._shard_loading: set[str] = set()
         self._errors: dict[str, Exception] = {}
 
     def register(self, shard_path: str, num_keys: int) -> None:
@@ -107,65 +113,65 @@ class RunAIShardCache:
 
     def get(self, shard_path: str, key: str) -> torch.Tensor:
         """Return the cloned tensor for *key*, streaming the shard if needed."""
-        while True:
-            with self._lock:
+        should_load = False
+
+        with self._condition:
+            while True:
                 if shard_path in self._errors:
                     raise self._errors[shard_path]
 
-                if shard_path in self._shards:
+                if key in self._tensors:
                     return self._pop_tensor(shard_path, key)
 
-                if shard_path in self._loading:
-                    event = self._loading[shard_path]
-                else:
-                    # We are the loader for this shard.
-                    event = threading.Event()
-                    self._loading[shard_path] = event
-                    break  # exit lock to stream
+                if shard_path not in self._shard_loading:
+                    self._shard_loading.add(shard_path)
+                    should_load = True
+                    break
 
-            # Another thread is loading this shard — wait outside the lock.
-            event.wait()
+                # Wait for notification (spurious wakeups handled by loop)
+                self._condition.wait()
 
-        # -- Stream the shard (only the loader thread reaches here) ----------
-        try:
-            shard_dict = self._stream_shard(shard_path)
-            with self._lock:
-                self._shards[shard_path] = shard_dict
-                del self._loading[shard_path]
-            event.set()
-        except Exception as e:
-            with self._lock:
-                self._errors[shard_path] = e
-                self._loading.pop(shard_path, None)
-            event.set()
-            raise
+        if should_load:
+            try:
+                self._stream_shard_incremental(shard_path)
+            except Exception as e:
+                with self._condition:
+                    self._errors[shard_path] = e
+                    self._condition.notify_all()
+                raise
 
-        with self._lock:
-            return self._pop_tensor(shard_path, key)
+            # Loader's own tensor is now available
+            with self._condition:
+                if shard_path in self._errors:
+                    raise self._errors[shard_path]
+                return self._pop_tensor(shard_path, key)
 
     # -- internals -------------------------------------------------------------
 
     def _pop_tensor(self, shard_path: str, key: str) -> torch.Tensor:
-        """Pop *key* from the cached shard and evict the shard if exhausted."""
-        tensor = self._shards[shard_path].pop(key)
+        """Pop *key* from the cache and clean up shard tracking if exhausted."""
+        tensor = self._tensors.pop(key)
         self._refcounts[shard_path] -= 1
         if self._refcounts[shard_path] == 0:
-            del self._shards[shard_path]
             del self._refcounts[shard_path]
+            self._shard_loading.discard(shard_path)
         return tensor
 
-    def _stream_shard(self, shard_path: str) -> dict[str, torch.Tensor]:
-        """Stream a single shard via run:ai and return cloned tensors."""
+    def _stream_shard_incremental(self, shard_path: str) -> None:
+        """Stream a shard via run:ai, storing and notifying per tensor."""
         from runai_model_streamer import SafetensorsStreamer
 
         os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(self._concurrency)
 
-        shard_dict: dict[str, torch.Tensor] = {}
         with SafetensorsStreamer() as streamer:
             streamer.stream_files([shard_path], device="cpu")
             for name, tensor in streamer.get_tensors():
-                shard_dict[name] = tensor.clone()
-        return shard_dict
+                cloned = tensor.clone()
+                if self._pin_memory and torch.cuda.is_available():
+                    cloned = cloned.pin_memory()
+                with self._condition:
+                    self._tensors[name] = cloned
+                    self._condition.notify_all()
 
 
 class LazyRunAITensor:
@@ -197,11 +203,6 @@ class LazyRunAITensor:
     def __getitem__(self, idx):
         tensor = self._cache.get(self._shard_path, self._key)
         return tensor[idx]
-    
-    def to(self, *args, **kwargs):
-        """Materialize the tensor and move it to the target device/dtype."""
-        tensor = self._cache.get(self._shard_path, self._key)
-        return tensor.to(*args, **kwargs)
 
     def to(self, *args, **kwargs):
         """Materialize the tensor and move it to the target device/dtype."""
@@ -226,17 +227,22 @@ class LazyRunAITensor:
 def build_lazy_state_dict(
     shard_paths: list[str],
     concurrency: int = 16,
+    pin_memory: bool = False,
 ) -> dict[str, LazyRunAITensor]:
-    """Build a lazy state dict backed by run:ai shard-by-shard streaming.
+    """Build a lazy state dict backed by run:ai incremental streaming.
 
     Values are :class:`LazyRunAITensor` instances that stream the
-    underlying safetensors shard on first ``__getitem__`` access.  Shards
+    underlying safetensors shard on first ``__getitem__`` access.  Tensors
+    are streamed incrementally (one-by-one) and workers are notified
+    immediately, enabling pipelined disk I/O and GPU transfers.  Shards
     are evicted from CPU memory once all their keys have been consumed,
     keeping peak RSS to ~2-3 shards instead of the full model.
 
     Args:
         shard_paths: Paths to ``.safetensors`` shard files.
         concurrency: Passed to ``RUNAI_STREAMER_CONCURRENCY``.
+        pin_memory: Pin cloned tensors to page-locked memory for faster
+            GPU transfers via ``cudaMemcpyAsync``.
 
     Returns:
         Dict mapping checkpoint key names to :class:`LazyRunAITensor`.
@@ -246,7 +252,7 @@ def build_lazy_state_dict(
 
     key_map, shard_key_counts = _parse_safetensors_keys(shard_paths)
 
-    cache = RunAIShardCache(concurrency)
+    cache = RunAIShardCache(concurrency, pin_memory=pin_memory)
     for shard_path, count in shard_key_counts.items():
         cache.register(shard_path, count)
 

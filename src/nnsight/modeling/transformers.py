@@ -36,7 +36,7 @@ class TransformersModel(HuggingFaceModel):
     def __init__(self, *args, config_model: Type[PretrainedConfig] = None, automodel: Type[AutoModel] = AutoModel, **kwargs):
 
         self.config: PretrainedConfig = config_model
-        
+
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
@@ -76,13 +76,15 @@ class TransformersModel(HuggingFaceModel):
     ) -> PreTrainedModel:
 
         load_format = kwargs.pop("load_format", None)
+        pin_memory = kwargs.pop("pin_memory", False)
         self._load_config(repo_id, revision=revision, **kwargs)
 
         # Default: try run:ai streamer, fall back to from_pretrained if not installed
         if load_format != "from_pretrained":
             try:
                 model = self._load_streamed(
-                    repo_id, revision=revision, **kwargs,
+                    repo_id, revision=revision,
+                    pin_memory=pin_memory, **kwargs,
                 )
                 self.config = model.config
                 return model
@@ -102,6 +104,7 @@ class TransformersModel(HuggingFaceModel):
         repo_id: str,
         revision: Optional[str] = None,
         concurrency: int = 16,
+        pin_memory: bool = False,
         **kwargs,
     ) -> PreTrainedModel:
         """Load model using run:ai SafetensorsStreamer for fast disk I/O.
@@ -120,7 +123,7 @@ class TransformersModel(HuggingFaceModel):
         )
 
         shard_paths = resolve_shard_paths(repo_id, revision=revision)
-        state_dict = build_lazy_state_dict(shard_paths, concurrency=concurrency)
+        state_dict = build_lazy_state_dict(shard_paths, concurrency=concurrency, pin_memory=pin_memory)
 
         # Resolve concrete model class — Auto classes reject None as path
         model_class = self.automodel._model_mapping[type(self.config)]
