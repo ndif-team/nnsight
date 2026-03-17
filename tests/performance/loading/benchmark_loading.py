@@ -420,14 +420,22 @@ def run_hf(model_id: str, gpu_ids: list[int],
 def run_runai(model_id: str, gpu_ids: list[int],
               experiment: str = "runai_batch",
               concurrency: int = 16,
+              workers: int = 4,
               stream: bool = False,
               pin_memory: bool = False,
               revision: str = "main") -> TimingResult:
-    """Load via run:ai lazy state dict with configurable cache strategy."""
+    """Load via run:ai lazy state dict with configurable cache strategy.
+
+    *concurrency* controls Run:AI I/O threads (disk bandwidth).
+    *workers* controls HF GLOBAL_WORKERS (GPU transfer parallelism).
+    These are independent: with incremental streaming, 1 HF worker
+    becomes the shard loader while the remaining (workers-1) do GPU
+    transfers in parallel with ongoing disk I/O.
+    """
     from nnsight import LanguageModel
 
     max_memory = build_max_memory(gpu_ids)
-    restore = _patch_hf_workers(concurrency)
+    restore = _patch_hf_workers(workers)
 
     try:
         with PeakMemMonitor() as mem:
@@ -455,7 +463,7 @@ def run_runai(model_id: str, gpu_ids: list[int],
 
     return TimingResult(
         experiment=experiment,
-        config={"concurrency": concurrency},
+        config={"concurrency": concurrency, "workers": workers},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
         peak_rss_mb=mem.peak_rss_mb,
@@ -544,6 +552,14 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
 
 ALL_EXPERIMENTS = ["hf", "runai_batch", "runai_stream", "runai_stream_pinned"]
 
+# HF workers and Run:AI concurrency are independent knobs:
+#   workers     — HF GLOBAL_WORKERS: threads doing GPU transfers (.to(device))
+#   concurrency — RUNAI_STREAMER_CONCURRENCY: O_DIRECT I/O threads (disk bandwidth)
+#
+# For runai experiments, workers is fixed at 4 (1 loader + 3 GPU consumers)
+# while concurrency is swept to find the disk-bandwidth sweet spot.
+DEFAULT_RUNAI_WORKERS = 4
+
 EXPERIMENT_CONFIGS = {
     "hf":                   [("hf",                   {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
     "runai_batch":          [("runai_batch",          {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
@@ -557,14 +573,17 @@ _RUNNERS = {
     "runai_batch":          lambda mid, gids, cfg, rev: run_runai(
                                 mid, gids, experiment="runai_batch",
                                 concurrency=cfg.get("concurrency", 16),
+                                workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
                                 stream=False, pin_memory=False, revision=rev),
     "runai_stream":         lambda mid, gids, cfg, rev: run_runai(
                                 mid, gids, experiment="runai_stream",
                                 concurrency=cfg.get("concurrency", 16),
+                                workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
                                 stream=True, pin_memory=False, revision=rev),
     "runai_stream_pinned":  lambda mid, gids, cfg, rev: run_runai(
                                 mid, gids, experiment="runai_stream_pinned",
                                 concurrency=cfg.get("concurrency", 16),
+                                workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
                                 stream=True, pin_memory=True, revision=rev),
 }
 
