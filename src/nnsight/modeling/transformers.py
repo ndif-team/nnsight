@@ -76,8 +76,8 @@ class TransformersModel(HuggingFaceModel):
     ) -> PreTrainedModel:
 
         load_format = kwargs.pop("load_format", None)
-        stream = kwargs.pop("stream", True)
-        pin_memory = kwargs.pop("pin_memory", False)
+        gpu_direct = kwargs.pop("gpu_direct", True)
+        pin_memory = kwargs.pop("pin_memory", True)
         self._load_config(repo_id, revision=revision, **kwargs)
 
         # Default: try run:ai streamer, fall back to from_pretrained if not installed
@@ -85,7 +85,8 @@ class TransformersModel(HuggingFaceModel):
             try:
                 model = self._load_streamed(
                     repo_id, revision=revision,
-                    stream=stream, pin_memory=pin_memory, **kwargs,
+                    gpu_direct=gpu_direct, pin_memory=pin_memory,
+                    **kwargs,
                 )
                 self.config = model.config
                 return model
@@ -100,24 +101,68 @@ class TransformersModel(HuggingFaceModel):
 
         return model
 
+    def _resolve_device_map(self, device_map_str: str, max_memory=None,
+                            torch_dtype=None) -> dict:
+        """Expand a string device_map ('auto', 'balanced', etc.) to a dict.
+
+        Creates a throwaway meta-device model to compute the layer→device
+        mapping, then discards it.  This lets us know each tensor's target
+        GPU *before* streaming begins.
+
+        ``torch_dtype`` sets the default dtype during meta-model creation
+        so that memory estimates match the actual loading dtype (e.g.
+        bfloat16 vs float32).
+        """
+        from transformers.integrations.accelerate import _get_device_map
+        import torch
+
+        model_class = self.automodel._model_mapping[type(self.config)]
+        old_dtype = torch.get_default_dtype()
+        effective_dtype = torch_dtype or getattr(self.config, "torch_dtype", None)
+        if effective_dtype is not None:
+            torch.set_default_dtype(effective_dtype)
+        try:
+            with torch.device("meta"):
+                meta_model = model_class(self.config)
+            resolved = _get_device_map(
+                meta_model, device_map_str, max_memory, hf_quantizer=None,
+            )
+        finally:
+            torch.set_default_dtype(old_dtype)
+        del meta_model
+        return resolved
+
     def _load_streamed(
         self,
         repo_id: str,
         revision: Optional[str] = None,
         concurrency: int = 16,
-        stream: bool = True,
-        pin_memory: bool = False,
+        gpu_direct: bool = True,
+        pin_memory: bool = True,
         **kwargs,
     ) -> PreTrainedModel:
         """Load model using run:ai SafetensorsStreamer for fast disk I/O.
 
-        Builds a lazy state dict whose values stream shard-by-shard on
-        first ``__getitem__`` access — peak CPU memory is ~2-3 shards
+        Builds a lazy state dict whose values stream incrementally on
+        first ``__getitem__`` access — peak CPU memory is ~1 tensor
         instead of the full model.
 
-        ``from_pretrained(None, state_dict=...)`` handles weight renaming,
-        conversion, dtype casting, device placement, and tied weight
-        resolution.
+        When *gpu_direct* is True (default) and ``device_map`` is a
+        string like ``"auto"``, it is resolved to a concrete dict
+        *before* building the lazy state dict so that the streaming
+        cache can copy tensors directly to their target GPU, making
+        HF's ``_materialize_copy().to()`` a no-op.
+
+        When *gpu_direct* is False, tensors are cloned to CPU and HF
+        workers handle the GPU transfer (the pre-GPU-direct path).
+
+        When *pin_memory* is True (default) and *gpu_direct* is True,
+        pinned staging buffers are used for async double-buffered DMA
+        that overlaps GPU copies with disk reads.
+
+        ``from_pretrained(None, state_dict=...)`` handles weight
+        renaming, conversion, dtype casting, device placement, and
+        tied weight resolution.
         """
         from .loader import (
             resolve_shard_paths,
@@ -125,9 +170,26 @@ class TransformersModel(HuggingFaceModel):
         )
 
         shard_paths = resolve_shard_paths(repo_id, revision=revision)
+
+        # Resolve device_map early so the cache can place tensors on GPU
+        device_map = kwargs.pop("device_map", None)
+        resolved_device_map = None
+        if gpu_direct:
+            if isinstance(device_map, str) and device_map in (
+                "auto", "balanced", "balanced_low_0", "sequential",
+            ):
+                resolved_device_map = self._resolve_device_map(
+                    device_map, max_memory=kwargs.get("max_memory"),
+                    torch_dtype=kwargs.get("torch_dtype"),
+                )
+            elif isinstance(device_map, dict):
+                resolved_device_map = device_map
+
         state_dict = build_lazy_state_dict(
             shard_paths, concurrency=concurrency,
-            stream=stream, pin_memory=pin_memory,
+            device_map=resolved_device_map,
+            torch_dtype=kwargs.get("torch_dtype") if gpu_direct else None,
+            pin_memory=pin_memory and gpu_direct,
         )
 
         # Resolve concrete model class — Auto classes reject None as path
@@ -138,6 +200,7 @@ class TransformersModel(HuggingFaceModel):
             config=self.config,
             state_dict=state_dict,
             revision=revision,
+            device_map=resolved_device_map or device_map,
             **kwargs,
         )
         return model

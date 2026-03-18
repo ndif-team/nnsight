@@ -1,18 +1,14 @@
-"""Benchmark: nnsight LanguageModel loading — four paths compared.
+"""Benchmark: nnsight LanguageModel loading — HF vs Run:AI streaming.
 
 Compares wall-clock time, peak GPU/CPU memory, and output correctness for
 loading HuggingFace models through nnsight's LanguageModel interface:
 
-  hf                  — standard from_pretrained (safetensors mmap → threaded loading)
-  runai_batch         — run:ai O_DIRECT streaming, batch shard loading (entire shard before serving)
-  runai_stream        — run:ai O_DIRECT streaming, incremental per-tensor notification
-  runai_stream_pinned — run:ai incremental + pinned CPU memory for faster GPU transfers
+  hf           — standard from_pretrained (safetensors mmap → threaded loading)
+  runai_stream — run:ai O_DIRECT streaming with GPU-direct tensor placement
 
 Page cache invalidation between experiments:
   By default, uses posix_fadvise(FADV_DONTNEED) on model shard files to evict
   their pages from the kernel page cache. This is reliable and requires no sudo.
-  With --junk-drop-caches, reads a large junk file to pressure the page cache
-  (unreliable due to Linux active/inactive list behavior).
   With --sudo-drop-caches, uses 'echo 3 > /proc/sys/vm/drop_caches' instead.
   With --no-drop-caches, skips invalidation entirely (warm-cache runs).
 
@@ -26,7 +22,7 @@ Usage:
   # Specific experiments
   python benchmark_loading.py --model Qwen/Qwen2.5-7B-Instruct --experiments hf runai_stream
 
-  # All four methods, 3 repeats, JSON output
+  # Both methods, 3 repeats, JSON output
   python benchmark_loading.py --model meta-llama/Llama-3.1-8B --repeats 3 --output results.json
 """
 
@@ -212,60 +208,8 @@ def resolve_model_size_gb(model_id: str, revision: str = "main") -> float:
 # Page cache invalidation
 # ---------------------------------------------------------------------------
 
-JUNK_FILE_PATH = "/tmp/bench_loading_junk.bin"
-JUNK_FILE_SIZE_GB = 512
-
-
-def create_junk_file(path: str, size_gb: int):
-    if os.path.exists(path):
-        existing_gb = os.path.getsize(path) / (1024 ** 3)
-        if existing_gb >= size_gb * 0.99:
-            print(f"  [junk] Reusing existing {existing_gb:.0f} GB file at {path}")
-            return
-    print(f"  [junk] Creating {size_gb} GB junk file at {path}...")
-    t0 = time.perf_counter()
-    subprocess.run(
-        ["dd", "if=/dev/zero", f"of={path}", "bs=1M", f"count={size_gb * 1024}",
-         "status=progress"],
-        check=True,
-    )
-    print(f"  [junk] Created in {time.perf_counter() - t0:.0f}s")
-
-
-def invalidate_via_junk_file(path: str, num_threads: int = 16):
-    if not os.path.exists(path):
-        print(f"  [cache] Junk file not found: {path}")
-        return
-    file_size = os.path.getsize(path)
-    size_gb = file_size / (1024 ** 3)
-    chunk_size = file_size // num_threads
-    print(f"  [cache] Reading {size_gb:.0f} GB junk file ({num_threads} threads)...")
-
-    def _read_chunk(idx):
-        offset = idx * chunk_size
-        end = file_size if idx == num_threads - 1 else offset + chunk_size
-        with open(path, "rb") as f:
-            f.seek(offset)
-            remaining = end - offset
-            while remaining > 0:
-                data = f.read(min(16 * 1024 * 1024, remaining))
-                if not data:
-                    break
-                remaining -= len(data)
-
-    t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=num_threads) as pool:
-        list(pool.map(_read_chunk, range(num_threads)))
-    elapsed = time.perf_counter() - t0
-    print(f"  [cache] Done in {elapsed:.1f}s ({size_gb / elapsed:.1f} GB/s)")
-
-
 def evict_model_pages(model_id: str, revision: str = "main"):
-    """Drop page cache for model shard files using posix_fadvise(FADV_DONTNEED).
-
-    This evicts pages by inode regardless of which process/function loaded them.
-    Works without sudo and targets only the model files (not the entire cache).
-    """
+    """Drop page cache for model shard files using posix_fadvise(FADV_DONTNEED)."""
     from huggingface_hub import snapshot_download
 
     try:
@@ -418,19 +362,19 @@ def run_hf(model_id: str, gpu_ids: list[int],
 
 
 def run_runai(model_id: str, gpu_ids: list[int],
-              experiment: str = "runai_batch",
+              experiment: str = "runai_stream",
               concurrency: int = 16,
               workers: int = 4,
-              stream: bool = False,
-              pin_memory: bool = False,
+              gpu_direct: bool = False,
               revision: str = "main") -> TimingResult:
-    """Load via run:ai lazy state dict with configurable cache strategy.
+    """Load via run:ai streaming.
 
     *concurrency* controls Run:AI I/O threads (disk bandwidth).
     *workers* controls HF GLOBAL_WORKERS (GPU transfer parallelism).
-    These are independent: with incremental streaming, 1 HF worker
-    becomes the shard loader while the remaining (workers-1) do GPU
-    transfers in parallel with ongoing disk I/O.
+
+    When *gpu_direct* is True, the cache copies tensors directly from the
+    Run:AI buffer to GPU — HF workers just consume pre-placed tensors.
+    When False, tensors are cloned to CPU and HF workers handle GPU transfer.
     """
     from nnsight import LanguageModel
 
@@ -447,8 +391,7 @@ def run_runai(model_id: str, gpu_ids: list[int],
                 device_map="auto",
                 max_memory=max_memory,
                 concurrency=concurrency,
-                stream=stream,
-                pin_memory=pin_memory,
+                gpu_direct=gpu_direct,
                 revision=revision,
                 dispatch=True,
             )
@@ -496,11 +439,7 @@ def _load_and_get_logits(model_id, gpu_ids, revision, prompt, **extra_kwargs):
 def verify_outputs(model_id: str, gpu_ids: list[int],
                    experiments: list[str],
                    revision: str = "main") -> bool:
-    """Load with each selected path, run same prompt, compare logits.
-
-    Uses 'hf' as the ground truth baseline when available, otherwise
-    compares all against the first experiment.
-    """
+    """Load with each selected path, run same prompt, compare logits."""
     if len(experiments) < 2:
         print("  Skipping verification (need at least 2 experiments)")
         return True
@@ -508,13 +447,10 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
     prompt = "The Eiffel Tower is in the city of"
     print(f"\n  Verifying output correctness (prompt: {prompt!r})...")
 
-    # Map experiment name → extra kwargs for LanguageModel
-    # All runai variants produce identical weights — only verify one
     load_kwargs = {
-        "hf":                   {"load_format": "from_pretrained"},
-        "runai_batch":          {"stream": False},
-        "runai_stream":         {"stream": True},
-        "runai_stream_pinned":  {"stream": True, "pin_memory": True},
+        "hf":               {"load_format": "from_pretrained"},
+        "runai_stream":     {"gpu_direct": False},
+        "runai_gpu_direct": {},
     }
 
     # Decide baseline order: prefer hf first
@@ -550,41 +486,32 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
 # Main
 # ---------------------------------------------------------------------------
 
-ALL_EXPERIMENTS = ["hf", "runai_batch", "runai_stream", "runai_stream_pinned"]
+ALL_EXPERIMENTS = ["hf", "runai_stream", "runai_gpu_direct"]
 
 # HF workers and Run:AI concurrency are independent knobs:
 #   workers     — HF GLOBAL_WORKERS: threads doing GPU transfers (.to(device))
 #   concurrency — RUNAI_STREAMER_CONCURRENCY: O_DIRECT I/O threads (disk bandwidth)
-#
-# For runai experiments, workers is fixed at 4 (1 loader + 3 GPU consumers)
-# while concurrency is swept to find the disk-bandwidth sweet spot.
 DEFAULT_RUNAI_WORKERS = 4
 
 EXPERIMENT_CONFIGS = {
-    "hf":                   [("hf",                   {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
-    "runai_batch":          [("runai_batch",          {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
-    "runai_stream":         [("runai_stream",         {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
-    "runai_stream_pinned":  [("runai_stream_pinned",  {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "hf":               [("hf",               {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
+    "runai_stream":     [("runai_stream",      {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "runai_gpu_direct": [("runai_gpu_direct",  {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
 }
 
 _RUNNERS = {
-    "hf":                   lambda mid, gids, cfg, rev: run_hf(
-                                mid, gids, workers=cfg.get("workers", 4), revision=rev),
-    "runai_batch":          lambda mid, gids, cfg, rev: run_runai(
-                                mid, gids, experiment="runai_batch",
-                                concurrency=cfg.get("concurrency", 16),
-                                workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
-                                stream=False, pin_memory=False, revision=rev),
-    "runai_stream":         lambda mid, gids, cfg, rev: run_runai(
-                                mid, gids, experiment="runai_stream",
-                                concurrency=cfg.get("concurrency", 16),
-                                workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
-                                stream=True, pin_memory=False, revision=rev),
-    "runai_stream_pinned":  lambda mid, gids, cfg, rev: run_runai(
-                                mid, gids, experiment="runai_stream_pinned",
-                                concurrency=cfg.get("concurrency", 16),
-                                workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
-                                stream=True, pin_memory=True, revision=rev),
+    "hf":               lambda mid, gids, cfg, rev: run_hf(
+                            mid, gids, workers=cfg.get("workers", 4), revision=rev),
+    "runai_stream":     lambda mid, gids, cfg, rev: run_runai(
+                            mid, gids, experiment="runai_stream",
+                            concurrency=cfg.get("concurrency", 16),
+                            workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                            gpu_direct=False, revision=rev),
+    "runai_gpu_direct": lambda mid, gids, cfg, rev: run_runai(
+                            mid, gids, experiment="runai_gpu_direct",
+                            concurrency=cfg.get("concurrency", 16),
+                            workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                            gpu_direct=True, revision=rev),
 }
 
 
@@ -597,7 +524,7 @@ def run_single_config(exp_name, config, model_id, gpu_ids, revision):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark nnsight model loading: hf vs runai_batch vs runai_stream vs runai_stream_pinned"
+        description="Benchmark nnsight model loading: hf vs runai_stream vs runai_gpu_direct"
     )
     parser.add_argument("--model", default="openai-community/gpt2",
                         help="HuggingFace model ID")
@@ -610,9 +537,6 @@ def main():
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--sudo-drop-caches", action="store_true")
     parser.add_argument("--no-drop-caches", action="store_true")
-    parser.add_argument("--junk-drop-caches", action="store_true",
-                        help="Use junk file to pressure page cache (unreliable)")
-    parser.add_argument("--junk-size-gb", type=int, default=JUNK_FILE_SIZE_GB)
     parser.add_argument("--warmup", action="store_true",
                         help="Read model shards into page cache before timing")
     parser.add_argument("--disk-device", default="nvme0n1",
@@ -636,7 +560,7 @@ def main():
     except ImportError:
         has_runai = False
 
-    runai_exps = {"runai_batch", "runai_stream", "runai_stream_pinned"}
+    runai_exps = {"runai_stream", "runai_gpu_direct"}
     if not has_runai:
         skipped = [e for e in args.experiments if e in runai_exps]
         if skipped:
@@ -663,7 +587,6 @@ def main():
     print(f"run:ai:      {'available' if has_runai else 'NOT installed'}")
 
     # Cache invalidation setup
-    junk_file = None
     if args.sudo_drop_caches:
         cache_mode = "sudo_drop_caches"
         print("Cache mode:  sudo drop_caches")
@@ -676,11 +599,6 @@ def main():
     elif args.no_drop_caches:
         cache_mode = "warm" if args.warmup else "disabled"
         print(f"Cache mode:  {cache_mode}")
-    elif args.junk_drop_caches:
-        cache_mode = "junk_file"
-        print(f"Cache mode:  junk file ({args.junk_size_gb} GB on /tmp)")
-        junk_file = JUNK_FILE_PATH
-        create_junk_file(junk_file, args.junk_size_gb)
     else:
         cache_mode = "cold"
         print("Cache mode:  fadvise (FADV_DONTNEED on model shards)")
@@ -690,8 +608,6 @@ def main():
             return
         if args.sudo_drop_caches:
             sudo_drop_caches()
-        elif args.junk_drop_caches:
-            invalidate_via_junk_file(junk_file)
         else:
             evict_model_pages(args.model, args.revision)
 
@@ -710,9 +626,6 @@ def main():
     # Run experiments
     all_results = []
     for exp_name in args.experiments:
-        # Reset cache state between experiment groups so that e.g.
-        # runai_eager's 61 GB CPU footprint doesn't warm the cache
-        # for the next group (runai_lazy).
         gc.collect()
         drop_caches()
         if args.warmup:

@@ -1,84 +1,163 @@
-# Model Loading Benchmark: HF vs run:ai Streamer
+# Run:AI Model Loading with GPU-Direct Tensor Placement
 
-## Benchmark Environment
-
-All benchmarks run on NCSA Delta with **Qwen/Qwen3-32B** (61 GB, bfloat16, 17 safetensors shards) on 2x NVIDIA A40 GPUs.
-
-| Setting | Local NVMe (`/tmp`) | Network NVMe (`/work/nvme`) |
-|---------|--------------------|-----------------------------|
-| **Storage** | 1 TB NVMe SSD on compute node | Lustre parallel filesystem over Slingshot |
-| **Filesystem** | XFS on LVM | Lustre (`@tcp10` over `hsn0`) |
-| **Cold cache** | `posix_fadvise(FADV_DONTNEED)` evicts page cache before each run | Same (partial effectiveness on Lustre client cache) |
-| **Warm cache** | Model shards read into page cache before timing | Same |
-
-Each experiment sweeps worker/concurrency counts from 1 to 32. CPU memory is measured via a background thread polling `/proc/self/smaps_rollup` every 100ms.
+Fast model loading for nnsight's `LanguageModel` via [run:ai model streamer](https://github.com/run-ai/runai-model-streamer) with direct buffer-to-GPU tensor placement, bypassing CPU intermediaries.
 
 ## Why HuggingFace Loading Is Slow
 
-HuggingFace `from_pretrained` with `device_map="auto"` reads weights via **safetensors mmap**. Loading is I/O-bound — CPU processing and GPU transfer are fast enough to hide behind I/O — so the only thing that matters is how efficiently we read from storage.
+HuggingFace `from_pretrained` with `device_map="auto"` has two bottlenecks:
 
-mmap's problem is its I/O granularity. Each demand-paged read triggers a **4 KB page fault**. On local NVMe the kernel services these quickly, but on a network filesystem like Lustre each fault becomes a separate RPC with full round-trip overhead. For a 61 GB model that's ~16M page faults. The per-message cost dominates, and the kernel's readahead window (~128-512 KB) can't compensate — it's conservative and resets when concurrent threads disrupt sequential access patterns.
+**1. Disk reads via mmap (4 KB page faults).** Safetensors files are memory-mapped. Each tensor access triggers demand-paged reads at 4 KB granularity. The kernel's readahead (~128-512 KB) helps for sequential access, but HF's multi-threaded workers disrupt sequentiality and contend for the same pages. Result: ~1.5 GB/s on local NVMe vs ~5-10 GB/s hardware capability.
 
-Adding HF workers doesn't help: `dot_natural_key` sorts tensors by layer name, which correlates with shard file order, so all workers fault into the same pages of the same shard. The readahead buffer is shared, and extra threads just contend rather than increasing parallelism.
+**2. Synchronous CPU→GPU copies.** Each HF worker thread calls `_materialize_copy(tensor, device).to(device)`, which triggers `cudaMemcpyAsync`. Despite the name, this blocks the calling CPU thread until the DMA transfer completes (source memory isn't pinned). For a 65 GB model, 4 worker threads accumulate **~148s of blocked CPU time** across all transfers — this is what dominates the ~43s wall time.
 
-The result: **~1.1-1.5 GB/s** on local NVMe (vs ~4-5 GB/s hardware capability), degrading to **0.3-0.6 GB/s** on Lustre at high worker counts.
+Profiling on Qwen3-32B (A100-80GB, 8×NVMe RAID-0) shows the breakdown:
 
-## Our Solution: run:ai Shard-by-Shard Streaming
+```
+HF from_pretrained:  42.89s wall
+  cudaMemcpyAsync:   147.93s cumulative CPU time (4 workers blocked on GPU DMA)
+  Disk:              1.42 GB/s avg, 98% utilization (steady but throttled by mmap)
+```
 
-We replace mmap with [run:ai model streamer](https://github.com/run-ai/runai-model-streamer)'s explicit `read()` syscalls — large, sequential, issued by N concurrent C++ pthreads (no GIL). This is the core optimization: **fewer, bigger I/O operations** instead of millions of 4 KB page faults.
+The disk is busy the entire time but reads slowly. Workers spend most of their time blocked on GPU transfers, not doing useful work.
 
-We offer two modes:
+## Our Solution
 
-### Eager mode (`load_format="runai_eager"`)
+We replace mmap with run:ai's explicit `O_DIRECT` reads and add GPU-direct tensor placement. The loading pipeline has evolved through two stages:
 
-Streams all shards into a CPU dict first, then passes to `from_pretrained(None, state_dict=...)` for device placement. Fast (~2.2 GB/s at concurrency=32) but uses **~80-95 GiB peak CPU memory**.
+### Stage 1: Run:AI Streaming with CPU Cache
 
-### Lazy mode (default, `load_format=None`)
+Replace mmap with run:ai's `SafetensorsStreamer` — large sequential `read()` syscalls issued by N concurrent C++ pthreads (no GIL contention). Tensors are cloned to a CPU cache as they arrive, then HF workers pick them up and call `.to(device)` for GPU placement.
 
-A `LazyRunAITensor` acts as a drop-in replacement for safetensors slices inside HF's loading pipeline. On first access to a tensor, `RunAIShardCache` streams the **entire shard** via run:ai, caches all its tensors, and serves subsequent requests from the same shard instantly. Shards are evicted once all their keys are consumed, keeping only 2-3 shards in memory at a time.
+This solves the disk I/O bottleneck (bursts at 6-10 GB/s) but the CPU→GPU copy remains: HF workers still block on `cudaMemcpyAsync` for 52s cumulative. The disk sits idle 61% of the time waiting for workers to finish GPU transfers.
 
-Since loading is I/O-bound, the brief cache-hit + `.to(device)` drain between shards is negligible compared to the streaming time — the storage stays saturated.
+### Stage 2: GPU-Direct Tensor Placement (Current)
 
-## Results
+The key insight: HF's `_materialize_copy` calls `tensor[...]` (our `__getitem__`) then `.to(device, dtype)`. If `__getitem__` returns a tensor **already on the target device with the correct dtype**, then `.to()` is a no-op (~0.02ms).
 
-### Loading Bandwidth
+We resolve `device_map` before building the lazy state dict, so the streaming cache knows each tensor's target GPU at read time. The loader thread copies tensors directly from the run:ai buffer to GPU via `.to(device=cuda:N, dtype=dtype)`. HF workers just consume pre-placed tensors.
 
-![Loading Bandwidth](bench_loading_bandwidth.png)
+```
+Stage 1 (CPU cache):     disk → Run:AI buffer → clone() → CPU cache → HF .to(cuda) → GPU
+Stage 2 (GPU-direct):    disk → Run:AI buffer → .to(cuda) → GPU cache → HF .to() [no-op]
+```
 
-**Cold cache (left):** run:ai lazy reaches **4 GB/s** on local NVMe (concurrency=32), ~3x faster than HF's ~1.3 GB/s ceiling. On network storage, lazy achieves **2.2 GB/s** vs HF's ~1 GB/s (which degrades to 0.3 GB/s at high worker counts).
+This eliminates both the CPU clone and the HF worker's GPU transfer:
 
-**Warm cache (right):** HF benefits most from warm cache on local NVMe (~5.5 GB/s) since mmap's zero-copy avoids the `read()` memcpy overhead. run:ai lazy still achieves **~5 GB/s**, competitive with HF.
+```
+GPU-direct:          17.52s wall
+  cudaMemcpyAsync:   8.17s cumulative CPU time (down from 148s)
+  Disk:              3.48 GB/s avg, 63% utilization (up from 39%)
+```
 
-### Loading Wall Time
+## Architecture
 
-![Loading Wall Time](bench_loading_walltime.png)
+```
+┌─────────────────────────────────────────────────────────────┐
+│ TransformersModel._load_streamed()                          │
+│                                                             │
+│  1. resolve_shard_paths()     → list of .safetensors paths  │
+│  2. _resolve_device_map()    → {"model.layers.0": 0, ...}  │
+│  3. build_lazy_state_dict()  → {key: LazyRunAITensor, ...}  │
+│  4. from_pretrained(None, state_dict=...)                   │
+└─────────────────────────────────────────────────────────────┘
 
-Lazy loading achieves **15-17s** cold and **12-13s** warm on local NVMe for a 61 GB model, vs HF's **41-48s** cold and **11s** warm.
+┌─────────────────────────────────────────────────────────────┐
+│ RunAIShardCache (loader thread)                             │
+│                                                             │
+│  SafetensorsStreamer.get_tensors() yields (name, buffer)    │
+│    ├─ GPU target? → tensor.to(device=cuda:N, dtype=dtype)  │
+│    └─ CPU target? → tensor.clone()                         │
+│  Store in _tensors[name], notify_all() waiting workers     │
+└─────────────────────────────────────────────────────────────┘
 
-### Peak CPU Memory
+┌─────────────────────────────────────────────────────────────┐
+│ HF GLOBAL_WORKERS threads                                   │
+│                                                             │
+│  _materialize_copy(lazy_tensor, device, dtype)              │
+│    → lazy_tensor[...]  → cache.get() → returns GPU tensor  │
+│    → tensor.to(device, dtype)  → no-op (already there)     │
+└─────────────────────────────────────────────────────────────┘
+```
 
-![Peak CPU Memory](bench_loading_memory.png)
+### Key Files
 
-| Method | Peak CPU Memory | Notes |
-|--------|----------------|-------|
-| **HF** | ~3 GiB | mmap avoids bulk allocation; tensors demand-paged |
-| **run:ai eager** | ~80-95 GiB | Full model in numpy buffer before GPU placement |
-| **run:ai lazy** | ~10-17 GiB | Only 2-3 shards cached at a time |
+| File | Role |
+|---|---|
+| `src/nnsight/modeling/loader.py` | `RunAIShardCache`, `LazyRunAITensor`, `build_lazy_state_dict` |
+| `src/nnsight/modeling/transformers.py` | `_load_streamed`, `_resolve_device_map`, `gpu_direct` flag |
 
-Lazy loading is the best trade-off: **3-4x faster than HF with only ~3x its memory footprint**, and **5-8x less memory than eager** with comparable or better speed.
+### User-Facing API
 
-## Running the Benchmark
+```python
+from nnsight import LanguageModel
+
+# GPU-direct (default when run:ai is installed)
+model = LanguageModel("Qwen/Qwen3-8B", device_map="auto", dispatch=True)
+
+# Force HF from_pretrained
+model = LanguageModel("Qwen/Qwen3-8B", device_map="auto", dispatch=True,
+                      load_format="from_pretrained")
+
+# CPU-clone path (for benchmarking comparison)
+model = LanguageModel("Qwen/Qwen3-8B", device_map="auto", dispatch=True,
+                      gpu_direct=False)
+
+# Tune Run:AI I/O concurrency (default 16)
+model = LanguageModel("Qwen/Qwen3-8B", device_map="auto", dispatch=True,
+                      concurrency=32)
+```
+
+If `runai-model-streamer` is not installed, loading falls back to `from_pretrained` silently.
+
+## Benchmark Results
+
+### Qwen3-32B (65.5 GB, bfloat16) — A100-80GB, 8×NVMe RAID-0, cold cache
+
+| Method | Wall Time | Effective BW | Speedup |
+|---|---|---|---|
+| HF `from_pretrained` | 40.36s | 1.62 GB/s | 1.0x |
+| Run:AI stream (CPU clone) | 25.74s | 2.54 GB/s | 1.6x |
+| **Run:AI GPU-direct** | **17.18s** | **3.81 GB/s** | **2.3x** |
+
+### Qwen3-8B (16.4 GB) — same setup
+
+| Method | Wall Time | Effective BW | Speedup |
+|---|---|---|---|
+| HF `from_pretrained` | 12.05s | 1.37 GB/s | 1.0x |
+| Run:AI stream (CPU clone) | 7.42s | 2.21 GB/s | 1.6x |
+| **Run:AI GPU-direct** | **5.67s** | **2.89 GB/s** | **2.1x** |
+
+Logits match exactly across all three methods.
+
+### Profiling Breakdown (Qwen3-32B)
+
+| | HF | Stream (CPU) | GPU-direct |
+|---|---|---|---|
+| `cudaMemcpyAsync` CPU time | 147.93s | 51.76s | **8.17s** |
+| Disk avg BW | 1.42 GB/s | 2.24 GB/s | **3.48 GB/s** |
+| Disk utilization | 98% | 39% | **63%** |
+| Disk idle time | 0.9s | 16.0s | **6.1s** |
+
+HF keeps the disk busy but reads slowly (mmap). Run:AI stream bursts at 10 GB/s but the disk idles 61% of the time waiting for CPU→GPU copies. GPU-direct cuts idle time to 37% by doing GPU transfers in the loader thread.
+
+## Running Benchmarks
 
 ```bash
-# Cold cache, all three methods
-python benchmark_loading.py --model Qwen/Qwen3-32B --no-verify
+# Quick comparison (2 configs each, uses CUDA_VISIBLE_DEVICES GPU)
+CUDA_VISIBLE_DEVICES=0 python benchmark_loading.py \
+  --model Qwen/Qwen3-8B --gpus 0 \
+  --experiments hf runai_stream runai_gpu_direct --no-verify
 
-# Warm cache
-python benchmark_loading.py --model Qwen/Qwen3-32B --warmup --no-drop-caches --no-verify
+# Full sweep (6 concurrency/worker configs × N repeats)
+python benchmark_loading.py --model Qwen/Qwen3-32B --repeats 3
 
-# Specific methods only
-python benchmark_loading.py --model Qwen/Qwen3-32B --experiments hf runai_lazy
+# Disk I/O timeline
+CUDA_VISIBLE_DEVICES=0 python profile_io_timeline.py \
+  --model Qwen/Qwen3-8B --experiment runai_gpu_direct --disk-device md0
 
-# Generate plots
-python plot_results.py
+# Full profiler (torch.profiler + iostat + cache stats)
+CUDA_VISIBLE_DEVICES=0 python profile_loading.py \
+  --model Qwen/Qwen3-8B --experiment runai_gpu_direct --disk-device md0
 ```
+
+See [PROFILING.md](PROFILING.md) for detailed profiling methodology and how to interpret results.
