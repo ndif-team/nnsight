@@ -77,7 +77,6 @@ class TransformersModel(HuggingFaceModel):
 
         load_format = kwargs.pop("load_format", None)
         gpu_direct = kwargs.pop("gpu_direct", True)
-        pin_memory = kwargs.pop("pin_memory", True)
         self._load_config(repo_id, revision=revision, **kwargs)
 
         # Default: try run:ai streamer, fall back to from_pretrained if not installed
@@ -85,8 +84,7 @@ class TransformersModel(HuggingFaceModel):
             try:
                 model = self._load_streamed(
                     repo_id, revision=revision,
-                    gpu_direct=gpu_direct, pin_memory=pin_memory,
-                    **kwargs,
+                    gpu_direct=gpu_direct, **kwargs,
                 )
                 self.config = model.config
                 return model
@@ -138,7 +136,6 @@ class TransformersModel(HuggingFaceModel):
         revision: Optional[str] = None,
         concurrency: int = 16,
         gpu_direct: bool = True,
-        pin_memory: bool = True,
         **kwargs,
     ) -> PreTrainedModel:
         """Load model using run:ai SafetensorsStreamer for fast disk I/O.
@@ -155,10 +152,6 @@ class TransformersModel(HuggingFaceModel):
 
         When *gpu_direct* is False, tensors are cloned to CPU and HF
         workers handle the GPU transfer (the pre-GPU-direct path).
-
-        When *pin_memory* is True (default) and *gpu_direct* is True,
-        pinned staging buffers are used for async double-buffered DMA
-        that overlaps GPU copies with disk reads.
 
         ``from_pretrained(None, state_dict=...)`` handles weight
         renaming, conversion, dtype casting, device placement, and
@@ -189,7 +182,6 @@ class TransformersModel(HuggingFaceModel):
             shard_paths, concurrency=concurrency,
             device_map=resolved_device_map,
             torch_dtype=kwargs.get("torch_dtype") if gpu_direct else None,
-            pin_memory=pin_memory and gpu_direct,
         )
 
         # Resolve concrete model class — Auto classes reject None as path

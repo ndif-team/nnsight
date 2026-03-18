@@ -137,9 +137,7 @@ def profile_load(model_id, gpu_ids, experiment, concurrency, workers,
         extra = {"load_format": "from_pretrained"}
     elif experiment == "runai_stream":
         extra = {"concurrency": concurrency, "gpu_direct": False}
-    elif experiment == "runai_gpu_direct_unpinned":
-        extra = {"concurrency": concurrency, "pin_memory": False}
-    elif experiment == "runai_gpu_direct_pinned":
+    elif experiment == "runai_gpu_direct":
         extra = {"concurrency": concurrency}
 
     # Start iostat
@@ -249,9 +247,7 @@ def profile_load_with_cache_stats(model_id, gpu_ids, experiment, concurrency,
 
     if experiment == "runai_stream":
         extra = {"concurrency": concurrency, "gpu_direct": False}
-    elif experiment == "runai_gpu_direct_unpinned":
-        extra = {"concurrency": concurrency, "pin_memory": False}
-    else:  # runai_gpu_direct_pinned
+    else:  # runai_gpu_direct
         extra = {"concurrency": concurrency}
 
     iostat = IOStatSampler(device=disk_device)
@@ -311,11 +307,7 @@ def profile_load_with_cache_stats(model_id, gpu_ids, experiment, concurrency,
         print(f"      io wait:         {cache.stats_io_wait_s:.2f}s  (uncovered — streamer yield blocked on disk)")
         print(f"      clone:           {cache.stats_clone_s:.2f}s")
         print(f"      gpu copy:        {cache.stats_gpu_copy_s:.2f}s")
-        print(f"      pinned memcpy:   {cache.stats_pinned_memcpy_s:.2f}s  (CPU → pinned staging buffer)")
-        print(f"      dma sync:        {cache.stats_dma_sync_s:.2f}s  (wait for async DMA — ~0 = good overlap)")
-        hidden_io = (cache.stats_shard_wall_s - cache.stats_io_wait_s
-                     - cache.stats_clone_s - cache.stats_gpu_copy_s
-                     - cache.stats_pinned_memcpy_s - cache.stats_dma_sync_s)
+        hidden_io = cache.stats_shard_wall_s - cache.stats_io_wait_s - cache.stats_clone_s - cache.stats_gpu_copy_s
         print(f"      notify+lock:     {hidden_io:.2f}s  (lock acquire + notify_all + overhead)")
         print(f"    consumer wait:     {cache.stats_consumer_wait_s:.2f}s  (cumulative across {workers} workers)")
 
@@ -355,7 +347,7 @@ def main():
     parser.add_argument(
         "--experiment",
         default="runai_stream",
-        choices=["hf", "runai_stream", "runai_gpu_direct_unpinned", "runai_gpu_direct_pinned"],
+        choices=["hf", "runai_stream", "runai_gpu_direct"],
     )
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--workers", type=int, default=4)
@@ -378,7 +370,7 @@ def main():
             args.model, gpu_ids, args.experiment, args.concurrency,
             args.workers, args.revision, args.disk_device, args.trace,
         )
-    else:  # runai_stream, runai_gpu_direct_unpinned, runai_gpu_direct_pinned
+    else:  # runai_stream or runai_gpu_direct
         profile_load_with_cache_stats(
             args.model, gpu_ids, args.experiment, args.concurrency,
             args.workers, args.revision, args.disk_device, args.trace,

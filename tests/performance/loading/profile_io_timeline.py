@@ -118,8 +118,8 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen3-8B")
     parser.add_argument("--revision", default="main")
     parser.add_argument("--gpus", default="0")
-    parser.add_argument("--experiment", default="runai_gpu_direct_pinned",
-                        choices=["hf", "runai_stream", "runai_gpu_direct_unpinned", "runai_gpu_direct_pinned"])
+    parser.add_argument("--experiment", default="runai_gpu_direct",
+                        choices=["hf", "runai_stream", "runai_gpu_direct"])
     parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--disk-device", default="md0")
@@ -135,9 +135,7 @@ def main():
         extra = {"load_format": "from_pretrained"}
     elif args.experiment == "runai_stream":
         extra = {"concurrency": args.concurrency, "gpu_direct": False}
-    elif args.experiment == "runai_gpu_direct_unpinned":
-        extra = {"concurrency": args.concurrency, "pin_memory": False}
-    elif args.experiment == "runai_gpu_direct_pinned":
+    elif args.experiment == "runai_gpu_direct":
         extra = {"concurrency": args.concurrency}
 
     # Monkey-patch to capture cache
@@ -193,9 +191,7 @@ def main():
         print(f"[cache] shard_wall={cache.stats_shard_wall_s:.2f}s  "
               f"io_wait={cache.stats_io_wait_s:.2f}s  "
               f"clone={cache.stats_clone_s:.2f}s  "
-              f"gpu_copy={cache.stats_gpu_copy_s:.2f}s  "
-              f"pinned_memcpy={cache.stats_pinned_memcpy_s:.2f}s  "
-              f"dma_sync={cache.stats_dma_sync_s:.2f}s")
+              f"gpu_copy={cache.stats_gpu_copy_s:.2f}s")
         print()
 
     # Disk I/O timeline
