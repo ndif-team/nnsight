@@ -3,8 +3,10 @@
 Compares wall-clock time, peak GPU/CPU memory, and output correctness for
 loading HuggingFace models through nnsight's LanguageModel interface:
 
-  hf           — standard from_pretrained (safetensors mmap → threaded loading)
-  runai_stream — run:ai O_DIRECT streaming with GPU-direct tensor placement
+  hf                       — standard from_pretrained (safetensors mmap → threaded loading)
+  runai_stream             — run:ai O_DIRECT streaming, CPU clone, HF workers do .to(cuda)
+  runai_gpu_direct_unpinned — run:ai + sync .to(cuda) from unpinned Run:AI buffer
+  runai_gpu_direct_pinned  — run:ai + pinned double-buffer async DMA to GPU
 
 Page cache invalidation between experiments:
   By default, uses posix_fadvise(FADV_DONTNEED) on model shard files to evict
@@ -20,7 +22,7 @@ Usage:
   python benchmark_loading.py --model meta-llama/Llama-3.1-8B --warmup --no-drop-caches
 
   # Specific experiments
-  python benchmark_loading.py --model Qwen/Qwen2.5-7B-Instruct --experiments hf runai_stream
+  python benchmark_loading.py --model Qwen/Qwen2.5-7B-Instruct --experiments hf runai_gpu_direct_pinned
 
   # Both methods, 3 repeats, JSON output
   python benchmark_loading.py --model meta-llama/Llama-3.1-8B --repeats 3 --output results.json
@@ -366,6 +368,7 @@ def run_runai(model_id: str, gpu_ids: list[int],
               concurrency: int = 16,
               workers: int = 4,
               gpu_direct: bool = False,
+              pin_memory: bool = True,
               revision: str = "main") -> TimingResult:
     """Load via run:ai streaming.
 
@@ -375,6 +378,10 @@ def run_runai(model_id: str, gpu_ids: list[int],
     When *gpu_direct* is True, the cache copies tensors directly from the
     Run:AI buffer to GPU — HF workers just consume pre-placed tensors.
     When False, tensors are cloned to CPU and HF workers handle GPU transfer.
+
+    When *pin_memory* is True (default) and *gpu_direct* is True, pinned
+    staging buffers are used for async double-buffered DMA that overlaps
+    GPU copies with disk reads.
     """
     from nnsight import LanguageModel
 
@@ -392,6 +399,7 @@ def run_runai(model_id: str, gpu_ids: list[int],
                 max_memory=max_memory,
                 concurrency=concurrency,
                 gpu_direct=gpu_direct,
+                pin_memory=pin_memory,
                 revision=revision,
                 dispatch=True,
             )
@@ -448,9 +456,10 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
     print(f"\n  Verifying output correctness (prompt: {prompt!r})...")
 
     load_kwargs = {
-        "hf":               {"load_format": "from_pretrained"},
-        "runai_stream":     {"gpu_direct": False},
-        "runai_gpu_direct": {},
+        "hf":                        {"load_format": "from_pretrained"},
+        "runai_stream":              {"gpu_direct": False},
+        "runai_gpu_direct_unpinned": {"gpu_direct": True, "pin_memory": False},
+        "runai_gpu_direct_pinned":   {"gpu_direct": True},
     }
 
     # Decide baseline order: prefer hf first
@@ -486,7 +495,7 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
 # Main
 # ---------------------------------------------------------------------------
 
-ALL_EXPERIMENTS = ["hf", "runai_stream", "runai_gpu_direct"]
+ALL_EXPERIMENTS = ["hf", "runai_stream", "runai_gpu_direct_unpinned", "runai_gpu_direct_pinned"]
 
 # HF workers and Run:AI concurrency are independent knobs:
 #   workers     — HF GLOBAL_WORKERS: threads doing GPU transfers (.to(device))
@@ -494,24 +503,30 @@ ALL_EXPERIMENTS = ["hf", "runai_stream", "runai_gpu_direct"]
 DEFAULT_RUNAI_WORKERS = 4
 
 EXPERIMENT_CONFIGS = {
-    "hf":               [("hf",               {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
-    "runai_stream":     [("runai_stream",      {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
-    "runai_gpu_direct": [("runai_gpu_direct",  {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "hf":                        [("hf",                        {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
+    "runai_stream":              [("runai_stream",              {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "runai_gpu_direct_unpinned": [("runai_gpu_direct_unpinned", {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "runai_gpu_direct_pinned":   [("runai_gpu_direct_pinned",   {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
 }
 
 _RUNNERS = {
-    "hf":               lambda mid, gids, cfg, rev: run_hf(
-                            mid, gids, workers=cfg.get("workers", 4), revision=rev),
-    "runai_stream":     lambda mid, gids, cfg, rev: run_runai(
-                            mid, gids, experiment="runai_stream",
-                            concurrency=cfg.get("concurrency", 16),
-                            workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
-                            gpu_direct=False, revision=rev),
-    "runai_gpu_direct": lambda mid, gids, cfg, rev: run_runai(
-                            mid, gids, experiment="runai_gpu_direct",
-                            concurrency=cfg.get("concurrency", 16),
-                            workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
-                            gpu_direct=True, revision=rev),
+    "hf":                        lambda mid, gids, cfg, rev: run_hf(
+                                     mid, gids, workers=cfg.get("workers", 4), revision=rev),
+    "runai_stream":              lambda mid, gids, cfg, rev: run_runai(
+                                     mid, gids, experiment="runai_stream",
+                                     concurrency=cfg.get("concurrency", 16),
+                                     workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                                     gpu_direct=False, revision=rev),
+    "runai_gpu_direct_unpinned": lambda mid, gids, cfg, rev: run_runai(
+                                     mid, gids, experiment="runai_gpu_direct_unpinned",
+                                     concurrency=cfg.get("concurrency", 16),
+                                     workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                                     gpu_direct=True, pin_memory=False, revision=rev),
+    "runai_gpu_direct_pinned":   lambda mid, gids, cfg, rev: run_runai(
+                                     mid, gids, experiment="runai_gpu_direct_pinned",
+                                     concurrency=cfg.get("concurrency", 16),
+                                     workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                                     gpu_direct=True, pin_memory=True, revision=rev),
 }
 
 
@@ -524,7 +539,7 @@ def run_single_config(exp_name, config, model_id, gpu_ids, revision):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark nnsight model loading: hf vs runai_stream vs runai_gpu_direct"
+        description="Benchmark nnsight model loading: hf vs runai_stream vs runai_gpu_direct_unpinned vs runai_gpu_direct_pinned"
     )
     parser.add_argument("--model", default="openai-community/gpt2",
                         help="HuggingFace model ID")
@@ -560,7 +575,7 @@ def main():
     except ImportError:
         has_runai = False
 
-    runai_exps = {"runai_stream", "runai_gpu_direct"}
+    runai_exps = {"runai_stream", "runai_gpu_direct_unpinned", "runai_gpu_direct_pinned"}
     if not has_runai:
         skipped = [e for e in args.experiments if e in runai_exps]
         if skipped:
