@@ -5,7 +5,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
+from vllm.distributed.parallel_state import get_tp_group
 from nnsight.intervention.tracing.globals import Globals
 
 from ....intervention.serialization import load
@@ -70,7 +70,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             for new_req in new_reqs:
 
-                extra_args = getattr(new_req.sampling_params, 'extra_args', None)
+                extra_args = getattr(new_req.sampling_params, "extra_args", None)
                 if not extra_args:
                     continue
 
@@ -272,9 +272,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 Globals.saves.discard(_id)
 
             done_traces = [
-                tid for tid, ctx in self.trace_contexts.items()
-                if (not ctx["pending_req_ids"]
-                    and ctx["received_count"] == ctx["expected_count"])
+                tid
+                for tid, ctx in self.trace_contexts.items()
+                if (
+                    not ctx["pending_req_ids"]
+                    and ctx["received_count"] == ctx["expected_count"]
+                )
             ]
             for tid in done_traces:
                 del self.trace_contexts[tid]
@@ -306,7 +309,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model._interleaver.batcher = VLLMBatcher()
 
-        self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
+        # Only wrap when TP > 1: registers hooks that handle
+        # gather/split of sharded tensors and CUDA synchronization
+        # for TP-parallel modules.  With TP == 1 nothing is sharded
+        # so wrapping is pure overhead.
+
+        if get_tp_group().world_size > 1:
+            self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
@@ -402,7 +411,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         finished_req_id_set = set(finished_req_ids)
 
         matched = helper.match_req_ids(req_id_set)
-        finished_keys = helper.finalize_mediators(matched, finished_req_id_set, self.nnsight_model)
+        finished_keys = helper.finalize_mediators(
+            matched, finished_req_id_set, self.nnsight_model
+        )
         saves, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
 
