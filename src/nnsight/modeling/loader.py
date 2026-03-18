@@ -247,6 +247,21 @@ class RunAIShardCache:
             return self._torch_dtype
         return None
 
+    @staticmethod
+    def _enable_expandable_segments() -> None:
+        """Enable CUDA expandable segments to avoid fragmentation.
+
+        Streaming hundreds of individually-sized tensors to GPU causes
+        fragmentation in the default CUDA caching allocator.  Expandable
+        segments let the allocator grow incrementally instead of reserving
+        large fixed blocks, with no measurable performance penalty.
+        """
+        key = "PYTORCH_CUDA_ALLOC_CONF"
+        conf = os.environ.get(key, "")
+        if "expandable_segments" not in conf:
+            entry = "expandable_segments:True"
+            os.environ[key] = f"{conf},{entry}" if conf else entry
+
     def _init_pinned_buffers(self) -> None:
         """Allocate two pinned byte buffers for double-buffered async DMA."""
         try:
@@ -276,6 +291,10 @@ class RunAIShardCache:
         from runai_model_streamer import SafetensorsStreamer
 
         os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(self._concurrency)
+
+        # Avoid CUDA memory fragmentation from streaming many varied-size tensors
+        if self._gpu_direct:
+            self._enable_expandable_segments()
 
         # Lazy-init pinned buffers on first call with GPU targets
         if (
