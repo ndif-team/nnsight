@@ -2,51 +2,24 @@
 
 Fast model loading for nnsight's `LanguageModel` via [run:ai model streamer](https://github.com/run-ai/runai-model-streamer) with direct buffer-to-GPU tensor placement, bypassing CPU intermediaries.
 
-## Why HuggingFace Loading Is Slow
+## Loading Paths
 
-HuggingFace `from_pretrained` with `device_map="auto"` has two bottlenecks:
+### 1. HF `from_pretrained` (baseline)
 
-**1. Disk reads via mmap (4 KB page faults).** Safetensors files are memory-mapped. Each tensor access triggers demand-paged reads at 4 KB granularity. The kernel's readahead (~128-512 KB) helps for sequential access, but HF's multi-threaded workers disrupt sequentiality and contend for the same pages. Result: ~1.5 GB/s on local NVMe vs ~5-10 GB/s hardware capability.
+Standard HuggingFace loading: safetensors files are memory-mapped, tensors are materialized via 4 KB page faults, then HF worker threads call `.to(device)` for GPU placement. Bottlenecked by mmap read granularity and synchronous `cudaMemcpyAsync` blocking on each worker thread.
 
-**2. Synchronous CPU→GPU copies.** Each HF worker thread calls `_materialize_copy(tensor, device).to(device)`, which triggers `cudaMemcpyAsync`. Despite the name, this blocks the calling CPU thread until the DMA transfer completes (source memory isn't pinned). For a 65 GB model, 4 worker threads accumulate **~148s of blocked CPU time** across all transfers — this is what dominates the ~43s wall time.
+### 2. Run:AI Stream (CPU clone)
 
-Profiling on Qwen3-32B (A100-80GB, 8×NVMe RAID-0) shows the breakdown:
+Replace mmap with run:ai's `SafetensorsStreamer` — large sequential `O_DIRECT` reads issued by N concurrent C++ pthreads (no GIL contention). Tensors are cloned to a CPU cache as they arrive, then HF workers call `.to(device)` for GPU placement. Solves the disk I/O bottleneck but CPU→GPU copies still block HF workers.
 
-```
-HF from_pretrained:  42.89s wall
-  cudaMemcpyAsync:   147.93s cumulative CPU time (4 workers blocked on GPU DMA)
-  Disk:              1.42 GB/s avg, 98% utilization (steady but throttled by mmap)
-```
+### 3. Run:AI GPU-Direct (current default)
 
-The disk is busy the entire time but reads slowly. Workers spend most of their time blocked on GPU transfers, not doing useful work.
-
-## Our Solution
-
-We replace mmap with run:ai's explicit `O_DIRECT` reads and add GPU-direct tensor placement. The loading pipeline has evolved through two stages:
-
-### Stage 1: Run:AI Streaming with CPU Cache
-
-Replace mmap with run:ai's `SafetensorsStreamer` — large sequential `read()` syscalls issued by N concurrent C++ pthreads (no GIL contention). Tensors are cloned to a CPU cache as they arrive, then HF workers pick them up and call `.to(device)` for GPU placement.
-
-This solves the disk I/O bottleneck (bursts at 6-10 GB/s) but the CPU→GPU copy remains: HF workers still block on `cudaMemcpyAsync` for 52s cumulative. The disk sits idle 61% of the time waiting for workers to finish GPU transfers.
-
-### Stage 2: GPU-Direct Tensor Placement (Current)
-
-The key insight: HF's `_materialize_copy` calls `tensor[...]` (our `__getitem__`) then `.to(device, dtype)`. If `__getitem__` returns a tensor **already on the target device with the correct dtype**, then `.to()` is a no-op (~0.02ms).
-
-We resolve `device_map` before building the lazy state dict, so the streaming cache knows each tensor's target GPU at read time. The loader thread copies tensors directly from the run:ai buffer to GPU via `.to(device=cuda:N, dtype=dtype)`. HF workers just consume pre-placed tensors.
+The loader thread resolves `device_map` before streaming begins, then copies tensors directly from the Run:AI buffer to the target GPU via `.to(device=cuda:N, dtype=dtype)`. When HF workers later call `.to()`, it's a no-op since the tensor is already on the correct device and dtype. The Run:AI streamer's background I/O threads read the next shard from disk concurrently with the blocking `.to()`, providing natural overlap between disk reads and GPU transfers.
 
 ```
-Stage 1 (CPU cache):     disk → Run:AI buffer → clone() → CPU cache → HF .to(cuda) → GPU
-Stage 2 (GPU-direct):    disk → Run:AI buffer → .to(cuda) → GPU cache → HF .to() [no-op]
-```
-
-This eliminates both the CPU clone and the HF worker's GPU transfer:
-
-```
-GPU-direct:          17.52s wall
-  cudaMemcpyAsync:   8.17s cumulative CPU time (down from 148s)
-  Disk:              3.48 GB/s avg, 63% utilization (up from 39%)
+HF baseline:     disk → mmap page faults → CPU → HF .to(cuda) → GPU
+Run:AI stream:   disk → O_DIRECT buffer → clone() → CPU cache → HF .to(cuda) → GPU
+Run:AI GPU-direct: disk → O_DIRECT buffer → .to(cuda) → GPU cache → HF .to() [no-op]
 ```
 
 ## Architecture
@@ -79,6 +52,12 @@ GPU-direct:          17.52s wall
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Key Implementation Details
+
+- **`_resolve_device_map` dtype fix:** The meta model used for device map resolution is created with the model's native dtype (from config) instead of float32 default. Without this, large models (e.g., Qwen3-32B at 61 GB in BF16 vs 122 GB in FP32) get incorrect memory estimates and trigger disk offloading.
+
+- **`expandable_segments`:** GPU-direct streaming allocates hundreds of individually-sized tensors on GPU, which can cause CUDA memory fragmentation. The loader automatically enables `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` on first GPU-direct use.
+
 ### Key Files
 
 | File | Role |
@@ -98,7 +77,7 @@ model = LanguageModel("Qwen/Qwen3-8B", device_map="auto", dispatch=True)
 model = LanguageModel("Qwen/Qwen3-8B", device_map="auto", dispatch=True,
                       load_format="from_pretrained")
 
-# CPU-clone path (for benchmarking comparison)
+# CPU-clone path (no GPU-direct)
 model = LanguageModel("Qwen/Qwen3-8B", device_map="auto", dispatch=True,
                       gpu_direct=False)
 
@@ -111,39 +90,26 @@ If `runai-model-streamer` is not installed, loading falls back to `from_pretrain
 
 ## Benchmark Results
 
-### Qwen3-32B (65.5 GB, bfloat16) — A100-80GB, 8×NVMe RAID-0, cold cache
+### Qwen3-32B (61 GB, bfloat16) — A100-80GB, 8×NVMe RAID-0, cold cache
 
 | Method | Wall Time | Effective BW | Speedup |
 |---|---|---|---|
-| HF `from_pretrained` | 40.36s | 1.62 GB/s | 1.0x |
-| Run:AI stream (CPU clone) | 25.74s | 2.54 GB/s | 1.6x |
-| **Run:AI GPU-direct** | **17.18s** | **3.81 GB/s** | **2.3x** |
-
-### Qwen3-8B (16.4 GB) — same setup
-
-| Method | Wall Time | Effective BW | Speedup |
-|---|---|---|---|
-| HF `from_pretrained` | 12.05s | 1.37 GB/s | 1.0x |
-| Run:AI stream (CPU clone) | 7.42s | 2.21 GB/s | 1.6x |
-| **Run:AI GPU-direct** | **5.67s** | **2.89 GB/s** | **2.1x** |
-
-Logits match exactly across all three methods.
+| HF `from_pretrained` | 42.94s | 1.42 GB/s | 1.0x |
+| Run:AI stream (CPU clone) | 26.49s | 2.30 GB/s | 1.6x |
+| **Run:AI GPU-direct** | **19.63s** | **3.11 GB/s** | **2.2x** |
 
 ### Profiling Breakdown (Qwen3-32B)
 
 | | HF | Stream (CPU) | GPU-direct |
 |---|---|---|---|
 | `cudaMemcpyAsync` CPU time | 147.93s | 51.76s | **8.17s** |
-| Disk avg BW | 1.42 GB/s | 2.24 GB/s | **3.48 GB/s** |
-| Disk utilization | 98% | 39% | **63%** |
-| Disk idle time | 0.9s | 16.0s | **6.1s** |
-
-HF keeps the disk busy but reads slowly (mmap). Run:AI stream bursts at 10 GB/s but the disk idles 61% of the time waiting for CPU→GPU copies. GPU-direct cuts idle time to 37% by doing GPU transfers in the loader thread.
+| Disk avg BW | 1.42 GB/s | 2.30 GB/s | **3.11 GB/s** |
+| Disk utilization | 98% | 39% | **57%** |
 
 ## Running Benchmarks
 
 ```bash
-# Quick comparison (2 configs each, uses CUDA_VISIBLE_DEVICES GPU)
+# Quick comparison
 CUDA_VISIBLE_DEVICES=0 python benchmark_loading.py \
   --model Qwen/Qwen3-8B --gpus 0 \
   --experiments hf runai_stream runai_gpu_direct --no-verify

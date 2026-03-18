@@ -6,8 +6,9 @@ Combines:
   - cache stats: loader vs consumer wait breakdown
 
 Usage:
-  CUDA_VISIBLE_DEVICES=0 python profile_loading.py --model Qwen/Qwen3-8B --experiment runai_stream
   CUDA_VISIBLE_DEVICES=0 python profile_loading.py --model Qwen/Qwen3-8B --experiment hf
+  CUDA_VISIBLE_DEVICES=0 python profile_loading.py --model Qwen/Qwen3-8B --experiment runai_stream
+  CUDA_VISIBLE_DEVICES=0 python profile_loading.py --model Qwen/Qwen3-8B --experiment runai_gpu_direct
 """
 
 import argparse
