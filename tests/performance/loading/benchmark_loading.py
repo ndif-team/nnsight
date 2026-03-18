@@ -4,7 +4,7 @@ Compares wall-clock time, peak GPU/CPU memory, and output correctness for
 loading HuggingFace models through nnsight's LanguageModel interface:
 
   hf               — standard from_pretrained (safetensors mmap → threaded loading)
-  runai_stream     — run:ai O_DIRECT streaming, CPU clone, HF workers do .to(cuda)
+  runai_stream     — run:ai streaming, CPU clone, HF workers do .to(cuda)
   runai_gpu_direct — run:ai + direct .to(cuda) from Run:AI buffer to target GPU
 
 Page cache invalidation between experiments:
@@ -491,7 +491,7 @@ ALL_EXPERIMENTS = ["hf", "runai_stream", "runai_gpu_direct"]
 
 # HF workers and Run:AI concurrency are independent knobs:
 #   workers     — HF GLOBAL_WORKERS: threads doing GPU transfers (.to(device))
-#   concurrency — RUNAI_STREAMER_CONCURRENCY: O_DIRECT I/O threads (disk bandwidth)
+#   concurrency — RUNAI_STREAMER_CONCURRENCY: I/O threads (disk bandwidth)
 DEFAULT_RUNAI_WORKERS = 4
 
 EXPERIMENT_CONFIGS = {

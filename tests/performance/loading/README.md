@@ -10,7 +10,7 @@ Standard HuggingFace loading: safetensors files are memory-mapped, tensors are m
 
 ### 2. Run:AI Stream (CPU clone)
 
-Replace mmap with run:ai's `SafetensorsStreamer` — large sequential `O_DIRECT` reads issued by N concurrent C++ pthreads (no GIL contention). Tensors are cloned to a CPU cache as they arrive, then HF workers call `.to(device)` for GPU placement. Solves the disk I/O bottleneck but CPU→GPU copies still block HF workers.
+Replace mmap with run:ai's `SafetensorsStreamer` — sequential reads issued by N concurrent C++ pthreads (no GIL contention). Tensors are cloned to a CPU cache as they arrive, then HF workers call `.to(device)` for GPU placement. Solves the disk I/O bottleneck but CPU→GPU copies still block HF workers.
 
 ### 3. Run:AI GPU-Direct (current default)
 
@@ -18,8 +18,8 @@ The loader thread resolves `device_map` before streaming begins, then copies ten
 
 ```
 HF baseline:     disk → mmap page faults → CPU → HF .to(cuda) → GPU
-Run:AI stream:   disk → O_DIRECT buffer → clone() → CPU cache → HF .to(cuda) → GPU
-Run:AI GPU-direct: disk → O_DIRECT buffer → .to(cuda) → GPU cache → HF .to() [no-op]
+Run:AI stream:     disk → run:ai buffer → clone() → CPU cache → HF .to(cuda) → GPU
+Run:AI GPU-direct: disk → run:ai buffer → .to(cuda) → GPU cache → HF .to() [no-op]
 ```
 
 ## Architecture
