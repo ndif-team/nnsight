@@ -55,8 +55,13 @@ def test_deserialized_helper_trace_uses_registered_linecache(tiny_model, tmp_pat
     result = restored(tiny_model, "Hello")
     assert result is not None
 
-    # linecache must now contain the registered source.
+    # linecache must now contain the registered source under the original
+    # filename (no UUID prefix).
     assert filename in linecache.cache
+
+    # co_firstlineno must match the original so tracebacks are correct.
+    assert restored.__code__.co_firstlineno == helper.__code__.co_firstlineno
+    assert restored.__code__.co_filename == filename
 
 
 def test_deserialized_closure_helper_trace(tiny_model, tmp_path):
@@ -87,6 +92,69 @@ def test_deserialized_closure_helper_trace(tiny_model, tmp_path):
     result = restored(tiny_model, "Hello")
     assert result is not None
     assert filename in linecache.cache
+
+    # co_firstlineno must match the original inner function.
+    assert restored.__code__.co_firstlineno == helper.__code__.co_firstlineno
+    assert restored.__code__.co_filename == filename
+
+
+def test_two_functions_same_file_no_collision(tiny_model, tmp_path):
+    """Two functions from the same file must not clobber each other in linecache.
+
+    This is the key scenario that motivated replacing the UUID approach: when
+    two different functions share the same co_filename, their source lines are
+    merged into a single linecache entry at the correct offsets.
+    """
+    filename = str(tmp_path / "shared_helpers.py")
+    # Two functions at different line offsets in the same "file".
+    # Lines 1-4: helper_a, Lines 6-9: helper_b (blank line 5 separates them).
+    full_source = textwrap.dedent(
+        """\
+        def helper_a(model, prompt):
+            with model.trace(prompt):
+                out = model.output.save()
+            return out
+
+        def helper_b(model, prompt):
+            with model.trace(prompt):
+                out = model.output.save()
+            return out
+        """
+    )
+
+    lines = full_source.splitlines(keepends=True)
+    namespace = {}
+    linecache.cache[filename] = (len(full_source), None, lines, filename)
+    exec(compile(full_source, filename, "exec"), namespace)
+    helper_a = namespace["helper_a"]
+    helper_b = namespace["helper_b"]
+
+    # Sanity: they have different firstlineno in the original file.
+    assert helper_a.__code__.co_firstlineno != helper_b.__code__.co_firstlineno
+
+    data_a = dumps(helper_a)
+    data_b = dumps(helper_b)
+
+    # Clear linecache to simulate remote worker.
+    linecache.cache.pop(filename, None)
+
+    restored_a = loads(data_a)
+    restored_b = loads(data_b)
+
+    # Both must be callable with correct trace extraction.
+    result_a = restored_a(tiny_model, "Hello")
+    result_b = restored_b(tiny_model, "World")
+    assert result_a is not None
+    assert result_b is not None
+
+    # Both share the same linecache entry (original filename, no UUID).
+    assert filename in linecache.cache
+    assert restored_a.__code__.co_filename == filename
+    assert restored_b.__code__.co_filename == filename
+
+    # Line numbers are preserved.
+    assert restored_a.__code__.co_firstlineno == helper_a.__code__.co_firstlineno
+    assert restored_b.__code__.co_firstlineno == helper_b.__code__.co_firstlineno
 
 
 # =============================================================================
