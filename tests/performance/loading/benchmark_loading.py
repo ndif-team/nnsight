@@ -52,6 +52,8 @@ class TimingResult:
     config: dict
     wall_time_s: float
     peak_gpu_mem_mb: float = 0.0
+    peak_gpu_alloc_mb: float = 0.0
+    peak_gpu_reserved_mb: float = 0.0
     peak_rss_mb: float = 0.0
     peak_private_mb: float = 0.0
     disk_read_gib: Optional[float] = None
@@ -169,13 +171,27 @@ def get_gpu_mem_allocated_mb(gpu_ids: list[int]) -> float:
     return sum(torch.cuda.memory_allocated(i) / (1024 ** 2) for i in gpu_ids)
 
 
-def build_max_memory(gpu_ids: list[int]) -> dict:
-    """Build a max_memory dict restricting placement to the given GPUs."""
+def build_max_memory(gpu_ids: list[int], model_size_bytes: int = 0) -> dict:
+    """Build a max_memory dict that forces an even split across *gpu_ids*.
+
+    ``device_map="auto"`` fills GPUs sequentially, so setting each GPU to
+    90% of its capacity lets the whole model land on the first GPU when it
+    fits.  Instead, we cap each GPU at ``(model_size / n_gpus) * 1.15`` so
+    accelerate is forced to distribute layers evenly.  Falls back to 90%
+    of physical memory when *model_size_bytes* is unknown or when only one
+    GPU is used.
+    """
     max_memory = {}
+    n_target = len(gpu_ids)
     for i in range(torch.cuda.device_count()):
         if i in gpu_ids:
-            mem = torch.cuda.get_device_properties(i).total_memory
-            max_memory[i] = int(mem * 0.9)
+            physical = torch.cuda.get_device_properties(i).total_memory
+            if model_size_bytes > 0 and n_target > 1:
+                # Per-GPU budget: even share + 15 % headroom, capped at 90 % physical
+                per_gpu = int(model_size_bytes / n_target * 1.15)
+                max_memory[i] = min(per_gpu, int(physical * 0.9))
+            else:
+                max_memory[i] = int(physical * 0.9)
         else:
             max_memory[i] = 0
     return max_memory
@@ -323,15 +339,18 @@ def _patch_hf_workers(n_workers: int):
 
 
 def run_hf(model_id: str, gpu_ids: list[int],
-           workers: int = 4, revision: str = "main") -> TimingResult:
+           workers: int = 4, revision: str = "main",
+           model_size_bytes: int = 0) -> TimingResult:
     """Load via LanguageModel with load_format='from_pretrained'."""
     from nnsight import LanguageModel
 
-    max_memory = build_max_memory(gpu_ids)
+    max_memory = build_max_memory(gpu_ids, model_size_bytes=model_size_bytes)
     restore = _patch_hf_workers(workers)
 
     try:
         with PeakMemMonitor() as mem:
+            for i in gpu_ids:
+                torch.cuda.reset_peak_memory_stats(i)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
@@ -348,6 +367,8 @@ def run_hf(model_id: str, gpu_ids: list[int],
             wall = time.perf_counter() - t0
 
         peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
+        peak_alloc = sum(torch.cuda.max_memory_allocated(i) / (1024 ** 2) for i in gpu_ids)
+        peak_reserved = sum(torch.cuda.max_memory_reserved(i) / (1024 ** 2) for i in gpu_ids)
         unload_model(model)
     finally:
         restore()
@@ -357,6 +378,8 @@ def run_hf(model_id: str, gpu_ids: list[int],
         config={"workers": workers},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
+        peak_gpu_alloc_mb=peak_alloc,
+        peak_gpu_reserved_mb=peak_reserved,
         peak_rss_mb=mem.peak_rss_mb,
         peak_private_mb=mem.peak_private_mb,
     )
@@ -367,7 +390,9 @@ def run_runai(model_id: str, gpu_ids: list[int],
               concurrency: int = 16,
               workers: int = 4,
               gpu_direct: bool = False,
-              revision: str = "main") -> TimingResult:
+              lazy: bool = False,
+              revision: str = "main",
+              model_size_bytes: int = 0) -> TimingResult:
     """Load via run:ai streaming.
 
     *concurrency* controls Run:AI I/O threads (disk bandwidth).
@@ -379,11 +404,13 @@ def run_runai(model_id: str, gpu_ids: list[int],
     """
     from nnsight import LanguageModel
 
-    max_memory = build_max_memory(gpu_ids)
+    max_memory = build_max_memory(gpu_ids, model_size_bytes=model_size_bytes)
     restore = _patch_hf_workers(workers)
 
     try:
         with PeakMemMonitor() as mem:
+            for i in gpu_ids:
+                torch.cuda.reset_peak_memory_stats(i)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
 
@@ -393,6 +420,7 @@ def run_runai(model_id: str, gpu_ids: list[int],
                 max_memory=max_memory,
                 concurrency=concurrency,
                 gpu_direct=gpu_direct,
+                lazy=lazy,
                 revision=revision,
                 dispatch=True,
             )
@@ -401,6 +429,8 @@ def run_runai(model_id: str, gpu_ids: list[int],
             wall = time.perf_counter() - t0
 
         peak_gpu = get_gpu_mem_allocated_mb(gpu_ids)
+        peak_alloc = sum(torch.cuda.max_memory_allocated(i) / (1024 ** 2) for i in gpu_ids)
+        peak_reserved = sum(torch.cuda.max_memory_reserved(i) / (1024 ** 2) for i in gpu_ids)
         unload_model(model)
     finally:
         restore()
@@ -410,6 +440,8 @@ def run_runai(model_id: str, gpu_ids: list[int],
         config={"concurrency": concurrency, "workers": workers},
         wall_time_s=wall,
         peak_gpu_mem_mb=peak_gpu,
+        peak_gpu_alloc_mb=peak_alloc,
+        peak_gpu_reserved_mb=peak_reserved,
         peak_rss_mb=mem.peak_rss_mb,
         peak_private_mb=mem.peak_private_mb,
     )
@@ -419,11 +451,12 @@ def run_runai(model_id: str, gpu_ids: list[int],
 # Correctness verification
 # ---------------------------------------------------------------------------
 
-def _load_and_get_logits(model_id, gpu_ids, revision, prompt, **extra_kwargs):
+def _load_and_get_logits(model_id, gpu_ids, revision, prompt,
+                         model_size_bytes=0, **extra_kwargs):
     """Load model, run one forward pass, return (logits, decoded_token, token_id)."""
     from nnsight import LanguageModel
 
-    max_memory = build_max_memory(gpu_ids)
+    max_memory = build_max_memory(gpu_ids, model_size_bytes=model_size_bytes)
     model = LanguageModel(
         model_id, device_map="auto", max_memory=max_memory,
         revision=revision, dispatch=True, **extra_kwargs,
@@ -439,7 +472,8 @@ def _load_and_get_logits(model_id, gpu_ids, revision, prompt, **extra_kwargs):
 
 def verify_outputs(model_id: str, gpu_ids: list[int],
                    experiments: list[str],
-                   revision: str = "main") -> bool:
+                   revision: str = "main",
+                   model_size_bytes: int = 0) -> bool:
     """Load with each selected path, run same prompt, compare logits."""
     if len(experiments) < 2:
         print("  Skipping verification (need at least 2 experiments)")
@@ -449,9 +483,10 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
     print(f"\n  Verifying output correctness (prompt: {prompt!r})...")
 
     load_kwargs = {
-        "hf":               {"load_format": "from_pretrained"},
-        "runai_stream":     {"gpu_direct": False},
-        "runai_gpu_direct": {},
+        "hf":         {"load_format": "from_pretrained"},
+        "stream":     {"gpu_direct": False},
+        "gpu_direct": {},
+        "lazy":       {"lazy": True},
     }
 
     # Decide baseline order: prefer hf first
@@ -460,7 +495,8 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
     for exp in ordered:
         print(f"    Loading {exp}...")
         results[exp] = _load_and_get_logits(
-            model_id, gpu_ids, revision, prompt, **load_kwargs[exp],
+            model_id, gpu_ids, revision, prompt,
+            model_size_bytes=model_size_bytes, **load_kwargs[exp],
         )
 
     baseline_name = ordered[0]
@@ -487,7 +523,7 @@ def verify_outputs(model_id: str, gpu_ids: list[int],
 # Main
 # ---------------------------------------------------------------------------
 
-ALL_EXPERIMENTS = ["hf", "runai_stream", "runai_gpu_direct"]
+ALL_EXPERIMENTS = ["hf", "stream", "gpu_direct", "lazy"]
 
 # HF workers and Run:AI concurrency are independent knobs:
 #   workers     — HF GLOBAL_WORKERS: threads doing GPU transfers (.to(device))
@@ -495,32 +531,43 @@ ALL_EXPERIMENTS = ["hf", "runai_stream", "runai_gpu_direct"]
 DEFAULT_RUNAI_WORKERS = 4
 
 EXPERIMENT_CONFIGS = {
-    "hf":               [("hf",               {"workers": w})     for w in [1, 2, 4, 8, 16, 32]],
-    "runai_stream":     [("runai_stream",      {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
-    "runai_gpu_direct": [("runai_gpu_direct",  {"concurrency": c}) for c in [1, 2, 4, 8, 16, 32]],
+    "hf":         [("hf",         {"workers": w})     for w in [1, 4, 8]],
+    "stream":     [("stream",     {"concurrency": c}) for c in [1, 4, 8]],
+    "gpu_direct": [("gpu_direct", {"concurrency": c}) for c in [1, 4, 8]],
+    "lazy":       [("lazy",       {"concurrency": c}) for c in [1, 4, 8]],
 }
 
 _RUNNERS = {
-    "hf":               lambda mid, gids, cfg, rev: run_hf(
-                            mid, gids, workers=cfg.get("workers", 4), revision=rev),
-    "runai_stream":     lambda mid, gids, cfg, rev: run_runai(
-                            mid, gids, experiment="runai_stream",
-                            concurrency=cfg.get("concurrency", 16),
-                            workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
-                            gpu_direct=False, revision=rev),
-    "runai_gpu_direct": lambda mid, gids, cfg, rev: run_runai(
-                            mid, gids, experiment="runai_gpu_direct",
-                            concurrency=cfg.get("concurrency", 16),
-                            workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
-                            gpu_direct=True, revision=rev),
+    "hf":         lambda mid, gids, cfg, rev, msb: run_hf(
+                      mid, gids, workers=cfg.get("workers", 4), revision=rev,
+                      model_size_bytes=msb),
+    "stream":     lambda mid, gids, cfg, rev, msb: run_runai(
+                      mid, gids, experiment="stream",
+                      concurrency=cfg.get("concurrency", 16),
+                      workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                      gpu_direct=False, revision=rev,
+                      model_size_bytes=msb),
+    "gpu_direct": lambda mid, gids, cfg, rev, msb: run_runai(
+                      mid, gids, experiment="gpu_direct",
+                      concurrency=cfg.get("concurrency", 16),
+                      workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                      gpu_direct=True, revision=rev,
+                      model_size_bytes=msb),
+    "lazy":       lambda mid, gids, cfg, rev, msb: run_runai(
+                      mid, gids, experiment="lazy",
+                      concurrency=cfg.get("concurrency", 16),
+                      workers=cfg.get("workers", DEFAULT_RUNAI_WORKERS),
+                      gpu_direct=True, lazy=True, revision=rev,
+                      model_size_bytes=msb),
 }
 
 
-def run_single_config(exp_name, config, model_id, gpu_ids, revision):
+def run_single_config(exp_name, config, model_id, gpu_ids, revision,
+                      model_size_bytes=0):
     runner = _RUNNERS.get(exp_name)
     if runner is None:
         raise ValueError(f"Unknown experiment: {exp_name}")
-    return runner(model_id, gpu_ids, config, revision)
+    return runner(model_id, gpu_ids, config, revision, model_size_bytes)
 
 
 def main():
@@ -561,7 +608,7 @@ def main():
     except ImportError:
         has_runai = False
 
-    runai_exps = {"runai_stream", "runai_gpu_direct"}
+    runai_exps = {"stream", "gpu_direct", "lazy"}
     if not has_runai:
         skipped = [e for e in args.experiments if e in runai_exps]
         if skipped:
@@ -614,7 +661,8 @@ def main():
 
     # Correctness verification
     if not args.no_verify and len(args.experiments) > 1:
-        ok = verify_outputs(args.model, gpu_ids, args.experiments, args.revision)
+        ok = verify_outputs(args.model, gpu_ids, args.experiments, args.revision,
+                            model_size_bytes=int(model_size_gb * 1024**3))
         if not ok:
             print("\n  WARNING: Output mismatch between loading paths!")
         else:
@@ -653,6 +701,7 @@ def main():
                     result = run_single_config(
                         exp_name, config, args.model, gpu_ids,
                         args.revision,
+                        model_size_bytes=int(model_size_gb * 1024**3),
                     )
 
                     disk_after = _read_diskstats(args.disk_device)
@@ -668,15 +717,17 @@ def main():
 
                     bw = model_size_gb / result.wall_time_s if result.wall_time_s > 0 else 0
                     print(f"\n  [OK] {result.experiment} | config={result.config}")
-                    print(f"    wall_time:    {result.wall_time_s:.2f}s")
-                    print(f"    bw:           {bw:.2f} GB/s")
-                    print(f"    peak_gpu_mem: {result.peak_gpu_mem_mb:.0f} MB")
-                    print(f"    peak_rss:     {result.peak_rss_mb:.0f} MB")
-                    print(f"    peak_private: {result.peak_private_mb:.0f} MB")
+                    print(f"    wall_time:      {result.wall_time_s:.2f}s")
+                    print(f"    bw:             {bw:.2f} GB/s")
+                    print(f"    peak_gpu_mem:   {result.peak_gpu_mem_mb:.0f} MB")
+                    print(f"    peak_gpu_alloc: {result.peak_gpu_alloc_mb:.0f} MB")
+                    print(f"    peak_gpu_resrv: {result.peak_gpu_reserved_mb:.0f} MB")
+                    print(f"    peak_rss:       {result.peak_rss_mb:.0f} MB")
+                    print(f"    peak_private:   {result.peak_private_mb:.0f} MB")
                     if result.disk_read_gib is not None:
-                        print(f"    disk_read:    {result.disk_read_gib:.3f} GiB")
+                        print(f"    disk_read:      {result.disk_read_gib:.3f} GiB")
                     if result.net_rx_gib is not None:
-                        print(f"    net_rx:       {result.net_rx_gib:.3f} GiB")
+                        print(f"    net_rx:         {result.net_rx_gib:.3f} GiB")
 
                     all_results.append(result)
                 except Exception as e:
@@ -696,9 +747,9 @@ def main():
     print(f"\n{'=' * 60}")
     print("SUMMARY")
     print(f"{'=' * 60}")
-    hdr = (f"{'Experiment':<14} {'Config':<28} {'Wall (s)':<10} "
-           f"{'BW (GB/s)':<10} {'GPU (MB)':<10} {'RSS (MB)':<10} "
-           f"{'Private (MB)':<12} {'Disk (GiB)':<10}")
+    hdr = (f"{'Experiment':<12} {'Config':<28} {'Wall (s)':<10} "
+           f"{'BW (GB/s)':<10} {'GPU (MB)':<10} {'PkAlloc(MB)':<12} "
+           f"{'PkResrv(MB)':<12} {'RSS (MB)':<10} {'Priv (MB)':<10}")
     print(hdr)
     print("-" * len(hdr))
     for r in all_results:
@@ -708,10 +759,10 @@ def main():
         if len(config_str) > 26:
             config_str = config_str[:23] + "..."
         bw = model_size_gb / r.wall_time_s if r.wall_time_s > 0 else 0
-        disk_str = f"{r.disk_read_gib:.3f}" if r.disk_read_gib is not None else "n/a"
-        print(f"{r.experiment:<14} {config_str:<28} {r.wall_time_s:<10.2f} "
-              f"{bw:<10.2f} {r.peak_gpu_mem_mb:<10.0f} {r.peak_rss_mb:<10.0f} "
-              f"{r.peak_private_mb:<12.0f} {disk_str:<10}")
+        print(f"{r.experiment:<12} {config_str:<28} {r.wall_time_s:<10.2f} "
+              f"{bw:<10.2f} {r.peak_gpu_mem_mb:<10.0f} {r.peak_gpu_alloc_mb:<12.0f} "
+              f"{r.peak_gpu_reserved_mb:<12.0f} {r.peak_rss_mb:<10.0f} "
+              f"{r.peak_private_mb:<10.0f}")
 
     # JSON output
     if args.output:
@@ -719,6 +770,8 @@ def main():
             "experiment": r.experiment, "config": r.config,
             "wall_time_s": r.wall_time_s,
             "peak_gpu_mem_mb": r.peak_gpu_mem_mb,
+            "peak_gpu_alloc_mb": r.peak_gpu_alloc_mb,
+            "peak_gpu_reserved_mb": r.peak_gpu_reserved_mb,
             "peak_rss_mb": r.peak_rss_mb,
             "peak_private_mb": r.peak_private_mb,
             "disk_read_gib": r.disk_read_gib,

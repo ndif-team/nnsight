@@ -77,6 +77,8 @@ class TransformersModel(HuggingFaceModel):
 
         load_format = kwargs.pop("load_format", None)
         gpu_direct = kwargs.pop("gpu_direct", True)
+        lazy = kwargs.pop("lazy", False)
+        concurrency = kwargs.pop("concurrency", 16)
         self._load_config(repo_id, revision=revision, **kwargs)
 
         # Default: try run:ai streamer, fall back to from_pretrained if not installed
@@ -84,7 +86,8 @@ class TransformersModel(HuggingFaceModel):
             try:
                 model = self._load_streamed(
                     repo_id, revision=revision,
-                    gpu_direct=gpu_direct, **kwargs,
+                    gpu_direct=gpu_direct, concurrency=concurrency,
+                    lazy=lazy, **kwargs,
                 )
                 self.config = model.config
                 return model
@@ -136,6 +139,7 @@ class TransformersModel(HuggingFaceModel):
         revision: Optional[str] = None,
         concurrency: int = 16,
         gpu_direct: bool = True,
+        lazy: bool = False,
         **kwargs,
     ) -> PreTrainedModel:
         """Load model using run:ai SafetensorsStreamer for fast disk I/O.
@@ -182,6 +186,7 @@ class TransformersModel(HuggingFaceModel):
             shard_paths, concurrency=concurrency,
             device_map=resolved_device_map,
             torch_dtype=kwargs.get("torch_dtype") if gpu_direct else None,
+            lazy=lazy,
         )
 
         # Resolve concrete model class — Auto classes reject None as path

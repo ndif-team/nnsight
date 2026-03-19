@@ -102,6 +102,7 @@ class RunAIShardCache:
         concurrency: int,
         device_map: dict | None = None,
         torch_dtype: torch.dtype | None = None,
+        lazy: bool = False,
     ) -> None:
         self._concurrency = concurrency
         self._device_map = device_map
@@ -109,6 +110,7 @@ class RunAIShardCache:
         self._gpu_direct = (
             device_map is not None and torch.cuda.is_available()
         )
+        self._lazy = lazy
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
 
@@ -119,6 +121,12 @@ class RunAIShardCache:
         self._refcounts: dict[str, int] = {}
         self._shard_loading: set[str] = set()
         self._errors: dict[str, Exception] = {}
+
+        # Lazy-mode iterator state (persistent across get() calls)
+        self._shard_contexts: dict = {}     # shard_path → SafetensorsStreamer ctx
+        self._shard_iterators: dict = {}    # shard_path → iterator
+        self._shard_exhausted: set[str] = set()
+        self._expandable_set = False
 
         # Profiling stats (thread-safe via _lock/_condition)
         self.stats_shard_wall_s = 0.0  # wall time of _stream_shard_incremental
@@ -135,6 +143,12 @@ class RunAIShardCache:
 
     def get(self, shard_path: str, key: str) -> torch.Tensor:
         """Return the tensor for *key*, streaming the shard if needed."""
+        if self._lazy:
+            return self._get_lazy(shard_path, key)
+        return self._get_eager(shard_path, key)
+
+    def _get_eager(self, shard_path: str, key: str) -> torch.Tensor:
+        """Eager: preload entire shard, then pop the requested key."""
         should_load = False
         t_wait_start = time.perf_counter()
 
@@ -170,6 +184,53 @@ class RunAIShardCache:
                     raise self._errors[shard_path]
                 return self._pop_tensor(shard_path, key)
 
+    def _get_lazy(self, shard_path: str, key: str) -> torch.Tensor:
+        """Lazy: advance shard iterator only until the requested key."""
+        t_wait_start = time.perf_counter()
+
+        while True:
+            with self._condition:
+                if shard_path in self._errors:
+                    raise self._errors[shard_path]
+
+                if key in self._tensors:
+                    self.stats_consumer_wait_s += (
+                        time.perf_counter() - t_wait_start
+                    )
+                    return self._pop_tensor(shard_path, key)
+
+                if shard_path in self._shard_exhausted:
+                    raise KeyError(
+                        f"Key {key!r} not found in exhausted shard "
+                        f"{shard_path!r}"
+                    )
+
+                if shard_path in self._shard_loading:
+                    self._condition.wait()
+                    continue
+
+                self._shard_loading.add(shard_path)
+                break
+
+        try:
+            self._stream_until(shard_path, key)
+        except Exception as e:
+            with self._condition:
+                self._errors[shard_path] = e
+                self._shard_loading.discard(shard_path)
+                self._condition.notify_all()
+            raise
+
+        with self._condition:
+            self._shard_loading.discard(shard_path)
+            self._condition.notify_all()
+            self.stats_consumer_wait_s += (
+                time.perf_counter() - t_wait_start
+            )
+            if shard_path in self._errors:
+                raise self._errors[shard_path]
+            return self._pop_tensor(shard_path, key)
+
     # -- internals -------------------------------------------------------------
 
     def _pop_tensor(self, shard_path: str, key: str) -> torch.Tensor:
@@ -180,6 +241,9 @@ class RunAIShardCache:
         if self._refcounts[shard_path] == 0:
             del self._refcounts[shard_path]
             self._shard_loading.discard(shard_path)
+            if self._lazy:
+                self._close_shard_streamer(shard_path)
+                self._shard_exhausted.discard(shard_path)
         return tensor
 
     def _resolve_device(self, checkpoint_key: str) -> torch.device:
@@ -281,6 +345,102 @@ class RunAIShardCache:
         with self._condition:
             self.stats_shard_wall_s += shard_wall
 
+    # -- lazy streaming helpers ------------------------------------------------
+
+    def _ensure_shard_iterator(self, shard_path: str):
+        """Open a streamer for *shard_path* if not already open."""
+        if shard_path in self._shard_iterators:
+            return self._shard_iterators[shard_path]
+
+        from runai_model_streamer import SafetensorsStreamer
+
+        os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(self._concurrency)
+        if self._gpu_direct and not self._expandable_set:
+            self._enable_expandable_segments()
+            self._expandable_set = True
+
+        streamer = SafetensorsStreamer()
+        streamer.__enter__()
+        streamer.stream_files([shard_path], device="cpu")
+
+        self._shard_contexts[shard_path] = streamer
+        self._shard_iterators[shard_path] = iter(streamer.get_tensors())
+        return self._shard_iterators[shard_path]
+
+    def _close_shard_streamer(self, shard_path: str) -> None:
+        """Close and discard the streamer context for *shard_path*."""
+        ctx = self._shard_contexts.pop(shard_path, None)
+        self._shard_iterators.pop(shard_path, None)
+        if ctx is not None:
+            ctx.__exit__(None, None, None)
+
+    def _place_tensor(
+        self, name: str, tensor: torch.Tensor,
+    ) -> tuple[torch.Tensor, float, float]:
+        """Copy *tensor* to its target device/dtype.
+
+        Returns ``(result, gpu_copy_seconds, clone_seconds)``.
+        """
+        gpu_copy_s = 0.0
+        clone_s = 0.0
+
+        if self._gpu_direct:
+            target_device = self._resolve_device(name)
+            target_dtype = self._resolve_dtype(tensor)
+            if target_device.type == "cuda":
+                t0 = time.perf_counter()
+                result = tensor.to(
+                    device=target_device,
+                    dtype=target_dtype or tensor.dtype,
+                )
+                gpu_copy_s = time.perf_counter() - t0
+            else:
+                t0 = time.perf_counter()
+                result = tensor.clone()
+                clone_s = time.perf_counter() - t0
+                if target_dtype is not None:
+                    result = result.to(dtype=target_dtype)
+        else:
+            t0 = time.perf_counter()
+            result = tensor.clone()
+            clone_s = time.perf_counter() - t0
+
+        return result, gpu_copy_s, clone_s
+
+    def _stream_until(self, shard_path: str, target_key: str) -> None:
+        """Advance the shard iterator until *target_key* is cached."""
+        iterator = self._ensure_shard_iterator(shard_path)
+
+        t_stream_start = time.perf_counter()
+        t_iter_start = t_stream_start
+        for name, tensor in iterator:
+            t_yield = time.perf_counter()
+            io_wait = t_yield - t_iter_start
+
+            result, gpu_copy_s, clone_s = self._place_tensor(name, tensor)
+
+            with self._condition:
+                self.stats_io_wait_s += io_wait
+                self.stats_gpu_copy_s += gpu_copy_s
+                self.stats_clone_s += clone_s
+                self._tensors[name] = result
+                self._condition.notify_all()
+                if name == target_key:
+                    self.stats_shard_wall_s += (
+                        time.perf_counter() - t_stream_start
+                    )
+                    return
+
+            t_iter_start = time.perf_counter()
+
+        # Iterator exhausted
+        self._close_shard_streamer(shard_path)
+        with self._condition:
+            self._shard_exhausted.add(shard_path)
+            self.stats_shard_wall_s += (
+                time.perf_counter() - t_stream_start
+            )
+
 
 class LazyRunAITensor:
     """Drop-in replacement for ``SafetensorSlice``.
@@ -337,6 +497,7 @@ def build_lazy_state_dict(
     concurrency: int = 16,
     device_map: dict | None = None,
     torch_dtype: torch.dtype | None = None,
+    lazy: bool = False,
 ) -> dict[str, LazyRunAITensor]:
     """Build a lazy state dict backed by run:ai streaming.
 
@@ -365,6 +526,7 @@ def build_lazy_state_dict(
 
     cache = RunAIShardCache(
         concurrency, device_map=device_map, torch_dtype=torch_dtype,
+        lazy=lazy,
     )
     for shard_path, count in shard_key_counts.items():
         cache.register(shard_path, count)
