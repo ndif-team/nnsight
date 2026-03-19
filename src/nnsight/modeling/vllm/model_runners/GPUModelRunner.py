@@ -1,6 +1,7 @@
 import pickle
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import torch
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -124,16 +125,43 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 ctx["received_count"] += 1
 
         def unflatten(self, model: VLLM):
+            """Re-assign batch groups from token-level to prompt-level.
+
+            After the forward pass, logits have one row per *scheduled
+            request* (in ``batch_req_ids`` order).  We must walk the
+            same ordering used by ``process_batch_groups`` so that each
+            mediator's prompt-level index matches its row in the logits
+            tensor — even when the batch contains non-NNsight requests
+            or requests whose mediators have already finished.
+            """
 
             batch_start = 0
+            mediator_set = {id(m) for m in model._interleaver.mediators}
 
-            for mediator in model._interleaver.mediators:
+            _dbg = []  # debug
+
+            for req_id in self._batch_req_ids:
+                if self._num_scheduled_tokens.get(req_id) is None:
+                    continue
+
+                mediator = self.mediators.get(req_id)
+
+                if mediator is None or id(mediator) not in mediator_set:
+                    # Non-NNsight request or already-finished mediator —
+                    # still occupies a row in the logits tensor.
+                    _dbg.append(f"SKIP:{req_id}@{batch_start}")
+                    batch_start += 1
+                    continue
 
                 mediator.batch_group = [batch_start, 1]
-
+                _dbg.append(f"MED:{req_id}@{batch_start}")
                 batch_start += 1
-
                 model._interleaver.batcher.last_batch_group = mediator.batch_group
+
+            import os
+            if os.environ.get("NNSIGHT_DEBUG_631"):
+                with open("/disk/u/jadenfk/wd/issue631/debug_output.log", "a") as f:
+                    f.write(f"UNFLATTEN: {' '.join(_dbg)} n_mediators={len(model._interleaver.mediators)}\n")
 
         def process_batch_groups(
             self,
@@ -315,6 +343,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # so wrapping is pure overhead.
 
         if get_tp_group().world_size > 1:
+            self.nnsight_model._interleaver._tp_sync = True
             self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
@@ -327,6 +356,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         # Use input_batch.req_ids for the actual batch order after
         # condense()/reorder, not the scheduler dict order.
+        # Store these for unflatten() which needs the same ordering.
+        self.nnsight_request_helper._batch_req_ids = list(self.input_batch.req_ids)
+        self.nnsight_request_helper._num_scheduled_tokens = dict(scheduler_output.num_scheduled_tokens)
+
         self.nnsight_request_helper.process_batch_groups(
             scheduler_output.num_scheduled_tokens,
             self.input_batch.req_ids,
@@ -352,6 +385,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             if self.execute_model_state is not None:
 
+                # Same stream-sync rationale as the TP-parallel module
+                # hooks in VLLMBatcher.wrap(): the logits tensor was
+                # computed on the CUDA compute stream; without an explicit
+                # sync the interleaver hooks that fire inside the
+                # WrapperModule call may observe stale data.
+                if get_tp_group().world_size > 1:
+                    torch.cuda.synchronize()
+
                 logits = self.nnsight_model.logits(
                     self.execute_model_state.logits, hook=True
                 )
@@ -373,6 +414,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         with self.nnsight_model._interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
+
+            if get_tp_group().world_size > 1:
+                torch.cuda.synchronize()
 
             sampler_output.sampled_token_ids = self.model.samples(
                 sampler_output.sampled_token_ids, hook=True

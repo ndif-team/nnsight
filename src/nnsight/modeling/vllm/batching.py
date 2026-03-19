@@ -59,6 +59,12 @@ class VLLMBatcher(Batcher):
             self.current_module = None
             self.type = None
 
+            # After gathering, user modification, and re-splitting, the
+            # resulting tensor lives on the compute stream.  Sync before
+            # the module forward so its NCCL collectives see final data.
+            if interleaver.interleaving:
+                torch.cuda.synchronize()
+
             return args, kwargs
 
         def pre_output_hook(module: torch.nn.Module, args: Any, output: Any):
@@ -99,6 +105,9 @@ class VLLMBatcher(Batcher):
             self.current_module = None
             self.type = None
 
+            if interleaver.interleaving:
+                torch.cuda.synchronize()
+
             return output
 
         # When tensor_parallel_size > 1, the interleaver's hooks introduce
@@ -114,7 +123,7 @@ class VLLMBatcher(Batcher):
         # traced execution and is skipped entirely outside of interleaving.
         def cuda_sync_hook(module: torch.nn.Module, args, kwargs):
             if interleaver.interleaving:
-                torch.cuda.current_stream().synchronize()
+                torch.cuda.synchronize()
             return args, kwargs
 
         for module in model.modules():
@@ -162,6 +171,12 @@ class VLLMBatcher(Batcher):
                         lambda x: tensor_model_parallel_all_reduce(x),
                         torch.Tensor,
                     )
+
+            # The NCCL collective above ran on the NCCL stream.
+            # Subsequent user code (.clone(), modifications) runs on the
+            # compute stream.  Sync to ensure the gathered/reduced data
+            # is fully materialized before the compute stream reads it.
+            torch.cuda.synchronize()
 
             self.gathered = True
 

@@ -104,6 +104,7 @@ class Interleaver:
         self.initialize(mediators, tracer, batcher)
 
         self._interleaving = False
+        self._tp_sync = False
         self.hook_handles = []
 
     def initialize(
@@ -255,6 +256,15 @@ class Interleaver:
             if not self.interleaving:
                 return args, kwargs
 
+            # Under tensor parallelism, the Python code in these hooks
+            # introduces CPU-side delay between CUDA operations.  vLLM's
+            # NCCL custom ops may not explicitly synchronize across
+            # streams, so the delay can cause collectives to read stale
+            # data.  A device-wide sync at the top of every hook keeps
+            # both compute and NCCL streams in lockstep.
+            if self._tp_sync:
+                torch.cuda.synchronize()
+
             # Clear any stale skip for this module from previous failed traces
             skip_container[0] = None
 
@@ -286,6 +296,9 @@ class Interleaver:
             # If not interleaving, just return the original output values.
             if not self.interleaving:
                 return output
+
+            if self._tp_sync:
+                torch.cuda.synchronize()
 
             # NNsight keeps the modules attribute path as the provider string on the module itself.
             provider = module.__path__
