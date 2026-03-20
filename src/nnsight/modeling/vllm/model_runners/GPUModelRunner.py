@@ -138,8 +138,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             batch_start = 0
             mediator_set = {id(m) for m in model._interleaver.mediators}
 
-            _dbg = []  # debug
-
             for req_id in self._batch_req_ids:
                 if self._num_scheduled_tokens.get(req_id) is None:
                     continue
@@ -149,19 +147,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 if mediator is None or id(mediator) not in mediator_set:
                     # Non-NNsight request or already-finished mediator —
                     # still occupies a row in the logits tensor.
-                    _dbg.append(f"SKIP:{req_id}@{batch_start}")
                     batch_start += 1
                     continue
 
                 mediator.batch_group = [batch_start, 1]
-                _dbg.append(f"MED:{req_id}@{batch_start}")
                 batch_start += 1
                 model._interleaver.batcher.last_batch_group = mediator.batch_group
-
-            import os
-            if os.environ.get("NNSIGHT_DEBUG_631"):
-                with open("/disk/u/jadenfk/wd/issue631/debug_output.log", "a") as f:
-                    f.write(f"UNFLATTEN: {' '.join(_dbg)} n_mediators={len(model._interleaver.mediators)}\n")
 
         def process_batch_groups(
             self,
@@ -343,7 +334,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # so wrapping is pure overhead.
 
         if get_tp_group().world_size > 1:
-            self.nnsight_model._interleaver._tp_sync = True
             self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
