@@ -80,6 +80,11 @@ class TransformersModel(HuggingFaceModel):
         concurrency = kwargs.pop("concurrency", 16)
         self._load_config(repo_id, revision=revision, **kwargs)
 
+        # Tensor parallelism requires torch.distributed, which conflicts with
+        # RunAI's DistributedStreamer.  Use from_pretrained for TP loads.
+        if kwargs.get("tp_plan") is not None:
+            load_format = "from_pretrained"
+
         # Default: try run:ai streamer, fall back to from_pretrained if not installed
         if load_format != "from_pretrained":
             try:
@@ -198,7 +203,9 @@ class TransformersModel(HuggingFaceModel):
         # Resolve device_map early so the cache can place tensors on GPU
         device_map = kwargs.pop("device_map", None)
         resolved_device_map = None
+
         if gpu_direct:
+            # Resolve device_map early so the cache can place tensors on GPU
             if isinstance(device_map, str) and device_map in (
                 "auto", "balanced", "balanced_low_0", "sequential",
             ):
