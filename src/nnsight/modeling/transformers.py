@@ -80,9 +80,14 @@ class TransformersModel(HuggingFaceModel):
         concurrency = kwargs.pop("concurrency", 16)
         self._load_config(repo_id, revision=revision, **kwargs)
 
-        # Tensor parallelism requires torch.distributed, and RunAI's
-        # DistributedStreamer creates a conflicting NCCL group in
-        # find_local_ranks().  Use from_pretrained for TP loads.
+        # Tensor parallelism: skip the run:ai streamer entirely.
+        # With single-node TP each rank mmap's the same files and the OS
+        # page cache shares the physical pages (1× read for N ranks).
+        # RunAI's per-rank independent streaming reads N× the data with no
+        # page sharing, measured 2× slower than mmap for Qwen3-8B on 2 GPUs.
+        # gpu_direct is also incompatible: TP needs torch.narrow() on CPU
+        # before GPU placement, so full-tensor GPU copies would require an
+        # extra GPU→CPU round-trip.
         if kwargs.get("tp_plan") is not None:
             load_format = "from_pretrained"
 
@@ -100,6 +105,10 @@ class TransformersModel(HuggingFaceModel):
                 if load_format == "runai_streamer":
                     raise  # explicit request — don't swallow the error
                 # else load_format is None (default) — fall through silently
+            except ValueError:
+                if load_format == "runai_streamer":
+                    raise
+                # No .safetensors files (e.g. old repos with only .bin) — fall through
 
         model = self.automodel.from_pretrained(repo_id, revision=revision, **kwargs)
 
@@ -201,6 +210,9 @@ class TransformersModel(HuggingFaceModel):
 
         shard_paths = resolve_shard_paths(repo_id, revision=revision)
 
+        # tp_plan and device_map are mutually exclusive in from_pretrained.
+        tp_plan = kwargs.get("tp_plan")
+
         device_map = kwargs.pop("device_map", None)
         resolved_device_map = None
 
@@ -225,12 +237,15 @@ class TransformersModel(HuggingFaceModel):
         # Resolve concrete model class — Auto classes reject None as path
         model_class = self.automodel._model_mapping[type(self.config)]
 
+        # Only pass device_map when not using TP (they're mutually exclusive)
+        if tp_plan is None:
+            kwargs["device_map"] = resolved_device_map or device_map
+
         model = model_class.from_pretrained(
             None,
             config=self.config,
             state_dict=state_dict,
             revision=revision,
-            device_map=resolved_device_map or device_map,
             **kwargs,
         )
         return model
