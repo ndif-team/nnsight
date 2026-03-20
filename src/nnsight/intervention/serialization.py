@@ -36,6 +36,8 @@ Examples:
 import dataclasses
 import inspect
 import io
+import linecache
+import os
 import pickle
 import textwrap
 import tokenize
@@ -66,6 +68,46 @@ _DATACLASS_GENERATED_METHODS = frozenset(
 
 # Default pickle protocol - protocol 4 is available in Python 3.4+ and supports large objects
 DEFAULT_PROTOCOL = 4
+
+
+def _register_source_with_linecache(
+    filename: Optional[str], source: str, firstlineno: int = 1
+) -> None:
+    """Register reconstructed source so inspect can recover it by filename.
+
+    Places the source lines at the correct offset (``firstlineno``) so that
+    ``inspect.getsourcelines`` finds the function at the right line number.
+    When multiple functions from the same file are deserialized, their source
+    lines are merged into a single linecache entry at their respective offsets.
+    """
+    if not filename:
+        return
+
+    if os.path.isfile(filename):
+        return
+
+    lines = source.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+
+    end_line = firstlineno - 1 + len(lines)
+
+    if filename in linecache.cache:
+        # Merge: place lines at correct offset in existing entry
+        existing = list(linecache.cache[filename][2])
+        while len(existing) < end_line:
+            existing.append("\n")
+        for i, line in enumerate(lines):
+            existing[firstlineno - 1 + i] = line
+        linecache.cache[filename] = (
+            sum(len(l) for l in existing), None, existing, filename
+        )
+    else:
+        # New entry: pad with blank lines to preserve original line numbers
+        padded = ["\n"] * (firstlineno - 1) + lines
+        linecache.cache[filename] = (
+            sum(len(l) for l in padded), None, padded, filename
+        )
 
 
 def _extract_lambda_source(source: str, code: types.CodeType) -> str:
@@ -424,6 +466,7 @@ def make_function(
     base_globals: dict,
     closure_values: Optional[list],
     closure_names: Optional[list],
+    firstlineno: int = 1,
 ) -> types.FunctionType:
     """Reconstruct a function from its serialized source code and metadata.
 
@@ -453,6 +496,8 @@ def make_function(
         closure_values: List of closure variable values (passed immediately, not
             deferred, because closures need factory pattern to bind properly).
         closure_names: List of closure variable names (co_freevars).
+        firstlineno: The original co_firstlineno of the function. Used to
+            preserve correct line numbers in tracebacks and linecache.
 
     Returns:
         A newly constructed function object. Note: the globals are minimal
@@ -552,9 +597,15 @@ def make_function(
     func.__doc__ = doc
     func.__qualname__ = qualname
 
+    # Restore original co_firstlineno so tracebacks and inspect show correct
+    # line numbers relative to the original source file.
+    if firstlineno > 1:
+        func.__code__ = func.__code__.replace(co_firstlineno=firstlineno)
+
     # Attach original source for re-serialization (inspect.getsource won't work
     # because line numbers don't match the original file)
     func.__source__ = source
+    _register_source_with_linecache(filename, source, firstlineno)
 
     return func
 
@@ -757,6 +808,7 @@ class CustomCloudPickler(cloudpickle.Pickler):
         kwdefaults = slotstate["__kwdefaults__"]
         annotations = slotstate["__annotations__"]
         filename = func.__code__.co_filename
+        firstlineno = func.__code__.co_firstlineno
         qualname = slotstate["__qualname__"]
         module_name = slotstate["__module__"]
         doc = slotstate["__doc__"]
@@ -826,6 +878,7 @@ class CustomCloudPickler(cloudpickle.Pickler):
             base_globals,
             closure_values,
             closure_names,
+            firstlineno,
         )
 
         # Return 6-tuple: (func, args, state, listitems, dictitems, state_setter)
