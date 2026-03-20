@@ -80,8 +80,9 @@ class TransformersModel(HuggingFaceModel):
         concurrency = kwargs.pop("concurrency", 16)
         self._load_config(repo_id, revision=revision, **kwargs)
 
-        # Tensor parallelism requires torch.distributed, which conflicts with
-        # RunAI's DistributedStreamer.  Use from_pretrained for TP loads.
+        # Tensor parallelism requires torch.distributed, and RunAI's
+        # DistributedStreamer creates a conflicting NCCL group in
+        # find_local_ranks().  Use from_pretrained for TP loads.
         if kwargs.get("tp_plan") is not None:
             load_format = "from_pretrained"
 
@@ -200,7 +201,6 @@ class TransformersModel(HuggingFaceModel):
 
         shard_paths = resolve_shard_paths(repo_id, revision=revision)
 
-        # Resolve device_map early so the cache can place tensors on GPU
         device_map = kwargs.pop("device_map", None)
         resolved_device_map = None
 
