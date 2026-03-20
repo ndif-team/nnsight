@@ -1,11 +1,12 @@
 import pickle
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import torch
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
+from vllm.distributed.parallel_state import get_tp_group
 from nnsight.intervention.tracing.globals import Globals
 
 from ....intervention.serialization import load
@@ -70,7 +71,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             for new_req in new_reqs:
 
-                extra_args = getattr(new_req.sampling_params, 'extra_args', None)
+                extra_args = getattr(new_req.sampling_params, "extra_args", None)
                 if not extra_args:
                     continue
 
@@ -124,15 +125,33 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 ctx["received_count"] += 1
 
         def unflatten(self, model: VLLM):
+            """Re-assign batch groups from token-level to prompt-level.
+
+            After the forward pass, logits have one row per *scheduled
+            request* (in ``batch_req_ids`` order).  We must walk the
+            same ordering used by ``process_batch_groups`` so that each
+            mediator's prompt-level index matches its row in the logits
+            tensor — even when the batch contains non-NNsight requests
+            or requests whose mediators have already finished.
+            """
 
             batch_start = 0
+            mediator_set = {id(m) for m in model._interleaver.mediators}
 
-            for mediator in model._interleaver.mediators:
+            for req_id in self._batch_req_ids:
+                if self._num_scheduled_tokens.get(req_id) is None:
+                    continue
+
+                mediator = self.mediators.get(req_id)
+
+                if mediator is None or id(mediator) not in mediator_set:
+                    # Non-NNsight request or already-finished mediator —
+                    # still occupies a row in the logits tensor.
+                    batch_start += 1
+                    continue
 
                 mediator.batch_group = [batch_start, 1]
-
                 batch_start += 1
-
                 model._interleaver.batcher.last_batch_group = mediator.batch_group
 
         def process_batch_groups(
@@ -272,9 +291,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 Globals.saves.discard(_id)
 
             done_traces = [
-                tid for tid, ctx in self.trace_contexts.items()
-                if (not ctx["pending_req_ids"]
-                    and ctx["received_count"] == ctx["expected_count"])
+                tid
+                for tid, ctx in self.trace_contexts.items()
+                if (
+                    not ctx["pending_req_ids"]
+                    and ctx["received_count"] == ctx["expected_count"]
+                )
             ]
             for tid in done_traces:
                 del self.trace_contexts[tid]
@@ -306,7 +328,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model._interleaver.batcher = VLLMBatcher()
 
-        self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
+        # Only wrap when TP > 1: registers hooks that handle
+        # gather/split of sharded tensors and CUDA synchronization
+        # for TP-parallel modules.  With TP == 1 nothing is sharded
+        # so wrapping is pure overhead.
+
+        if get_tp_group().world_size > 1:
+            self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
@@ -318,6 +346,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         # Use input_batch.req_ids for the actual batch order after
         # condense()/reorder, not the scheduler dict order.
+        # Store these for unflatten() which needs the same ordering.
+        self.nnsight_request_helper._batch_req_ids = list(self.input_batch.req_ids)
+        self.nnsight_request_helper._num_scheduled_tokens = dict(scheduler_output.num_scheduled_tokens)
+
         self.nnsight_request_helper.process_batch_groups(
             scheduler_output.num_scheduled_tokens,
             self.input_batch.req_ids,
@@ -343,6 +375,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             if self.execute_model_state is not None:
 
+                # Same stream-sync rationale as the TP-parallel module
+                # hooks in VLLMBatcher.wrap(): the logits tensor was
+                # computed on the CUDA compute stream; without an explicit
+                # sync the interleaver hooks that fire inside the
+                # WrapperModule call may observe stale data.
+                if get_tp_group().world_size > 1:
+                    torch.cuda.synchronize()
+
                 logits = self.nnsight_model.logits(
                     self.execute_model_state.logits, hook=True
                 )
@@ -364,6 +404,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         with self.nnsight_model._interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
+
+            if get_tp_group().world_size > 1:
+                torch.cuda.synchronize()
 
             sampler_output.sampled_token_ids = self.model.samples(
                 sampler_output.sampled_token_ids, hook=True
@@ -402,7 +445,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         finished_req_id_set = set(finished_req_ids)
 
         matched = helper.match_req_ids(req_id_set)
-        finished_keys = helper.finalize_mediators(matched, finished_req_id_set, self.nnsight_model)
+        finished_keys = helper.finalize_mediators(
+            matched, finished_req_id_set, self.nnsight_model
+        )
         saves, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
 

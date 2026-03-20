@@ -31,6 +31,8 @@ class VLLMBatcher(Batcher):
 
     def wrap(self, model: Envoy):
 
+        interleaver = model._interleaver
+
         def pre_input_hook(module: torch.nn.Module, args: Any, kwargs: Any):
             self.current_module = module
             self.type = "input"
@@ -99,16 +101,35 @@ class VLLMBatcher(Batcher):
 
             return output
 
-        for module in model.modules():
+        # When tensor_parallel_size > 1, the interleaver's hooks introduce
+        # variable-length Python execution between CUDA operations.  vLLM's
+        # custom NCCL ops inside TP-parallel modules may assume the compute
+        # stream is already caught up (no explicit cross-stream sync).  The
+        # hook-induced CPU delay can break that assumption, causing NCCL to
+        # read stale data and producing non-deterministic results.
+        #
+        # Synchronizing the current CUDA stream before each TP-parallel
+        # module ensures all prior compute kernels have finished before the
+        # module's NCCL collectives run.  This adds ~3 % overhead during
+        # traced execution and is skipped entirely outside of interleaving.
+        def cuda_sync_hook(module: torch.nn.Module, args, kwargs):
+            if interleaver.interleaving:
+                torch.cuda.synchronize()
+            return args, kwargs
 
-            module._module.register_forward_pre_hook(
-                pre_input_hook, prepend=True, with_kwargs=True
-            )
-            module._module.register_forward_pre_hook(
-                post_input_hook, prepend=False, with_kwargs=True
-            )
-            module._module.register_forward_hook(pre_output_hook, prepend=True)
-            module._module.register_forward_hook(post_output_hook, prepend=False)
+        for module in model.modules():
+            if isinstance(module._module, (RowParallelLinear, ColumnParallelLinear)):
+                module._module.register_forward_pre_hook(
+                    cuda_sync_hook, prepend=True, with_kwargs=True
+                )
+                module._module.register_forward_pre_hook(
+                    pre_input_hook, prepend=True, with_kwargs=True
+                )
+                module._module.register_forward_pre_hook(
+                    post_input_hook, prepend=False, with_kwargs=True
+                )
+                module._module.register_forward_hook(pre_output_hook, prepend=True)
+                module._module.register_forward_hook(post_output_hook, prepend=False)
 
     def check_gathered(self):
 
@@ -142,6 +163,10 @@ class VLLMBatcher(Batcher):
                         torch.Tensor,
                     )
 
+            # Sync after the NCCL collective so that user code
+            # (.clone(), tensor modifications) on the compute stream
+            # sees fully materialised data.
+            torch.cuda.synchronize()
             self.gathered = True
 
     def narrow(self, batch_group: Union[int, None]):
