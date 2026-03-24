@@ -674,10 +674,29 @@ class Mediator:
             len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER
         )
 
+        # Capture the current CUDA stream so the worker thread uses it.
+        # Worker threads default to the NULL stream (stream 0), but
+        # vLLM (and other frameworks) run on a non-default stream.
+        # PyTorch creates non-default streams with cudaStreamNonBlocking,
+        # which disables implicit synchronization with the NULL stream.
+        # Without propagating the stream, worker-thread CUDA ops (clone,
+        # fill) race with main-thread ops on the compute stream.
+        if torch.cuda.is_available() and torch.cuda.current_device() >= 0:
+            _caller_stream = torch.cuda.current_stream()
+        else:
+            _caller_stream = None
+
+        _intervention = self.intervention
+        _args = (self, self.info, *self.args)
+
+        def _worker_target():
+            if _caller_stream is not None:
+                torch.cuda.set_stream(_caller_stream)
+            _intervention(*_args)
+
         # Start the worker thread.
         self.worker = Thread(
-            target=self.intervention,
-            args=(self, self.info, *self.args),
+            target=_worker_target,
             daemon=True,
             name=self.name,
         )

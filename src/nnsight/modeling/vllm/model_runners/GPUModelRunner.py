@@ -1,7 +1,6 @@
 import pickle
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import torch
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -375,14 +374,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             if self.execute_model_state is not None:
 
-                # Same stream-sync rationale as the TP-parallel module
-                # hooks in VLLMBatcher.wrap(): the logits tensor was
-                # computed on the CUDA compute stream; without an explicit
-                # sync the interleaver hooks that fire inside the
-                # WrapperModule call may observe stale data.
-                if get_tp_group().world_size > 1:
-                    torch.cuda.synchronize()
-
                 logits = self.nnsight_model.logits(
                     self.execute_model_state.logits, hook=True
                 )
@@ -404,9 +395,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         with self.nnsight_model._interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
-
-            if get_tp_group().world_size > 1:
-                torch.cuda.synchronize()
 
             sampler_output.sampled_token_ids = self.model.samples(
                 sampler_output.sampled_token_ids, hook=True
