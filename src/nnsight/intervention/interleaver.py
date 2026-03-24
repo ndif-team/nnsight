@@ -681,7 +681,7 @@ class Mediator:
         # which disables implicit synchronization with the NULL stream.
         # Without propagating the stream, worker-thread CUDA ops (clone,
         # fill) race with main-thread ops on the compute stream.
-        if torch.cuda.is_available() and torch.cuda.current_device() >= 0:
+        if torch.cuda.is_available():
             _caller_stream = torch.cuda.current_stream()
         else:
             _caller_stream = None
