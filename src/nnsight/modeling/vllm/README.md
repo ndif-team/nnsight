@@ -74,7 +74,7 @@ vllm/
 - Input preparation (`_prepare_input`) — normalizes strings, token ID lists, and HuggingFace tokenizer dicts
 - Batching multiple invokes together (`_batch`)
 - Forwarding calls to the vLLM engine (`__call__`)
-- Creating wrapper modules for `logits`, `samples`, and `generator`
+- Defining `logits` and `samples` eproperties for intercepting model outputs
 - Automatic Ray executor substitution when `distributed_executor_backend="ray"`
 - `trace()` override that injects `AsyncVLLMBackend` and `AsyncInterleavingTracer` when `mode="async"`
 
@@ -117,9 +117,8 @@ The user-facing class. Exists in two contexts:
 Key attributes:
 - `vllm_entrypoint` — The actual `vllm.LLM` or `AsyncLLM` instance (user process only)
 - `tokenizer` — vLLM's tokenizer
-- `logits` — `WrapperModule` envoy for intercepting logits
-- `samples` — `WrapperModule` envoy for intercepting sampled tokens
-- `generator` — `WrapperModule` envoy for generation output
+- `logits` — `eproperty` for intercepting logits
+- `samples` — `eproperty` for intercepting sampled tokens
 - `_async_engine` — Boolean flag (derived from `mode="async"`); when `True`, `trace()` injects async backend/tracer
 
 ### AsyncInterleavingTracer (async_tracer.py)
@@ -211,7 +210,7 @@ with model.trace(max_tokens=512) as tracer:
         with tracer.invoke(prompt):
             # Each invoke = one prompt = one vLLM request
             with tracer.all():
-                out_ids[i].append(model.samples.output.item())
+                out_ids[i].append(model.samples.item())
 
 # Access results after the trace
 for i, ids in enumerate(out_ids):
@@ -234,7 +233,7 @@ Key points:
 **1. User enters trace context:**
 ```python
 with model.trace("Hello", temperature=0.0, max_tokens=3) as tracer:
-    logits = model.logits.output.save()
+    logits = model.logits.save()
 ```
 
 NNsight captures, parses, and compiles the intervention code into a `Mediator`.
@@ -355,7 +354,7 @@ with model.trace(max_tokens=3) as tracer:
     for i, prompt in enumerate(prompts):
         with tracer.invoke(prompt):
             with tracer.all():
-                out_ids[i].append(model.logits.output)  # mutates shared list
+                out_ids[i].append(model.logits)  # mutates shared list
 ```
 
 On the worker:
@@ -414,11 +413,11 @@ After the forward pass completes, `unflatten()` switches batch groups to prompt-
 
 ### Phase 2: Logits
 
-Still inside the same `execute_model()` call, logits are wrapped through `model.logits(logits, hook=True)`. This fires the logits envoy's hooks, letting mediators observe/modify logits before sampling. The user accesses this as `model.logits.output`.
+Still inside the same `execute_model()` call, logits are provided via `VLLM.logits.provide()`. This feeds the logits into the interleaver, letting mediators observe/modify logits before sampling. The user accesses this as `model.logits`.
 
 ### Phase 3: Sampling (`_sample`)
 
-A separate interleaver context wraps `super()._sample()`. After sampling, the sampled token IDs are wrapped through `model.samples(token_ids, hook=True)`. The user accesses this as `model.samples.output`.
+A separate interleaver context wraps `super()._sample()`. After sampling, the sampled token IDs are provided via `VLLM.samples.provide()`. This feeds the sampled tokens into the interleaver, letting mediators observe/modify them. The user accesses this as `model.samples`.
 
 ### Phase 4: Collect (`collect_nnsight`)
 
@@ -510,7 +509,7 @@ In user code, `tracer.iter[:]` or `tracer.iter[0:3]` iterates over generation st
 with model.trace("Hello", max_tokens=3) as tracer:
     logits = list().save()
     for step in tracer.iter[:]:
-        logits.append(model.logits.output)
+        logits.append(model.logits)
 ```
 
 Each iteration of the loop corresponds to one generation step. The mediator's iteration counter advances, matching the interleaver's provider iteration suffix.
@@ -535,7 +534,7 @@ model = VLLM("gpt2", tensor_parallel_size=1, dispatch=True, mode="async")
 
 async def main():
     with model.trace("The Eiffel Tower is in", temperature=0.0, max_tokens=5) as tracer:
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     async for output in tracer.backend():
         print(f"finished={output.finished}, saves={list(output.saves.keys())}")
@@ -551,7 +550,7 @@ The async path introduces three new components that work together to defer gener
 ┌─────────────────────────────────────────────────────────────────┐
 │  User Code                                                      │
 │  with model.trace("Hello", ...) as tracer:                      │
-│      logits = model.logits.output.save()                        │
+│      logits = model.logits.save()                        │
 │                                                                 │
 │  async for output in tracer.backend():  # <-- streaming here    │
 │      print(output.saves)                                        │

@@ -48,7 +48,7 @@ def run_single_tp(tp: int, runs: int) -> dict:
         with torch.no_grad():
             with vllm.trace(temperature=0.0, max_tokens=1) as tracer:
                 with tracer.invoke(PROMPT):
-                    baseline_logit = vllm.logits.output[-1, token_id].item().save()
+                    baseline_logit = vllm.logits[-1, token_id].item().save()
 
         bl = float(baseline_logit)
         results["baseline"].append(bl)
@@ -66,7 +66,7 @@ def run_single_tp(tp: int, runs: int) -> dict:
                         s, e = head * HEAD_DIM, (head + 1) * HEAD_DIM
                         head_in[:, s:e] = 0
                         vllm.model.layers[TARGET_LAYER].self_attn.o_proj.input = head_in
-                        saved[head] = vllm.logits.output[-1, token_id].item().save()
+                        saved[head] = vllm.logits[-1, token_id].item().save()
 
         for head, sv in saved.items():
             v = float(sv)

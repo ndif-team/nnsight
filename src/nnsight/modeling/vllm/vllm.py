@@ -30,11 +30,10 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
 
-from ...intervention.envoy import Envoy
+from ...intervention.envoy import Envoy, eproperty
 from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.tracer import ScanningTracer
 from ...intervention.tracing.util import push_variables
-from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
 from ...intervention.serialization import save as serialize
@@ -50,12 +49,12 @@ if TYPE_CHECKING:
 
 class VLLM(RemoteableMixin):
     """NNsight wrapper to conduct interventions on a vLLM inference engine.\
-    
+
     Attributes:
         - vllm_entrypoint (vllm.LLM): vLLM language model.
         - tokenizer (vllm.transformers_utils.tokenizer.AnyTokenizer): tokenizer.
-        - logits (nnsight.WrapperModule): logits.
-        - samples (nnsight.WrapperModule): sampled tokens.
+        - logits (eproperty): logit tensor.
+        - samples (eproperty): sampled token ids.
 
     .. code-block:: python
         from nnsight.models.VLLM import VLLM
@@ -113,9 +112,27 @@ class VLLM(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-        self.logits: Envoy = WrapperModule()
-        self.samples: Envoy = WrapperModule()
-        self.generator: Envoy = WrapperModule()
+    @eproperty(description="logit tensor")
+    def logits(self):
+        """The logit tensor produced by the model before sampling.
+
+        Access during a trace to observe or modify logits::
+
+            with model.trace("Hello", temperature=0.0, top_p=1):
+                logits = model.logits.save()
+        """
+
+    @eproperty(description="sampled token ids")
+    def samples(self):
+        """The sampled token IDs produced by the sampler after logits.
+
+        Access during a trace to observe or modify sampled tokens::
+
+            with model.trace("Hello", temperature=0.8, top_p=0.95, max_tokens=3) as tracer:
+                tokens = list().save()
+                for step in tracer.iter[:]:
+                    tokens.append(model.samples.item())
+        """
 
     @staticmethod
     def _cleanup_distributed():

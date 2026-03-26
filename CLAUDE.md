@@ -1058,7 +1058,7 @@ model = VLLM("gpt2", tensor_parallel_size=1, gpu_memory_utilization=0.1, dispatc
 
 ```python
 with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
-    logits = model.logits.output.save()
+    logits = model.logits.save()
 
 next_token = model.tokenizer.decode(logits.argmax(dim=-1))
 ```
@@ -1070,7 +1070,7 @@ with model.trace("Hello", max_tokens=5) as tracer:
     logits = list().save()
 
     for step in tracer.iter[:]:
-        logits.append(model.logits.output)
+        logits.append(model.logits)
 ```
 
 ### vLLM Interventions
@@ -1081,8 +1081,8 @@ with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
     model.transformer.h[-2].mlp.output = torch.zeros_like(
         model.transformer.h[-2].mlp.output
     )
-    
-    logits = model.logits.output.save()
+
+    logits = model.logits.save()
 ```
 
 ### vLLM Sampling
@@ -1092,7 +1092,7 @@ with model.trace(max_tokens=3) as tracer:
     with tracer.invoke("Hello", temperature=0.8, top_p=0.95):
         samples = list().save()
         for step in tracer.iter[:]:
-            samples.append(model.samples.output.item())
+            samples.append(model.samples.item())
 ```
 
 ---

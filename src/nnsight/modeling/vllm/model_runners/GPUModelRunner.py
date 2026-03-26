@@ -374,8 +374,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             if self.execute_model_state is not None:
 
-                logits = self.nnsight_model.logits(
-                    self.execute_model_state.logits, hook=True
+                logits = type(self.nnsight_model).logits.provide(
+                    self.nnsight_model,
+                    self.execute_model_state.logits,
                 )
 
                 state = self.execute_model_state
@@ -396,8 +397,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             sampler_output = super()._sample(*args, **kwargs)
 
-            sampler_output.sampled_token_ids = self.model.samples(
-                sampler_output.sampled_token_ids, hook=True
+            sampler_output.sampled_token_ids = type(self.nnsight_model).samples.provide(
+                self.nnsight_model,
+                sampler_output.sampled_token_ids,
             )
 
         Globals.exit()

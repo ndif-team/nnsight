@@ -91,7 +91,7 @@ class TestTPStreamFix:
                         head_in = model.model.layers[layer].self_attn.o_proj.input.clone()
                         head_in[:, h * head_dim:(h + 1) * head_dim] = 0
                         model.model.layers[layer].self_attn.o_proj.input = head_in
-                        logits_list.append(model.logits.output[-1, token_id].item().save())
+                        logits_list.append(model.logits[-1, token_id].item().save())
             runs.append(logits_list[:])
 
         for i, h in enumerate(heads):

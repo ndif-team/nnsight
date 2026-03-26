@@ -68,7 +68,7 @@ class TestBasicInference:
     def test_single_logit(self, vllm_gpt2, ET_prompt: str):
         """Test single token logit prediction."""
         with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -87,7 +87,7 @@ class TestBasicInference:
         ) as tracer:
             logits = list().save()
             with tracer.iter[0:3]:
-                logits.append(vllm_gpt2.logits.output)
+                logits.append(vllm_gpt2.logits)
 
         assert vllm_gpt2.tokenizer.batch_decode(
             [logit.argmax(dim=-1) for logit in logits]
@@ -110,7 +110,7 @@ class TestGeneration:
         ) as tracer:
             logits = list().save()
             with tracer.iter[0:3]:
-                logits.append(vllm_gpt2.logits.output)
+                logits.append(vllm_gpt2.logits)
 
         assert vllm_gpt2.tokenizer.batch_decode(
             [logit.argmax(dim=-1) for logit in logits]
@@ -122,7 +122,7 @@ class TestGeneration:
         with vllm_gpt2.trace(ET_prompt, max_tokens=10) as tracer:
             logits = list().save()
             with tracer.all():
-                logits.append(vllm_gpt2.logits.output)
+                logits.append(vllm_gpt2.logits)
 
         assert len(logits) == 10
 
@@ -142,12 +142,12 @@ class TestSampling:
             with tracer.invoke(MSG_prompt, temperature=0.8, top_p=0.95):
                 samples_2 = list().save()
                 with tracer.iter[0:3]:
-                    samples_2.append(vllm_gpt2.samples.output.item())
+                    samples_2.append(vllm_gpt2.samples.item())
 
             with tracer.invoke(MSG_prompt, temperature=0.0, top_p=1.0):
                 samples_1 = list().save()
                 with tracer.iter[0:3]:
-                    samples_1.append(vllm_gpt2.samples.output.item())
+                    samples_1.append(vllm_gpt2.samples.item())
 
         assert vllm_gpt2.tokenizer.batch_decode(
             samples_1
@@ -170,7 +170,7 @@ class TestInterventions:
             out[:] = 0
             vllm_gpt2.transformer.h[-2].mlp.output = out
             hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert torch.all(hs == 0)
@@ -184,7 +184,7 @@ class TestInterventions:
                 vllm_gpt2.transformer.h[-2].mlp.output
             )
             hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " London"
@@ -205,7 +205,7 @@ class TestInterventions:
                     vllm_gpt2.transformer.h[-2].output = out
 
                 hs_list.append(vllm_gpt2.transformer.h[-2].output[0])
-                logits.append(vllm_gpt2.logits.output)
+                logits.append(vllm_gpt2.logits)
 
         assert [torch.all(hs == 0) for hs in hs_list] == [
             False,
@@ -233,14 +233,14 @@ class TestBatching:
         with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(ET_prompt):
                 clean_hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
-                clean_logits = vllm_gpt2.logits.output.save()
+                clean_logits = vllm_gpt2.logits.save()
 
             with tracer.invoke(ET_prompt):
                 out = vllm_gpt2.transformer.h[-2].mlp.output[:].clone()
                 out[:] = 0
                 vllm_gpt2.transformer.h[-2].mlp.output = out
                 corrupted_hs = vllm_gpt2.transformer.h[-2].mlp.output.save()
-                corrupted_logits = vllm_gpt2.logits.output.save()
+                corrupted_logits = vllm_gpt2.logits.save()
 
         clean_token = vllm_gpt2.tokenizer.decode(clean_logits.argmax(dim=-1))
         corrupted_token = vllm_gpt2.tokenizer.decode(corrupted_logits.argmax(dim=-1))
@@ -259,12 +259,12 @@ class TestBatching:
             with tracer.invoke(ET_prompt):
                 ET_logits = list().save()
                 with tracer.iter[1:7]:
-                    ET_logits.append(vllm_gpt2.logits.output)
+                    ET_logits.append(vllm_gpt2.logits)
 
             with tracer.invoke(MSG_prompt, max_tokens=5):
                 MSG_logits = list().save()
                 with tracer.iter[:5]:
-                    MSG_logits.append(vllm_gpt2.logits.output)
+                    MSG_logits.append(vllm_gpt2.logits)
 
         assert len(ET_logits) == 6
         assert len(MSG_logits) == 5
@@ -291,7 +291,7 @@ class TestTensorParallelism:
             value_tuple = (value, *value_tuple[1:])
             vllm_gpt2.transformer.h[5].mlp.c_fc.output = value_tuple
             hs = vllm_gpt2.transformer.h[5].mlp.c_fc.output[0].save()
-            logit = vllm_gpt2.logits.output.save()
+            logit = vllm_gpt2.logits.save()
             next_token = vllm_gpt2.tokenizer.decode(logit.argmax(dim=-1)).save()
 
         assert next_token != " Paris"
@@ -313,7 +313,7 @@ class TestTokenInputs:
         token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
 
         with vllm_gpt2.trace(token_ids, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -324,7 +324,7 @@ class TestTokenInputs:
         hf_output = vllm_gpt2.tokenizer(ET_prompt, return_tensors="pt")
 
         with vllm_gpt2.trace(dict(hf_output), temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -336,7 +336,7 @@ class TestTokenInputs:
 
         with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(token_ids):
-                logits = vllm_gpt2.logits.output.save()
+                logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -350,10 +350,10 @@ class TestTokenInputs:
 
         with vllm_gpt2.trace(temperature=0.0, top_p=1) as tracer:
             with tracer.invoke(et_tokens):
-                et_logits = vllm_gpt2.logits.output.save()
+                et_logits = vllm_gpt2.logits.save()
 
             with tracer.invoke(MSG_prompt):
-                msg_logits = vllm_gpt2.logits.output.save()
+                msg_logits = vllm_gpt2.logits.save()
 
         et_token = vllm_gpt2.tokenizer.decode(et_logits.argmax(dim=-1))
         msg_token = vllm_gpt2.tokenizer.decode(msg_logits.argmax(dim=-1))
@@ -366,7 +366,7 @@ class TestTokenInputs:
         token_ids = vllm_gpt2.tokenizer.encode(ET_prompt)
 
         with vllm_gpt2.trace({"input_ids": token_ids}, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -378,7 +378,7 @@ class TestTokenInputs:
         input_dict = {"input_ids": hf_output["input_ids"]}
 
         with vllm_gpt2.trace(input_dict, temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -389,7 +389,7 @@ class TestTokenInputs:
         hf_output = vllm_gpt2.tokenizer(ET_prompt, return_tensors="pt")
 
         with vllm_gpt2.trace(dict(hf_output), temperature=0.0, top_p=1):
-            logits = vllm_gpt2.logits.output.save()
+            logits = vllm_gpt2.logits.save()
 
         next_token = vllm_gpt2.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -432,7 +432,7 @@ class TestRayExecutor:
     def test_ray_basic_logit(self, vllm_gpt2_ray, ET_prompt: str):
         """Test basic logit access with Ray executor."""
         with vllm_gpt2_ray.trace(ET_prompt, temperature=0.0, top_p=1):
-            logits = vllm_gpt2_ray.logits.output.save()
+            logits = vllm_gpt2_ray.logits.save()
 
         next_token = vllm_gpt2_ray.tokenizer.decode(logits.argmax(dim=-1))
         assert next_token == " Paris"
@@ -445,7 +445,7 @@ class TestRayExecutor:
             out[:] = 0
             vllm_gpt2_ray.transformer.h[-2].mlp.output = out
             hs = vllm_gpt2_ray.transformer.h[-2].mlp.output.save()
-            logits = vllm_gpt2_ray.logits.output.save()
+            logits = vllm_gpt2_ray.logits.save()
 
         assert torch.all(hs == 0)
 
@@ -457,7 +457,7 @@ class TestRayExecutor:
         ) as tracer:
             logits = list().save()
             with tracer.iter[0:3]:
-                logits.append(vllm_gpt2_ray.logits.output)
+                logits.append(vllm_gpt2_ray.logits)
 
         assert len(logits) == 3
 
@@ -476,7 +476,7 @@ class TestRayExecutor:
                     vllm_gpt2_ray.transformer.h[-2].output = out
 
                 hs_list.append(vllm_gpt2_ray.transformer.h[-2].output[0])
-                logits.append(vllm_gpt2_ray.logits.output)
+                logits.append(vllm_gpt2_ray.logits)
 
         assert [torch.all(hs == 0) for hs in hs_list] == [
             False,
@@ -504,7 +504,7 @@ class TestCrossInvokeSharedState:
             out_ids = [list() for _ in range(len(prompts))].save()
             for i, prompt in enumerate(prompts):
                 with tracer.invoke(prompt):
-                    out_ids[i].append(vllm_gpt2.logits.output.argmax(dim=-1))
+                    out_ids[i].append(vllm_gpt2.logits.argmax(dim=-1))
 
         # Each sub-list should have exactly one entry (single-token generation)
         assert len(out_ids) == 2
@@ -528,7 +528,7 @@ class TestCrossInvokeSharedState:
             for i, prompt in enumerate(prompts):
                 with tracer.invoke(prompt):
                     with tracer.all():
-                        out_ids[i].append(vllm_gpt2.logits.output.argmax(dim=-1))
+                        out_ids[i].append(vllm_gpt2.logits.argmax(dim=-1))
 
         # Each sub-list should have num_tokens entries
         assert len(out_ids) == 2
@@ -577,7 +577,7 @@ class TestAsyncEngine:
             with vllm_gpt2_async.trace(
                 ET_prompt, temperature=0.0, max_tokens=5
             ) as tracer:
-                logits = vllm_gpt2_async.logits.output.save()
+                logits = vllm_gpt2_async.logits.save()
 
             count = 0
             async for output in tracer.backend():
@@ -596,7 +596,7 @@ class TestAsyncEngine:
             with vllm_gpt2_async.trace(
                 ET_prompt, temperature=0.0, max_tokens=5
             ) as tracer:
-                logits = vllm_gpt2_async.logits.output.save()
+                logits = vllm_gpt2_async.logits.save()
 
             count = 0
             saves_count = 0
@@ -622,7 +622,7 @@ class TestAsyncEngine:
             with vllm_gpt2_async.trace(
                 ET_prompt, temperature=0.0, max_tokens=3
             ) as tracer:
-                logits = vllm_gpt2_async.logits.output.save()
+                logits = vllm_gpt2_async.logits.save()
 
             outputs = []
             async for output in tracer.backend():
@@ -645,7 +645,7 @@ class TestAsyncEngine:
             with vllm_gpt2_async.trace(
                 ET_prompt, temperature=0.0, max_tokens=1
             ) as tracer:
-                logits = vllm_gpt2_async.logits.output.save()
+                logits = vllm_gpt2_async.logits.save()
 
             clean_saves = None
             async for output in tracer.backend():
@@ -665,7 +665,7 @@ class TestAsyncEngine:
                 vllm_gpt2_async.transformer.h[-2].mlp.output = torch.zeros_like(
                     vllm_gpt2_async.transformer.h[-2].mlp.output
                 )
-                logits = vllm_gpt2_async.logits.output.save()
+                logits = vllm_gpt2_async.logits.save()
 
             corrupted_saves = None
             async for output in tracer.backend():
@@ -689,7 +689,7 @@ class TestAsyncEngine:
             with vllm_gpt2_async.trace(
                 MSG_prompt, temperature=0.0, max_tokens=3
             ) as tracer:
-                logits = vllm_gpt2_async.logits.output.save()
+                logits = vllm_gpt2_async.logits.save()
 
             texts = []
             async for output in tracer.backend():
@@ -757,7 +757,7 @@ class TestAsyncRayExecutor:
             with vllm_gpt2_async_ray.trace(
                 ET_prompt, temperature=0.0, max_tokens=5
             ) as tracer:
-                logits = vllm_gpt2_async_ray.logits.output.save()
+                logits = vllm_gpt2_async_ray.logits.save()
 
             count = 0
             async for output in tracer.backend():
@@ -776,7 +776,7 @@ class TestAsyncRayExecutor:
             with vllm_gpt2_async_ray.trace(
                 ET_prompt, temperature=0.0, max_tokens=5
             ) as tracer:
-                logits = vllm_gpt2_async_ray.logits.output.save()
+                logits = vllm_gpt2_async_ray.logits.save()
 
             count = 0
             saves_count = 0
@@ -803,7 +803,7 @@ class TestAsyncRayExecutor:
             with vllm_gpt2_async_ray.trace(
                 ET_prompt, temperature=0.0, max_tokens=1
             ) as tracer:
-                logits = vllm_gpt2_async_ray.logits.output.save()
+                logits = vllm_gpt2_async_ray.logits.save()
 
             clean_saves = None
             async for output in tracer.backend():
@@ -823,7 +823,7 @@ class TestAsyncRayExecutor:
                 vllm_gpt2_async_ray.transformer.h[-2].mlp.output = torch.zeros_like(
                     vllm_gpt2_async_ray.transformer.h[-2].mlp.output
                 )
-                logits = vllm_gpt2_async_ray.logits.output.save()
+                logits = vllm_gpt2_async_ray.logits.save()
 
             corrupted_saves = None
             async for output in tracer.backend():

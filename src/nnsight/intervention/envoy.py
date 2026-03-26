@@ -46,6 +46,104 @@ def trace_only(fn: Callable):
     return wrapper
 
 
+class eproperty:
+    """A descriptor for defining hookable properties on Envoy subclasses.
+
+    ``eproperty`` provides a way to expose non-module values (e.g. logits,
+    sampled tokens) through the same interleaving request/swap mechanism that
+    ``.output`` and ``.input`` use.  During a trace, reading an ``eproperty``
+    issues a blocking request to the interleaver; writing to it schedules a
+    swap — just like regular module outputs.
+
+    Intended for internal use when building model integrations that need to
+    surface values which aren't tied to a ``torch.nn.Module``.
+
+    Args:
+        name: The interleaving key appended to the envoy path
+            (``<envoy.path>.<name>``).  Defaults to the decorated method's
+            ``__name__``.  Multiple eproperties may share the same ``name``
+            to offer different post-processing views of a single value.
+        description: A short human-readable label shown in the module tree
+            when printing an Envoy (``(name): description``).
+        iterate: Whether the provider key should be iterated (appending
+            ``.i0``, ``.i1``, etc.) on each call to :meth:`provide`.
+            Defaults to ``True``.
+
+    Usage::
+
+        class MyEnvoy(Envoy):
+
+            @eproperty(description="raw logit tensor")
+            def logits(self): ...
+
+    The stub method body is not executed — the decorator is used purely for
+    readability and to infer ``name`` when not provided explicitly.
+
+    eproperties appear in the Envoy ``__repr__`` tree alongside child modules::
+
+        MyModel(
+          (layers): ModuleList(...)
+          (logits): raw logit tensor
+        )
+    """
+
+    def __init__(self, name: str = None, description: str = "eproperty", iterate: bool = True):
+
+        self.name = name
+        self.description = description
+        self.iterate = iterate
+
+    def __call__(self, stub: Callable):
+        if self.name is None:
+            self.name = stub.__name__
+        return self
+
+    def __get__(self, envoy: Envoy, owner):
+
+        if envoy is None:
+            return self
+        if envoy.interleaving:
+            return envoy._interleaver.current.request(
+                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.name}")
+            )
+        else:
+            raise ValueError(
+                f"Cannot access `{envoy.path}.{self.name}` outside of interleaving."
+            )
+
+    def __set__(self, envoy: Envoy, value: Any):
+
+        if envoy.interleaving:
+
+            envoy._interleaver.current.swap(
+                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.name}"), value
+            )
+
+        else:
+            raise ValueError(
+                f"Cannot set `{envoy.path}.{self.name}` outside of interleaving."
+            )
+
+    def provide(self, envoy: Envoy, value: Any) -> Any:
+        """Provide a value to the interleaver for this eproperty.
+
+        Called from the provider side (e.g. a model runner) to feed a value
+        into the interleaving system so that mediators can observe or modify it.
+
+        Args:
+            envoy: The Envoy instance this eproperty belongs to.
+            value: The value to provide.
+
+        Returns:
+            The (potentially modified) value after all mediators have handled it.
+        """
+        return envoy._interleaver.handle(
+            f"{envoy.path}.{self.name}",
+            value,
+            iterate=self.iterate,
+        )
+
+
 class Envoy(Batchable):
     """
     A proxy class that wraps a PyTorch module to enable intervention during execution.
@@ -650,20 +748,6 @@ class Envoy(Batchable):
             self._interleaver.iterate_requester(f"{self.path}.input"), replacement
         )
 
-    @trace_only
-    def wait_for_input(self):
-        """
-        Wait for the input to the module to be available.
-        """
-        self.inputs
-
-    @trace_only
-    def wait_for_output(self):
-        """
-        Wait for the output to the module to be available.
-        """
-        self.output
-
     def to(self, device: torch.device):
         """
         Move the module to a specific device.
@@ -1049,7 +1133,13 @@ class Envoy(Batchable):
                 mod_str = _addindent(mod_str, 2)
                 child_lines.append("(" + key + "): " + mod_str)
 
-        lines = extra_lines + child_lines
+        eproperty_lines = []
+        for cls in type(self).__mro__:
+            for attr_name, attr_val in cls.__dict__.items():
+                if isinstance(attr_val, eproperty):
+                    eproperty_lines.append("(" + attr_val.name + "): " + attr_val.description)
+
+        lines = extra_lines + child_lines + eproperty_lines
 
         main_str = self._module._get_name() + "("
         if lines:
@@ -1485,7 +1575,6 @@ class EnvoySource:
                 submodules.append(name)
 
         return iter(submodules)
-
 
     def __getattribute__(self, name: str) -> Union[OperationEnvoy]:
 

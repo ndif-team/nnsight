@@ -2449,7 +2449,7 @@ vLLM integration provides high-performance inference with NNsight interventions.
 ┌─────────────────────────────────────────────────────────┐
 │  User Code                                              │
 │  with model.trace("Hello") as tracer:                   │
-│      logits = model.logits.output.save()                │
+│      logits = model.logits.save()                │
 └──────┬──────────────────────────────────────────────────┘
        |
        v
@@ -2482,7 +2482,7 @@ vLLM integration provides high-performance inference with NNsight interventions.
 ┌─────────────────────────────────────────────────────────┐
 │  User Code                                              │
 │  with model.trace("Hello", ...) as tracer:              │
-│      logits = model.logits.output.save()                │
+│      logits = model.logits.save()                │
 │                                                         │
 │  async for output in tracer.backend():                  │
 │      print(output.saves)  # saves on every output       │
@@ -2518,7 +2518,7 @@ with model.trace("Hello", temperature=0.0, max_tokens=5) as tracer:
     logits = list().save()
 
     for step in tracer.iter[:]:
-        logits.append(model.logits.output)
+        logits.append(model.logits)
 
     output = tracer.result.save()
 
@@ -2535,7 +2535,7 @@ model = VLLM("gpt2", tensor_parallel_size=1, dispatch=True, mode="async")
 
 async def main():
     with model.trace("Hello", temperature=0.0, max_tokens=5) as tracer:
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     async for output in tracer.backend():
         print(f"finished={output.finished}, saves={list(output.saves.keys())}")
@@ -2708,19 +2708,19 @@ def _sample(self, *args, **kwargs):
 
 Like `Generator` in LanguageModel, VLLM has wrapper modules for key outputs:
 
-| Module | Access | Description |
-|--------|--------|-------------|
-| `model.logits` | `model.logits.output` | Final logits before sampling |
-| `model.samples` | `model.samples.output` | Sampled token IDs |
+| eproperty | Access | Description |
+|-----------|--------|-------------|
+| `logits` | `model.logits` | Final logits before sampling |
+| `samples` | `model.samples` | Sampled token IDs |
 
 ```python
 with model.trace("Hello", max_tokens=5) as tracer:
     for step in tracer.iter[:]:
         # Access logits at each step
-        step_logits = model.logits.output.save()
+        step_logits = model.logits.save()
 
         # Access sampled tokens
-        tokens = model.samples.output.save()
+        tokens = model.samples.save()
 ```
 
 ---
