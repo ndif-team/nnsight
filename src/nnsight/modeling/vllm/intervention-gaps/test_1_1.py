@@ -70,21 +70,14 @@ def run_vllm(model_name, prompt, layer_idx):
     model = VLLM(model_name, gpu_memory_utilization=0.05, dispatch=True)
     findings = {}
 
-    # --- Test layer.output[0] and layer.output[1] ---
+    # --- Test layer.output[0] (compat layer combines dual streams) ---
     with model.trace(prompt, temperature=0.0):
         layer_out0_ref = model.model.layers[layer_idx].output[0].save()
         layer_out0_clone = model.model.layers[layer_idx].output[0].clone().save()
-        layer_out1_ref = model.model.layers[layer_idx].output[1].save()
-        layer_out1_clone = model.model.layers[layer_idx].output[1].clone().save()
 
     match_0, diff_0 = compare_values(layer_out0_ref, layer_out0_clone)
-    match_1, diff_1 = compare_values(layer_out1_ref, layer_out1_clone)
-
     findings["layer.output[0]"] = {"match": match_0, "max_diff": diff_0}
-    findings["layer.output[1]"] = {"match": match_1, "max_diff": diff_1}
-
     print(f"layer.output[0]: ref==clone? {match_0}  max_diff={diff_0:.6f}")
-    print(f"layer.output[1]: ref==clone? {match_1}  max_diff={diff_1:.6f}")
 
     # --- Test mlp.output ---
     with model.trace(prompt, temperature=0.0):
@@ -112,14 +105,13 @@ def run_vllm(model_name, prompt, layer_idx):
     corrupted = [k for k, v in findings.items() if not v["match"]]
     safe = [k for k, v in findings.items() if v["match"]]
 
-    if not match_0 or not match_1:
+    if not match_0:
         status = "CONFIRMED"
     else:
         status = "NOT_REPRODUCED"
 
     detail = (
         f"layer.output[0] ref==clone: {match_0} (diff={diff_0:.6f}); "
-        f"layer.output[1] ref==clone: {match_1} (diff={diff_1:.6f}); "
         f"Corrupted: {corrupted}; Safe: {safe}"
     )
     return {

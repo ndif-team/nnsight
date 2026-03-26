@@ -8,85 +8,84 @@
 
 ## Summary
 
-**13 / 13 gaps confirmed.** Every documented semantic difference between the vLLM and HuggingFace backends was reproduced.
+**13 gaps documented. 6 auto-fixed by the HF-compatibility layer** (`VLLMBatcher.pre_user_transform` / `post_user_transform`), 7 remain as documented differences or hard blocks.
 
-| Gap | vLLM | HF | Verdict | Description |
-|-----|------|----|---------|-------------|
-| 1.1 | CONFIRMED | NO_GAP | GAP CONFIRMED | In-place mutation corrupts `.save()` |
-| 1.2 | CONFIRMED | NO_GAP | GAP CONFIRMED | Decoder layer output semantics differ |
-| 1.3 | CONFIRMED | NO_GAP | GAP CONFIRMED | Decoder layer input semantics differ |
-| 1.4 | CONFIRMED | NO_GAP | GAP CONFIRMED | LayerNorm output: tensor vs tuple |
-| 1.5 | CONFIRMED | NO_GAP | GAP CONFIRMED | LayerNorm input semantics differ |
-| 2.1 | CONFIRMED | NO_GAP | GAP CONFIRMED | MLP submodule layout (merged gate\_up\_proj) |
-| 2.2 | CONFIRMED | NO_GAP | GAP CONFIRMED | Attention submodule layout (merged qkv\_proj) |
-| 2.3 | CONFIRMED | NO_GAP | GAP CONFIRMED | RowParallelLinear returns tuple |
-| 3.1 | CONFIRMED | NO_GAP | GAP CONFIRMED | Flat batch dimension [total\_tokens, hidden] |
-| 3.2 | CONFIRMED | NO_GAP | GAP CONFIRMED | PagedAttention: no attention weights |
-| 4.1 | CONFIRMED | NO_GAP | GAP CONFIRMED | Gradients blocked by inference\_mode |
-| 4.2 | CONFIRMED | NO_GAP | GAP CONFIRMED | Source tracing into fused kernels |
-| 4.3 | CONFIRMED | NO_GAP | GAP CONFIRMED | Module skip breaks fused norm |
+| Gap | Description | Compat Status |
+|-----|-------------|---------------|
+| 1.1 | In-place mutation corrupts `.save()` | **AUTO-FIXED** — pre/post transforms clone |
+| 1.2 | Decoder layer output: `(mlp, res)` vs `(combined,)` | **AUTO-FIXED** — streams combined |
+| 1.3 | Decoder layer `.input` returns int64 positions | **AUTO-FIXED** — transformed to float hidden states |
+| 1.4 | LayerNorm output: tuple vs tensor | **AUTO-FIXED** — tuple unwrapped |
+| 1.5 | LayerNorm input semantics differ | DOCUMENTED |
+| 2.1 | MLP submodule layout (merged gate\_up\_proj) | DOCUMENTED |
+| 2.2 | Attention submodule layout (merged qkv\_proj) | DOCUMENTED |
+| 2.3 | RowParallelLinear returns tuple | **AUTO-FIXED** — tuple unwrapped |
+| 3.1 | Flat batch dimension [total\_tokens, hidden] | DOCUMENTED |
+| 3.2 | PagedAttention: no attention weights | HARD BLOCK |
+| 4.1 | Gradients blocked by inference\_mode | HARD BLOCK |
+| 4.2 | Source tracing into fused kernels | HARD BLOCK |
+| 4.3 | Module skip breaks fused norm | **AUTO-FIXED** — skip value decomposed |
+
+The gap descriptions below document the **underlying architectural differences** that still exist in vLLM. The compat layer masks these transparently so HF-style code works without modification.
 
 ---
 
 ## Group 1: Activation Semantics
 
-### Gap 1.1 — In-place mutation corrupts `.save()`
+### Gap 1.1 — In-place mutation corrupts `.save()` — **AUTO-FIXED**
 
 **Root cause:** vLLM's `fused_add_rms_norm` mutates tensors in-place after nnsight hooks fire. `.save()` stores a reference, so the saved value silently becomes the post-mutation value.
 
-**Evidence:**
+**Evidence (raw, without compat layer):**
 - `layer.output[0]` ref vs clone: diff = **64.62**
 - `layer.output[1]` ref vs clone: diff = **1013.81**
 - `mlp.output` and `self_attn.output`: unaffected (not mutated downstream)
 
-**Workaround:** Use `.clone().save()` instead of `.save()`.
+**Compat fix:** `pre_user_transform` creates the combined tensor via `clone() + clone()`, giving the user a fresh tensor. `post_user_transform` clones again before returning to vLLM, so fused norm mutations don't propagate back.
 
-**Impact:** Silent data corruption in probing, activation patching, logit lens. Users get wrong results with no error.
+**Impact without compat:** Silent data corruption in probing, activation patching, logit lens.
 
 ---
 
-### Gap 1.2 — Decoder layer output semantics differ
+### Gap 1.2 — Decoder layer output semantics differ — **AUTO-FIXED**
 
 **Root cause:** vLLM maintains a dual residual stream. Decoder layers return `(hidden_states, residual)` as separate tuple elements. HF returns `(hidden_states + residual,)` combined.
 
-**Evidence:**
+**Evidence (raw, without compat layer):**
 - vLLM: output is 2-tuple; `output[0] == mlp.output` (cosine = 1.0)
 - HF: output is 1-tuple; `output[0] != mlp.output` (cosine = 0.45) because it includes the residual
 
-**Workaround:** `layer.output[0].clone() + layer.output[1].clone()` recovers the HF-equivalent hidden state (verified: max_diff = 0.0625).
+**Compat fix:** `pre_user_transform` combines `(mlp_out, residual)` into `(mlp_out + residual,)` 1-tuple. `post_user_transform` decomposes back to `(combined.clone(), zeros)` for vLLM.
 
-**Impact:** Logit lens, steering vectors, activation patching all operate on the wrong representation.
+**Impact without compat:** Logit lens, steering vectors, activation patching all operate on the wrong representation.
 
 ---
 
-### Gap 1.3 — Decoder layer input semantics differ
+### Gap 1.3 — Decoder layer input semantics differ — **AUTO-FIXED**
 
 **Root cause:** vLLM decoder signature is `forward(positions, hidden_states, residual, ...)`. The first positional arg (`.input`) is int64 position IDs, not float hidden states.
 
-**Evidence:**
+**Evidence (raw, without compat layer):**
 - vLLM `.input` dtype: `torch.int64`, values: `[0, 1, 2, 3, 4]`
 - HF `.input` dtype: `torch.float32`, shape: `[1, 5, 896]`
 
-**Workaround:**
-```python
-args, kwargs = layer.inputs
-hidden_states = args[1] + args[2]  # Combine dual residual stream
-```
-Verified: max_diff = 0.0625 vs HF.
+**Compat fix:** `pre_user_transform` filters out `positions`, combines `hidden_states + residual` into a single float tensor, and presents it as `(combined_hidden_states,)`. For layer 0 where `residual=None`, presents just `hidden_states`.
 
-**Impact:** Arithmetic on `.input` silently promotes int to float; cross-layer analysis operates on wrong data.
+**Impact without compat:** Arithmetic on `.input` silently promotes int to float; cross-layer analysis operates on wrong data.
 
 ---
 
-### Gap 1.4 — LayerNorm output: tensor vs tuple
+### Gap 1.4 — LayerNorm output: tensor vs tuple — **AUTO-FIXED**
 
 **Root cause:** vLLM's fused `fused_add_rms_norm` returns `(normalized, new_residual)` tuple. HF returns a single tensor.
 
-**Evidence:**
+**Evidence (raw, without compat layer):**
 - vLLM `input_layernorm.output`: is tuple = True
 - HF `input_layernorm.output`: is tensor = True
 
-**Impact:** Logit lens fails (can't pass tuple to lm_head). Layernorm output analysis breaks.
+**Compat fix:** `pre_user_transform` detects `RMSNorm` modules and unwraps `(normalized, residual)` to just `normalized`. `post_user_transform` wraps back to tuple if the original was a tuple.
+
+**Impact without compat:** Logit lens fails (can't pass tuple to lm_head). Layernorm output analysis breaks.
 
 ---
 
@@ -128,15 +127,17 @@ Verified: max_diff = 0.0625 vs HF.
 
 ---
 
-### Gap 2.3 — RowParallelLinear returns tuple
+### Gap 2.3 — RowParallelLinear returns tuple — **AUTO-FIXED**
 
 **Root cause:** vLLM's `RowParallelLinear` returns `(output, output_bias)` 2-tuple. HF `Linear` returns a single tensor.
 
-**Evidence:**
+**Evidence (raw, without compat layer):**
 - vLLM: `down_proj` tuple = True, `o_proj` tuple = True
 - HF: `down_proj` tuple = False, `o_proj` tuple = False
 
-**Impact:** `down_proj.output * 2` fails. Any intervention needs tuple unpacking.
+**Compat fix:** `pre_user_transform` detects `RowParallelLinear` modules and unwraps `(output, bias)` to just `output`. `post_user_transform` wraps back to tuple.
+
+**Impact without compat:** `down_proj.output * 2` fails. Any intervention needs tuple unpacking.
 
 ---
 
@@ -144,11 +145,13 @@ Verified: max_diff = 0.0625 vs HF.
 
 ### Gap 3.1 — Flat batch dimension [total\_tokens, hidden]
 
-**Root cause:** vLLM uses continuous batching with a flat 2D layout `[total_tokens, hidden]`. HF uses padded 3D `[batch, seq, hidden]`.
+**Root cause:** vLLM uses continuous batching with a flat 2D layout `[total_tokens, hidden]`. HF natively uses padded 3D `[batch, seq, hidden]`.
 
 **Evidence:**
-- vLLM: ndim = 2, shape = `[7, 896]`
-- HF: ndim = 2, shape = `[7, 896]` (after batcher narrows per-invoke)
+- vLLM: ndim = 2, shape = `[7, 896]` — tokens from all sequences packed flat
+- HF: ndim = 2, shape = `[7, 896]` — nnsight's batcher narrows the batch dimension even for single-input traces (implicit invoke)
+
+**Clarification:** Inside nnsight traces, both backends produce 2D tensors because nnsight creates an implicit invoke that narrows the batch dimension. The gap manifests in two ways: (1) **Doc examples use 3D indexing** like `[:, -1, :]` which assumes a `[batch, seq, hidden]` layout — these fail on vLLM because the native format is flat `[total_tokens, hidden]` with no sequence dimension; (2) **Multi-sequence batching** in vLLM packs all tokens contiguously with no padding, so token boundary tracking requires out-of-band knowledge of sequence lengths. Use `[-1, :]` for last-token selection on both backends inside traces.
 
 **Impact:** Positional indexing like `[:, -1, :]` (last token) or `[:, pos, :]` breaks. Token targeting requires knowing token boundaries in the flat layout.
 
@@ -173,8 +176,8 @@ Verified: max_diff = 0.0625 vs HF.
 **Root cause:** vLLM wraps all execution in `torch.inference_mode()`, disabling gradient tracking globally.
 
 **Evidence:**
-- vLLM: `requires_grad_()` FAILED, `backward()` FAILED
-- HF: `requires_grad_()` OK, `backward()` FAILED (unrelated — nnsight backward context needed)
+- vLLM: `requires_grad_()` FAILED (RuntimeError from inference\_mode), `backward()` FAILED
+- HF: `requires_grad_()` OK, `backward()` FAILED (unrelated nnsight interleaver issue — grad not captured for this model/layer combination; the key asymmetry is that `requires_grad_()` itself succeeds on HF, proving no inference\_mode barrier)
 
 **Impact:** Integrated gradients, GradCAM, saliency maps, gradient-based attribution, probe training all impossible.
 
@@ -193,17 +196,21 @@ Verified: max_diff = 0.0625 vs HF.
 
 ---
 
-### Gap 4.3 — Module skip breaks fused norm
+### Gap 4.3 — Module skip breaks fused norm — **AUTO-FIXED**
 
 **Root cause:** vLLM decoder layers return `(hidden_states, residual)` tuple. Skipping with a single tensor fails because the next layer's `fused_add_rms_norm` expects the `(x, residual)` pair.
 
-**Evidence:**
-- vLLM `skip(single_tensor)`: FAILED (EngineDeadError)
-- vLLM `skip(tuple)`: FAILED (EngineDeadError — engine crashed from first attempt)
-- HF `skip(single_tensor)`: FAILED (expected shape mismatch)
+**Evidence (raw, without compat layer):**
+- vLLM `skip(single_tensor)`: FAILED (EngineDeadError — unrecoverable engine crash)
+- vLLM `skip(tuple)`: FAILED (EngineDeadError — engine already dead from first attempt)
+- HF `skip(single_tensor)`: FAILED (shape mismatch — HF layers also expect tuple input)
 - HF `skip(tuple)`: OK
 
-**Impact:** Layer ablation studies blocked on vLLM. Requires understanding internal `(x, residual)` bookkeeping.
+**Compat fix:** `post_user_transform` detects skip values on decoder layers and decomposes the skip value into `(zeros, value)`, so `fused_add_rms_norm(0, v) = rms_norm(v)`.
+
+**Note:** `skip(single_tensor)` fails on both backends without the compat layer, but for different reasons: HF raises a shape error (recoverable), while vLLM crashes the engine (unrecoverable — all subsequent traces fail with `EngineDeadError`, requiring process restart).
+
+**Impact without compat:** Layer ablation studies blocked on vLLM.
 
 ---
 
@@ -211,146 +218,73 @@ Verified: max_diff = 0.0625 vs HF.
 
 All 13 gaps stem from four architectural decisions in vLLM:
 
-1. **Fused CUDA kernels** — `fused_add_rms_norm`, `SiluAndMul`, PagedAttention mutate tensors in-place, return tuples, and hide internals from Python hooks. (Gaps 1.1, 1.4, 1.5, 3.2, 4.2, 4.3)
+1. **Fused CUDA kernels** — `fused_add_rms_norm`, `SiluAndMul`, PagedAttention mutate tensors in-place, return tuples, and hide internals from Python hooks. (Gaps 1.1✓, 1.4✓, 1.5, 3.2, 4.2, 4.3✓)
 
-2. **Dual residual stream** — Hidden states and residual are kept as separate tensors throughout the forward pass, unlike HF which combines them. (Gaps 1.2, 1.3)
+2. **Dual residual stream** — Hidden states and residual are kept as separate tensors throughout the forward pass, unlike HF which combines them. (Gaps 1.2✓, 1.3✓)
 
-3. **Merged linear layers** — `ColumnParallelLinear` (gate\_up\_proj, qkv\_proj) and `RowParallelLinear` (returning tuples) for tensor parallelism. (Gaps 2.1, 2.2, 2.3)
+3. **Merged linear layers** — `ColumnParallelLinear` (gate\_up\_proj, qkv\_proj) and `RowParallelLinear` (returning tuples) for tensor parallelism. (Gaps 2.1, 2.2, 2.3✓)
 
 4. **Continuous batching + inference\_mode** — Flat `[total_tokens, hidden]` layout and `torch.inference_mode()` wrapper for performance. (Gaps 3.1, 4.1)
+
+✓ = auto-fixed by HF-compatibility layer
 
 ---
 
 ## Fixability Assessment
 
-| Category | Fixable in nnsight? | Approach |
-|----------|-------------------|----------|
-| **Gap 1.1** (mutation) | Yes | Auto-clone in `.save()` when vLLM backend detected |
-| **Gaps 1.2–1.5** (dual residual) | Partial | Adapter layer could recombine, but adds overhead and may surprise users |
-| **Gaps 2.1–2.3** (merged modules) | No | Fundamental vLLM architecture; best documented with splitting helpers |
-| **Gap 3.1** (flat layout) | Partial | nnsight's invoker already narrows per-invoke; 3D reshape possible but fragile |
-| **Gap 3.2** (no attn weights) | No | PagedAttention is a fused CUDA kernel; no Python-level access |
-| **Gap 4.1** (no gradients) | No | `inference_mode` is set by vLLM engine; disabling it would break vLLM internals |
-| **Gap 4.2** (fused source) | No | Computation happens in C/CUDA; Python-level `.source` can't reach it |
-| **Gap 4.3** (skip breaks) | Partial | Could auto-wrap skip value into `(tensor, residual)` tuple for vLLM layers |
-
-**Recommendation:** Gap 1.1 is the highest-priority fix (silent data corruption). The rest should be documented in a vLLM compatibility guide with workarounds.
+| Category | Status | Implementation |
+|----------|--------|----------------|
+| **Gap 1.1** (mutation) | **FIXED** | `pre_user_transform` clones; `post_user_transform` clones before returning to vLLM |
+| **Gap 1.2** (dual residual output) | **FIXED** | `pre_user_transform` combines `(mlp, res)` → `(combined,)` 1-tuple |
+| **Gap 1.3** (input positions) | **FIXED** | `pre_user_transform` filters positions, combines hidden + residual |
+| **Gap 1.4** (norm tuple) | **FIXED** | `pre_user_transform` unwraps `(normalized, residual)` → `normalized` |
+| **Gap 1.5** (norm input) | Documented | Sub-module input semantics not transformed |
+| **Gaps 2.1–2.2** (merged modules) | Not fixable | Fundamental vLLM architecture; use `.chunk()` / `.split()` |
+| **Gap 2.3** (RowParallel tuple) | **FIXED** | `pre_user_transform` unwraps `(output, bias)` → `output` |
+| **Gap 3.1** (flat layout) | Documented | Use `[-1, :]` not `[:, -1, :]`; nnsight invoker already narrows per-invoke |
+| **Gap 3.2** (no attn weights) | Not fixable | PagedAttention is a fused CUDA kernel; no Python-level access |
+| **Gap 4.1** (no gradients) | Not fixable | `inference_mode` is set by vLLM engine; disabling it would break vLLM internals |
+| **Gap 4.2** (fused source) | Not fixable | Computation happens in C/CUDA; Python-level `.source` can't reach it |
+| **Gap 4.3** (skip breaks) | **FIXED** | `post_user_transform` decomposes skip value to `(zeros, value)` for fused norm |
 
 ---
 
-## Intervention Strategy Guide for vLLM's Dual Residual Stream
+## Intervention Patterns (with compat layer)
 
-### Background: How the Dual Stream Works
+The HF-compatibility layer (`VLLMBatcher`) auto-fixes gaps 1.1–1.4, 2.3, and 4.3, so **standard HF-style intervention code works on vLLM without modification** (except for 2D indexing from Gap 3.1).
 
-In HF, each decoder layer returns a single `hidden_states` tensor that includes the residual:
+### How the compat layer works
+
 ```
-hidden_states = residual + mlp(norm(residual + attn(norm(hidden_states))))
-```
-
-In vLLM, the layer returns `(mlp_output, residual)` as **separate tensors**. The next layer's `fused_add_rms_norm` computes:
-```
-normalized = RMSNorm(mlp_output + residual)
-new_residual = mlp_output + residual
-```
-
-**Key insight: only the sum `output[0] + output[1]` matters.** The decomposition into two streams is ephemeral — it's immediately collapsed by the next layer's fused norm. This means the specific split between `output[0]` and `output[1]` is irrelevant; only their sum affects downstream computation.
-
-### Verified Intervention Strategies
-
-All strategies verified experimentally on Qwen2.5-0.5B, layer 10, comparing vLLM against HF reference.
-
-#### Steering (Adding a Direction Vector)
-
-**Add to either stream — both produce identical results.**
-
-```python
-# Strategy A: add to output[0] (mlp stream)
-with lm.trace(prompt):
-    layer = lm.model.layers[layer_idx]
-    out0 = layer.output[0].clone()
-    out1 = layer.output[1].clone()
-    out0[-1, :] += steering_vector
-    layer.output = (out0, out1)
-
-# Strategy B: add to output[1] (residual stream)
-with lm.trace(prompt):
-    layer = lm.model.layers[layer_idx]
-    out0 = layer.output[0].clone()
-    out1 = layer.output[1].clone()
-    out1[-1, :] += steering_vector
-    layer.output = (out0, out1)
+PyTorch hook fires with raw vLLM output
+  → pre_user_transform:  vLLM (mlp_out, residual) → HF (combined,)
+    → user code sees HF-compatible values
+  → post_user_transform: HF (combined,) → vLLM (combined.clone(), zeros)
+PyTorch receives vLLM-compatible output
 ```
 
-**Result:** `steer_A vs steer_B: max_diff=0.004, cosine=1.000` — effectively identical.
+### HF-compatible patterns (use these)
 
-Both work because:
-```
-(out0 + v) + out1 = out0 + (out1 + v) = out0 + out1 + v
-```
+| Operation | Pattern | Notes |
+|-----------|---------|-------|
+| **Save** | `layer.output[0].save()` | Auto-cloned, mutation-safe |
+| **Steer** | `layer.output[0][-1, :] += v` | 2D indexing (Gap 3.1) |
+| **Patch** | `layer.output[0][-1, :] = target` | 2D indexing |
+| **Ablate** | `layer.output[0][:] = 0` | Auto-decomposes to both streams |
+| **Scale** | `layer.output[0][:] *= s` | Auto-decomposes to both streams |
+| **Skip** | `layer.skip(value)` | Auto-decomposes for fused norm |
+| **LayerNorm** | `norm.output` → tensor | Auto-unwrapped from tuple |
+| **down/o proj** | `proj.output` → tensor | Auto-unwrapped from tuple |
+| **Layer input** | `layer.input` → float tensor | Auto-combined hidden states |
 
-#### Patching (Replacing Hidden States)
+### Remaining differences (not auto-fixed)
 
-**All three decompositions produce identical results.**
+1. **2D layout** `[tokens, hidden]` not 3D `[batch, seq, hidden]` — index with `[-1, :]` not `[:, -1, :]` (Gap 3.1)
+2. **Logits** — use `model.logits.output` instead of `model.lm_head.output`
+3. **Generation** — use `model.trace(max_tokens=N)` instead of `model.generate(max_new_tokens=N)`
+4. **Merged projections** — `gate_up_proj` (Gap 2.1), `qkv_proj` (Gap 2.2) require `.chunk()` / `.split()`
+5. **Baseline logit gap** — vLLM and HF use different kernels (fused vs separate), producing slightly different numerical results. Compare intervention *effects* (delta from baseline), not absolute values.
 
-```python
-# P1: put target in mlp stream, zero residual
-layer.output = (target_hs, torch.zeros_like(layer.output[1]))
+### Background: vLLM's dual residual stream (hidden by compat layer)
 
-# P2: preserve residual, adjust mlp stream
-residual = layer.output[1].clone()
-layer.output = (target_hs - residual, residual)
-
-# P3: zero mlp stream, put target in residual
-layer.output = (torch.zeros_like(layer.output[0]), target_hs)
-```
-
-**Result:** `P1 vs P2 vs P3: max_diff=0.000` — bit-for-bit identical.
-
-**Recommended: use P1 `(target_hs, zeros)` for simplicity.**
-
-#### Ablation (Zeroing Out)
-
-**Must zero BOTH streams to match HF-style ablation.**
-
-```python
-# CORRECT: zero both streams (matches HF ablation)
-layer.output = (torch.zeros_like(layer.output[0]), torch.zeros_like(layer.output[1]))
-
-# WRONG: zero only mlp stream (residual leaks through)
-layer.output = (torch.zeros_like(layer.output[0]), layer.output[1].clone())
-```
-
-**Result:** `ablate_both vs ablate_mlp: max_diff=3.088` — NOT the same.
-
-Zeroing only `output[0]` leaves the residual stream intact, so previous layers' contributions still flow through. This is a fundamentally different intervention than zeroing the full hidden state.
-
-#### Scaling
-
-**Must scale BOTH streams.**
-
-```python
-# CORRECT
-out0 = layer.output[0].clone()
-out1 = layer.output[1].clone()
-layer.output = (out0 * scale, out1 * scale)
-
-# WRONG — only scales mlp component
-out0 = layer.output[0].clone()
-layer.output = (out0 * scale, layer.output[1].clone())
-```
-
-### Summary Table
-
-| Operation | HF Pattern | vLLM Pattern | Notes |
-|-----------|-----------|-------------|-------|
-| **Steer** (add vector) | `layer.output[0][:, -1, :] += v` | Add `v` to either `output[0]` or `output[1]` | Both streams equivalent |
-| **Patch** (replace) | `layer.output[0] = target` | `layer.output = (target, zeros)` | Simplest decomposition |
-| **Ablate** (zero out) | `layer.output[0][:] = 0` | `layer.output = (zeros, zeros)` | Must zero BOTH streams |
-| **Scale** | `layer.output[0] *= s` | `layer.output = (out0*s, out1*s)` | Must scale BOTH streams |
-
-### Important Notes
-
-1. **Always `.clone()` before modifying** — Gap 1.1 means fused kernels mutate tensors in-place after hooks fire.
-2. **Always replace the full tuple** — `layer.output[0] = x` raises `TypeError: 'tuple' object does not support item assignment`. Use `layer.output = (new0, new1)`.
-3. **vLLM uses 2D layout** `[tokens, hidden]` not 3D `[batch, seq, hidden]` — index with `[-1, :]` not `[:, -1, :]`.
-4. **Baseline logit gap is expected** — vLLM and HF use different kernels (fused vs separate), producing different numerical results even without intervention. Compare intervention *effects* (delta from baseline), not absolute values.
+Under the hood, vLLM decoder layers still return `(mlp_output, residual)` as separate tensors. The compat layer combines them into `(mlp_output + residual,)` before user code sees them, and decomposes back to `(combined.clone(), zeros)` afterward. This is mathematically equivalent because the next layer's `fused_add_rms_norm` computes `RMSNorm(stream0 + stream1)` — only the sum matters.

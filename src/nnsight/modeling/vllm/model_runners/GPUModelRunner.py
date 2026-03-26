@@ -327,13 +327,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model._interleaver.batcher = VLLMBatcher()
 
-        # Only wrap when TP > 1: registers hooks that handle
-        # gather/split of sharded tensors and CUDA synchronization
-        # for TP-parallel modules.  With TP == 1 nothing is sharded
-        # so wrapping is pure overhead.
-
-        if get_tp_group().world_size > 1:
-            self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
+        # Always call wrap() to register compat transforms (module
+        # detection for HF-compatibility layer).  TP gather/split
+        # hooks are gated on world_size > 1 inside wrap() itself.
+        self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 

@@ -60,22 +60,33 @@ def run_vllm(model_name, prompt):
         errors.append(("requires_grad_", str(e)))
         print(f"requires_grad_(True): ERROR -- {type(e).__name__}: {e}")
 
-    # Test 2: backward inside trace
+    # Test 2: backward inside trace — check that gradients actually contain values,
+    # not just that the context manager doesn't throw.
     try:
         with model.trace(prompt, temperature=0.0):
             hs = model.model.layers[5].output[0]
+            hs.requires_grad_(True)
             logits = model.logits.output
             loss = logits.sum()
             with loss.backward():
                 grad = hs.grad.save()
-        errors.append(("backward", None))
-        print("loss.backward(): NO ERROR (unexpected)")
+        # Even if no exception, verify grad has real nonzero values
+        if grad.abs().sum().item() > 0:
+            errors.append(("backward", None))
+            print(f"loss.backward(): OK, grad has nonzero values, shape={grad.shape}")
+        else:
+            errors.append(("backward", "grad is all zeros — no real gradient flow"))
+            print("loss.backward(): FAILED — grad is all zeros")
     except Exception as e:
         errors.append(("backward", str(e)))
         print(f"loss.backward(): ERROR -- {type(e).__name__}: {e}")
 
-    both_failed = all(err is not None for _, err in errors)
-    status = "CONFIRMED" if both_failed else "NOT_REPRODUCED"
+    # The real test is whether backward() works (actual gradient flow).
+    # requires_grad_() may succeed if the compat layer creates non-inference
+    # tensors, but that doesn't mean gradients actually propagate — the
+    # underlying computation graph still ran under inference_mode.
+    backward_failed = errors[1][1] is not None if len(errors) > 1 else True
+    status = "CONFIRMED" if backward_failed else "NOT_REPRODUCED"
     detail = "; ".join(f"{name}: {'FAILED' if err else 'OK'}" for name, err in errors)
     return {
         "backend": "vllm",

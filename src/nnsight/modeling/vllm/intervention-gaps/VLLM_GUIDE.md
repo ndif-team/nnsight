@@ -1,14 +1,94 @@
 # NNsight vLLM Intervention Guide
 
-This guide mirrors the [main nnsight documentation](../../../../CLAUDE.md) (written for HuggingFace Transformers) and shows how each pattern translates to the vLLM backend. For every example, we show:
+This guide mirrors the [main nnsight documentation](../../../../CLAUDE.md) (written for HuggingFace Transformers) and shows how each pattern translates to the vLLM backend.
 
-1. **HF pattern** — the doc example as-written
-2. **vLLM equivalent** — the working vLLM version
-3. **Why it differs** — root cause and gap reference
+All examples tested on **Qwen/Qwen2-0.5B** with vLLM 0.15.1, nnsight on branch `vllm-intervention-gaps`.
 
-All examples tested on **Qwen2.5-0.5B** with vLLM 0.15.1, nnsight on branch `vllm-intervention-gaps`.
+---
 
-> **Key architectural difference:** vLLM uses a **dual residual stream**. Each decoder layer returns `(mlp_output, residual)` as separate tensors. The next layer's `fused_add_rms_norm` computes `RMSNorm(mlp_output + residual)`. Only the **sum** of both streams equals the HF-equivalent hidden state.
+## Hard Blocks (Not Available on vLLM)
+
+These features are **fundamentally impossible** on the vLLM backend due to C/CUDA-level architectural decisions. If your workflow requires any of these, use the HF backend instead.
+
+| Feature | Why it's blocked | Impact |
+|---------|-----------------|--------|
+| **Gradients / backward pass** | vLLM wraps all execution in `torch.inference_mode()`, which globally disables gradient tracking. `requires_grad_(True)` raises `RuntimeError`. | Integrated gradients, saliency maps, GradCAM, gradient-based attribution, and training probes on activations are all blocked. |
+| **Attention weights** | PagedAttention computes attention entirely in C/CUDA. No Python-level attention weight tensor exists — `self_attn.output` returns only the post-attention hidden state. | Attention visualization, head pruning, induction head detection, and attention knockout are impossible. |
+| **Source tracing into fused modules** | Fused kernels (`input_layernorm`, `act_fn`, PagedAttention) have trivial Python wrappers that delegate to C/CUDA. `.source` reveals only the single delegate call, not the internal computation. | Fine-grained intervention inside fused modules is impossible. Non-fused modules (e.g. `self_attn`) work fine. |
+
+---
+
+## Remaining Differences (with compat layer)
+
+Even with the compatibility layer (see below), these differences between HF and vLLM remain:
+
+| Difference | HF | vLLM | Workaround |
+|---|---|---|---|
+| **Tensor layout** | 2D `[seq, hidden]` inside invokes | 2D `[tokens, hidden]` | Use `[-1, :]` not `[:, -1, :]` for last-token selection |
+| **Logits access** | `model.lm_head.output` | `model.logits.output` | vLLM-specific module; `lm_head` may also work but `logits` is reliable |
+| **Generation API** | `model.generate(max_new_tokens=N)` | `model.trace(max_tokens=N)` | Different method name and kwarg |
+| **gate/up proj** | `mlp.gate_proj`, `mlp.up_proj` (separate) | `mlp.gate_up_proj` (merged) | `gate, up = output.chunk(2, dim=-1)` |
+| **q/k/v proj** | `attn.q_proj`, `attn.k_proj`, `attn.v_proj` (separate) | `attn.qkv_proj` (merged) | `q, k, v = output.split([q_size, kv_size, kv_size], dim=-1)` |
+| **LayerNorm inputs** | `RMSNorm(hidden)` — 1 arg | `fused_add_rms_norm(x, residual)` — 2 args | Access via `.inputs` and combine manually |
+| **Numerical values** | PyTorch kernels | Fused CUDA kernels | Compare intervention *effects* (deltas), not absolute values |
+
+---
+
+## Compatibility Layer (auto-enabled)
+
+NNsight includes a **transparent compatibility layer** (`VLLMBatcher` in `modeling/vllm/batching.py`) that automatically transforms vLLM-native values to match HuggingFace semantics. With the compat layer enabled (the default), most HF-style intervention code works on vLLM **without modification**.
+
+### Why it exists
+
+vLLM's internal architecture differs from HuggingFace Transformers in ways that would break standard intervention code:
+
+- **Dual residual stream**: Decoder layers return `(mlp_output, residual)` as separate tensors instead of HF's `(hidden_states,)` combined 1-tuple.
+- **In-place mutation**: `fused_add_rms_norm` mutates tensors after hooks fire, silently corrupting `.save()`'d references.
+- **Different tuple formats**: `RMSNorm` returns `(normalized, residual)` tuples; `RowParallelLinear` returns `(output, bias)` tuples.
+- **Int64 layer inputs**: Decoder layer `.input` returns position IDs, not float hidden states.
+
+The compat layer masks all of these so users write the same code for both backends.
+
+### How it works
+
+The compat layer uses a **two-layer defense**:
+
+1. **Detection** (once at model init): Heuristic checks flag modules as candidates for transformation — `'residual' in forward()` for decoder layers, `isinstance` for RMSNorm and RowParallelLinear. Unknown architectures fall through with no transform.
+
+2. **Runtime guard** (every hook call): Before transforming, the code verifies the actual value matches the expected format (e.g. 2-tuple of tensors). If it doesn't match, the transform is silently skipped and a warning is logged. This prevents false positives from corrupting values.
+
+```
+PyTorch hook fires with raw vLLM output
+  → pre_user_transform:  vLLM (mlp_out, residual) → HF (combined,)
+    → user code sees HF-compatible values
+  → post_user_transform: HF (combined,) → vLLM (combined.clone(), zeros)
+PyTorch receives vLLM-compatible output
+```
+
+### What it auto-fixes
+
+| Gap | Raw vLLM behavior | After compat layer | How |
+|-----|-------------------|-------------------|-----|
+| 1.1 | `.save()` silently corrupted by fused kernels | `.save()` is mutation-safe | Clones on both pre and post transform |
+| 1.2 | `layer.output` is `(mlp_out, residual)` 2-tuple | `layer.output` is `(combined,)` 1-tuple | Combines streams, decomposes back |
+| 1.3 | `layer.input` is int64 position IDs | `layer.input` is float hidden states | Filters positions, combines hidden + residual |
+| 1.4 | `norm.output` is `(normalized, residual)` tuple | `norm.output` is a single tensor | Unwraps tuple, re-wraps on return |
+| 2.3 | `down_proj.output` is `(tensor, bias)` tuple | `down_proj.output` is a single tensor | Unwraps tuple, re-wraps on return |
+| 4.3 | `layer.skip(value)` crashes engine | `layer.skip(value)` works | Decomposes skip value to `(zeros, value)` for fused norm |
+
+### Model detection
+
+The compat layer auto-detects which modules need transforms:
+- **Decoder layers**: detected via `'residual' in forward()` parameters — works for Qwen2, Llama, Mistral, Mixtral, Gemma2, DeepSeek-V2, Phi3
+- **GPT2Block**: has no `residual` param → no transform applied (correct — GPT2 uses single-stream)
+- **RMSNorm**: detected via `isinstance(module, vllm...RMSNorm)`
+- **RowParallelLinear**: detected via `isinstance(module, RowParallelLinear)`
+
+Unknown architectures fall through with **no transform** (same as raw vLLM behavior). If detection flags a module but the runtime value doesn't match expectations, the transform is skipped and a warning is logged.
+
+### inference_mode handling
+
+vLLM wraps all execution in `torch.inference_mode()`. The compat layer briefly exits inference mode (`with torch.inference_mode(False):`) for exactly 2 tensor operations (clone + add) when creating user-facing combined tensors. This is necessary so users can do in-place modifications like `output[0][:] = 0`. The scope is minimal (thread-local bool toggle), does not affect vLLM's forward pass (already completed), and vLLM never checks `is_inference_mode_enabled()` at runtime.
 
 ---
 
@@ -41,13 +121,13 @@ All examples tested on **Qwen2.5-0.5B** with vLLM 0.15.1, nnsight on branch `vll
 ### HF (LanguageModel)
 ```python
 from nnsight import LanguageModel
-model = LanguageModel("Qwen/Qwen2.5-0.5B", device_map="auto", dispatch=True)
+model = LanguageModel("Qwen/Qwen2-0.5B", device_map="auto", dispatch=True)
 ```
 
 ### vLLM
 ```python
 from nnsight.modeling.vllm import VLLM
-model = VLLM("Qwen/Qwen2.5-0.5B", tensor_parallel_size=1,
+model = VLLM("Qwen/Qwen2-0.5B", tensor_parallel_size=1,
              gpu_memory_utilization=0.3, dtype=torch.float16, dispatch=True)
 ```
 
@@ -68,25 +148,16 @@ with model.trace("Hello"):
 # hidden is the full residual-stream hidden state, shape [batch, seq, hidden_dim]
 ```
 
-### vLLM equivalent
+### vLLM (with compat layer — same code works)
 ```python
 with model.trace("Hello", temperature=0.0, top_p=1):
-    hidden = (model.model.layers[-1].output[0].clone()
-              + model.model.layers[-1].output[1].clone()).save()
+    hidden = model.model.layers[-1].output[0].save()
 # hidden is the combined hidden state, shape [total_tokens, hidden_dim]
 ```
 
-### Why it differs
+The compat layer automatically combines the dual residual streams and protects against in-place mutation. `output[0]` returns the full combined hidden state (equivalent to HF), and `.save()` is mutation-safe.
 
-**Three differences compound here:**
-
-1. **Gap 1.1 — In-place mutation:** vLLM's `fused_add_rms_norm` mutates tensors after hooks fire. `.save()` stores a reference to the mutated tensor. **Must use `.clone().save()`**.
-
-2. **Gap 1.2 — Dual residual stream:** vLLM decoder layers return `(mlp_output, residual)` as separate tensors. `output[0]` alone is just the MLP component — NOT the full hidden state. **Must add both: `output[0] + output[1]`**.
-
-3. **Gap 3.1 — Flat 2D layout:** vLLM uses continuous batching with shape `[total_tokens, hidden_dim]` instead of HF's `[batch, seq_len, hidden_dim]`. Indexing like `[:, -1, :]` will fail.
-
-**Verified:** `output[0].clone() + output[1].clone()` matches HF hidden state within fp16 variance (max_diff ≈ 0.06).
+**Only remaining difference:** shape is 2D `[tokens, hidden]` instead of 3D `[batch, seq, hidden]` (Gap 3.1).
 
 ---
 
@@ -122,21 +193,14 @@ with model.trace("Hello"):
     # Returns float hidden states, shape [batch, seq, hidden_dim]
 ```
 
-### vLLM equivalent
+### vLLM (with compat layer — same code works)
 ```python
 with model.trace("Hello", temperature=0.0, top_p=1):
-    args, kwargs = model.model.layers[4].inputs
-    hidden = (args[1].clone() + args[2].clone()).save()
-    # args[0] = positions (int64), args[1] = hidden_states, args[2] = residual
+    layer_input = model.model.layers[4].input.save()
+    # Returns float hidden states, shape [total_tokens, hidden_dim]
 ```
 
-### Why it differs
-
-**Gap 1.3:** vLLM decoder layers have signature `forward(positions, hidden_states, residual, ...)`. The `.input` property returns the first positional argument, which is **int64 position IDs** — not float hidden states.
-
-Use `.inputs` (plural) to get all arguments, then pick `args[1]` (hidden_states) and `args[2]` (residual). Add them to reconstruct the HF-equivalent input.
-
-**Verified:** `.input` returns dtype=int64 with values like `[0, 1, 2, 3, 4]`. `args[1]+args[2]` matches HF within fp16 variance (max_diff ≈ 0.06).
+The compat layer transforms the input from `(positions, hidden_states, residual)` to `(combined_hidden_states,)`, so `.input` returns the combined float hidden state just like HF. For layer 0 where `residual=None`, `.input` returns just `hidden_states`.
 
 ---
 
@@ -148,17 +212,15 @@ with model.trace("Hello"):
     hidden = model.transformer.h[0].output[0].save()
 ```
 
-### vLLM — ALWAYS use `.clone().save()`
+### vLLM (with compat layer — same code works)
 ```python
 with model.trace("Hello", temperature=0.0, top_p=1):
-    hidden = model.model.layers[0].output[0].clone().save()
+    hidden = model.model.layers[0].output[0].save()
 ```
 
-### Why it differs
+The compat layer auto-clones decoder layer outputs, so `.save()` is mutation-safe. No manual `.clone()` needed.
 
-**Gap 1.1:** vLLM's fused CUDA kernels (`fused_add_rms_norm`) mutate activation tensors **in-place after** nnsight's hooks capture them. `.save()` stores a reference, so the saved value silently becomes the post-mutation value.
-
-**Verified:** `.save()` vs `.clone().save()` on layer 5 output[0] shows max_diff=18.95 — the saved value is corrupted without `.clone()`.
+**Background (Gap 1.1):** Without the compat layer, vLLM's fused CUDA kernels (`fused_add_rms_norm`) mutate tensors in-place after hooks fire, silently corrupting saved values (max_diff up to 1013.81).
 
 ---
 
@@ -170,22 +232,13 @@ with model.trace("Hello"):
     model.transformer.h[0].output[0][:] = 0    # Zero the hidden state
 ```
 
-### vLLM equivalent
+### vLLM (with compat layer — same code works)
 ```python
 with model.trace("Hello", temperature=0.0, top_p=1):
-    model.model.layers[0].output = (
-        torch.zeros_like(model.model.layers[0].output[0]),
-        torch.zeros_like(model.model.layers[0].output[1]),
-    )
+    model.model.layers[0].output[0][:] = 0    # Zero the combined hidden state
 ```
 
-### Why it differs
-
-Two issues:
-
-1. **Gap 1.2:** `output[0][:] = 0` only zeros the MLP stream. The residual stream (`output[1]`) leaks through to the next layer. For HF-equivalent ablation, **must zero both streams**.
-
-2. **Tuple assignment:** `layer.output[0] = x` raises `TypeError: 'tuple' object does not support item assignment`. Must replace the entire tuple: `layer.output = (new0, new1)`.
+The compat layer presents a `(combined,)` 1-tuple. In-place zeroing modifies the combined tensor, and `post_user_transform` decomposes it back to `(zeros, zeros)` for both streams — equivalent to zeroing the full hidden state.
 
 ---
 
@@ -199,26 +252,15 @@ with model.trace("Hello"):
     model.transformer.h[10].output[0][:, -1, :] += steering_vector * 0.5
 ```
 
-### vLLM equivalent
+### vLLM (with compat layer — nearly identical)
 ```python
-steering_vector = torch.randn(896, dtype=torch.float16).cuda() * 0.5
+steering_vector = torch.randn(896, dtype=torch.bfloat16).cuda() * 0.5
 
 with model.trace("Hello", temperature=0.0, top_p=1):
-    out0 = model.model.layers[10].output[0].clone()
-    out1 = model.model.layers[10].output[1].clone()
-    out0[-1, :] += steering_vector  # 2D indexing: [tokens, hidden]
-    model.model.layers[10].output = (out0, out1)
+    model.model.layers[10].output[0][-1, :] += steering_vector  # 2D: [-1, :] not [:, -1, :]
 ```
 
-### Why it differs
-
-1. **Gap 3.1:** `[:, -1, :]` (3D) fails because vLLM tensors are 2D `[tokens, hidden]`. Use `[-1, :]` instead.
-
-2. **Tuple replacement:** Can't modify `output[0]` in-place on the tuple. Must clone both, modify, then replace the whole tuple.
-
-3. **Steering is stream-agnostic:** Adding `v` to **either** `output[0]` or `output[1]` produces identical results. The next layer's `fused_add_rms_norm` sums them, so `(out0+v) + out1 = out0 + (out1+v)`. Adding to `output[0]` is conventional.
-
-**Verified:** `steer_A` (add to output[0]) vs `steer_B` (add to output[1]): max_diff=0.004, cosine=1.000.
+The compat layer handles the dual-stream decomposition automatically. The only remaining difference is **2D indexing** (`[-1, :]` instead of `[:, -1, :]`) due to Gap 3.1.
 
 ---
 
@@ -237,39 +279,20 @@ with model.trace() as tracer:
         logits = model.lm_head.output.save()
 ```
 
-### vLLM equivalent
+### vLLM (with compat layer — nearly identical)
 ```python
 with model.trace() as tracer:
     barrier = tracer.barrier(2)
     with tracer.invoke("The Eiffel Tower is in", temperature=0.0, top_p=1):
-        # Get combined hidden state at last token
-        clean_hs = (model.model.layers[5].output[0].clone()[-1, :]
-                    + model.model.layers[5].output[1].clone()[-1, :]).save()
+        clean_hs = model.model.layers[5].output[0][-1, :].save()   # 2D indexing
         barrier()
     with tracer.invoke("The Colosseum is in", temperature=0.0, top_p=1):
         barrier()
-        # Patch: adjust mlp stream so out0 + out1 = target
-        out0 = model.model.layers[5].output[0].clone()
-        out1 = model.model.layers[5].output[1].clone()
-        out0[-1, :] = clean_hs - out1[-1, :]
-        model.model.layers[5].output = (out0, out1)
+        model.model.layers[5].output[0][-1, :] = clean_hs          # 2D indexing
         logits = model.logits.output.save()
 ```
 
-### Why it differs
-
-Combines all previous gaps:
-- **2D indexing** (`[-1, :]` not `[:, -1, :]`)
-- **Dual residual stream** (must combine `output[0]+output[1]` for extraction, and decompose back for injection)
-- **Clone** to avoid mutation corruption
-- **Tuple replacement** (can't assign to tuple elements)
-
-**Simpler patching alternative** — if you don't need to preserve the decomposition:
-```python
-# Put entire target in one stream, zero the other
-model.model.layers[5].output = (clean_hs_full, torch.zeros_like(out1))
-```
-All three decompositions `(target, zeros)`, `(target-res, res)`, `(zeros, target)` produce bit-identical results.
+The compat layer handles combining/decomposing the dual streams, cloning, and tuple management. Only remaining difference: `[-1, :]` (2D) instead of `[:, -1, :]` (3D), and `model.logits.output` instead of `model.lm_head.output`.
 
 ---
 
@@ -285,29 +308,22 @@ with model.trace("The Eiffel Tower is in"):
         print(f"Layer {i}:", model.tokenizer.decode(tokens[0][-1]))
 ```
 
-### vLLM equivalent
+### vLLM (with compat layer — nearly identical)
 ```python
 with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
     for i in range(24):
-        # Combine dual residual streams
-        hs = (model.model.layers[i].output[0].clone()
-              + model.model.layers[i].output[1].clone())
-        # Apply final norm (may return tuple on vLLM)
-        normed = model.model.norm(hs)
-        if isinstance(normed, tuple):
+        hs = model.model.layers[i].output[0]          # Already combined by compat
+        normed = model.model.norm(hs)                  # Already unwrapped by compat
+        if isinstance(normed, tuple):                   # Defensive check for norm called as function
             normed = normed[0]
         logits = model.lm_head(normed)
         tokens = logits.argmax(dim=-1).save()
-        print(f"Layer {i}:", model.tokenizer.decode(tokens[-1]))
+        print(f"Layer {i}:", model.tokenizer.decode(tokens[-1]))  # 2D: [-1] not [0][-1]
 ```
 
-### Why it differs
+The compat layer handles Gap 1.2 (output combining) and Gap 1.4 (norm unwrapping) automatically. The `isinstance` check is a defensive guard for when `model.model.norm(hs)` is called as a function rather than accessed via `.output` (function calls bypass compat hooks). Only remaining difference: `tokens[-1]` (2D) instead of `tokens[0][-1]` (3D).
 
-1. **Gap 1.2:** Must combine `output[0] + output[1]` to get the full hidden state
-2. **Gap 1.4:** `model.model.norm(hs)` may return a tuple `(normalized, residual)` when the fused kernel path is taken. Use `normed[0]` if it's a tuple.
-3. **2D layout:** Use `tokens[-1]` not `tokens[0][-1]`
-
-**Verified:** Logit lens produces coherent predictions (e.g., "Paris" at deeper layers for "The Eiffel Tower is in").
+**Verified:** Logit lens produces "Paris" at deeper layers for "The Eiffel Tower is in".
 
 ---
 
@@ -349,20 +365,15 @@ with model.trace("Hello"):
     normed = model.transformer.ln_f(hidden_states)  # Returns single tensor
 ```
 
-### vLLM behavior
+### vLLM (with compat layer — same code works)
 ```python
 with model.trace("Hello", temperature=0.0, top_p=1):
-    norm_out = model.model.layers[0].input_layernorm.output
-    # Returns 2-tuple: (normalized, new_residual)
-    normed = norm_out[0]      # The actual normalized value
-    residual = norm_out[1]    # Updated residual stream
+    normed = model.model.layers[0].input_layernorm.output  # Returns single tensor
 ```
 
-### Why it differs
+The compat layer auto-unwraps the fused RMSNorm's `(normalized, residual)` tuple and returns just the normalized tensor, matching HF behavior.
 
-**Gap 1.4:** vLLM's `fused_add_rms_norm` computes `RMSNorm(x + residual)` and returns both the normalized value and the updated residual as a tuple. HF's `RMSNorm` just returns the normalized tensor.
-
-**Gap 1.5:** The input also differs — vLLM's layernorm takes 2 args `(x, residual)`, HF's takes 1 `(hidden_states)`.
+**Gap 1.5 (inputs):** The input to vLLM's layernorm still differs (2 args vs 1). This is not transformed by the compat layer.
 
 ---
 
@@ -403,13 +414,14 @@ model.model.layers[0].self_attn.qkv_proj.output  # Single merged output
 
 **HF:** `down_proj.output` and `o_proj.output` return single tensors.
 
-**vLLM:** They return `(output, bias)` 2-tuples.
+**vLLM (with compat layer — same code works):** The compat layer auto-unwraps the `(output, bias)` tuple, so `down_proj.output` returns a single tensor just like HF.
+
 ```python
-# Use output[0] for the actual tensor
-actual_output = model.model.layers[0].mlp.down_proj.output[0]
+# Works directly — compat layer strips the bias tuple
+actual_output = model.model.layers[0].mlp.down_proj.output
 ```
 
-**Gap 2.3:** vLLM uses `RowParallelLinear` which returns `(output, output_bias)`.
+**Background (Gap 2.3):** Without the compat layer, vLLM's `RowParallelLinear` returns `(output, output_bias)` 2-tuples.
 
 ---
 
@@ -458,11 +470,16 @@ with model.trace("Hello"):
     model.transformer.h[1].skip(layer0_out)
 ```
 
-### vLLM: BROKEN
+### vLLM (with compat layer — same code works)
+```python
+with model.trace("Hello", temperature=0.0, top_p=1):
+    layer0_out = model.model.layers[0].output
+    model.model.layers[1].skip(layer0_out)
+```
 
-**Gap 4.3:** `skip()` with a single tensor (or even a tuple) fails because the next layer's `fused_add_rms_norm` expects a specific `(hidden_states, residual)` pair structure. The engine crashes with `EngineDeadError`.
+The compat layer's `post_user_transform` detects skip values and decomposes them into the `(zeros, value)` format that vLLM's `fused_add_rms_norm` expects, so `fused_add_rms_norm(0, v) = rms_norm(v)`.
 
-**No clean workaround.** Would require manually constructing the correct dual-stream tuple that the fused norm expects.
+**Background (Gap 4.3):** Without the compat layer, `skip()` crashes the vLLM engine with `EngineDeadError` because fused norm expects `(hidden_states, residual)` pairs.
 
 ---
 
@@ -507,17 +524,19 @@ with model.trace("Hello") as tracer:
 out = cache['model.transformer.h.0'].output
 ```
 
-### vLLM equivalent
+### vLLM (with compat layer — same code works)
 ```python
 with model.trace("Hello", temperature=0.0, top_p=1) as tracer:
     cache = tracer.cache(modules=[model.model.layers[0]])
 
 out = cache.model.layers[0].output
-# Note: out is a tuple (mlp_output, residual) — vLLM semantics
-# Combined hidden state: out[0] + out[1]
+# With compat layer: out is a (combined_hidden_states,) 1-tuple, same as HF
+hidden = out[0]  # Already combined, already clone-safe
 ```
 
-Caching works on vLLM, but cached values reflect vLLM's semantics (dual residual stream, potential in-place mutation).
+The compat layer transforms cached values the same way as `.output` — dual streams are combined and mutation-protected.
+
+**Note:** The cache captures values after the compat `pre_user_transform`, so cached decoder layer outputs are already in HF format.
 
 ---
 
@@ -525,12 +544,13 @@ Caching works on vLLM, but cached values reflect vLLM's semantics (dual residual
 
 With `tensor_parallel_size=2`, vLLM shards certain modules across GPUs. This introduces additional differences from tp=1.
 
-### Verified: tp=2 on Qwen2.5-0.5B (GPUs 0,7)
+### Verified: tp=2 on Qwen/Qwen2-0.5B (GPUs 0,7)
+
+> **Warning:** Accessing sub-module outputs (`qkv_proj`, `gate_up_proj`, `down_proj`, `o_proj`) with tp=2 **crashes the vLLM engine unrecoverably**. All subsequent traces fail with `EngineDeadError`. Stick to layer-level interventions only.
 
 | Test | tp=1 | tp=2 | Status |
 |------|------|------|--------|
-| `layer.output[0]` shape | `[2, 896]` | `[2, 896]` | **Same** — all-reduced to full hidden_dim |
-| `layer.output[1]` shape | `[2, 896]` | `[2, 896]` | **Same** — residual is replicated |
+| `layer.output[0]` shape | `[2, 896]` | `[2, 896]` | **Same** — combined hidden state (compat layer) |
 | `logits.output` shape | `[1, 151936]` | `[1, 151936]` | **Same** — full vocab |
 | Sub-module access (qkv_proj, gate_up_proj, etc.) | Works | **Engine crash** | **New tp=2 gap** |
 
@@ -548,16 +568,15 @@ When sub-module access is fixed, these are the expected shapes:
 
 | Module | tp=1 shape | tp=2 shape | Notes |
 |--------|-----------|-----------|-------|
-| `layer.output[0]` | `[tokens, 896]` | `[tokens, 896]` | All-reduced |
-| `layer.output[1]` | `[tokens, 896]` | `[tokens, 896]` | Replicated |
+| `layer.output[0]` | `[tokens, 896]` | `[tokens, 896]` | Combined hidden state (compat layer) |
 | `qkv_proj.output` | `[tokens, 1152]` | `[tokens, 576]` | Sharded — half the heads per GPU |
 | `gate_up_proj.output` | `[tokens, 9728]` | `[tokens, 4864]` | Sharded — half intermediate dim |
-| `down_proj.output` | `(tensor, bias)` | `(tensor, bias)` | All-reduced after RowParallel |
-| `o_proj.output` | `(tensor, bias)` | `(tensor, bias)` | All-reduced after RowParallel |
+| `down_proj.output` | tensor | tensor | Compat layer unwraps `(output, bias)` tuple |
+| `o_proj.output` | tensor | tensor | Compat layer unwraps `(output, bias)` tuple |
 
 ### tp=2 setup
 ```python
-model = VLLM("Qwen/Qwen2.5-0.5B", tensor_parallel_size=2,
+model = VLLM("Qwen/Qwen2-0.5B", tensor_parallel_size=2,
              gpu_memory_utilization=0.3, dtype=torch.float16, dispatch=True)
 ```
 
@@ -571,22 +590,23 @@ model = VLLM("Qwen/Qwen2.5-0.5B", tensor_parallel_size=2,
 
 ## Quick Reference Table
 
-| Operation | HF Pattern | vLLM Pattern | Gap |
-|-----------|-----------|-------------|-----|
-| **Save hidden state** | `layer.output[0].save()` | `(layer.output[0].clone() + layer.output[1].clone()).save()` | 1.1, 1.2 |
-| **Get logits** | `model.lm_head.output` | `model.logits.output` | — |
-| **Get layer input** | `layer.input` | `args, _ = layer.inputs; args[1] + args[2]` | 1.3 |
-| **Last token** | `output[:, -1, :]` | `output[-1, :]` | 3.1 |
-| **Zero layer** | `layer.output[0][:] = 0` | `layer.output = (zeros, zeros)` | 1.2 |
-| **Steer** | `output[0][:, -1, :] += v` | `out0 = output[0].clone(); out0[-1,:] += v; layer.output = (out0, out1)` | 3.1, 1.2 |
-| **Patch** | `output[0][:, -1, :] = target` | `layer.output = (target, zeros)` | 1.2, 3.1 |
-| **Scale** | `output[0] *= s` | `layer.output = (out0*s, out1*s)` | 1.2 |
-| **LayerNorm out** | `norm(x)` → tensor | `norm(x, residual)` → tuple | 1.4 |
-| **gate/up proj** | `mlp.gate_proj`, `mlp.up_proj` | `mlp.gate_up_proj` (merged) | 2.1 |
-| **q/k/v proj** | `attn.q_proj`, `attn.k_proj`, `attn.v_proj` | `attn.qkv_proj` (merged) | 2.2 |
-| **down/o proj out** | tensor | `(tensor, bias)` tuple | 2.3 |
-| **Attn weights** | `attn.source.attention_interface_0.output[0]` | Not available | 3.2 |
-| **Gradients** | `requires_grad_()` + `backward()` | Not available | 4.1 |
-| **Module skip** | `layer.skip(value)` | Broken (engine crash) | 4.3 |
-| **Generation** | `model.generate(max_new_tokens=N)` | `model.trace(max_tokens=N)` | — |
-| **Source tracing** | Works on all modules | Works on Python wrappers only | 4.2 |
+### With compat layer (default)
+
+| Operation | HF Pattern | vLLM Pattern (compat) | Notes |
+|-----------|-----------|----------------------|-------|
+| **Save hidden state** | `layer.output[0].save()` | **Same** | Auto-combined, auto-cloned |
+| **Get layer input** | `layer.input` | **Same** | Auto-combined hidden states |
+| **Zero layer** | `layer.output[0][:] = 0` | **Same** | Auto-decomposed to both streams |
+| **Steer** | `output[0][:, -1, :] += v` | `output[0][-1, :] += v` | Only diff: 2D indexing (Gap 3.1) |
+| **Patch** | `output[0][:, -1, :] = target` | `output[0][-1, :] = target` | Only diff: 2D indexing |
+| **Scale** | `output[0] *= s` | **Same** | Auto-decomposed |
+| **LayerNorm out** | `norm(x)` → tensor | **Same** | Auto-unwrapped |
+| **down/o proj out** | tensor | **Same** | Auto-unwrapped |
+| **Module skip** | `layer.skip(value)` | **Same** | Auto-decomposed for fused norm |
+| **Get logits** | `model.lm_head.output` | `model.logits.output` | Different module path |
+| **Generation** | `model.generate(max_new_tokens=N)` | `model.trace(max_tokens=N)` | Different API |
+| **gate/up proj** | `mlp.gate_proj`, `mlp.up_proj` | `mlp.gate_up_proj` (merged) | Use `.chunk(2)` (Gap 2.1) |
+| **q/k/v proj** | `attn.q_proj`, `attn.k_proj`, `attn.v_proj` | `attn.qkv_proj` (merged) | Use `.split()` (Gap 2.2) |
+| **Attn weights** | `attn.source...output[0]` | Not available | Hard block (Gap 3.2) |
+| **Gradients** | `requires_grad_()` + `backward()` | Not available | Hard block (Gap 4.1) |
+| **Source tracing** | Works on all modules | Python wrappers only | Hard block (Gap 4.2) |

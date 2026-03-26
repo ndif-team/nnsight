@@ -42,14 +42,13 @@ def run_vllm(model_name, prompt, layer_idx):
 
     model = VLLM(model_name, gpu_memory_utilization=0.05, dispatch=True)
 
-    # Forward order in vLLM: mlp fires BEFORE layer.output
+    # With compat layer: output is now (combined,) where combined = mlp_out + residual
+    # So output[0] should NOT equal mlp.output (it includes the residual).
     with model.trace(prompt, temperature=0.0):
         mlp_out = model.model.layers[layer_idx].mlp.output.clone().save()
         out0 = model.model.layers[layer_idx].output[0].clone().save()
-        out1 = model.model.layers[layer_idx].output[1].clone().save()
 
     print(f"layer.output[0] shape: {out0.shape}, dtype: {out0.dtype}")
-    print(f"layer.output[1] shape: {out1.shape}, dtype: {out1.dtype}")
     print(f"mlp.output shape: {mlp_out.shape if isinstance(mlp_out, torch.Tensor) else [t.shape for t in mlp_out]}")
 
     if isinstance(mlp_out, tuple):
@@ -69,19 +68,17 @@ def run_vllm(model_name, prompt, layer_idx):
 
     print(f"\noutput[0] == mlp.output: {out0_eq_mlp} (diff={out0_mlp_diff:.6f}, cos={out0_mlp_cos:.6f})")
 
-    reconstructed = out0 + out1
-    print(f"output[0] + output[1] shape: {reconstructed.shape}")
-
+    # Gap is confirmed if output[0] == mlp.output (raw MLP, no residual added).
+    # Gap is NOT reproduced if output[0] != mlp.output (compat layer combined them).
     status = "CONFIRMED" if out0_eq_mlp or out0_mlp_cos > 0.99 else "NOT_REPRODUCED"
     detail = (
-        f"output is 2-tuple; output[0]==mlp.output: {out0_eq_mlp} (cos={out0_mlp_cos:.4f}); "
-        f"vLLM returns (mlp_out, residual) not (mlp_out+residual,)"
+        f"output[0]==mlp.output: {out0_eq_mlp} (cos={out0_mlp_cos:.4f}); "
+        f"{'compat layer combined dual streams' if not out0_eq_mlp else 'still raw mlp output'}"
     )
     return {
         "backend": "vllm",
         "status": status,
         "detail": detail,
-        "output_len": 2,
         "out0_eq_mlp": out0_eq_mlp,
     }
 
