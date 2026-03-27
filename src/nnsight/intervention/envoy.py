@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 import warnings
+import weakref
 from functools import wraps
 from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
 from typing import (
@@ -109,6 +110,7 @@ class eproperty:
         self.iterate = iterate
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
+        self._fake_values: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
     def __call__(self, stub: Callable):
         if self.name is None:
@@ -139,14 +141,14 @@ class eproperty:
         Used by the scanning tracer to populate shape/type information
         from a fake-tensor forward pass.
         """
-        envoy._eproperty_fakes[self.name] = value
+        self._fake_values[envoy] = value
 
     def get_fake(self, envoy: Envoy) -> Any:
         """Retrieve the fake value for this eproperty from the given envoy.
 
         Returns ``inspect._empty`` if no fake value has been set.
         """
-        return envoy._eproperty_fakes.get(self.name, inspect._empty)
+        return self._fake_values.get(envoy, inspect._empty)
 
     def __get__(self, envoy: Envoy, owner):
 
@@ -260,8 +262,6 @@ class Envoy(Batchable):
         self._interleaver.wrap_module(module)
 
         self._default_mediators: List[Mediator] = []
-
-        self._eproperty_fakes: Dict[str, Any] = {}
 
         if rename is not None:
             self._alias = Aliaser(rename)
@@ -1194,7 +1194,6 @@ class Envoy(Batchable):
         state["_interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
 
-        state.pop("_eproperty_fakes")
         state.pop("_source")
 
         return state
@@ -1202,7 +1201,6 @@ class Envoy(Batchable):
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-        self._eproperty_fakes = {}
         self._source = None
 
 
