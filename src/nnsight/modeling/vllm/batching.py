@@ -117,7 +117,7 @@ class VLLMBatcher(Batcher):
         self._decoder_layer_ids: set = set()
         self._rmsnorm_ids: set = set()
         self._row_parallel_ids: set = set()
-        self._transform_stack: List[dict] = []
+        self._transform_frames: dict = {}  # (id(module), hook_type) -> frame dict
         self._guard_warned: set = set()  # module ids that already logged a mismatch warning
 
     def wrap(self, model: Envoy, compat: bool = True):
@@ -326,7 +326,8 @@ class VLLMBatcher(Batcher):
                         and isinstance(value[1], torch.Tensor)):
                     frame["type"] = "rmsnorm"
                     frame["residual"] = value[1]
-                    value = value[0]
+                    with torch.inference_mode(False):
+                        value = value[0].clone()
                 elif mid not in self._guard_warned:
                     self._guard_warned.add(mid)
                     logger.warning(
@@ -342,7 +343,8 @@ class VLLMBatcher(Batcher):
                         and isinstance(value[0], torch.Tensor)):
                     frame["type"] = "row_parallel"
                     frame["bias"] = value[1]
-                    value = value[0]
+                    with torch.inference_mode(False):
+                        value = value[0].clone()
                 elif mid not in self._guard_warned:
                     self._guard_warned.add(mid)
                     logger.warning(
@@ -373,7 +375,33 @@ class VLLMBatcher(Batcher):
                     frame["combined_id"] = id(combined)
                     value = (combined,) + rest, kwargs
 
-        self._transform_stack.append(frame)
+        # Clone any remaining inference-mode tensors so users can do in-place
+        # ops (e.g. output[0][:] = 0).  Dual-stream models already get cloned
+        # above; this catches single-stream models (GPT-2, GPT-J, etc.) and
+        # any module not covered by the specific transforms.
+        if hook_type == "output" and frame.get("type") is None:
+            value = self._clone_inference_tensors(value)
+
+        self._transform_frames[(mid, hook_type)] = frame
+        return value
+
+    @staticmethod
+    def _clone_inference_tensors(value: Any) -> Any:
+        """Clone inference-mode tensors out of inference mode."""
+        if isinstance(value, torch.Tensor) and value.is_inference():
+            with torch.inference_mode(False):
+                return value.clone()
+        elif isinstance(value, tuple):
+            cloned = []
+            changed = False
+            for v in value:
+                if isinstance(v, torch.Tensor) and v.is_inference():
+                    with torch.inference_mode(False):
+                        cloned.append(v.clone())
+                    changed = True
+                else:
+                    cloned.append(v)
+            return tuple(cloned) if changed else value
         return value
 
     def post_user_transform(self, module: torch.nn.Module, hook_type: str, value: Any, is_skip: bool = False) -> Any:
@@ -382,10 +410,8 @@ class VLLMBatcher(Batcher):
 
         mid = id(module)
 
-        # Pop the frame pushed by pre_user_transform.
-        # If the stack is empty (e.g. pre_user_transform was skipped for is_skip),
-        # use an empty frame.
-        frame = self._transform_stack.pop() if self._transform_stack else {}
+        # Retrieve the frame set by pre_user_transform for this module+hook.
+        frame = self._transform_frames.pop((mid, hook_type), {})
         frame_type = frame.get("type")
 
         if hook_type == "output":

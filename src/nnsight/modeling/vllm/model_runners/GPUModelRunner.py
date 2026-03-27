@@ -363,7 +363,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
     ):
 
         Globals.enter()
-        with self.nnsight_model._interleaver:
+
+        return_value = None
+        interleaver = self.nnsight_model._interleaver
+        interleaver._defer_exceptions = True
+
+        with interleaver:
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
@@ -381,6 +386,18 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     **{**state._asdict(), "logits": logits}
                 )
 
+        interleaver._defer_exceptions = False
+
+        # Safety net: if __enter__ failed or forward was interrupted before
+        # return_value could be assigned, build a minimal valid output.
+        if return_value is None:
+            from vllm.v1.outputs import ModelRunnerOutput
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            return_value = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            )
+
         Globals.exit()
 
         return return_value
@@ -389,13 +406,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.enter()
 
-        with self.nnsight_model._interleaver:
+        sampler_output = None
+        interleaver = self.nnsight_model._interleaver
+        interleaver._defer_exceptions = True
+
+        with interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
 
             sampler_output.sampled_token_ids = self.model.samples(
                 sampler_output.sampled_token_ids, hook=True
             )
+
+        interleaver._defer_exceptions = False
 
         Globals.exit()
 
@@ -435,5 +458,21 @@ class NNsightGPUModelRunner(GPUModelRunner):
         )
         saves, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
+
+        # Collect deferred exceptions from mediators, keyed by request ID.
+        # Each invoke has its own mediator and its own exception.
+        # The wrapped exception can't be pickled (dynamic class), so send type + message.
+        exceptions = {}
+        for base_id, mediator, internal_key in matched:
+            if mediator._deferred_exception is not None:
+                exc = mediator._deferred_exception
+                exceptions[base_id] = {
+                    "type": type(exc).__bases__[0].__name__ if hasattr(type(exc), "__bases__") else type(exc).__name__,
+                    "message": str(exc),
+                }
+                mediator._deferred_exception = None
+
+        if exceptions:
+            saves["__nnsight_exceptions__"] = exceptions
 
         return pickle.dumps(saves)
