@@ -10,11 +10,14 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Generic,
     List,
     Optional,
     Tuple,
     Type,
+    TypeVar,
     Union,
+    overload,
 )
 
 import torch
@@ -46,7 +49,10 @@ def trace_only(fn: Callable):
     return wrapper
 
 
-class eproperty:
+T = TypeVar("T")
+
+
+class eproperty(Generic[T]):
     """A descriptor for defining hookable properties on Envoy subclasses.
 
     ``eproperty`` provides a way to expose values through the same interleaving
@@ -103,7 +109,9 @@ class eproperty:
         )
     """
 
-    def __init__(self, key: str = None, description: str = "eproperty", iterate: bool = True):
+    def __init__(
+        self, key: str = None, description: str = None, iterate: bool = True
+    ):
 
         self.name: str = None
         self.key = key
@@ -112,13 +120,13 @@ class eproperty:
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
 
-    def __call__(self, stub: Callable):
+    def __call__(self, stub: Callable[..., T]) -> "eproperty[T]":
         self.name = stub.__name__
         if self.key is None:
             self.key = self.name
         return self
 
-    def postprocess(self, func: Callable) -> "eproperty":
+    def postprocess(self, func: Callable) -> "eproperty[T]":
         """Register a post-processing function called on ``__get__``.
 
         The function receives ``(envoy, value)`` and should return the
@@ -127,7 +135,7 @@ class eproperty:
         self._postprocess = func
         return self
 
-    def preprocess(self, func: Callable) -> "eproperty":
+    def preprocess(self, func: Callable) -> "eproperty[T]":
         """Register a pre-processing function called on ``__set__``.
 
         The function receives ``(envoy, value)`` and should return the
@@ -136,7 +144,12 @@ class eproperty:
         self._preprocess = func
         return self
 
-    def __get__(self, envoy: Envoy, owner):
+    @overload
+    def __get__(self, envoy: None, owner: type) -> "eproperty[T]": ...
+    @overload
+    def __get__(self, envoy: Envoy, owner: type) -> T: ...
+
+    def __get__(self, envoy, owner):
 
         if envoy is None:
             return self
@@ -292,7 +305,7 @@ class Envoy(Batchable):
 
     #### Properties ####
 
-    @eproperty(description="module output")
+    @eproperty()
     def output(self) -> Object:
         """Get the output of the module's forward pass.
 
@@ -301,7 +314,7 @@ class Envoy(Batchable):
             ...     attn = model.transformer.h[0].attn.output[0].save()
         """
 
-    @eproperty(key="input", description="module inputs (args, kwargs)")
+    @eproperty(key="input")
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
         """Get the inputs to the module's forward pass.
 
@@ -313,7 +326,7 @@ class Envoy(Batchable):
             ...     args, kwargs = model.transformer.h[0].attn.inputs
         """
 
-    @eproperty(key="input", description="first module input")
+    @eproperty(key="input")
     def input(self) -> Object:
         """Get the first input to the module's forward pass.
 
@@ -1080,8 +1093,10 @@ class Envoy(Batchable):
         eproperty_lines = []
         for cls in type(self).__mro__:
             for attr_name, attr_val in cls.__dict__.items():
-                if isinstance(attr_val, eproperty):
-                    eproperty_lines.append("(" + attr_val.name + "): " + attr_val.description)
+                if isinstance(attr_val, eproperty) and attr_val.description is not None:
+                    eproperty_lines.append(
+                        "(" + attr_val.name + "): " + attr_val.description
+                    )
 
         lines = extra_lines + child_lines + eproperty_lines
 
