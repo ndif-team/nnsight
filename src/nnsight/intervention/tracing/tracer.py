@@ -178,6 +178,12 @@ class Cache:
                 raise AttributeError(
                     f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute."
                 )
+                
+        def __getstate__(self):
+            return self.__dict__.copy()
+
+        def __setstate__(self, state):
+            self.__dict__.update(state)
 
     def __init__(
         self,
@@ -611,9 +617,7 @@ class ScanningTracer(InterleavingTracer):
     A tracer that runs the model in fake tensor mode to validate operations and inspect tensor shapes.
 
     This tracer uses PyTorch's FakeTensorMode to run the model without actual computation,
-    allowing for shape validation and operation checking. It populates the _fake_inputs and
-    _fake_output attributes on each Envoy to store the shapes and types of tensors that would
-    flow through the model during a real forward pass.
+    allowing for shape validation and operation checking.
     """
 
     def execute(self, fn: Callable):
@@ -621,34 +625,12 @@ class ScanningTracer(InterleavingTracer):
         Execute the model in fake tensor mode.
 
         This method:
-        1. Registers forward hooks on all modules to capture fake input/output
-        2. Runs the model in fake tensor mode to validate operations
-        3. Stores the fake inputs/outputs on each Envoy for later inspection
+        1. Runs the model in fake tensor mode to validate operations
+        2. Allows intervention code inside the scan context to access fake tensor shapes
 
         Args:
             fn: The function to execute (typically the model's forward pass)
         """
-        # Get all Envoys in the model
-        envoys = self.model.modules()
-
-        hooks = []
-
-        # Register hooks on each module to capture shapes
-        for envoy in envoys:
-
-            def _hook(
-                module: torch.nn.Module,
-                input: Any,
-                input_kwargs: Dict,
-                output: Any,
-                envoy=envoy,
-            ):
-                # Store the shapes/types of inputs and outputs on the Envoy
-                envoy._fake_inputs = (input, input_kwargs)
-                envoy._fake_output = output
-
-            hooks.append(envoy._module.register_forward_hook(_hook, with_kwargs=True))
-
         # Run the model in fake tensor mode
         with FakeTensorMode(
             allow_non_fake_inputs=True,  # Allow real tensors as input
@@ -661,10 +643,6 @@ class ScanningTracer(InterleavingTracer):
 
                 # Execute the model in fake mode
                 super().execute(fn)
-
-        # Clean up hooks
-        for hook in hooks:
-            hook.remove()
 
 
 class Barrier:

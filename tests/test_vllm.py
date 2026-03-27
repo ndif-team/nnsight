@@ -488,6 +488,37 @@ class TestRayExecutor:
 
 
 # =============================================================================
+# Cache
+# =============================================================================
+
+
+class TestCache:
+    """Tests for activation caching with vLLM."""
+
+    @torch.no_grad()
+    def test_basic_cache(self, vllm_gpt2, ET_prompt: str):
+        """Test basic caching of module outputs."""
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1) as tracer:
+            cache = tracer.cache()
+
+        assert cache["model.transformer.h.0"].output is not None
+        assert cache["model.transformer.h.0"].inputs is None
+
+    @torch.no_grad()
+    def test_cache_specific_modules(self, vllm_gpt2, ET_prompt: str):
+        """Test caching specific modules only."""
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1) as tracer:
+            cache = tracer.cache(modules=[
+                vllm_gpt2.transformer.h[0],
+                vllm_gpt2.transformer.h[-1],
+            ])
+
+        assert "model.transformer.h.0" in cache
+        assert "model.transformer.h.11" in cache
+        assert "model.transformer.h.5" not in cache
+
+
+# =============================================================================
 # Cross-Invoke Shared State
 # =============================================================================
 

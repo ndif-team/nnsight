@@ -587,7 +587,6 @@ class TestScan:
         assert isinstance(attn_output, torch._subclasses.fake_tensor.FakeTensor)
         assert attn_input.shape == (1, 9, 768)
         assert attn_output.shape == (1, 9, 768)
-        assert gpt2.transformer.h[1].output.shape == (1, 9, 768)
 
     @torch.no_grad()
     def test_scan_with_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
@@ -599,7 +598,6 @@ class TestScan:
             out = gpt2.transformer.h[0].mlp.c_proj.output.save()
 
         assert out.shape == (1, 1, 768)
-        assert gpt2.transformer.h[1].output.shape == (1, 9, 768)
 
     @torch.no_grad()
     def test_scan_undispatched(self, MSG_prompt: str):
@@ -610,7 +608,6 @@ class TestScan:
             pass
 
         assert gpt2_undispatched.dispatched == False
-        assert gpt2_undispatched.transformer.h[1].output.shape == (1, 9, 768)
 
 
 # =============================================================================

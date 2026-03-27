@@ -45,6 +45,8 @@ def trace_only(fn: Callable):
 
     return wrapper
 
+from typing import TypeVar
+T = TypeVar('T')
 
 class eproperty:
     """A descriptor for defining hookable properties on Envoy subclasses.
@@ -53,6 +55,9 @@ class eproperty:
     request/swap mechanism that ``.output`` and ``.input`` use.  During a trace,
     reading an ``eproperty`` issues a blocking request to the interleaver;
     writing to it schedules a swap — just like regular module outputs.
+
+    Inherits from ``property`` so that type checkers infer the return type
+    from the stub function's annotation.
 
     Args:
         key: The interleaving key appended to the envoy path
@@ -105,6 +110,8 @@ class eproperty:
     """
 
     def __init__(self, key: str = None, description: str = None, iterate: bool = True):
+        super().__init__()
+        
         self.name: str = None
         self.key = key
         self.description = description
@@ -112,7 +119,7 @@ class eproperty:
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
 
-    def __call__(self, stub: Callable) -> "eproperty":
+    def __call__(self, stub: Callable[..., T]) -> T | property:
         self.name = stub.__name__
         if self.key is None:
             self.key = self.name
@@ -136,20 +143,22 @@ class eproperty:
         self._preprocess = func
         return self
 
-    def __get__(self, envoy, owner) -> Any:
+    def __get__(self, envoy: Envoy, owner):
 
         if envoy is None:
             return self
 
         if envoy.interleaving:
-            value = envoy._interleaver.current.request(
-                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.key}")
-            )
+            
+            requester = f"{envoy.path}.{self.key}"
+            
+            if self.iterate:
+                requester = envoy._interleaver.iterate_requester(requester)
+                
+            value = envoy._interleaver.current.request(requester)
         else:
             raise ValueError(
-                f"Cannot access `{envoy.path}.{self.name}` outside of interleaving. "
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
+                f"Cannot access `{envoy.path}.{self.name}` outside of interleaving."
             )
 
         if self._postprocess is not None:
@@ -163,16 +172,19 @@ class eproperty:
             value = self._preprocess(envoy, value)
 
         if envoy.interleaving:
+            
+            requester = f"{envoy.path}.{self.key}"
+            
+            if self.iterate:
+                requester = envoy._interleaver.iterate_requester(requester)
 
             envoy._interleaver.current.swap(
-                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.key}"), value
+                requester, value
             )
 
         else:
             raise ValueError(
-                f"Cannot set `{envoy.path}.{self.name}` outside of interleaving. "
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
+                f"Cannot set `{envoy.path}.{self.name}` outside of interleaving."
             )
 
     def provide(self, envoy: Envoy, value: Any) -> Any:
@@ -246,9 +258,6 @@ class Envoy(Batchable):
         self._interleaver.wrap_module(module)
 
         self._default_mediators: List[Mediator] = []
-
-        self._fake_inputs = inspect._empty
-        self._fake_output = inspect._empty
 
         if rename is not None:
             self._alias = Aliaser(rename)
@@ -1183,8 +1192,6 @@ class Envoy(Batchable):
         state["_interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
 
-        state.pop("_fake_inputs")
-        state.pop("_fake_output")
         state.pop("_source")
 
         return state
@@ -1192,8 +1199,6 @@ class Envoy(Batchable):
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-        self._fake_inputs = inspect._empty
-        self._fake_output = inspect._empty
         self._source = None
 
 

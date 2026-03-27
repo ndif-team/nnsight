@@ -835,29 +835,22 @@ model.clear_edits()
 
 ### Scan Mode
 
-Get shapes and types without running the full model:
+Run interventions with fake tensors to validate shapes and operations without full execution:
 
 ```python
 import nnsight
 
 with model.scan("Hello"):
-    # Access shape information - must use .save() to persist outside the context
+    # Access shape information inside the scan context
     dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+
+    # Validate interventions — will fail early if shapes don't match
+    model.transformer.h[0].output[0][:, 10] = 0  # Will fail if dim < 11
 
 print(dim)  # e.g., 768
 ```
 
-**Important:** Even though `model.scan()` uses fake tensors for lightweight execution, it is still a tracing context. You **must** use `.save()` (or `nnsight.save()`) on any value you want to access after the `with model.scan(...)` block exits. This is the same rule as `model.trace()` — values defined inside the context are garbage collected unless explicitly saved. Use `nnsight.save()` for non-tensor values like shape integers.
-
-### Validation Mode
-
-Test interventions with fake tensors:
-
-```python
-# Validate interventions before running
-with model.scan("Hello"):
-    model.transformer.h[0].output[0][:, 10] = 0  # Will fail if dim < 11
-```
+**Note:** `model.scan()` is a tracing context — use `.save()` (or `nnsight.save()`) on any value you need after the block exits. Values are only accessible inside the scan context or via `.save()`.
 
 ---
 
@@ -1503,12 +1496,14 @@ with model.trace("Hello"):
     print(shape)  # torch.Size([1, 5, 768])
 ```
 
-Use `.scan()` if you need shapes **without** running the model (remember to save values you need outside the context):
+Use `.scan()` if you need shapes **without** running the model:
 
 ```python
 import nnsight
 with model.scan("Hello"):
-    shape = nnsight.save(model.transformer.h[0].output[0].shape)  # Shape via fake tensors
+    shape = nnsight.save(model.transformer.h[0].output[0].shape)
+
+print(shape)  # torch.Size([1, 5, 768])
 ```
 
 ### 8. Generation vs Trace
@@ -1562,7 +1557,7 @@ with model.trace() as tracer:
 
 ### 11. `.save()` Is Required in All Tracing Contexts (Including Scan)
 
-`.save()` is needed to persist values outside **any** tracing context — this includes `model.trace()`, `model.generate()`, `model.session()`, **and** `model.scan()`. Even though scan uses fake tensors for lightweight execution, it is still a tracing context that garbage-collects unsaved values.
+`.save()` is needed to persist values outside **any** tracing context — this includes `model.trace()`, `model.generate()`, `model.session()`, **and** `model.scan()`.
 
 ```python
 # WRONG - dim is lost after scan exits
@@ -1686,7 +1681,7 @@ print(model.transformer.h[0])
 
 ### 4. Check Shapes with Scan
 
-Use `.scan()` to get shapes without running the full model:
+Use `.scan()` to inspect shapes without running the full model:
 
 ```python
 with model.scan("Hello"):
@@ -1789,7 +1784,7 @@ model2 = NNsight(my_pytorch_model)  # Safe - hooks replaced, not duplicated
 |--------|-------------|
 | `model.trace(input)` | Single forward pass with interventions |
 | `model.generate(input, max_new_tokens=N)` | Multi-token generation |
-| `model.scan(input)` | Get shapes without full execution |
+| `model.scan(input)` | Validate shapes/operations with fake tensors |
 | `model.edit()` | Create persistent model modifications |
 | `model.session()` | Group multiple traces |
 

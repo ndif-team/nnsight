@@ -768,16 +768,11 @@ The `.output` property:
 5. Returns the value when the model's hook provides it
 
 ```python
-@property
+@eproperty(description="module output")
 def output(self):
-    if self.interleaving:
-        return self._interleaver.current.request(
-            self._interleaver.iterate_requester(f"{self.path}.output")
-        )
-    elif self._fake_output is not inspect._empty:
-        return self._fake_output
-    else:
-        raise ValueError("Cannot return output outside of trace")
+    # During interleaving, __get__ requests the value from the interleaver.
+    # Outside interleaving, raises ValueError.
+    ...
 ```
 
 #### Setting Values
@@ -815,15 +810,13 @@ When using `.scan()` (shape inference without full execution), fake inputs/outpu
 import nnsight
 
 with model.scan("Hello"):
-    # Runs with fake tensors, populates _fake_output
-    # To persist a value outside the scan, use .save() or nnsight.save()
+    # Runs with fake tensors — access shapes inside the scan context
     shape = nnsight.save(model.transformer.h[0].output[0].shape)
 
-# After scanning, can also access _fake_output directly on the module
-print(model.transformer.h[0]._fake_output.shape)
+print(shape)  # torch.Size([1, seq_len, hidden_dim])
 ```
 
-The `_fake_output` and `_fake_inputs` attributes store these fake values on the module, allowing access outside a trace after scanning. Note that regular variables defined inside `.scan()` still require `.save()` to persist, just like any other tracing context.
+Values are only accessible inside the scan context or via `.save()`, just like any other tracing context.
 
 ---
 
@@ -1852,7 +1845,7 @@ def handle_barrier_event(self, provider, participants):
 
 Scanning runs the model with **fake tensors** to determine shapes and validate interventions without full execution.
 
-**Important:** `model.scan()` is a tracing context, so `.save()` is still required to persist values outside the block. Use `nnsight.save()` for non-tensor values like shape integers.
+`model.scan()` is a tracing context — values are only accessible inside the scan block or via `.save()`.
 
 #### Usage
 
@@ -1861,7 +1854,6 @@ import nnsight
 
 with model.scan("Hello"):
     # Access shapes without running real computation
-    # Must use .save() to persist values outside the scan context
     dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
 
     # Validate slicing
@@ -1876,23 +1868,13 @@ Scanning uses PyTorch's `FakeTensorMode` to create tensors that track shape and 
 
 1. Create fake input tensors
 2. Run the model with fake tensors
-3. Hooks capture fake outputs (which have correct shapes)
-4. Store fake values in `_fake_output` / `_fake_inputs`
-
-After scanning, you can access shapes outside a trace:
-
-```python
-# After scanning
-print(model.transformer.h[0]._fake_output[0].shape)  # [1, seq_len, hidden_dim]
-```
+3. Intervention code inside the scan context receives fake tensors with correct shapes
 
 #### Use Cases
 
 - **Shape inference**: Determine dimensions before writing interventions
 - **Validation**: Check that slicing operations will work
 - **Quick iteration**: Test intervention logic without full computation
-
-**Note:** Scanning is experimental. Some operations may not work correctly with fake tensors.
 
 ---
 
