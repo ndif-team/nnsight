@@ -10,14 +10,11 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Generic,
     List,
     Optional,
     Tuple,
     Type,
-    TypeVar,
     Union,
-    overload,
 )
 
 import torch
@@ -49,16 +46,16 @@ def trace_only(fn: Callable):
     return wrapper
 
 
-T = TypeVar("T")
-
-
-class eproperty(Generic[T]):
+class eproperty(property):
     """A descriptor for defining hookable properties on Envoy subclasses.
 
     ``eproperty`` provides a way to expose values through the same interleaving
     request/swap mechanism that ``.output`` and ``.input`` use.  During a trace,
     reading an ``eproperty`` issues a blocking request to the interleaver;
     writing to it schedules a swap — just like regular module outputs.
+
+    Inherits from ``property`` so that type checkers infer the return type
+    from the stub function's annotation.
 
     Args:
         key: The interleaving key appended to the envoy path
@@ -67,7 +64,8 @@ class eproperty(Generic[T]):
             same ``key`` to offer different post-processing views of a
             single value.
         description: A short human-readable label shown in the module tree
-            when printing an Envoy (``(name): description``).
+            when printing an Envoy (``(name): description``).  Only
+            eproperties with a description appear in the tree.
         iterate: Whether the provider key should be iterated (appending
             ``.i0``, ``.i1``, etc.) on each call to :meth:`provide`.
             Defaults to ``True``.
@@ -112,7 +110,7 @@ class eproperty(Generic[T]):
     def __init__(
         self, key: str = None, description: str = None, iterate: bool = True
     ):
-
+        super().__init__()
         self.name: str = None
         self.key = key
         self.description = description
@@ -120,13 +118,14 @@ class eproperty(Generic[T]):
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
 
-    def __call__(self, stub: Callable[..., T]) -> "eproperty[T]":
+    def __call__(self, stub: Callable):
+        super().__init__(stub)
         self.name = stub.__name__
         if self.key is None:
             self.key = self.name
         return self
 
-    def postprocess(self, func: Callable) -> "eproperty[T]":
+    def postprocess(self, func: Callable) -> "eproperty":
         """Register a post-processing function called on ``__get__``.
 
         The function receives ``(envoy, value)`` and should return the
@@ -135,7 +134,7 @@ class eproperty(Generic[T]):
         self._postprocess = func
         return self
 
-    def preprocess(self, func: Callable) -> "eproperty[T]":
+    def preprocess(self, func: Callable) -> "eproperty":
         """Register a pre-processing function called on ``__set__``.
 
         The function receives ``(envoy, value)`` and should return the
@@ -143,11 +142,6 @@ class eproperty(Generic[T]):
         """
         self._preprocess = func
         return self
-
-    @overload
-    def __get__(self, envoy: None, owner: type) -> "eproperty[T]": ...
-    @overload
-    def __get__(self, envoy: Envoy, owner: type) -> T: ...
 
     def __get__(self, envoy, owner):
 
@@ -899,18 +893,7 @@ class Envoy(Batchable):
 
         setattr(new_cls, f"nns_{mount_point}", mount)
 
-        if isinstance(mount, property):
-
-            mount = property(
-                lambda slf: slf.__dict__[mount_point],
-                mount.fset,
-                mount.fdel,
-                mount.__doc__,
-            )
-
-            setattr(new_cls, mount_point, mount)
-
-        elif isinstance(mount, eproperty):
+        if isinstance(mount, eproperty):
 
             # Replace the eproperty with a property that returns the child
             # envoy from the instance dict, but delegates setter to the
@@ -924,6 +907,17 @@ class Envoy(Batchable):
                 _ep.__set__(slf, value)
 
             setattr(new_cls, mount_point, property(_ep_getter, _ep_setter))
+
+        elif isinstance(mount, property):
+
+            mount = property(
+                lambda slf: slf.__dict__[mount_point],
+                mount.fset,
+                mount.fdel,
+                mount.__doc__,
+            )
+
+            setattr(new_cls, mount_point, mount)
 
         # Move it to nns_<mount point>
         self.__dict__[mount_point] = envoy
