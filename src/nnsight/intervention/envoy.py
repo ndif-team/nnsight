@@ -3,7 +3,6 @@ from __future__ import annotations
 import inspect
 import os
 import warnings
-import weakref
 from functools import wraps
 from types import BuiltinFunctionType, BuiltinMethodType, FunctionType, MethodType
 from typing import (
@@ -91,9 +90,9 @@ class eproperty:
             inputs = self.inputs
             return (value, *inputs[0][1:]), inputs[1]
 
-    ``postprocess`` is called on ``__get__`` after retrieving the value (from
-    the interleaver or fake storage).  ``preprocess`` is called on ``__set__``
-    before passing the value to the interleaver's swap.
+    ``postprocess`` is called on ``__get__`` after retrieving the value.
+    ``preprocess`` is called on ``__set__`` before passing the value to
+    the interleaver's swap.
 
     eproperties appear in the Envoy ``__repr__`` tree alongside child modules::
 
@@ -110,7 +109,6 @@ class eproperty:
         self.iterate = iterate
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
-        self._fake_values: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
     def __call__(self, stub: Callable):
         if self.name is None:
@@ -135,21 +133,6 @@ class eproperty:
         self._preprocess = func
         return self
 
-    def set_fake(self, envoy: Envoy, value: Any):
-        """Store a fake value for this eproperty on the given envoy.
-
-        Used by the scanning tracer to populate shape/type information
-        from a fake-tensor forward pass.
-        """
-        self._fake_values[envoy] = value
-
-    def get_fake(self, envoy: Envoy) -> Any:
-        """Retrieve the fake value for this eproperty from the given envoy.
-
-        Returns ``inspect._empty`` if no fake value has been set.
-        """
-        return self._fake_values.get(envoy, inspect._empty)
-
     def __get__(self, envoy: Envoy, owner):
 
         if envoy is None:
@@ -160,13 +143,11 @@ class eproperty:
                 envoy._interleaver.iterate_requester(f"{envoy.path}.{self.name}")
             )
         else:
-            value = self.get_fake(envoy)
-            if value is inspect._empty:
-                raise ValueError(
-                    f"Cannot access `{envoy.path}.{self.name}` outside of interleaving. "
-                    "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                    "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-                )
+            raise ValueError(
+                f"Cannot access `{envoy.path}.{self.name}` outside of interleaving. "
+                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
+                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
+            )
 
         if self._postprocess is not None:
             value = self._postprocess(envoy, value)
@@ -262,6 +243,9 @@ class Envoy(Batchable):
         self._interleaver.wrap_module(module)
 
         self._default_mediators: List[Mediator] = []
+
+        self._fake_inputs = inspect._empty
+        self._fake_output = inspect._empty
 
         if rename is not None:
             self._alias = Aliaser(rename)
@@ -1194,6 +1178,8 @@ class Envoy(Batchable):
         state["_interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
 
+        state.pop("_fake_inputs")
+        state.pop("_fake_output")
         state.pop("_source")
 
         return state
@@ -1201,6 +1187,8 @@ class Envoy(Batchable):
     def __setstate__(self, state):
         self.__dict__.update(state)
 
+        self._fake_inputs = inspect._empty
+        self._fake_output = inspect._empty
         self._source = None
 
 
