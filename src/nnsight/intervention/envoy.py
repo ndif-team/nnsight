@@ -10,14 +10,11 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Generic,
     List,
     Optional,
     Tuple,
     Type,
-    TypeVar,
     Union,
-    overload,
 )
 
 import torch
@@ -49,10 +46,7 @@ def trace_only(fn: Callable):
     return wrapper
 
 
-T = TypeVar("T")
-
-
-class eproperty(Generic[T]):
+class eproperty:
     """A descriptor for defining hookable properties on Envoy subclasses.
 
     ``eproperty`` provides a way to expose values through the same interleaving
@@ -110,9 +104,7 @@ class eproperty(Generic[T]):
         )
     """
 
-    def __init__(
-        self, key: str = None, description: str = None, iterate: bool = True
-    ):
+    def __init__(self, key: str = None, description: str = None, iterate: bool = True):
         self.name: str = None
         self.key = key
         self.description = description
@@ -120,13 +112,13 @@ class eproperty(Generic[T]):
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
 
-    def __call__(self, stub: Callable[..., T]) -> "eproperty[T]":
+    def __call__(self, stub: Callable) -> "eproperty":
         self.name = stub.__name__
         if self.key is None:
             self.key = self.name
         return self
 
-    def postprocess(self, func: Callable) -> "eproperty[T]":
+    def postprocess(self, func: Callable) -> "eproperty":
         """Register a post-processing function called on ``__get__``.
 
         The function receives ``(envoy, value)`` and should return the
@@ -135,7 +127,7 @@ class eproperty(Generic[T]):
         self._postprocess = func
         return self
 
-    def preprocess(self, func: Callable) -> "eproperty[T]":
+    def preprocess(self, func: Callable) -> "eproperty":
         """Register a pre-processing function called on ``__set__``.
 
         The function receives ``(envoy, value)`` and should return the
@@ -144,12 +136,7 @@ class eproperty(Generic[T]):
         self._preprocess = func
         return self
 
-    @overload
-    def __get__(self, envoy: None, owner: type) -> "eproperty[T]": ...
-    @overload
-    def __get__(self, envoy: Envoy, owner: type) -> T: ...
-
-    def __get__(self, envoy, owner):
+    def __get__(self, envoy, owner) -> Any:
 
         if envoy is None:
             return self
