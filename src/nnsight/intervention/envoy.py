@@ -55,10 +55,11 @@ class eproperty:
     writing to it schedules a swap — just like regular module outputs.
 
     Args:
-        name: The interleaving key appended to the envoy path
-            (``<envoy.path>.<name>``).  Defaults to the decorated method's
-            ``__name__``.  Multiple eproperties may share the same ``name``
-            to offer different post-processing views of a single value.
+        key: The interleaving key appended to the envoy path
+            (``<envoy.path>.<key>``).  Defaults to ``name`` (the stub
+            function's ``__name__``).  Multiple eproperties may share the
+            same ``key`` to offer different post-processing views of a
+            single value.
         description: A short human-readable label shown in the module tree
             when printing an Envoy (``(name): description``).
         iterate: Whether the provider key should be iterated (appending
@@ -78,7 +79,7 @@ class eproperty:
     Post-processing and pre-processing can be added via decorators, similar
     to ``@property.setter``::
 
-        @eproperty(name="input", description="first module input")
+        @eproperty(key="input", description="first module input")
         def input(self): ...
 
         @input.postprocess
@@ -102,17 +103,19 @@ class eproperty:
         )
     """
 
-    def __init__(self, name: str = None, description: str = "eproperty", iterate: bool = True):
+    def __init__(self, key: str = None, description: str = "eproperty", iterate: bool = True):
 
-        self.name = name
+        self.name: str = None
+        self.key = key
         self.description = description
         self.iterate = iterate
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
 
     def __call__(self, stub: Callable):
-        if self.name is None:
-            self.name = stub.__name__
+        self.name = stub.__name__
+        if self.key is None:
+            self.key = self.name
         return self
 
     def postprocess(self, func: Callable) -> "eproperty":
@@ -140,7 +143,7 @@ class eproperty:
 
         if envoy.interleaving:
             value = envoy._interleaver.current.request(
-                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.name}")
+                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.key}")
             )
         else:
             raise ValueError(
@@ -162,7 +165,7 @@ class eproperty:
         if envoy.interleaving:
 
             envoy._interleaver.current.swap(
-                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.name}"), value
+                envoy._interleaver.iterate_requester(f"{envoy.path}.{self.key}"), value
             )
 
         else:
@@ -186,7 +189,7 @@ class eproperty:
             The (potentially modified) value after all mediators have handled it.
         """
         return envoy._interleaver.handle(
-            f"{envoy.path}.{self.name}",
+            f"{envoy.path}.{self.key}",
             value,
             iterate=self.iterate,
         )
@@ -289,7 +292,7 @@ class Envoy(Batchable):
 
     #### Properties ####
 
-    @eproperty(name="output", description="module output")
+    @eproperty(key="output", description="module output")
     def output(self) -> Object:
         """Get the output of the module's forward pass.
 
@@ -298,7 +301,7 @@ class Envoy(Batchable):
             ...     attn = model.transformer.h[0].attn.output[0].save()
         """
 
-    @eproperty(name="input", description="module inputs (args, kwargs)")
+    @eproperty(key="input", description="module inputs (args, kwargs)")
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
         """Get the inputs to the module's forward pass.
 
@@ -310,7 +313,7 @@ class Envoy(Batchable):
             ...     args, kwargs = model.transformer.h[0].attn.inputs
         """
 
-    @eproperty(name="input", description="first module input")
+    @eproperty(key="input", description="first module input")
     def input(self) -> Object:
         """Get the first input to the module's forward pass.
 
