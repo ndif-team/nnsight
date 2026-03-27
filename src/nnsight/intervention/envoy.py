@@ -292,7 +292,7 @@ class Envoy(Batchable):
 
     #### Properties ####
 
-    @eproperty(key="output", description="module output")
+    @eproperty(description="module output")
     def output(self) -> Object:
         """Get the output of the module's forward pass.
 
