@@ -49,14 +49,10 @@ def trace_only(fn: Callable):
 class eproperty:
     """A descriptor for defining hookable properties on Envoy subclasses.
 
-    ``eproperty`` provides a way to expose non-module values (e.g. logits,
-    sampled tokens) through the same interleaving request/swap mechanism that
-    ``.output`` and ``.input`` use.  During a trace, reading an ``eproperty``
-    issues a blocking request to the interleaver; writing to it schedules a
-    swap — just like regular module outputs.
-
-    Intended for internal use when building model integrations that need to
-    surface values which aren't tied to a ``torch.nn.Module``.
+    ``eproperty`` provides a way to expose values through the same interleaving
+    request/swap mechanism that ``.output`` and ``.input`` use.  During a trace,
+    reading an ``eproperty`` issues a blocking request to the interleaver;
+    writing to it schedules a swap — just like regular module outputs.
 
     Args:
         name: The interleaving key appended to the envoy path
@@ -79,6 +75,25 @@ class eproperty:
     The stub method body is not executed — the decorator is used purely for
     readability and to infer ``name`` when not provided explicitly.
 
+    Post-processing and pre-processing can be added via decorators, similar
+    to ``@property.setter``::
+
+        @eproperty(name="input", description="first module input")
+        def input(self): ...
+
+        @input.postprocess
+        def input(self, value):
+            return [*value[0], *value[1].values()][0]
+
+        @input.preprocess
+        def input(self, value):
+            inputs = self.inputs
+            return (value, *inputs[0][1:]), inputs[1]
+
+    ``postprocess`` is called on ``__get__`` after retrieving the value (from
+    the interleaver or fake storage).  ``preprocess`` is called on ``__set__``
+    before passing the value to the interleaver's swap.
+
     eproperties appear in the Envoy ``__repr__`` tree alongside child modules::
 
         MyModel(
@@ -92,26 +107,74 @@ class eproperty:
         self.name = name
         self.description = description
         self.iterate = iterate
+        self._postprocess: Optional[Callable] = None
+        self._preprocess: Optional[Callable] = None
 
     def __call__(self, stub: Callable):
         if self.name is None:
             self.name = stub.__name__
         return self
 
+    def postprocess(self, func: Callable) -> "eproperty":
+        """Register a post-processing function called on ``__get__``.
+
+        The function receives ``(envoy, value)`` and should return the
+        processed value.
+        """
+        self._postprocess = func
+        return self
+
+    def preprocess(self, func: Callable) -> "eproperty":
+        """Register a pre-processing function called on ``__set__``.
+
+        The function receives ``(envoy, value)`` and should return the
+        value to pass to the interleaver's swap.
+        """
+        self._preprocess = func
+        return self
+
+    def set_fake(self, envoy: Envoy, value: Any):
+        """Store a fake value for this eproperty on the given envoy.
+
+        Used by the scanning tracer to populate shape/type information
+        from a fake-tensor forward pass.
+        """
+        envoy._eproperty_fakes[self.name] = value
+
+    def get_fake(self, envoy: Envoy) -> Any:
+        """Retrieve the fake value for this eproperty from the given envoy.
+
+        Returns ``inspect._empty`` if no fake value has been set.
+        """
+        return envoy._eproperty_fakes.get(self.name, inspect._empty)
+
     def __get__(self, envoy: Envoy, owner):
 
         if envoy is None:
             return self
+
         if envoy.interleaving:
-            return envoy._interleaver.current.request(
+            value = envoy._interleaver.current.request(
                 envoy._interleaver.iterate_requester(f"{envoy.path}.{self.name}")
             )
         else:
-            raise ValueError(
-                f"Cannot access `{envoy.path}.{self.name}` outside of interleaving."
-            )
+            value = self.get_fake(envoy)
+            if value is inspect._empty:
+                raise ValueError(
+                    f"Cannot access `{envoy.path}.{self.name}` outside of interleaving. "
+                    "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
+                    "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
+                )
+
+        if self._postprocess is not None:
+            value = self._postprocess(envoy, value)
+
+        return value
 
     def __set__(self, envoy: Envoy, value: Any):
+
+        if self._preprocess is not None:
+            value = self._preprocess(envoy, value)
 
         if envoy.interleaving:
 
@@ -121,7 +184,9 @@ class eproperty:
 
         else:
             raise ValueError(
-                f"Cannot set `{envoy.path}.{self.name}` outside of interleaving."
+                f"Cannot set `{envoy.path}.{self.name}` outside of interleaving. "
+                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
+                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
             )
 
     def provide(self, envoy: Envoy, value: Any) -> Any:
@@ -196,8 +261,7 @@ class Envoy(Batchable):
 
         self._default_mediators: List[Mediator] = []
 
-        self._fake_inputs = inspect._empty
-        self._fake_output = inspect._empty
+        self._eproperty_fakes: Dict[str, Any] = {}
 
         if rename is not None:
             self._alias = Aliaser(rename)
@@ -241,170 +305,48 @@ class Envoy(Batchable):
 
     #### Properties ####
 
-    @property
+    @eproperty(name="output", description="module output")
     def output(self) -> Object:
-        """
-        Get the output of the module's forward pass.
-
-        This property allows access to the return values produced by the module
-        during the forward pass.
+        """Get the output of the module's forward pass.
 
         Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             >>> with model.trace("Hello World"):
             ...     attn = model.transformer.h[0].attn.output[0].save()
-            >>> print(attn)
+        """
+
+    @eproperty(name="input", description="module inputs (args, kwargs)")
+    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
+        """Get the inputs to the module's forward pass.
 
         Returns:
-            The module's output values
-        """
-
-        if self.interleaving:
-            return self._interleaver.current.request(
-                self._interleaver.iterate_requester(f"{self.path}.output")
-            )
-        elif self._fake_output is not inspect._empty:
-            return self._fake_output
-        else:
-            raise ValueError(
-                f"The model did not execute — cannot access `{self.path}.output`. "
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @output.setter
-    def output(self, value: Any):
-        """
-        Set new values for the module's output.
-
-        This allows for intervention by replacing the module's output with
-        custom values during execution.
+            (args, kwargs) tuple of positional and keyword arguments.
 
         Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     model.transformer.h[0].attn.output[0] *= 2
-
-        Args:
-            value: The new output value to use.
-        """
-        if self.interleaving:
-
-            self._interleaver.current.swap(
-                self._interleaver.iterate_requester(f"{self.path}.output"), value
-            )
-
-        else:
-            raise ValueError(
-                f"Cannot set `{self.path}.output`. The model is not executing during interleaving."
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @property
-    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
-        """
-        Get the inputs to the module's forward pass.
-
-        This property provides access to all input values passed to the module
-        during the forward pass.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             >>> with model.trace("Hello World"):
             ...     args, kwargs = model.transformer.h[0].attn.inputs
-
-        Returns:
-            The module's input values as a tuple of positional and keyword arguments. i.e (args, kwargs)
-
         """
 
-        if self.interleaving:
-
-            return self._interleaver.current.request(
-                self._interleaver.iterate_requester(f"{self.path}.input")
-            )
-        elif self._fake_inputs is not inspect._empty:
-            return self._fake_inputs
-        else:
-            raise ValueError(
-                f"Cannot access `{self.path}.inputs`. The model is not executing during interleaving."
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @inputs.setter
-    def inputs(self, value: Any):
-        """
-        Set new values for the module's inputs.
-
-        This allows for intervention by replacing the module's inputs with
-        custom values during execution.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     model.transformer.h[0].attn.inputs = (torch.randn(1, 1024, 1024), {})
-
-        Args:
-            value: The new input value(s) to use, structured as a tuple of (args, kwargs)
-        """
-        if self.interleaving:
-
-            self._interleaver.current.swap(
-                self._interleaver.iterate_requester(f"{self.path}.input"), value
-            )
-        else:
-            raise ValueError(
-                f"Cannot set `{self.path}.inputs`. The model is not executing during interleaving."
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @property
+    @eproperty(name="input", description="first module input")
     def input(self) -> Object:
-        """
-        Get the first input to the module's forward pass.
+        """Get the first input to the module's forward pass.
 
-        This is a convenience property that returns just the first input value
-        from all inputs passed to the module. So first positional argument, or first keyword argumetn if there are no positional arguments.
+        Convenience wrapper around :attr:`inputs` that extracts the first
+        positional argument, or the first keyword argument if there are no
+        positional arguments.
 
         Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             >>> with model.trace("Hello World"):
             ...     hidden_states = model.transformer.h[0].attn.input.save()
-            >>> print(hidden_states)
-
-        Returns:
-            The first input value
         """
 
+    @input.postprocess
+    def input(self, value):
+        return [*value[0], *value[1].values()][0]
+
+    @input.preprocess
+    def input(self, value):
         inputs = self.inputs
-
-        return [*inputs[0], *inputs[1].values()][0]
-
-    @input.setter
-    def input(self, value: Any):
-        """
-        Set a new value for the module's first input.
-
-        This is a convenience method that replaces just the first input value
-        while preserving all other inputs.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     model.transformer.h[0].attn.input = torch.randn(1, 1024, 1024)
-
-        Args:
-            value: The new value for the first input
-        """
-
-        inputs = self.inputs
-
-        value = (value, *inputs[0][1:]), inputs[1]
-
-        self.inputs = value
+        return (value, *inputs[0][1:]), inputs[1]
 
     @property
     def source(self) -> EnvoySource:
@@ -968,6 +910,21 @@ class Envoy(Batchable):
 
             setattr(new_cls, mount_point, mount)
 
+        elif isinstance(mount, eproperty):
+
+            # Replace the eproperty with a property that returns the child
+            # envoy from the instance dict, but delegates setter to the
+            # original eproperty's __set__.
+            original_ep = mount
+
+            def _ep_getter(slf, _mp=mount_point):
+                return slf.__dict__[_mp]
+
+            def _ep_setter(slf, value, _ep=original_ep):
+                _ep.__set__(slf, value)
+
+            setattr(new_cls, mount_point, property(_ep_getter, _ep_setter))
+
         # Move it to nns_<mount point>
         self.__dict__[mount_point] = envoy
 
@@ -1237,8 +1194,7 @@ class Envoy(Batchable):
         state["_interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
 
-        state.pop("_fake_inputs")
-        state.pop("_fake_output")
+        state.pop("_eproperty_fakes")
         state.pop("_source")
 
         return state
@@ -1246,8 +1202,7 @@ class Envoy(Batchable):
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-        self._fake_inputs = inspect._empty
-        self._fake_output = inspect._empty
+        self._eproperty_fakes = {}
         self._source = None
 
 

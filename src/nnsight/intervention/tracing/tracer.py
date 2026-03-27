@@ -611,8 +611,8 @@ class ScanningTracer(InterleavingTracer):
     A tracer that runs the model in fake tensor mode to validate operations and inspect tensor shapes.
 
     This tracer uses PyTorch's FakeTensorMode to run the model without actual computation,
-    allowing for shape validation and operation checking. It populates the _fake_inputs and
-    _fake_output attributes on each Envoy to store the shapes and types of tensors that would
+    allowing for shape validation and operation checking. It populates the eproperty
+    fake values on each Envoy to store the shapes and types of tensors that would
     flow through the model during a real forward pass.
     """
 
@@ -644,8 +644,8 @@ class ScanningTracer(InterleavingTracer):
                 envoy=envoy,
             ):
                 # Store the shapes/types of inputs and outputs on the Envoy
-                envoy._fake_inputs = (input, input_kwargs)
-                envoy._fake_output = output
+                type(envoy).inputs.set_fake(envoy, (input, input_kwargs))
+                type(envoy).output.set_fake(envoy, output)
 
             hooks.append(envoy._module.register_forward_hook(_hook, with_kwargs=True))
 
