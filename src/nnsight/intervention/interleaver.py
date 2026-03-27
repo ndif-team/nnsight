@@ -105,6 +105,7 @@ class Interleaver:
 
         self._interleaving = False
         self.hook_handles = []
+        self._defer_exceptions = False
 
     def initialize(
         self,
@@ -409,6 +410,12 @@ class Interleaver:
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
             return True
 
+        # In defer mode (vLLM), don't raise here — exceptions are stored
+        # per-mediator and will be raised on the client side.
+        # Raising from __exit__ would kill the vLLM engine process.
+        if self._defer_exceptions:
+            return
+
     def check_dangling_mediators(self):
 
         # If any mediators are still waiting for their values for their events, they probably called an Envoy out of order
@@ -647,6 +654,7 @@ class Mediator:
         self.cross_invoker = None
 
         self.original_globals = {}
+        self._deferred_exception = None
 
         self._prev = None
 
@@ -889,6 +897,13 @@ class Mediator:
 
             # because of the defered execution of NNsight, we need to rebuild where the execption was in the original user code instead of this execption.
             exception = wrap_exception(exception, self.info)
+
+            # In vLLM mode, defer the exception instead of re-raising inside
+            # the forward pass.  The mediator is already cancelled (above),
+            # so subsequent hooks will skip it.  Other mediators keep running.
+            if self.interleaver._defer_exceptions:
+                self._deferred_exception = exception
+                return False
 
             raise exception
 
@@ -1143,4 +1158,5 @@ class Mediator:
         self.iteration = 0
         self.args = list()
         self.original_globals = {}
+        self._deferred_exception = None
         self.cross_invoker = None
