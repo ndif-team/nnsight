@@ -34,6 +34,11 @@ if TYPE_CHECKING:
     from ..vllm import VLLM
 
 logger = logging.getLogger("nnsight.serve")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[nnsight-serve] %(message)s"))
+    logger.addHandler(_handler)
 
 app = FastAPI(title="nnsight-vllm-serve")
 
@@ -75,6 +80,11 @@ async def generate(request: Request):
     body = await request.body()
     compress = request.headers.get("nnsight-compress", "False").lower() == "true"
 
+    client_host = request.client.host if request.client else "unknown"
+    logger.info(
+        "Received request: %d bytes, compress=%s, client=%s",
+        len(body), compress, client_host,
+    )
     try:
         request_model = RequestModel.deserialize(
             body, _model._remoteable_persistent_objects(), compress
@@ -163,6 +173,13 @@ async def generate(request: Request):
     response_data = {"saves": all_saves, "outputs": generation_outputs}
     buf = io.BytesIO()
     torch.save(response_data, buf)
-    buf.seek(0)
+    resp_bytes = buf.getvalue()
 
-    return Response(content=buf.read(), media_type="application/octet-stream")
+    logger.info(
+        "Completed request: %d invokes, %d saves (%s), %d bytes response",
+        len(generation_outputs),
+        len(all_saves),
+        ", ".join(all_saves.keys()) if all_saves else "none",
+        len(resp_bytes),
+    )
+    return Response(content=resp_bytes, media_type="application/octet-stream")

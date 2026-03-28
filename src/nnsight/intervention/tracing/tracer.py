@@ -460,6 +460,36 @@ class InterleavingTracer(Tracer):
         # TODO make sure not already executing
         return Invoker(self, *args, **kwargs)
 
+    def collect(self, timeout: float = None) -> Dict:
+        """Block until a non-blocking serve request completes and return saves.
+
+        Only valid after ``model.trace(..., serve=url, blocking=False)``.
+
+        Args:
+            timeout: Maximum seconds to wait. ``None`` means wait forever.
+
+        Returns:
+            Dict mapping saved variable names to their values.
+
+        Raises:
+            AttributeError: If the tracer was not used with ``blocking=False``.
+            Exception: Any exception from the server or network.
+
+        Example::
+
+            with model.trace("prompt", serve=url, blocking=False) as t:
+                out = model.logits.output.save()
+            saves = t.collect()
+            out = saves["out"]
+        """
+        future = getattr(self, "_serve_future", None)
+        if future is None:
+            raise AttributeError(
+                "Tracer has no pending serve request. "
+                "Did you use blocking=False?"
+            )
+        return future.result(timeout=timeout)
+
     def stop(self):
         """
         Raise an EarlyStopException to stop the execution of the model.
