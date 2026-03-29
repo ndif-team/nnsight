@@ -1577,6 +1577,38 @@ with model.scan("Hello"):
 print(dim)  # 768
 ```
 
+### 12. Don't `.save()` Elements Inside a List Comprehension
+
+`.save()` marks an object's `id()` in `Globals.saves`. After the trace, `push` walks the caller's frame locals and only injects variables whose `id()` is in that set. When you `.save()` individual tensors inside a list comprehension, each tensor's id is saved but the tensors aren't bound to any variable name — they're anonymous elements of a list that itself isn't saved. So `push` finds nothing to inject.
+
+```python
+# WRONG — each element is saved but none have names in the frame
+with model.trace("Hello"):
+    results = [model.transformer.h[i].output[0].save() for i in range(12)]
+# NameError: name 'results' is not defined
+
+# WRONG — same problem with a loop appending to a plain list
+with model.trace("Hello"):
+    results = []
+    for i in range(12):
+        results.append(model.transformer.h[i].output[0].save())
+# NameError: name 'results' is not defined
+
+# CORRECT — .save() the list itself, append unsaved elements
+with model.trace("Hello"):
+    results = list().save()
+    for i in range(12):
+        results.append(model.transformer.h[i].output[0])
+# results is a list of 12 tensors
+
+# CORRECT — .save() the comprehension result (the list)
+with model.trace("Hello"):
+    results = [model.transformer.h[i].output[0] for i in range(12)].save()
+# results is a list of 12 tensors
+```
+
+**Rule of thumb:** `.save()` must be called on the object that is assigned to a named variable in your code. If you want a list of tensors, save the list — not the individual tensors inside it.
+
 ---
 
 ## Understanding Exceptions in NNsight
