@@ -372,6 +372,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
 
+        Globals.exit()
+
+        return return_value
+
+    def sample_tokens(self, *args, **kwargs):
+
+        Globals.enter()
+
+        with self.nnsight_model._interleaver:
+
+            # Provide logits from execute_model state before sampling.
             if self.execute_model_state is not None:
 
                 logits = type(self.nnsight_model).logits.provide(
@@ -387,7 +398,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.exit()
 
-        return return_value
+        return super().sample_tokens(*args, **kwargs)
 
     def _sample(self, *args, **kwargs):
 

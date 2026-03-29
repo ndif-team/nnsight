@@ -611,17 +611,17 @@ class TestAsyncEngine:
                 logits = vllm_gpt2_async.logits.save()
 
             count = 0
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 count += 1
 
             assert count > 1, f"Expected streaming outputs, got {count}"
 
         async_loop.run_until_complete(run())
 
-    def test_async_saves_on_every_output(
+    def test_async_saves_on_finished_output(
         self, vllm_gpt2_async, async_loop, ET_prompt: str
     ):
-        """Test that saves are attached to every streamed output, not just the final one."""
+        """Test that saves are attached to the final streamed output."""
 
         async def run():
             with vllm_gpt2_async.trace(
@@ -629,18 +629,15 @@ class TestAsyncEngine:
             ) as tracer:
                 logits = vllm_gpt2_async.logits.save()
 
-            count = 0
-            saves_count = 0
-            async for output in tracer.backend():
-                count += 1
-                if hasattr(output, "saves") and output.saves:
-                    saves_count += 1
-                    assert "logits" in output.saves
-                    assert output.saves["logits"].shape[-1] == 50257
+            last_output = None
+            async for output in tracer.backend:
+                last_output = output
 
-            assert saves_count == count, (
-                f"Expected saves on every output, got {saves_count}/{count}"
-            )
+            assert last_output is not None
+            assert last_output.finished
+            assert hasattr(last_output, "saves") and last_output.saves
+            assert "logits" in last_output.saves
+            assert last_output.saves["logits"].shape[-1] == 50257
 
         async_loop.run_until_complete(run())
 
@@ -656,7 +653,7 @@ class TestAsyncEngine:
                 logits = vllm_gpt2_async.logits.save()
 
             outputs = []
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 outputs.append(output)
 
             assert len(outputs) >= 1
@@ -679,7 +676,7 @@ class TestAsyncEngine:
                 logits = vllm_gpt2_async.logits.save()
 
             clean_saves = None
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 if hasattr(output, "saves") and output.saves:
                     clean_saves = output.saves
 
@@ -699,7 +696,7 @@ class TestAsyncEngine:
                 logits = vllm_gpt2_async.logits.save()
 
             corrupted_saves = None
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 if hasattr(output, "saves") and output.saves:
                     corrupted_saves = output.saves
 
@@ -723,7 +720,7 @@ class TestAsyncEngine:
                 logits = vllm_gpt2_async.logits.save()
 
             texts = []
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 if output.outputs:
                     texts.append(output.outputs[0].text)
 
@@ -791,7 +788,7 @@ class TestAsyncRayExecutor:
                 logits = vllm_gpt2_async_ray.logits.save()
 
             count = 0
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 count += 1
 
             assert count > 1, f"Expected streaming outputs, got {count}"
@@ -811,7 +808,7 @@ class TestAsyncRayExecutor:
 
             count = 0
             saves_count = 0
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 count += 1
                 if hasattr(output, "saves") and output.saves:
                     saves_count += 1
@@ -837,7 +834,7 @@ class TestAsyncRayExecutor:
                 logits = vllm_gpt2_async_ray.logits.save()
 
             clean_saves = None
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 if hasattr(output, "saves") and output.saves:
                     clean_saves = output.saves
 
@@ -857,7 +854,7 @@ class TestAsyncRayExecutor:
                 logits = vllm_gpt2_async_ray.logits.save()
 
             corrupted_saves = None
-            async for output in tracer.backend():
+            async for output in tracer.backend:
                 if hasattr(output, "saves") and output.saves:
                     corrupted_saves = output.saves
 
