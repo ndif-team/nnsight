@@ -21,6 +21,8 @@ git checkout nnsight-vllm-serve
 pip install -e ".[serve]"
 ```
 
+**Note:** Editable installs (`pip install -e`) don't register the `nnsight-serve` CLI command due to a setuptools-scm limitation. Use `python -m nnsight.modeling.vllm.serve.cli` instead (same interface, same arguments).
+
 ## Start the server
 
 ```bash
