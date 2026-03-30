@@ -6,15 +6,18 @@ Users who only need one model get a persistent server with nnsight intervention 
 
 ## Install
 
+This feature is on the `nnsight-vllm-serve` branch and not yet released on PyPI.
+
 ```bash
-pip install nnsight[serve]
+pip install "nnsight[serve] @ git+https://github.com/ndif-team/nnsight.git@nnsight-vllm-serve"
 ```
 
-This pulls in `vllm`, `fastapi`, and `uvicorn` alongside the core nnsight dependencies.
-
-For development (editable install from source):
+Or from a local clone:
 
 ```bash
+git clone https://github.com/ndif-team/nnsight.git
+cd nnsight
+git checkout nnsight-vllm-serve
 pip install -e ".[serve]"
 ```
 
