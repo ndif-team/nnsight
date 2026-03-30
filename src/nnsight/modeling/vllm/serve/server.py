@@ -28,7 +28,6 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from ....intervention.backends.base import Backend
 from ....intervention.tracing.globals import Globals
 from ....schema.request import RequestModel
-from ....schema.response import ResponseModel
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -44,11 +43,13 @@ app = FastAPI(title="nnsight-vllm-serve")
 
 # Set by cli.py after engine initialization.
 _model: Optional["VLLM"] = None
+_persistent_objects: Optional[dict] = None
 
 
 def set_model(model: "VLLM") -> None:
-    global _model
+    global _model, _persistent_objects
     _model = model
+    _persistent_objects = model._remoteable_persistent_objects()
 
 
 @app.get("/health")
@@ -87,7 +88,7 @@ async def generate(request: Request):
     )
     try:
         request_model = RequestModel.deserialize(
-            body, _model._remoteable_persistent_objects(), compress
+            body, _persistent_objects, compress
         )
     except Exception as e:
         logger.exception("Failed to deserialize request")
@@ -113,7 +114,6 @@ async def generate(request: Request):
 
         tracer.mediators.clear()
     except Exception as e:
-        Globals.exit()
         logger.exception("Failed to compile trace")
         raise HTTPException(status_code=400, detail=f"Trace compilation failed: {e}")
     finally:

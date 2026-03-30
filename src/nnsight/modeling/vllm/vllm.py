@@ -409,13 +409,10 @@ class VLLM(RemoteableMixin):
 
         prompts, params, lora_requests = self._serialize_mediators(prompts, params, lora_requests, **kwargs)
 
-        # Do VLLM generation with NNsight
         outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_requests)
 
         saves = {}
-        deferred_exception = None
 
-        # Some of the output objects will have a saves attribute, which contains the saved variables
         for output in outputs:
             if hasattr(output, "saves"):
                 saves.update(output.saves)
@@ -455,10 +452,14 @@ class VLLM(RemoteableMixin):
         if serve is not None and kwargs.get("backend") is None:
             from ...intervention.backends.local_serve import LocalServeBackend
             blocking = kwargs.pop("blocking", True)
-            kwargs["backend"] = LocalServeBackend(self, host=serve, blocking=blocking)
-        elif self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
-            from .async_backend import AsyncVLLMBackend
-            kwargs['backend'] = AsyncVLLMBackend(self)
+            api_key = kwargs.pop("api_key", None)
+            kwargs["backend"] = LocalServeBackend(self, host=serve, blocking=blocking, api_key=api_key)
+        else:
+            if "api_key" in kwargs:
+                raise ValueError("api_key= requires serve= to specify the server URL")
+            if self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
+                from .async_backend import AsyncVLLMBackend
+                kwargs['backend'] = AsyncVLLMBackend(self)
         return super().trace(*inputs, **kwargs)
 
     def interleave(self, fn: Callable, *args, **kwargs):

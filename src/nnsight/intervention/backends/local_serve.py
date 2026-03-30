@@ -8,7 +8,7 @@ Design choices:
   until done, then pushes saves into the caller's frame (same as local execution).
 - Non-blocking mode (blocking=False): fires the HTTP request in a background
   thread and returns immediately. The tracer is returned from the ``with``
-  block with a ``.collect(timeout=None)`` method. Calling ``.result()``
+  block with a ``.collect(timeout=None)`` method. Calling ``.collect()``
   blocks until the response arrives and returns a dict of saved values.
   Frame injection is NOT possible in non-blocking mode because the caller's
   frame has moved on by the time the response arrives.
@@ -20,7 +20,7 @@ Design choices:
 from __future__ import annotations
 
 import io
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import httpx
@@ -72,10 +72,14 @@ class LocalServeBackend(Backend):
     CONNECT_TIMEOUT: float = 10.0
     READ_TIMEOUT: float = 600.0  # 10 min for large models.
 
-    def __init__(self, model: Any, host: str, blocking: bool = True):
+    def __init__(self, model: Any, host: str, blocking: bool = True, api_key: str = None):
         self.model = model
         self.host = host.rstrip("/")
         self.blocking = blocking
+        self.api_key = api_key
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT),
+        )
 
     def __call__(self, tracer: Optional["Tracer"] = None):
         if tracer is None:
@@ -106,15 +110,14 @@ class LocalServeBackend(Backend):
             "Content-Type": "application/octet-stream",
             "nnsight-compress": str(compress),
         }
+        if self.api_key:
+            headers["ndif-api-key"] = self.api_key
 
-        timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
-
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(
-                f"{self.host}/v1/nnsight/generate",
-                content=data,
-                headers=headers,
-            )
+        response = self._client.post(
+            f"{self.host}/v1/nnsight/generate",
+            content=data,
+            headers=headers,
+        )
 
         if response.status_code != 200:
             try:
