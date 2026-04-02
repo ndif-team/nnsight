@@ -139,8 +139,10 @@ async def generate(request: Request):
             "collect_nnsight",
             args=([request_id], finished),
         )
-        saves_bytes = next((r for r in results if r is not None), None)
-        saves = pickle.loads(saves_bytes) if saves_bytes else {}
+        saves = {}
+        for r in results:
+            if r is not None:
+                saves.update(pickle.loads(r))
 
         gen_output = {}
         if last_output is not None:
