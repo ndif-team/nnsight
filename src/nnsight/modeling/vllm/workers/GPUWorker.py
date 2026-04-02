@@ -32,3 +32,15 @@ class NNsightGPUWorker(gpu_worker.Worker):
 
     def collect_nnsight(self, req_ids: list[str], finished_req_ids: list[str] | None = None):
         return self.model_runner.collect_nnsight(req_ids, finished_req_ids)
+
+    def test_pp_buffer_put(self, entries):
+        return self.model_runner.test_pp_buffer_put(entries)
+
+    def test_pp_pull(self, source_rank, key, shape, dtype_str, offset):
+        return self.model_runner.test_pp_pull(source_rank, key, shape, dtype_str, offset)
+
+    def test_pp_buffer_clear(self):
+        return self.model_runner.test_pp_buffer_clear()
+
+    def test_pp_profile_pull(self, num_pulls, shape, dtype_str, direction):
+        return self.model_runner.test_pp_profile_pull(num_pulls, shape, dtype_str, direction)

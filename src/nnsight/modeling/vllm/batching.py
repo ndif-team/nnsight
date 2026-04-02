@@ -286,7 +286,11 @@ class VLLMBatcher(Batcher):
 
         self.check_gathered()
 
-        return super().swap(batch_group, swap_value)
+        # vLLM runs forward passes in inference mode, so hook-provided
+        # tensors are inference tensors. In-place writes to them require
+        # inference_mode context.
+        with torch.inference_mode():
+            return super().swap(batch_group, swap_value)
 
     # ---- HF-compatibility transforms ----
 

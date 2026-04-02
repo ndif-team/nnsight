@@ -305,7 +305,15 @@ def wrap_exception(exception: Exception, info: "Tracer.Info" = None):
     # and our ExceptionWrapper
     exception_type = type(exception)
 
-    class NNsightException(exception_type, ExceptionWrapper):
+    # If exception_type is Exception itself (or another ancestor of
+    # ExceptionWrapper), inheriting from both causes an MRO conflict.
+    # In that case, just inherit from ExceptionWrapper alone.
+    if issubclass(ExceptionWrapper, exception_type):
+        bases = (ExceptionWrapper,)
+    else:
+        bases = (exception_type, ExceptionWrapper)
+
+    class NNsightException(*bases):
 
         __qualname__ = "NNsightException"
         __module__ = "nnsight"

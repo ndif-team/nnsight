@@ -134,8 +134,10 @@ class Globals(metaclass=_GlobalsMeta):
             mount(Object.save, "save")
             Globals._mounted = True
         cur = _stack_var.get()
-        if cur == 0:
-            # New trace context — start with a fresh saves set.
+        if cur == 0 and _saves_var.get() is None:
+            # First entry with no existing saves — create a fresh set.
+            # Don't reset if a set already exists (preserves saves
+            # across execute_model / _sample boundaries in vLLM).
             _saves_var.set(set())
         _stack_var.set(cur + 1)
 

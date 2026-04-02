@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextvars
 import inspect
 import types
 import warnings
@@ -713,18 +712,29 @@ class Mediator:
         _intervention = self.intervention
         _args = (self, self.info, *self.args)
 
+        # The worker thread needs to:
+        # 1. Know it's inside a trace (stack > 0)
+        # 2. Register saves in the same set the main thread checks
+        # ContextVars are thread-local, so we must explicitly propagate
+        # both the stack depth AND a reference to the caller's saves set.
+        from nnsight.intervention.tracing.globals import _stack_var, _saves_var
+        _caller_stack = _stack_var.get()
+        _caller_saves_ref = _saves_var.get()  # shared mutable set
+
         def _worker_target():
             if _caller_stream is not None:
                 torch.cuda.set_stream(_caller_stream)
+            # Propagate trace state into this thread's context.
+            # _saves_var.set() makes this thread's _get_saves() return
+            # the SAME set object the main thread uses.
+            _stack_var.set(_caller_stack)
+            _saves_var.set(_caller_saves_ref)
             _intervention(*_args)
 
-        # Start the worker thread. Copy the current context so the
-        # worker inherits Globals.stack / Globals.saves from the caller.
-        ctx = contextvars.copy_context()
-
+        # Start the worker thread WITHOUT copy_context — we propagate
+        # the needed state manually above.
         self.worker = Thread(
-            target=ctx.run,
-            args=(_worker_target,),
+            target=_worker_target,
             daemon=True,
             name=self.name,
         )
@@ -829,6 +839,19 @@ class Mediator:
             value = self.interleaver.batcher.narrow(self.batch_group)
 
             self.respond(value)
+
+            # PP: clone consumed value into buffer and notify listener.
+            # The listener (PPListener) waits on the Condition for values
+            # to appear, so it can serve them to LazyRemoteTensor pulls.
+            if getattr(self.interleaver, 'pp_enabled', False):
+                cv = self.interleaver.batcher.current_value
+                cond = self.interleaver.pp_buffer_condition
+                with cond:
+                    with torch.inference_mode():
+                        self.interleaver.pp_hook_buffer[provider] = (
+                            cv.clone() if isinstance(cv, torch.Tensor) else cv
+                        )
+                    cond.notify_all()
         else:
             # If the requester has been seen before, respond with an out of order error.
             if requester in self.history:

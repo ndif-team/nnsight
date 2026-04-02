@@ -1,0 +1,184 @@
+<mxfile host="65bd71144e">
+    <diagram id="pp_problem" name="PP Problem">
+        <mxGraphModel dx="1021" dy="817" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1500" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="PP Problem: Why the Interleaver Deadlocks" style="text;fontSize=20;fontStyle=1;align=center;verticalAlign=middle;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="10" width="800" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="p1_title" value="1. The Basic Deadlock" style="text;fontSize=16;fontStyle=5;align=left;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="60" width="300" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="ctx_box" value="" style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="90" width="940" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="ctx_text" value="Same mediator code is deserialized on BOTH PP ranks.  Each rank wraps its local model (real layers + PPMissingLayer stubs).&#10;Hooks only fire on real layers.  PPMissingLayer = nn.Identity, never calls forward(), hooks never fire." style="text;fontSize=10;align=left;whiteSpace=wrap;spacingLeft=10;fontColor=#1B5E20;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="ctx_box" vertex="1">
+                    <mxGeometry x="5" y="3" width="930" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_title" value="Rank 0: execute_model" style="text;fontSize=13;fontStyle=1;align=left;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="150" width="200" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_box" value="" style="rounded=1;fillColor=#FAFAFA;strokeColor=#E0E0E0;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="175" width="940" height="155" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_time" value="" style="endArrow=classic;strokeColor=#9E9E9E;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="120" y="20" as="sourcePoint"/>
+                        <mxPoint x="920" y="20" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r0_time_l" value="time" style="text;fontSize=9;fontColor=#9E9E9E;fontStyle=2;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="890" y="5" width="30" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_main_l" value="Main thread&#10;(forward)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="10" y="35" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_med_l" value="Worker thread&#10;(mediator)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="10" y="85" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_enter" value="interleaver&#10;.__enter__()" style="rounded=1;fillColor=#E8EAF6;strokeColor=#5C6BC0;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="120" y="35" width="70" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_fwd" value="forward: L0 .. L5 .. L39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="200" y="35" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_fwd_done" value="forward done" style="rounded=1;fillColor=#E0E0E0;strokeColor=#9E9E9E;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="410" y="35" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_m_start" value="start: runs code&#10;until first send()" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="120" y="85" width="110" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_m_req5" value="layers[5].output&#10;send() -&gt; blocked" style="rounded=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=8;whiteSpace=wrap;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="240" y="85" width="110" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_hook5" value="L5 hook&#10;respond()" style="text;fontSize=8;fontColor=#2E7D32;fontStyle=1;align=center;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="270" y="68" width="60" height="17" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_hook5_a" value="" style="endArrow=classic;strokeColor=#2E7D32;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="300" y="65" as="sourcePoint"/>
+                        <mxPoint x="300" y="85" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r0_m_req50" value="layers[50].output&#10;send() -&gt; blocked" style="rounded=1;fillColor=#FFCDD2;strokeColor=#C62828;fontSize=8;whiteSpace=wrap;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="360" y="85" width="130" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_m_dead" value="DEADLOCK: L50 is PPMissing, hook never fires, wait() blocks forever" style="text;fontSize=8;fontColor=#C62828;fontStyle=1;align=left;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="360" y="118" width="400" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_nohook" value="no hook" style="text;fontSize=8;fontColor=#C62828;fontStyle=1;align=center;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="430" y="68" width="50" height="17" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_nohook_a" value="" style="endArrow=cross;strokeColor=#C62828;strokeWidth=2;endFill=0;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="455" y="65" as="sourcePoint"/>
+                        <mxPoint x="455" y="85" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r1_title" value="Rank 1: execute_model" style="text;fontSize=13;fontStyle=1;align=left;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="340" width="200" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_box" value="" style="rounded=1;fillColor=#FAFAFA;strokeColor=#E0E0E0;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="365" width="940" height="135" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_time" value="" style="endArrow=classic;strokeColor=#9E9E9E;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="120" y="20" as="sourcePoint"/>
+                        <mxPoint x="920" y="20" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r1_main_l" value="Main thread&#10;(forward)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="10" y="35" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_med_l" value="Worker thread&#10;(mediator)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="10" y="80" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_enter" value="interleaver&#10;.__enter__()" style="rounded=1;fillColor=#E8EAF6;strokeColor=#5C6BC0;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="120" y="35" width="70" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_stuck" value="(never reaches forward: mediator never finishes start())" style="text;fontSize=8;fontColor=#C62828;fontStyle=2;align=left;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="200" y="42" width="350" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_m_start" value="start: runs code&#10;until first send()" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="120" y="80" width="110" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_m_req5" value="layers[5].output&#10;send() -&gt; blocked" style="rounded=1;fillColor=#FFCDD2;strokeColor=#C62828;fontSize=8;whiteSpace=wrap;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="240" y="80" width="130" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_m_dead" value="DEADLOCK: L5 is PPMissing on rank 1, hook never fires. Mediator blocks on the FIRST line." style="text;fontSize=8;fontColor=#C62828;fontStyle=1;align=left;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="240" y="113" width="500" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="p2_title" value="2. Why &quot;Push All State Forward&quot; Fails with Multi-Token Generation" style="text;fontSize=16;fontStyle=5;align=left;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="515" width="600" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="gen_box" value="" style="rounded=1;fillColor=#FAFAFA;strokeColor=#E0E0E0;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="545" width="940" height="165" as="geometry"/>
+                </mxCell>
+                <mxCell id="gen_time" value="" style="endArrow=classic;strokeColor=#9E9E9E;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="10" y="20" as="sourcePoint"/>
+                        <mxPoint x="920" y="20" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="gen_s0" value="Step 0" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#E8EAF6;strokeColor=#5C6BC0;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="50" y="5" width="270" height="16" as="geometry"/>
+                </mxCell>
+                <mxCell id="gen_s1" value="Step 1" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#E8EAF6;strokeColor=#5C6BC0;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="340" y="5" width="270" height="16" as="geometry"/>
+                </mxCell>
+                <mxCell id="gen_s2" value="Step 2 ..." style="text;fontSize=9;fontStyle=1;align=center;fillColor=#E8EAF6;strokeColor=#5C6BC0;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="630" y="5" width="270" height="16" as="geometry"/>
+                </mxCell>
+                <mxCell id="gen_r0f" value="R0 fwd" style="text;fontSize=8;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="5" y="35" width="42" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="gen_r1f" value="R1 fwd" style="text;fontSize=8;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="5" y="60" width="42" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="gen_med" value="Mediator" style="text;fontSize=8;fontStyle=1;align=center;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="5" y="85" width="42" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_r0_0" value="L0..39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="55" y="35" width="100" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_r1_0" value="L40..79 + logits" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="165" y="60" width="120" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_m_0" value="h=L5.out; logits_list.append(logits.out)" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="55" y="85" width="235" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_r0_1" value="L0..39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="345" y="35" width="100" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_r1_1" value="L40..79 + logits" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="455" y="60" width="120" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_m_1" value="h=L5.out; logits_list.append(logits.out)" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="345" y="85" width="235" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_r0_2" value="L0..39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="635" y="35" width="100" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_r1_2" value="L40..79 + logits" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="745" y="60" width="120" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="g_m_2" value="h=L5.out; logits_list.append(logits.out)" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="635" y="85" width="235" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="push_fail" value="" style="rounded=1;fillColor=#FFEBEE;strokeColor=#C62828;sketch=1;curveFitting=1;jiggle=2;" parent="gen_box" vertex="1">
+                    <mxGeometry x="10" y="112" width="910" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="pf1" value="1. Mediator is a STATEFUL THREAD looping via tracer.iter[:], accumulating logits_list. Cannot serialize/ship thread state to another rank." style="text;fontSize=9;align=left;whiteSpace=wrap;spacingLeft=5;fontColor=#C62828;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="push_fail" vertex="1">
+                    <mxGeometry x="5" y="2" width="900" height="13" as="geometry"/>
+                </mxCell>
+                <mxCell id="pf2" value="2. Stage 0 needs its OWN values from previous steps (h from step 0 feeds step 1). Pushing everything away loses stage 0's accumulated state." style="text;fontSize=9;align=left;whiteSpace=wrap;spacingLeft=5;fontColor=#C62828;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="push_fail" vertex="1">
+                    <mxGeometry x="5" y="16" width="900" height="13" as="geometry"/>
+                </mxCell>
+                <mxCell id="pf3" value="3. Most interventions have NO cross-stage dependency. Pushing all variables wastes bandwidth every step." style="text;fontSize=9;align=left;whiteSpace=wrap;spacingLeft=5;fontColor=#C62828;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="push_fail" vertex="1">
+                    <mxGeometry x="5" y="30" width="900" height="13" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

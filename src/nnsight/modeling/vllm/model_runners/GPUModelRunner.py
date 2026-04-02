@@ -1,5 +1,9 @@
 import pickle
+import threading
+import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+import torch
 
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
@@ -51,6 +55,47 @@ class NNsightGPUModelRunner(GPUModelRunner):
             self.mediators: Dict[str, Any] = {}  # req_id -> Mediator
             self.trace_contexts: Dict[str, dict] = {}  # trace_id -> context
 
+        def _pp_aware_load(self, data: bytes, model: VLLM):
+            """Deserialize a mediator with PP-aware persistent ID resolution.
+
+            When PP is enabled, the serialized mediator references module paths
+            from the full meta model (e.g. ``model.transformer.h.6.ln_1``).
+            On PP workers, layers on other stages are ``PPMissingLayer`` stubs
+            with no children.  This method falls back to the nearest ancestor
+            ``PPMissingLayer`` stub when a child path cannot be resolved.
+            """
+            import io
+
+            persistent_objects = model._remoteable_persistent_objects()
+            pp_enabled = get_pp_group().world_size > 1
+
+            if not pp_enabled:
+                return load(data, persistent_objects)
+
+            from ..pp import is_pp_missing
+            from ....intervention.serialization import CustomCloudUnpickler
+
+            class _PPUnpickler(CustomCloudUnpickler):
+                def persistent_load(self, pid):
+                    if pid in self.persistent_objects:
+                        return self.persistent_objects[pid]
+                    # PP fallback: walk up the module path to find the
+                    # nearest ancestor that exists (a PPMissingLayer stub).
+                    if isinstance(pid, str) and pid.startswith("Module:"):
+                        path = pid[len("Module:"):]
+                        parts = path.split(".")
+                        for i in range(len(parts) - 1, 0, -1):
+                            ancestor_pid = "Module:" + ".".join(parts[:i])
+                            if ancestor_pid in self.persistent_objects:
+                                ancestor = self.persistent_objects[ancestor_pid]
+                                if is_pp_missing(ancestor):
+                                    return ancestor
+                    raise __import__("pickle").UnpicklingError(
+                        f"Unknown persistent id: {pid}"
+                    )
+
+            return _PPUnpickler(io.BytesIO(data), persistent_objects).load()
+
         def process_new_reqs(
             self, new_reqs: List["NewRequestData"], model: VLLM
         ) -> None:
@@ -79,9 +124,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     # Non-NNsight request, skip
                     continue
 
-                mediator = load(
+                mediator = self._pp_aware_load(
                     extra_args["nnsight_mediator"],
-                    model._remoteable_persistent_objects(),
+                    model,
                 )
 
                 saved_names = extra_args.get("nnsight_saved_names", [])
@@ -332,6 +377,62 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # hooks are gated on world_size > 1 inside wrap() itself.
         self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 
+        # --- PP support: buffer, condition, module map ---
+        pp_world_size = get_pp_group().world_size
+        self.pp_enabled = pp_world_size > 1
+        self.pp_hook_buffer: dict[str, Any] = {}
+        self.pp_buffer_condition = threading.Condition()
+
+        if self.pp_enabled:
+            from ..pp import PPModuleMap
+
+            num_layers = self.model_config.hf_config.num_hidden_layers
+            self.pp_module_map = PPModuleMap(num_layers, pp_world_size)
+        else:
+            self.pp_module_map = None
+
+        # --- PP listener with cross-rank pull support ---
+        if self.pp_enabled:
+            from ..pp_listener import PPListener
+            import torch.distributed as dist
+
+            pp_group = get_pp_group()
+            local_rank = pp_group.rank_in_group
+
+            # Dedicated gloo group for pull requests — separate from
+            # vLLM's PP groups so the listener thread's recv() doesn't
+            # conflict with vLLM's PP communication.  Tags separate
+            # request vs response traffic within the same group.
+            #
+            # new_group is collective: ALL ranks in the default group
+            # must call it the same number of times. With TP>1, there
+            # are multiple PP groups (one per TP slice). We must call
+            # new_group for ALL PP group rank lists, matching vLLM's
+            # pattern in GroupCoordinator.__init__.
+            my_pull_group = None
+            tp_size = get_tp_group().world_size
+            world_size = dist.get_world_size()
+            for tp_offset in range(tp_size):
+                pp_ranks_for_tp = [
+                    pp_rank * tp_size + tp_offset
+                    for pp_rank in range(pp_world_size)
+                ]
+                g = dist.new_group(ranks=pp_ranks_for_tp, backend="gloo")
+                if dist.get_rank() in pp_ranks_for_tp:
+                    my_pull_group = g
+            self.pp_pull_group = my_pull_group
+
+            self.pp_listener = PPListener(
+                buffer=self.pp_hook_buffer,
+                condition=self.pp_buffer_condition,
+                pull_group=self.pp_pull_group,
+                local_rank=local_rank,
+                device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+            )
+            self.pp_listener.start()
+        else:
+            self.pp_listener = None
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
         super()._update_states(scheduler_output)
@@ -362,6 +463,18 @@ class NNsightGPUModelRunner(GPUModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ):
 
+        # PP state must be set BEFORE entering the interleaver, because
+        # __enter__ starts mediator threads that check _is_pp_missing.
+        if self.pp_enabled:
+            interleaver = self.nnsight_model._interleaver
+            interleaver.pp_enabled = True
+            interleaver.pp_local_rank = get_pp_group().rank_in_group
+            interleaver.pp_module_map = self.pp_module_map
+            interleaver.pp_hook_buffer = self.pp_hook_buffer
+            interleaver.pp_buffer_condition = self.pp_buffer_condition
+            if getattr(self, 'pp_listener', None) is not None:
+                interleaver.pp_listener = self.pp_listener
+
         Globals.enter()
 
         return_value = None
@@ -369,6 +482,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
         interleaver._defer_exceptions = True
 
         with interleaver:
+
+            # --- Task 6: PP readiness check ---
+            # Wait until all mediators are parked at a local module before
+            # firing forward pass hooks.  PPMissing accesses bypass the
+            # event_queue (Envoy short-circuit), so any queued event must
+            # be for a local module — meaning the mediator is ready.
+            if getattr(self, 'pp_enabled', False) and self.nnsight_model._interleaver.mediators:
+                self._pp_wait_for_mediator_readiness()
+            # --- End Task 6: PP readiness check ---
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
@@ -401,6 +523,20 @@ class NNsightGPUModelRunner(GPUModelRunner):
         Globals.exit()
 
         return return_value
+
+    def _pp_wait_for_mediator_readiness(self):
+        """Wait until all mediators have a pending event for a local module.
+
+        Mediators run freely for PPMissing accesses (Envoy short-circuit
+        returns LazyRemoteTensor without posting to event_queue). Before
+        firing forward-pass hooks, we must ensure each mediator has
+        finished all PPMissing processing and is blocked waiting for a
+        local module (i.e., has an event in its event_queue). This
+        prevents hooks from firing with no consumer waiting.
+        """
+        for mediator in self.nnsight_model._interleaver.mediators:
+            while mediator.alive and not mediator.event_queue.has_value:
+                time.sleep(0.0001)
 
     def _sample(self, *args, **kwargs):
 
@@ -442,9 +578,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 should be finalized and cleaned up.  ``None`` means no
                 requests are finished.
         """
-        if get_pp_group().rank != 0:
-            return None
-
         if finished_req_ids is None:
             finished_req_ids = []
 
@@ -458,6 +591,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
         )
         saves, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
+
+        # Clear request-scoped buffer entries on completion.
+        # The listener thread keeps running across requests.
+        if getattr(self, 'pp_enabled', False) and finished_keys:
+            self.pp_hook_buffer.clear()
 
         # Collect deferred exceptions from mediators, keyed by request ID.
         # Each invoke has its own mediator and its own exception.
@@ -476,3 +614,109 @@ class NNsightGPUModelRunner(GPUModelRunner):
             saves["__nnsight_exceptions__"] = exceptions
 
         return pickle.dumps(saves)
+
+    def test_pp_buffer_put(self, entries: dict) -> bytes:
+        """Put tensors into this rank's buffer.
+
+        entries: {key: (shape, dtype_str, seed)}
+        Generates deterministic data on CPU, then moves to GPU.
+        Returns checksums for verification.
+        """
+        pp_rank = get_pp_group().rank_in_group
+        checksums = {}
+        for key, (shape, dtype_str, seed) in entries.items():
+            dtype = getattr(torch, dtype_str)
+            g = torch.Generator().manual_seed(seed)
+            tensor = torch.randn(shape, dtype=torch.float32, generator=g).to(dtype).cuda()
+            checksums[key] = float(tensor.float().sum().item())
+            with self.pp_buffer_condition:
+                self.pp_hook_buffer[key] = tensor
+                self.pp_buffer_condition.notify_all()
+        return pickle.dumps({"rank": pp_rank, "keys": list(entries.keys()), "checksums": checksums})
+
+    def test_pp_pull(self, source_rank: int, key: str, shape: list, dtype_str: str, seed: int) -> bytes:
+        """Pull a tensor from source_rank and verify via checksum.
+        No-op if this rank IS the source rank.
+        """
+        pp_rank = get_pp_group().rank_in_group
+        if pp_rank == source_rank:
+            return pickle.dumps({"rank": pp_rank, "role": "server"})
+        result = self.pp_listener.pull_from_remote(source_rank, key)
+        # Recompute expected checksum the same way the server did
+        dtype = getattr(torch, dtype_str)
+        g = torch.Generator().manual_seed(seed)
+        expected = torch.randn(shape, dtype=torch.float32, generator=g).to(dtype)
+        expected_sum = float(expected.float().sum().item())
+        result_sum = float(result.float().cpu().sum().item())
+        match = abs(result_sum - expected_sum) < 1e-2
+        return pickle.dumps({
+            "rank": pp_rank, "match": match,
+            "shape": list(result.shape),
+            "device": str(result.device),
+            "dtype": str(result.dtype),
+        })
+
+    def test_pp_buffer_clear(self) -> bytes:
+        """Clear the buffer."""
+        self.pp_hook_buffer.clear()
+        return pickle.dumps({"rank": get_pp_group().rank_in_group})
+
+    def test_pp_profile_pull(self, num_pulls: int, shape: list, dtype_str: str, direction: str) -> bytes:
+        """Profile pull latency. Rank-aware: one rank serves, the other pulls.
+
+        Args:
+            num_pulls: number of sequential pulls to perform
+            shape: tensor shape
+            dtype_str: e.g. "bfloat16"
+            direction: "0to1" (rank 0 serves, rank 1 pulls) or "1to0"
+        """
+        pp_rank = get_pp_group().rank_in_group
+        dtype = getattr(torch, dtype_str)
+        numel = 1
+        for s in shape:
+            numel *= s
+
+        serve_rank = int(direction[0])
+        pull_rank = int(direction[-1])
+
+        if pp_rank == serve_rank:
+            # Populate buffer with all keys upfront
+            for i in range(num_pulls):
+                key = f"prof_{i}"
+                tensor = torch.randn(shape, dtype=dtype, device="cuda")
+                with self.pp_buffer_condition:
+                    self.pp_hook_buffer[key] = tensor
+                    self.pp_buffer_condition.notify_all()
+            # Don't clear here — the listener thread may still be
+            # serving the puller. The caller should clear separately
+            # via test_pp_buffer_clear after the RPC completes.
+            return pickle.dumps({"rank": pp_rank, "role": "server"})
+
+        elif pp_rank == pull_rank:
+            torch.cuda.synchronize()
+            times = []
+            for i in range(num_pulls):
+                key = f"prof_{i}"
+                t0 = time.perf_counter()
+                result = self.pp_listener.pull_from_remote(serve_rank, key)
+                torch.cuda.synchronize()
+                t1 = time.perf_counter()
+                times.append(t1 - t0)
+            total = sum(times)
+            elem_bytes = result.element_size()
+            tensor_bytes = numel * elem_bytes
+            return pickle.dumps({
+                "rank": pp_rank,
+                "role": "puller",
+                "num_pulls": num_pulls,
+                "shape": shape,
+                "dtype": dtype_str,
+                "tensor_bytes": tensor_bytes,
+                "times_ms": [t * 1000 for t in times],
+                "total_ms": total * 1000,
+                "mean_ms": (total / num_pulls) * 1000,
+                "min_ms": min(times) * 1000,
+                "max_ms": max(times) * 1000,
+            })
+        else:
+            return pickle.dumps({"rank": pp_rank, "role": "bystander"})

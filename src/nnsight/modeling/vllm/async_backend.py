@@ -97,8 +97,10 @@ class AsyncVLLMBackend(Backend):
                 "collect_nnsight",
                 args=([output.request_id], finished),
             )
-            saves_bytes = next((r for r in results if r is not None), None)
-            if saves_bytes:
-                saves = pickle.loads(saves_bytes)
-                output.saves = saves
+            all_saves = {}
+            for r in results:
+                if r is not None:
+                    all_saves.update(pickle.loads(r))
+            if all_saves:
+                output.saves = all_saves
             yield output

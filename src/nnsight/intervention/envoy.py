@@ -162,6 +162,10 @@ class Envoy(Batchable):
         """
 
         if self.interleaving:
+            # PP short-circuit: PPMissing modules return LazyRemoteTensor directly
+            if self._is_pp_missing:
+                return self._pp_lazy_output()
+
             return self._interleaver.current.request(
                 self._interleaver.iterate_requester(f"{self.path}.output")
             )
@@ -191,6 +195,9 @@ class Envoy(Batchable):
             value: The new output value to use.
         """
         if self.interleaving:
+            # PP short-circuit: writes to PPMissing are no-ops
+            if self._is_pp_missing:
+                return
 
             self._interleaver.current.swap(
                 self._interleaver.iterate_requester(f"{self.path}.output"), value
@@ -222,6 +229,8 @@ class Envoy(Batchable):
         """
 
         if self.interleaving:
+            if self._is_pp_missing:
+                return self._pp_lazy_input()
 
             return self._interleaver.current.request(
                 self._interleaver.iterate_requester(f"{self.path}.input")
@@ -252,6 +261,8 @@ class Envoy(Batchable):
             value: The new input value(s) to use, structured as a tuple of (args, kwargs)
         """
         if self.interleaving:
+            if self._is_pp_missing:
+                return
 
             self._interleaver.current.swap(
                 self._interleaver.iterate_requester(f"{self.path}.input"), value
@@ -307,6 +318,79 @@ class Envoy(Batchable):
         value = (value, *inputs[0][1:]), inputs[1]
 
         self.inputs = value
+
+    #### PP (Pipeline Parallelism) helpers ####
+
+    @property
+    def _is_pp_missing(self) -> bool:
+        """Check if this Envoy wraps a PPMissing module on a non-local rank."""
+        if not getattr(self._interleaver, 'pp_enabled', False):
+            return False
+        from nnsight.modeling.vllm.pp import is_pp_missing
+        if is_pp_missing(self._module):
+            return True
+        # Also check module-to-rank mapping for modules like logits/samples
+        # that exist on all ranks as WrapperModules but are only meaningful
+        # on the owning rank.
+        pp_map = getattr(self._interleaver, 'pp_module_map', None)
+        if pp_map is not None:
+            local_rank = getattr(self._interleaver, 'pp_local_rank', None)
+            if local_rank is not None and not pp_map.is_local(f"{self.path}.output", local_rank):
+                return True
+        return False
+
+    def _pp_lazy_output(self):
+        """Return a LazyRemoteTensor for this PPMissing module's output."""
+        from nnsight.modeling.vllm.lazy_remote_tensor import LazyRemoteTensor
+
+        mediator = self._interleaver.current
+        module_key = f"{self.path}.output"
+        iteration = mediator.iteration_tracker[module_key]
+        provider_string = f"{module_key}.i{iteration}"
+        mediator.iteration_tracker[module_key] += 1
+
+        source_rank = self._interleaver.pp_module_map.get_owning_rank(provider_string)
+
+        lazy = LazyRemoteTensor(
+            source_rank=source_rank,
+            provider_string=provider_string,
+            shape=(),  # shape unknown until materialized; pull protocol sends it
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+        # Wire up the pull function: cross-rank pull via the listener
+        if hasattr(self._interleaver, 'pp_listener') and self._interleaver.pp_listener is not None:
+            listener = self._interleaver.pp_listener
+            lazy._pull_fn = listener.pull_from_remote
+
+        return lazy
+
+    def _pp_lazy_input(self):
+        """Return a LazyRemoteTensor for this PPMissing module's input."""
+        from nnsight.modeling.vllm.lazy_remote_tensor import LazyRemoteTensor
+
+        mediator = self._interleaver.current
+        module_key = f"{self.path}.input"
+        iteration = mediator.iteration_tracker[module_key]
+        provider_string = f"{module_key}.i{iteration}"
+        mediator.iteration_tracker[module_key] += 1
+
+        source_rank = self._interleaver.pp_module_map.get_owning_rank(provider_string)
+
+        lazy = LazyRemoteTensor(
+            source_rank=source_rank,
+            provider_string=provider_string,
+            shape=(),
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+        if hasattr(self._interleaver, 'pp_listener') and self._interleaver.pp_listener is not None:
+            listener = self._interleaver.pp_listener
+            lazy._pull_fn = listener.pull_from_remote
+
+        return lazy
 
     @property
     def source(self) -> EnvoySource:

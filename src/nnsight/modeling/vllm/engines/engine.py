@@ -21,12 +21,16 @@ class NNsightLLMEngine(LLMEngine):
                 "collect_nnsight",
                 args=(finished_req_ids, finished_req_ids),
             )
-            # results is a list (one per worker). Rank-0 returns pickled bytes, others None.
-            saves_bytes = next((r for r in results if r is not None), None)
-            if saves_bytes:
-                saves = pickle.loads(saves_bytes)
+            # Merge saves from all PP ranks. Each rank returns pickled
+            # saves for its local modules. Later ranks override on
+            # duplicate keys (owning rank wins).
+            all_saves = {}
+            for r in results:
+                if r is not None:
+                    all_saves.update(pickle.loads(r))
+            if all_saves:
                 for ro in request_outputs:
                     if ro.finished:
-                        ro.saves = saves
+                        ro.saves = all_saves
 
         return request_outputs
