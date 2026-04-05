@@ -121,7 +121,6 @@ class LazyRemoteTensor:
             provider_string=self._meta["provider_string"],
             dtype=self._meta["dtype"],
         )
-        child._pull_fn = self._pull_fn
         parent = self
         index = key
 

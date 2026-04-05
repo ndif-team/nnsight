@@ -258,17 +258,19 @@ Buffer accumulates `(local_layers * hooks_per_layer * N_tokens)` GPU tensor clon
 
 # CLEANUP
 
-## CLEANUP-1: Test helpers in production GPUModelRunner
+## ~~CLEANUP-1: Test helpers in production GPUModelRunner~~ FIXED
 
-`GPUModelRunner.py:618-660` — `test_pp_buffer_put`, `test_pp_pull`, `test_pp_buffer_clear`, `test_pp_profile_pull` are test scaffolding. Passthrough wrappers in `GPUWorker.py:36-46`.
+~~`GPUModelRunner.py:618-660` — `test_pp_buffer_put`, `test_pp_pull`, `test_pp_buffer_clear`, `test_pp_profile_pull` are test scaffolding. Passthrough wrappers in `GPUWorker.py:36-46`.~~
 
-**Fix:** Move to test utilities or the test file itself.
+**Fixed:** Removed test helpers from production code.
 
 ---
 
-## CLEANUP-2: Dead code in `LazyRemoteTensor.__getitem__`
+## ~~CLEANUP-2: Dead code in `LazyRemoteTensor.__getitem__`~~ FIXED
 
-`lazy_remote_tensor.py:130` — `child._pull_fn = self._pull_fn` is immediately overwritten at line 137 by `child._pull_fn = _deferred_pull`. Line 130 is dead.
+~~`lazy_remote_tensor.py:130` — `child._pull_fn = self._pull_fn` is immediately overwritten at line 137 by `child._pull_fn = _deferred_pull`. Line 130 is dead.~~
+
+**Fixed:** Removed dead assignment.
 
 ---
 
@@ -280,9 +282,11 @@ Removed as part of the iteration gate change.
 
 ---
 
-## CLEANUP-4: Dead `world_size` variable
+## ~~CLEANUP-4: Dead `world_size` variable~~ FIXED
 
-`GPUModelRunner.py:414` — `world_size = dist.get_world_size()` assigned but never referenced.
+~~`GPUModelRunner.py:414` — `world_size = dist.get_world_size()` assigned but never referenced.~~
+
+**Fixed:** Removed dead variable.
 
 ---
 
