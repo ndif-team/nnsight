@@ -161,6 +161,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 ctx = self.trace_contexts[trace_id]
 
+                # Reset the iteration gate for the new request so
+                # mediators are not blocked by a previous stop signal.
+                model._interleaver._generation_done = False
+
                 model._interleaver.mediators.append(mediator)
                 mediator.start(model._interleaver)
 
@@ -388,8 +392,24 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             num_layers = self.model_config.hf_config.num_hidden_layers
             self.pp_module_map = PPModuleMap(num_layers, pp_world_size)
+
+            # Graft meta model's children onto PPMissing envoys so users
+            # can access sub-modules (e.g., model.layers[5].attn.output).
+            # The meta model was created in GPUWorker.__init__ before
+            # distributed init (PP=1, TP=1, full architecture).
+            meta_model = getattr(self, '_pp_meta_model', None)
+            if meta_model is not None:
+                self._graft_pp_missing_envoys(meta_model)
+                del self._pp_meta_model
+
+            # Exchange local module metadata across PP ranks to build
+            # a complete {path: (dtype, static_shape)} map. Each rank
+            # contributes its local (non-PPMissing) modules' shapes,
+            # which reflect the real TP/EP sharding.
+            self.pp_module_meta = self._exchange_pp_module_meta()
         else:
             self.pp_module_map = None
+            self.pp_module_meta = {}
 
         # --- PP listener with cross-rank pull support ---
         if self.pp_enabled:
@@ -428,10 +448,107 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 pull_group=self.pp_pull_group,
                 local_rank=local_rank,
                 device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+                dtype_map=self.pp_module_meta,
             )
             self.pp_listener.start()
         else:
             self.pp_listener = None
+
+    def _graft_pp_missing_envoys(self, meta_model: torch.nn.Module) -> None:
+        """Graft child Envoys from meta model onto PPMissing layer envoys.
+
+        PPMissingLayer stubs have no children, so the worker's Envoy tree
+        is missing sub-module envoys for non-local layers. This grafts
+        the meta model's children (full architecture, PP=1) onto each
+        PPMissing envoy so users can access e.g. model.layers[5].attn.output.
+
+        The grafted child envoys wrap meta-device modules. _is_pp_missing
+        detects them as non-local via pp_module_map and returns
+        LazyRemoteTensors on .output access.
+        """
+        from ..pp import is_pp_missing
+        from ...intervention.envoy import Envoy
+
+        meta_modules = dict(meta_model.named_modules())
+
+        def graft(envoy):
+            if is_pp_missing(envoy._module):
+                meta_module = meta_modules.get(envoy.path)
+                if meta_module is not None:
+                    for name, child_module in meta_module.named_children():
+                        child_envoy = Envoy(
+                            child_module,
+                            path=f"{envoy.path}.{name}",
+                            rename=envoy._alias.rename if envoy._alias is not None else None,
+                            interleaver=envoy._interleaver,
+                        )
+                        if hasattr(Envoy, name):
+                            envoy._handle_overloaded_mount(child_envoy, name)
+                        else:
+                            object.__setattr__(envoy, name, child_envoy)
+            for child_envoy in envoy._children:
+                graft(child_envoy)
+
+        graft(self.nnsight_model)
+
+    def _exchange_pp_module_meta(self) -> dict:
+        """Exchange local module metadata across PP ranks.
+
+        Each rank collects {path: (dtype, static_shape)} for its local
+        (non-PPMissing) modules — shapes reflect real TP/EP sharding.
+        An allgather across PP ranks merges into a complete map.
+
+        Returns:
+            dict mapping module_path -> dtype (torch.dtype).
+            Shape info is encoded separately per module for the pull
+            protocol.
+        """
+        import pickle
+        import torch.distributed as dist
+        from ..pp import is_pp_missing
+
+        pp_group = get_pp_group()
+
+        # Collect local module metadata
+        local_meta = {}
+        for name, module in self.model.named_modules():
+            if not is_pp_missing(module):
+                # Use first parameter's dtype, fall back to model config
+                param = next(module.parameters(recurse=False), None)
+                dtype = param.dtype if param is not None else self.model_config.dtype
+                local_meta[name] = dtype
+
+        # Serialize and allgather across PP ranks
+        local_bytes = pickle.dumps(local_meta)
+        local_tensor = torch.tensor(
+            list(local_bytes), dtype=torch.uint8, device="cpu"
+        )
+        size_tensor = torch.tensor([len(local_bytes)], dtype=torch.int64)
+
+        # Gather sizes first
+        all_sizes = [
+            torch.zeros(1, dtype=torch.int64)
+            for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_sizes, size_tensor, group=pp_group.cpu_group)
+
+        max_size = max(s.item() for s in all_sizes)
+        padded = torch.zeros(max_size, dtype=torch.uint8)
+        padded[: len(local_bytes)] = local_tensor
+
+        all_padded = [
+            torch.zeros(max_size, dtype=torch.uint8)
+            for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_padded, padded, group=pp_group.cpu_group)
+
+        # Merge all ranks' metadata
+        merged = {}
+        for i, (buf, size) in enumerate(zip(all_padded, all_sizes)):
+            rank_meta = pickle.loads(buf[: size.item()].numpy().tobytes())
+            merged.update(rank_meta)
+
+        return merged
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
@@ -472,6 +589,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             interleaver.pp_module_map = self.pp_module_map
             interleaver.pp_hook_buffer = self.pp_hook_buffer
             interleaver.pp_buffer_condition = self.pp_buffer_condition
+            interleaver.pp_module_meta = self.pp_module_meta
             if getattr(self, 'pp_listener', None) is not None:
                 interleaver.pp_listener = self.pp_listener
 
@@ -483,14 +601,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         with interleaver:
 
-            # --- Task 6: PP readiness check ---
-            # Wait until all mediators are parked at a local module before
-            # firing forward pass hooks.  PPMissing accesses bypass the
-            # event_queue (Envoy short-circuit), so any queued event must
-            # be for a local module — meaning the mediator is ready.
+            # Wait until all mediators are parked at a local module
+            # before firing forward pass hooks.  The iteration gate
+            # (in IteratorTracer) prevents mediators from starting new
+            # iterations, but within an iteration they still need to
+            # process PP-missing accesses and reach a local module.
             if getattr(self, 'pp_enabled', False) and self.nnsight_model._interleaver.mediators:
                 self._pp_wait_for_mediator_readiness()
-            # --- End Task 6: PP readiness check ---
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
@@ -586,6 +703,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
         finished_req_id_set = set(finished_req_ids)
 
         matched = helper.match_req_ids(req_id_set)
+
+        # Signal mediators to exit their iteration loops and wait for
+        # threads to die.  This ensures all in-flight pulls complete
+        # before we finalize or clear the buffer.
+        if finished_req_ids:
+            interleaver = self.nnsight_model._interleaver
+            interleaver.stop_iteration()
+            for _, mediator, _ in matched:
+                if mediator.worker is not None:
+                    mediator.worker.join(timeout=5.0)
+
         finished_keys = helper.finalize_mediators(
             matched, finished_req_id_set, self.nnsight_model
         )
@@ -593,9 +721,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         helper.cleanup_finished(finished_keys, removals)
 
         # Clear request-scoped buffer entries on completion.
-        # The listener thread keeps running across requests.
         if getattr(self, 'pp_enabled', False) and finished_keys:
-            self.pp_hook_buffer.clear()
+            with self.pp_buffer_condition:
+                self.pp_hook_buffer.clear()
 
         # Collect deferred exceptions from mediators, keyed by request ID.
         # Each invoke has its own mediator and its own exception.

@@ -49,6 +49,19 @@ class IteratorTracer(Tracer):
 
                     yield i
 
+                    # Iteration gate: if the interleaver is not active
+                    # (between execute_model calls in vLLM), wait for the
+                    # next forward pass to start or generation to end.
+                    # In standard LanguageModel, _interleaving stays True
+                    # throughout generation — this is a no-op.
+                    il = mediator.interleaver
+                    if not il._interleaving:
+                        with il._iter_condition:
+                            while not il._interleaving and not il._generation_done:
+                                il._iter_condition.wait()
+                            if il._generation_done:
+                                break
+
                     if stop is None:
                         if mediator.all_stop is not None:
                             stop = mediator.all_stop
@@ -149,6 +162,15 @@ class IteratorTracer(Tracer):
             while True:
 
                 do_iteration(i, unbound=True)
+
+                # Iteration gate (see __iter__ for detailed comment).
+                il = mediator.interleaver
+                if not il._interleaving:
+                    with il._iter_condition:
+                        while not il._interleaving and not il._generation_done:
+                            il._iter_condition.wait()
+                        if il._generation_done:
+                            break
 
                 if stop is None:
                     if mediator.all_stop is not None:

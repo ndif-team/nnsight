@@ -339,24 +339,30 @@ class Envoy(Batchable):
                 return True
         return False
 
-    def _pp_lazy_output(self):
-        """Return a LazyRemoteTensor for this PPMissing module's output."""
+    def _pp_lazy_access(self, kind: str):
+        """Return a LazyRemoteTensor for this PPMissing module's output or input.
+
+        Args:
+            kind: "output" or "input"
+        """
         from nnsight.modeling.vllm.lazy_remote_tensor import LazyRemoteTensor
 
         mediator = self._interleaver.current
-        module_key = f"{self.path}.output"
+        module_key = f"{self.path}.{kind}"
         iteration = mediator.iteration_tracker[module_key]
         provider_string = f"{module_key}.i{iteration}"
         mediator.iteration_tracker[module_key] += 1
 
         source_rank = self._interleaver.pp_module_map.get_owning_rank(provider_string)
 
+        # Resolve dtype from the shared metadata map built at load time.
+        dtype_map = getattr(self._interleaver, 'pp_module_meta', {})
+        dtype = dtype_map.get(self.path, torch.float32)
+
         lazy = LazyRemoteTensor(
             source_rank=source_rank,
             provider_string=provider_string,
-            shape=(),  # shape unknown until materialized; pull protocol sends it
-            dtype=torch.float32,
-            device=torch.device("cpu"),
+            dtype=dtype,
         )
 
         # Wire up the pull function: cross-rank pull via the listener
@@ -366,31 +372,13 @@ class Envoy(Batchable):
 
         return lazy
 
+    def _pp_lazy_output(self):
+        """Return a LazyRemoteTensor for this PPMissing module's output."""
+        return self._pp_lazy_access("output")
+
     def _pp_lazy_input(self):
         """Return a LazyRemoteTensor for this PPMissing module's input."""
-        from nnsight.modeling.vllm.lazy_remote_tensor import LazyRemoteTensor
-
-        mediator = self._interleaver.current
-        module_key = f"{self.path}.input"
-        iteration = mediator.iteration_tracker[module_key]
-        provider_string = f"{module_key}.i{iteration}"
-        mediator.iteration_tracker[module_key] += 1
-
-        source_rank = self._interleaver.pp_module_map.get_owning_rank(provider_string)
-
-        lazy = LazyRemoteTensor(
-            source_rank=source_rank,
-            provider_string=provider_string,
-            shape=(),
-            dtype=torch.float32,
-            device=torch.device("cpu"),
-        )
-
-        if hasattr(self._interleaver, 'pp_listener') and self._interleaver.pp_listener is not None:
-            listener = self._interleaver.pp_listener
-            lazy._pull_fn = listener.pull_from_remote
-
-        return lazy
+        return self._pp_lazy_access("input")
 
     @property
     def source(self) -> EnvoySource:

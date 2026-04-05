@@ -7,7 +7,7 @@ import weakref
 from collections import defaultdict
 from enum import Enum
 from functools import partial, wraps
-from threading import Thread
+from threading import Condition, Thread
 from types import FrameType
 from typing import (
     TYPE_CHECKING,
@@ -107,6 +107,12 @@ class Interleaver:
         self.hook_handles = []
         self._defer_exceptions = False
 
+        # Iteration gate: mediators wait on this between iterations
+        # until the next forward pass starts (_interleaving becomes True)
+        # or generation ends (_generation_done becomes True).
+        self._iter_condition = Condition()
+        self._generation_done = False
+
     def initialize(
         self,
         mediators: List[Mediator],
@@ -122,6 +128,18 @@ class Interleaver:
         self.default_all = None
 
         self.current: Mediator = None
+
+    def stop_iteration(self):
+        """Signal all mediators to exit their iteration loops.
+
+        Mediators gated at an iteration boundary (waiting on
+        ``_iter_condition``) will wake up, see ``_generation_done``,
+        and break out of their loop.  Call this before joining
+        mediator threads to ensure clean shutdown.
+        """
+        self._generation_done = True
+        with self._iter_condition:
+            self._iter_condition.notify_all()
 
     def cancel(self):
         """Cancel all mediators / intervention threads."""
@@ -383,6 +401,11 @@ class Interleaver:
         # Used by a variety of functioanlities that interact with the interleaver.
         # Often to raise an error when one of these functionalities is called outside interleaving.
         self._interleaving = True
+
+        # Wake mediators gated at iteration boundaries (waiting for the
+        # next forward pass).  They check _interleaving and continue.
+        with self._iter_condition:
+            self._iter_condition.notify_all()
 
         try:
             # Start all the mediators to begin their intervention threads amd wait for their first event.
@@ -840,16 +863,15 @@ class Mediator:
 
             self.respond(value)
 
-            # PP: clone consumed value into buffer and notify listener.
-            # The listener (PPListener) waits on the Condition for values
-            # to appear, so it can serve them to LazyRemoteTensor pulls.
+            # PP: clone the narrowed value into buffer and notify listener.
+            # Each mediator's entry is its own batch slice — remote ranks
+            # pull exactly what they need without re-narrowing.
             if getattr(self.interleaver, 'pp_enabled', False):
-                cv = self.interleaver.batcher.current_value
                 cond = self.interleaver.pp_buffer_condition
                 with cond:
                     with torch.inference_mode():
                         self.interleaver.pp_hook_buffer[provider] = (
-                            cv.clone() if isinstance(cv, torch.Tensor) else cv
+                            value.clone() if isinstance(value, torch.Tensor) else value
                         )
                     cond.notify_all()
         else:

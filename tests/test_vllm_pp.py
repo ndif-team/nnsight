@@ -19,9 +19,7 @@ class TestLazyRemoteTensor:
         lazy = LazyRemoteTensor(
             source_rank=1,
             provider_string="model.layers.50.output.i0",
-            shape=(1, 5, 768),
             dtype=torch.float32,
-            device=torch.device("cpu"),
         )
         if real_tensor is not None:
             lazy._real = real_tensor
@@ -29,9 +27,7 @@ class TestLazyRemoteTensor:
 
     def test_metadata_no_materialization(self):
         lazy = self._make_lazy()
-        assert lazy.shape == (1, 5, 768)
         assert lazy.dtype == torch.float32
-        assert lazy.device == torch.device("cpu")
         assert lazy._real is None
 
     def test_setitem_noop(self):
@@ -39,10 +35,11 @@ class TestLazyRemoteTensor:
         lazy[:] = torch.zeros(1, 5, 768)
         assert lazy._real is None  # no materialization
 
-    def test_getitem_returns_self(self):
+    def test_getitem_returns_child_lazy(self):
         lazy = self._make_lazy()
         result = lazy[0]
-        assert result is lazy
+        assert isinstance(result, LazyRemoteTensor)
+        assert result is not lazy  # child with deferred indexing
 
     def test_save_returns_self(self):
         lazy = self._make_lazy()
@@ -67,20 +64,30 @@ class TestLazyRemoteTensor:
 
 class TestPPListener:
 
+    def _make_listener(self, buffer=None):
+        """Helper: create a PPListener for local_lookup tests (no pull_group needed)."""
+        if buffer is None:
+            buffer = {}
+        cond = threading.Condition()
+        return PPListener(
+            buffer=buffer,
+            condition=cond,
+            pull_group=None,
+            local_rank=0,
+            device=torch.device("cpu"),
+        ), cond
+
     def test_serve_existing_value(self):
         """Listener serves a value that's already in the buffer."""
-        buffer = {"model.layers.5.output.i0": torch.randn(1, 5, 768)}
-        cond = threading.Condition()
-        listener = PPListener(buffer, cond)
+        buf = {"model.layers.5.output.i0": torch.randn(1, 5, 768)}
+        listener, cond = self._make_listener(buf)
 
         result = listener.local_lookup("model.layers.5.output.i0")
-        assert torch.equal(result, buffer["model.layers.5.output.i0"])
+        assert torch.equal(result, buf["model.layers.5.output.i0"])
 
     def test_wait_for_value(self):
         """Listener waits until a value appears in the buffer."""
-        buffer = {}
-        cond = threading.Condition()
-        listener = PPListener(buffer, cond)
+        listener, cond = self._make_listener()
 
         result_holder = [None]
 
@@ -99,7 +106,7 @@ class TestPPListener:
         # Add value and notify
         tensor = torch.randn(1, 5, 768)
         with cond:
-            buffer["model.layers.5.output.i0"] = tensor
+            listener._buffer["model.layers.5.output.i0"] = tensor
             cond.notify_all()
 
         t.join(timeout=5.0)
@@ -108,9 +115,7 @@ class TestPPListener:
 
     def test_timeout_raises(self):
         """Listener raises TimeoutError if value never appears."""
-        buffer = {}
-        cond = threading.Condition()
-        listener = PPListener(buffer, cond)
+        listener, cond = self._make_listener()
 
         with pytest.raises(TimeoutError):
             listener.local_lookup("missing.key", timeout=0.1)
@@ -134,6 +139,7 @@ class TestEnvoyPPMissingShortCircuit:
         mock_map.get_owning_rank.return_value = 1
         mock_map.is_local.return_value = False
         interleaver.pp_module_map = mock_map
+        interleaver.pp_module_meta = {"model.layers.50": torch.float32}
 
         # Create a mock mediator with iteration tracker
         mediator = MagicMock()

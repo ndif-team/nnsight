@@ -6,7 +6,9 @@ Uses tags to separate request and response traffic on the same group:
 
 This avoids concurrent recv on the same (group, tag) from different threads.
 
-Buffers live on GPU; tensors are moved to CPU only at pull time.
+Buffers store narrowed (per-mediator) tensors on GPU; moved to CPU at pull time.
+Dtype is resolved locally from a shared metadata map built at model load time —
+no dtype encoding on the wire.
 """
 
 from __future__ import annotations
@@ -40,12 +42,14 @@ class PPListener:
         pull_group: Optional[dist.ProcessGroup],
         local_rank: int,
         device: torch.device,
+        dtype_map: Optional[Dict[str, torch.dtype]] = None,
     ):
         self._buffer = buffer
         self._condition = condition
         self._pull_group = pull_group
         self._local_rank = local_rank
         self._device = device
+        self._dtype_map = dtype_map or {}
         self._thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
@@ -99,21 +103,18 @@ class PPListener:
                 dist.recv(key_buf, group=group, group_src=requesting_rank, tag=TAG_REQUEST)
                 provider_string = key_buf.numpy().tobytes().decode("utf-8")
 
-                # 3. Look up tensor in GPU buffer (blocks until available)
+                # 3. Look up tensor in buffer (blocks until available)
                 tensor = self.local_lookup(provider_string)
 
                 # 4. Move to CPU for gloo transfer
                 cpu_tensor = tensor.detach().contiguous().cpu()
 
-                # 5. Send metadata on TAG_RESPONSE: [ndim, dtype_code, *shape]
-                meta = torch.tensor(
-                    [cpu_tensor.ndim, _dtype_to_code(cpu_tensor.dtype)]
-                    + list(cpu_tensor.shape),
-                    dtype=torch.int64,
-                )
-                meta_header = torch.tensor([meta.numel()], dtype=torch.int64)
-                dist.send(meta_header, group=group, group_dst=requesting_rank, tag=TAG_RESPONSE)
-                dist.send(meta, group=group, group_dst=requesting_rank, tag=TAG_RESPONSE)
+                # 5. Send shape on TAG_RESPONSE: fixed 8-slot buffer [ndim, *shape, 0...]
+                shape_meta = torch.zeros(8, dtype=torch.int64)
+                shape_meta[0] = cpu_tensor.ndim
+                for i, s in enumerate(cpu_tensor.shape):
+                    shape_meta[1 + i] = s
+                dist.send(shape_meta, group=group, group_dst=requesting_rank, tag=TAG_RESPONSE)
 
                 # 6. Send flattened tensor data on TAG_RESPONSE
                 dist.send(
@@ -152,49 +153,37 @@ class PPListener:
         key_tensor = torch.tensor(list(key_bytes), dtype=torch.uint8)
         dist.send(key_tensor, group=group, group_dst=source_rank, tag=TAG_REQUEST)
 
-        # 3. Recv metadata on TAG_RESPONSE
-        meta_header = torch.zeros(1, dtype=torch.int64)
-        dist.recv(meta_header, group=group, group_src=source_rank, tag=TAG_RESPONSE)
-        meta = torch.zeros(meta_header.item(), dtype=torch.int64)
-        dist.recv(meta, group=group, group_src=source_rank, tag=TAG_RESPONSE)
+        # 3. Resolve dtype locally from the shared metadata map.
+        # Strip iteration suffix (e.g. ".output.i0" → module path) to look up dtype.
+        module_path = _provider_to_module_path(provider_string)
+        dtype = self._dtype_map.get(module_path, torch.float32)
 
-        meta_list = meta.tolist()
-        ndim = int(meta_list[0])
-        dtype = _code_to_dtype(int(meta_list[1]))
-        shape = [int(x) for x in meta_list[2 : 2 + ndim]]
+        # 4. Recv shape on TAG_RESPONSE: [ndim, *shape]
+        # Max ndim in practice is 4-5; 8 slots is generous.
+        shape_meta = torch.zeros(8, dtype=torch.int64)
+        dist.recv(shape_meta, group=group, group_src=source_rank, tag=TAG_RESPONSE)
 
-        # 4. Recv flattened tensor on TAG_RESPONSE
+        ndim = int(shape_meta[0].item())
+        shape = [int(shape_meta[1 + i].item()) for i in range(ndim)]
+
         numel = 1
         for s in shape:
             numel *= s
+
+        # 5. Recv flattened tensor on TAG_RESPONSE
         flat = torch.zeros(numel, dtype=dtype)
         dist.recv(flat, group=group, group_src=source_rank, tag=TAG_RESPONSE)
 
-        # 5. Reshape and move to GPU
+        # 6. Reshape and move to GPU
         return flat.reshape(shape).to(self._device)
 
 
-# ------------------------------------------------------------------
-# Dtype encoding
-# ------------------------------------------------------------------
-
-_DTYPE_MAP = {
-    torch.float16: 0,
-    torch.float32: 1,
-    torch.float64: 2,
-    torch.bfloat16: 3,
-    torch.int32: 4,
-    torch.int64: 5,
-    torch.int8: 6,
-    torch.uint8: 7,
-    torch.bool: 8,
-}
-_CODE_MAP = {v: k for k, v in _DTYPE_MAP.items()}
-
-
-def _dtype_to_code(dtype: torch.dtype) -> int:
-    return _DTYPE_MAP.get(dtype, 1)
-
-
-def _code_to_dtype(code: int) -> torch.dtype:
-    return _CODE_MAP.get(code, torch.float32)
+def _provider_to_module_path(provider_string: str) -> str:
+    """Strip '.output.iN' or '.input.iN' suffix to get the module path."""
+    parts = provider_string.split(".")
+    # Walk backwards to find and remove the access suffix
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i].startswith("i") and parts[i][1:].isdigit():
+            # Found iteration marker, the part before is "output" or "input"
+            return ".".join(parts[: i - 1])
+    return provider_string

@@ -21,16 +21,12 @@ class LazyRemoteTensor:
         self,
         source_rank: int,
         provider_string: str,
-        shape: Tuple[int, ...],
         dtype: torch.dtype,
-        device: torch.device,
     ):
         self._meta = {
             "source_rank": source_rank,
             "provider_string": provider_string,
-            "shape": shape,
             "dtype": dtype,
-            "device": device,
         }
         self._real: torch.Tensor | None = None
         self._pull_fn = None  # set externally by whoever creates the lazy tensor
@@ -123,9 +119,7 @@ class LazyRemoteTensor:
         child = LazyRemoteTensor(
             source_rank=self._meta["source_rank"],
             provider_string=self._meta["provider_string"],
-            shape=(),  # unknown until materialized
             dtype=self._meta["dtype"],
-            device=self._meta["device"],
         )
         child._pull_fn = self._pull_fn
         parent = self
@@ -158,9 +152,7 @@ class LazyRemoteTensor:
 
     @property
     def shape(self) -> Tuple[int, ...]:
-        if self._real is not None:
-            return self._real.shape
-        return self._meta["shape"]
+        return self._materialize().shape
 
     @property
     def dtype(self) -> torch.dtype:
@@ -170,15 +162,12 @@ class LazyRemoteTensor:
 
     @property
     def device(self) -> torch.device:
-        if self._real is not None:
-            return self._real.device
-        return self._meta["device"]
+        return self._materialize().device
 
     def __repr__(self) -> str:
         status = "materialized" if self._real is not None else "lazy"
         return (
             f"LazyRemoteTensor({status}, "
             f"src=rank{self._meta['source_rank']}, "
-            f"key={self._meta['provider_string']!r}, "
-            f"shape={self.shape})"
+            f"key={self._meta['provider_string']!r})"
         )
