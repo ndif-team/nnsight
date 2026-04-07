@@ -72,11 +72,11 @@ Files changed: `pp_listener.py`, `envoy.py`, `interleaver.py`, `GPUModelRunner.p
 
 ---
 
-## BUG-5: Missing `collect_saves` LazyRemoteTensor filter
+## ~~BUG-5: Missing `collect_saves` LazyRemoteTensor filter~~ FIXED
 
-PP_DESIGN.md specifies "Filter out any unmaterialized LazyRemoteTensor in collect_saves as safety net." The actual `collect_saves` (GPUModelRunner.py:285-326) does no such filtering. If a LazyRemoteTensor's `id()` enters `Globals.saves` (e.g., via pymount's global `.save()` bypassing the no-op override), pickling fails or produces corrupt data since `__getstate__` nulls `_pull_fn`.
+~~PP_DESIGN.md specifies "Filter out any unmaterialized LazyRemoteTensor in collect_saves as safety net." The actual `collect_saves` (GPUModelRunner.py:285-326) does no such filtering. If a LazyRemoteTensor's `id()` enters `Globals.saves` (e.g., via `nnsight.save()` bypassing the no-op override), pickling fails or produces corrupt data since `__getstate__` nulls `_pull_fn`.~~
 
-**Fix:** Add `isinstance(v, LazyRemoteTensor)` filter in `collect_saves`.
+**Fixed:** Added `isinstance(value, LazyRemoteTensor)` filter in both collection paths within `collect_saves` (per-invoke frame locals and trace-shared saves). File changed: `GPUModelRunner.py`.
 
 ---
 

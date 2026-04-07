@@ -14,6 +14,7 @@ from nnsight.intervention.tracing.globals import Globals
 
 from ....intervention.serialization import load
 from ..batching import VLLMBatcher
+from ..lazy_remote_tensor import LazyRemoteTensor
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -303,6 +304,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 frame = mediator.info.frame
                 for key, value in frame.f_locals.items():
                     if id(value) in Globals.saves:
+                        if isinstance(value, LazyRemoteTensor):
+                            continue
                         saves[key] = value
                         if internal_key in finished_internal_keys:
                             removals.add(id(value))
@@ -323,6 +326,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
                                 if name in canonical:
                                     value = canonical[name]
                                     if id(value) in Globals.saves:
+                                        if isinstance(value, LazyRemoteTensor):
+                                            continue
                                         saves[name] = value
                                         removals.add(id(value))
                         break
