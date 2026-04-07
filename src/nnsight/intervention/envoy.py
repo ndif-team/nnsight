@@ -335,7 +335,7 @@ class Envoy(Batchable):
         pp_map = getattr(self._interleaver, 'pp_module_map', None)
         if pp_map is not None:
             local_rank = getattr(self._interleaver, 'pp_local_rank', None)
-            if local_rank is not None and not pp_map.is_local(f"{self.path}.output", local_rank):
+            if local_rank is not None and not pp_map.is_local(self.path, local_rank):
                 return True
         return False
 
@@ -353,7 +353,7 @@ class Envoy(Batchable):
         provider_string = f"{module_key}.i{iteration}"
         mediator.iteration_tracker[module_key] += 1
 
-        source_rank = self._interleaver.pp_module_map.get_owning_rank(provider_string)
+        source_rank = self._interleaver.pp_module_map.get_owning_rank(self.path)
 
         # Resolve dtype from the shared metadata map built at load time.
         dtype_map = getattr(self._interleaver, 'pp_module_meta', {})

@@ -64,11 +64,11 @@ Files changed: `pp_listener.py`, `envoy.py`, `interleaver.py`, `GPUModelRunner.p
 
 ---
 
-## BUG-4: `get_owning_rank` returns `None` → `LazyRemoteTensor(source_rank=None)`
+## ~~BUG-4: `get_owning_rank` returns `None` → `LazyRemoteTensor(source_rank=None)`~~ NOT A BUG
 
-`envoy.py:352,379` — If `PPModuleMap` doesn't recognize a module path, `get_owning_rank` returns `None`. This flows into `LazyRemoteTensor(source_rank=None, ...)`. On materialization, `pull_from_remote(None, ...)` crashes inside `dist.send` with an unhelpful error.
+~~`envoy.py:352,379` — If `PPModuleMap` doesn't recognize a module path, `get_owning_rank` returns `None`.~~
 
-**Fix:** Raise early in `_pp_lazy_output`/`_pp_lazy_input` when `source_rank is None` with a message naming the unresolved module path.
+**Downgraded:** `_pp_lazy_access` is only reachable when `_is_pp_missing()` returns True. For `PPMissingLayer` stubs, the path always contains a recognized layer container so `get_owning_rank` returns a valid rank. For the `is_local` path, `get_owning_rank` returning `None` causes `is_local` to return `True` (assume local), so `_is_pp_missing` returns `False` and `_pp_lazy_access` is never called. The `None` case is unreachable.
 
 ---
 
@@ -80,11 +80,11 @@ Files changed: `pp_listener.py`, `envoy.py`, `interleaver.py`, `GPUModelRunner.p
 
 ---
 
-## BUG-6: Provider string includes `.output.iN` suffix when passed to `get_owning_rank`
+## ~~BUG-6: Provider string includes `.output.iN` suffix when passed to `get_owning_rank`~~ FIXED
 
-`envoy.py:352` — Passes `"model.layers.5.output.i0"` to `get_owning_rank`, which splits on `.` and searches for layer container names. Works by accident because `"output"` and `"i0"` don't match any name in `_LAYER_CONTAINER_NAMES`. If someone adds `"output"` to any name set, it breaks silently.
+~~`envoy.py:352` — Passes `"model.layers.5.output.i0"` to `get_owning_rank`, which splits on `.` and searches for layer container names. Works by accident because `"output"` and `"i0"` don't match any name in `_LAYER_CONTAINER_NAMES`.~~
 
-**Fix:** Pass the module path (without suffix) to `get_owning_rank`, not the full provider string. Or better: replace PPModuleMap entirely (see STYLE-2).
+**Fixed:** Pass `self.path` (the module path, e.g. `"model.layers.5"`) to `get_owning_rank` instead of the full provider string. Same fix in `_is_pp_missing` which was passing `f"{self.path}.output"`. Files changed: `envoy.py`.
 
 ---
 
