@@ -421,11 +421,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 self._graft_pp_missing_envoys(meta_model)
                 del self._pp_meta_model
 
-            # Exchange local module metadata across PP ranks to build
-            # a complete {path: (dtype, static_shape)} map. Each rank
-            # contributes its local (non-PPMissing) modules' shapes,
-            # which reflect the real TP/EP sharding.
-            self.pp_module_meta = self._exchange_pp_module_meta()
+            # Probe output shapes from the real loaded model via
+            # FakeTensorMode, then allgather across PP ranks.
+            shape_meta = self._probe_pp_output_shapes()
+            self.pp_module_meta = self._exchange_pp_module_meta(shape_meta)
         else:
             self.pp_module_map = None
             self.pp_module_meta = {}
@@ -466,7 +465,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 pull_group=self.pp_pull_group,
                 local_rank=local_rank,
                 device=torch.device(f"cuda:{torch.cuda.current_device()}"),
-                dtype_map=self.pp_module_meta,
+                meta_map=self.pp_module_meta,
             )
             self.pp_listener.start()
         else:
@@ -509,17 +508,99 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         graft(self.nnsight_model)
 
-    def _exchange_pp_module_meta(self) -> dict:
+    def _probe_pp_output_shapes(self) -> dict:
+        """Probe output shapes of local modules via FakeTensorMode forward.
+
+        Runs the real (TP-sharded) model forward once with fake tensors,
+        captures each module's output, applies compat transforms to get
+        the user-facing shape (what the PP hook buffer stores), and
+        records ``{path: {dtype, num_outputs, static_suffixes}}``.
+
+        """
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from ..pp import is_pp_missing
+
+        captured = {}
+        hooks = []
+
+        # Register temporary hooks on all local modules.
+        for name, module in self.model.named_modules():
+            if is_pp_missing(module):
+                continue
+            _name = name
+
+            def _hook(mod, _input, output, n=_name):
+                captured[n] = output
+
+            hooks.append(module.register_forward_hook(_hook))
+
+        # Build fake inputs.
+        hidden_size = self.model_config.hf_config.hidden_size
+        device = next(self.model.parameters()).device
+
+        try:
+            with FakeTensorMode(allow_non_fake_inputs=True):
+                input_ids = torch.zeros(1, dtype=torch.long, device=device)
+                positions = torch.zeros(1, dtype=torch.long, device=device)
+
+                pp_group = get_pp_group()
+                if pp_group.is_first_rank:
+                    intermediate_tensors = None
+                else:
+                    intermediate_tensors = IntermediateTensors({
+                        "hidden_states": torch.zeros(
+                            1, hidden_size,
+                            dtype=self.model_config.dtype, device=device,
+                        ),
+                        "residual": torch.zeros(
+                            1, hidden_size,
+                            dtype=self.model_config.dtype, device=device,
+                        ),
+                    })
+
+                with torch.no_grad():
+                    self.model(input_ids, positions, intermediate_tensors)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        finally:
+            for h in hooks:
+                h.remove()
+
+        # Record raw output shapes — no compat transforms here.
+        # The pull protocol transfers raw tensors; compat transforms
+        # happen downstream in nnsight's output hooks.
+        meta = {}
+        for path, raw_output in captured.items():
+            try:
+                tensors = list(raw_output) if isinstance(raw_output, (tuple, list)) else [raw_output]
+                tensor_list = [t for t in tensors if isinstance(t, torch.Tensor)]
+                if tensor_list:
+                    meta[path] = {
+                        "dtype": tensor_list[0].dtype,
+                        "num_outputs": len(tensor_list),
+                        "static_suffixes": [tuple(t.shape[1:]) for t in tensor_list],
+                    }
+            except Exception:
+                continue
+
+        return meta
+
+    def _exchange_pp_module_meta(self, shape_meta: dict) -> dict:
         """Exchange local module metadata across PP ranks.
 
-        Each rank collects {path: (dtype, static_shape)} for its local
-        (non-PPMissing) modules — shapes reflect real TP/EP sharding.
-        An allgather across PP ranks merges into a complete map.
+        Each rank collects ``{path: {dtype, num_outputs, static_suffixes}}``
+        for its local (non-PPMissing) modules.  Shapes come from
+        ``_probe_pp_output_shapes()`` and reflect real TP/EP sharding.
+        An allgather across PP ranks merges into a complete map so every
+        rank can pre-compute recv buffer sizes without shape on the wire.
+
+        Args:
+            shape_meta: Output of ``_probe_pp_output_shapes()``.
 
         Returns:
-            dict mapping module_path -> dtype (torch.dtype).
-            Shape info is encoded separately per module for the pull
-            protocol.
+            dict mapping module_path to
+            ``{"dtype", "num_outputs", "static_suffixes"}``.
         """
         import pickle
         import torch.distributed as dist
@@ -527,14 +608,23 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         pp_group = get_pp_group()
 
-        # Collect local module metadata
+        # Build local metadata: merge dtype from real modules with
+        # shape info from the probe.
         local_meta = {}
         for name, module in self.model.named_modules():
             if not is_pp_missing(module):
-                # Use first parameter's dtype, fall back to model config
                 param = next(module.parameters(recurse=False), None)
                 dtype = param.dtype if param is not None else self.model_config.dtype
-                local_meta[name] = dtype
+                if name in shape_meta:
+                    entry = shape_meta[name].copy()
+                    entry["dtype"] = dtype
+                    local_meta[name] = entry
+                else:
+                    local_meta[name] = {
+                        "dtype": dtype,
+                        "num_outputs": 1,
+                        "static_suffixes": [],
+                    }
 
         # Serialize and allgather across PP ranks
         local_bytes = pickle.dumps(local_meta)
@@ -543,7 +633,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
         )
         size_tensor = torch.tensor([len(local_bytes)], dtype=torch.int64)
 
-        # Gather sizes first
         all_sizes = [
             torch.zeros(1, dtype=torch.int64)
             for _ in range(pp_group.world_size)

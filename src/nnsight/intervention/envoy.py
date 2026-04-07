@@ -356,8 +356,9 @@ class Envoy(Batchable):
         source_rank = self._interleaver.pp_module_map.get_owning_rank(self.path)
 
         # Resolve dtype from the shared metadata map built at load time.
-        dtype_map = getattr(self._interleaver, 'pp_module_meta', {})
-        dtype = dtype_map.get(self.path, torch.float32)
+        meta_map = getattr(self._interleaver, 'pp_module_meta', {})
+        meta = meta_map.get(self.path, {})
+        dtype = meta.get("dtype", torch.float32) if isinstance(meta, dict) else meta
 
         lazy = LazyRemoteTensor(
             source_rank=source_rank,
@@ -365,10 +366,17 @@ class Envoy(Batchable):
             dtype=dtype,
         )
 
-        # Wire up the pull function: cross-rank pull via the listener
+        # Wire up the pull function: cross-rank pull via the listener.
+        # Capture num_tokens from mediator.batch_group so the consumer
+        # can pre-compute the recv buffer size (no shape on the wire).
         if hasattr(self._interleaver, 'pp_listener') and self._interleaver.pp_listener is not None:
             listener = self._interleaver.pp_listener
-            lazy._pull_fn = listener.pull_from_remote
+            num_tokens = mediator.batch_group[1] if mediator.batch_group else 0
+
+            def _pull(src_rank, prov_str, _nt=num_tokens):
+                return listener.pull_from_remote(src_rank, prov_str, _nt)
+
+            lazy._pull_fn = _pull
 
         return lazy
 
