@@ -88,13 +88,11 @@ Files changed: `pp_listener.py`, `envoy.py`, `interleaver.py`, `GPUModelRunner.p
 
 ---
 
-## BUG-7: Pull protocol crashes on tuple outputs (vLLM layers return tuples)
+## ~~BUG-7: Pull protocol crashes on tuple outputs (vLLM layers return tuples)~~ FIXED
 
-`pp_listener.py:_listen_loop` — calls `tensor.detach().contiguous().cpu()` on the buffer value, but vLLM decoder layers return `(hidden_states, residual)` tuples. The `narrow` in `handle_value_event` maps over the tuple (narrowing each tensor), so the buffer stores a tuple of narrowed tensors. `_listen_loop` then crashes trying to call `.detach()` on a tuple.
+~~`pp_listener.py:_listen_loop` — calls `tensor.detach().contiguous().cpu()` on the buffer value, but vLLM decoder layers return `(hidden_states, residual)` tuples.~~
 
-Discovered during BUG-3 analysis. Currently not hit because PP test coverage doesn't exercise cross-rank pulls of tuple-output modules.
-
-**Fix:** Either serialize tuples element-by-element in the pull protocol, or store only the first element (hidden states) since that's what users access via `model.layers[i].output[0]`.
+**Fixed:** Producer normalizes value to a list of tensors, sends metadata `[num_elements, ndim0, *shape0, ndim1, *shape1, ...]` then all tensor data concatenated as one flat buffer. Consumer splits, reshapes, returns a tuple if multi-element or a tensor if single-element. Same 2 sends as before — no extra round-trips. File changed: `pp_listener.py`.
 
 ---
 

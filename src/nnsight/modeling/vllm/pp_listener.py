@@ -21,6 +21,7 @@ import torch.distributed as dist
 
 TAG_REQUEST = 0
 TAG_RESPONSE = 1
+_META_SLOTS = 32  # metadata buffer size: supports ~5 elements of 5D tensors
 
 
 class PPListener:
@@ -103,26 +104,29 @@ class PPListener:
                 dist.recv(key_buf, group=group, group_src=requesting_rank, tag=TAG_REQUEST)
                 provider_string = key_buf.numpy().tobytes().decode("utf-8")
 
-                # 3. Look up tensor in buffer (blocks until available)
-                tensor = self.local_lookup(provider_string)
+                # 3. Look up value in buffer (blocks until available)
+                value = self.local_lookup(provider_string)
 
-                # 4. Move to CPU for gloo transfer
-                cpu_tensor = tensor.detach().contiguous().cpu()
+                # Normalize to list of tensors (handles both tensor and tuple)
+                tensors = list(value) if isinstance(value, (tuple, list)) else [value]
+                cpu_tensors = [t.detach().contiguous().cpu() for t in tensors]
 
-                # 5. Send shape on TAG_RESPONSE: fixed 8-slot buffer [ndim, *shape, 0...]
-                shape_meta = torch.zeros(8, dtype=torch.int64)
-                shape_meta[0] = cpu_tensor.ndim
-                for i, s in enumerate(cpu_tensor.shape):
-                    shape_meta[1 + i] = s
+                # 4. Send metadata: [num_elements, ndim0, *shape0, ndim1, *shape1, ...]
+                # 32 slots supports up to ~5 elements of 5D tensors.
+                shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
+                shape_meta[0] = len(cpu_tensors)
+                idx = 1
+                for t in cpu_tensors:
+                    shape_meta[idx] = t.ndim
+                    idx += 1
+                    for s in t.shape:
+                        shape_meta[idx] = s
+                        idx += 1
                 dist.send(shape_meta, group=group, group_dst=requesting_rank, tag=TAG_RESPONSE)
 
-                # 6. Send flattened tensor data on TAG_RESPONSE
-                dist.send(
-                    cpu_tensor.contiguous().view(-1),
-                    group=group,
-                    group_dst=requesting_rank,
-                    tag=TAG_RESPONSE,
-                )
+                # 5. Send all tensor data concatenated as one flat buffer
+                flat = torch.cat([t.contiguous().view(-1) for t in cpu_tensors])
+                dist.send(flat, group=group, group_dst=requesting_rank, tag=TAG_RESPONSE)
 
             except Exception:
                 import traceback
@@ -136,7 +140,7 @@ class PPListener:
         self,
         source_rank: int,
         provider_string: str,
-    ) -> torch.Tensor:
+    ):
         if self._pull_group is None:
             raise RuntimeError("No pull_group configured for cross-rank pull")
 
@@ -154,28 +158,42 @@ class PPListener:
         dist.send(key_tensor, group=group, group_dst=source_rank, tag=TAG_REQUEST)
 
         # 3. Resolve dtype locally from the shared metadata map.
-        # Strip iteration suffix (e.g. ".output.i0" → module path) to look up dtype.
         module_path = _provider_to_module_path(provider_string)
         dtype = self._dtype_map.get(module_path, torch.float32)
 
-        # 4. Recv shape on TAG_RESPONSE: [ndim, *shape]
-        # Max ndim in practice is 4-5; 8 slots is generous.
-        shape_meta = torch.zeros(8, dtype=torch.int64)
+        # 4. Recv metadata: [num_elements, ndim0, *shape0, ndim1, *shape1, ...]
+        shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
         dist.recv(shape_meta, group=group, group_src=source_rank, tag=TAG_RESPONSE)
 
-        ndim = int(shape_meta[0].item())
-        shape = [int(shape_meta[1 + i].item()) for i in range(ndim)]
+        num_elements = int(shape_meta[0].item())
+        shapes = []
+        idx = 1
+        total_numel = 0
+        for _ in range(num_elements):
+            ndim = int(shape_meta[idx].item())
+            idx += 1
+            shape = [int(shape_meta[idx + j].item()) for j in range(ndim)]
+            idx += ndim
+            numel = 1
+            for s in shape:
+                numel *= s
+            shapes.append((shape, numel))
+            total_numel += numel
 
-        numel = 1
-        for s in shape:
-            numel *= s
-
-        # 5. Recv flattened tensor on TAG_RESPONSE
-        flat = torch.zeros(numel, dtype=dtype)
+        # 5. Recv all tensor data as one flat buffer
+        flat = torch.zeros(total_numel, dtype=dtype)
         dist.recv(flat, group=group, group_src=source_rank, tag=TAG_RESPONSE)
 
-        # 6. Reshape and move to GPU
-        return flat.reshape(shape).to(self._device)
+        # 6. Split, reshape, and move to GPU
+        results = []
+        offset = 0
+        for shape, numel in shapes:
+            results.append(flat[offset:offset + numel].reshape(shape).to(self._device))
+            offset += numel
+
+        if num_elements == 1:
+            return results[0]
+        return tuple(results)
 
 
 def _provider_to_module_path(provider_string: str) -> str:
