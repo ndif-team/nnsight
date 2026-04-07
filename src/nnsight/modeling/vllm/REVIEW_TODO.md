@@ -36,13 +36,13 @@ Files changed: `interleaver.py`, `iterator.py`, `GPUModelRunner.py`.
 
 ---
 
-## BUG-2: `Globals.enter()` change affects all code paths, not just PP
+## ~~BUG-2: `Globals.enter()` change affects all code paths, not just PP~~ FIXED
 
-`globals.py:137` — Changed from `if cur == 0:` to `if cur == 0 and _saves_var.get() is None:`. This means: if a previous trace left a stale saves set (e.g., exception during cleanup that didn't reach `Globals.clear()`), the next trace silently reuses the stale set instead of getting a fresh one. This is a regression for **all** nnsight users, not just PP.
+~~`globals.py:137` — Changed from `if cur == 0:` to `if cur == 0 and _saves_var.get() is None:`. The `is None` guard prevented cleanup between unrelated traces.~~
 
-The intent was to preserve saves across the `execute_model` → `_sample` boundary in vLLM (where stack drops to 0 between the two calls). But the guard is too broad — it also prevents cleanup between unrelated traces.
+**Fixed:** Root cause was that vLLM saves were tracked in the global `Globals.saves` set, which got orphaned when `Globals.enter()` reset it across `execute_model`/`_sample` boundaries. Fix: moved save tracking to per-trace sets stored in `trace_contexts["saves"]`. Each mediator holds a reference (`mediator._trace_saves`), and `_saves_var` is pointed at the trace's set before `mediator.start()`. `collect_saves` and `cleanup_finished` now operate on per-trace sets. `Globals.enter()` reverted to unconditional `if cur == 0: reset`.
 
-**Fix:** Either scope the guard to the vLLM path (e.g., a flag), or ensure `_saves_var` is always reset to `None` after a trace completes (in `Globals.exit()` when stack reaches 0).
+Files changed: `GPUModelRunner.py` (serve branch), `globals.py` (reverted in merge).
 
 ---
 
