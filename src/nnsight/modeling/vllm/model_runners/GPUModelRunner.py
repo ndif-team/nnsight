@@ -327,9 +327,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model._interleaver.batcher = VLLMBatcher()
 
-        # Always call wrap() to register compat transforms (module
-        # detection for HF-compatibility layer).  TP gather/split
-        # hooks are gated on world_size > 1 inside wrap() itself.
+        # Register TP gather/split hooks (gated on world_size > 1
+        # inside wrap()).
         self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:

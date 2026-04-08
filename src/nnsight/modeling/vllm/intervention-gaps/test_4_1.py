@@ -82,8 +82,8 @@ def run_vllm(model_name, prompt):
         print(f"loss.backward(): ERROR -- {type(e).__name__}: {e}")
 
     # The real test is whether backward() works (actual gradient flow).
-    # requires_grad_() may succeed if the compat layer creates non-inference
-    # tensors, but that doesn't mean gradients actually propagate — the
+    # requires_grad_() may succeed if nnsight clones tensors out of inference
+    # mode, but that doesn't mean gradients actually propagate — the
     # underlying computation graph still ran under inference_mode.
     backward_failed = errors[1][1] is not None if len(errors) > 1 else True
     status = "CONFIRMED" if backward_failed else "NOT_REPRODUCED"

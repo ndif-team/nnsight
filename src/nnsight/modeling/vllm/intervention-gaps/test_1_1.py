@@ -70,7 +70,7 @@ def run_vllm(model_name, prompt, layer_idx):
     model = VLLM(model_name, gpu_memory_utilization=0.05, dispatch=True)
     findings = {}
 
-    # --- Test layer.output[0] (compat layer combines dual streams) ---
+    # --- Test layer.output[0] (first element of dual-stream tuple) ---
     with model.trace(prompt, temperature=0.0):
         layer_out0_ref = model.model.layers[layer_idx].output[0].save()
         layer_out0_clone = model.model.layers[layer_idx].output[0].clone().save()

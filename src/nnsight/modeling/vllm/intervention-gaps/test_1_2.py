@@ -42,8 +42,8 @@ def run_vllm(model_name, prompt, layer_idx):
 
     model = VLLM(model_name, gpu_memory_utilization=0.05, dispatch=True)
 
-    # With compat layer: output is now (combined,) where combined = mlp_out + residual
-    # So output[0] should NOT equal mlp.output (it includes the residual).
+    # vLLM decoder layers return (mlp_output, residual) — output[0] is the raw mlp output.
+    # HF would return (combined,) where combined = mlp_out + residual.
     with model.trace(prompt, temperature=0.0):
         mlp_out = model.model.layers[layer_idx].mlp.output.clone().save()
         out0 = model.model.layers[layer_idx].output[0].clone().save()
@@ -69,11 +69,11 @@ def run_vllm(model_name, prompt, layer_idx):
     print(f"\noutput[0] == mlp.output: {out0_eq_mlp} (diff={out0_mlp_diff:.6f}, cos={out0_mlp_cos:.6f})")
 
     # Gap is confirmed if output[0] == mlp.output (raw MLP, no residual added).
-    # Gap is NOT reproduced if output[0] != mlp.output (compat layer combined them).
+    # This is expected: vLLM returns (mlp_output, residual) as separate streams.
     status = "CONFIRMED" if out0_eq_mlp or out0_mlp_cos > 0.99 else "NOT_REPRODUCED"
     detail = (
         f"output[0]==mlp.output: {out0_eq_mlp} (cos={out0_mlp_cos:.4f}); "
-        f"{'compat layer combined dual streams' if not out0_eq_mlp else 'still raw mlp output'}"
+        f"{'dual streams separate (expected)' if out0_eq_mlp else 'streams combined (unexpected)'}"
     )
     return {
         "backend": "vllm",
