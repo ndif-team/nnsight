@@ -21,6 +21,9 @@ class AppConfigModel(BaseModel):
     CACHE_DIR: The directory to cache the model.
     CROSS_INVOKER: Whether to enable cross-invoker. This allows you to refernce variable directly from one invoker to another.
         This has some performance cost.
+    OUT_OF_ORDER: Whether to enable out-of-order access detection. When True, the interleaver tracks
+        module execution history to detect when interventions access modules out of forward-pass order.
+        When False, skips history tracking for a faster hook fast-path. Defaults to True.
     """
 
     REMOTE_LOGGING: bool = True
@@ -28,6 +31,7 @@ class AppConfigModel(BaseModel):
     DEBUG: bool = True
     CACHE_DIR: str = "~/.cache/nnsight/"
     CROSS_INVOKER: bool = True
+    OUT_OF_ORDER: bool = True
     TRACE_CACHING: bool = False
 
     def __setattr__(self, name, value):

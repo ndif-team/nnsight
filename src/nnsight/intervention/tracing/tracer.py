@@ -516,18 +516,41 @@ class InterleavingTracer(Tracer):
         if not self.model.interleaving:
             raise ValueError("Cannot create a cache outside an invoker.")
 
-        self.model._interleaver.current.set_user_cache(
-            Cache(
-                modules,
-                device,
-                dtype,
-                detach,
-                include_output,
-                include_inputs,
-                rename_dict,
-                alias_dict,
-            )
+        cache_obj = Cache(
+            modules,
+            device,
+            dtype,
+            detach,
+            include_output,
+            include_inputs,
+            rename_dict,
+            alias_dict,
         )
+
+        self.model._interleaver.current.set_user_cache(cache_obj)
+
+        # Enable hooks persistently for cached modules so they call handle() every iteration.
+        interleaver = self.model._interleaver
+        hook_fns = interleaver.hook_fns
+
+        if cache_obj.modules is not None:
+            # Specific modules requested — enable only those.
+            for module_path in cache_obj.modules:
+                if include_output:
+                    hook_fn = hook_fns.get(f"{module_path}.output")
+                    if hook_fn is not None:
+                        hook_fn._cache_enabled = True
+                if include_inputs:
+                    hook_fn = hook_fns.get(f"{module_path}.input")
+                    if hook_fn is not None:
+                        hook_fn._cache_enabled = True
+        else:
+            # All modules — enable all output (and optionally input) hooks.
+            for key, hook_fn in hook_fns.items():
+                if include_output and key.endswith(".output"):
+                    hook_fn._cache_enabled = True
+                if include_inputs and key.endswith(".input"):
+                    hook_fn._cache_enabled = True
 
         return self.model._interleaver.current.user_cache[-1].cache
 

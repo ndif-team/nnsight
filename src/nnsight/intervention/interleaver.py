@@ -105,6 +105,7 @@ class Interleaver:
 
         self._interleaving = False
         self.hook_handles = []
+        self.hook_fns = {}
 
     def initialize(
         self,
@@ -247,6 +248,12 @@ class Interleaver:
         else:
             skip_container = module.__nnsight_skip__
 
+        # Pre-compute provider key strings to avoid f-string formatting on every hook call.
+        input_key = f"{module.__path__}.input"
+        output_key = f"{module.__path__}.output"
+
+        out_of_order = CONFIG.APP.OUT_OF_ORDER
+
         # Hook the module's input to intercept and interleave the input values.
         # Each interleaver adds its own hooks; they coexist and each checks its own interleaving state.
         def input_hook(module: torch.nn.Module, args, kwargs):
@@ -255,31 +262,59 @@ class Interleaver:
             if not self.interleaving:
                 return args, kwargs
 
-            # Clear any stale skip for this module from previous failed traces
+            # Always clear stale skips from previous traces.
             skip_container[0] = None
 
-            # NNsight keeps the modules attribute path as the provider string on the module itself.
-            provider = module.__path__
+            # Fast path: no mediator is requesting this module's input and no cache needs it.
+            if not (input_hook._enabled or input_hook._cache_enabled):
+                if out_of_order:
+                    for mediator in self.mediators:
+                        if not mediator.alive:
+                            continue
+                        i = mediator.iteration_tracker[input_key]
+                        mediator.history.add(f"{input_key}.i{i}")
+                        mediator.iteration_tracker[input_key] += 1
+                else:
+                    for mediator in self.mediators:
+                        if not mediator.alive:
+                            continue
+                        mediator.iteration_tracker[input_key] += 1
+                return args, kwargs
+
+            # Active path: a mediator is requesting this module's input or cache needs it.
+
+            # Clear one-shot flag before handle(). If the mediator re-enables it
+            # during handle() (next iteration request), it will persist.
+            input_hook._enabled = False
 
             # Provide the input values to the interleaver to be potentially consumed and/or modified by the mediators.
-            # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
             try:
-                inputs = self.handle(f"{provider}.input", (args, kwargs), iterate=True)
-            # To skip a module, we raise a SkipException with the value we want to return instead.
-            # The skip_container is shared so the skippable forward method can read it.
+                inputs = self.handle(input_key, (args, kwargs), iterate=True)
             except SkipException as e:
                 skip_container[0] = e.value
-            # If not skipping, just return the potentially modified input values.
             else:
                 args, kwargs = inputs
 
+            # If any mediator still has a pending request (event not consumed because
+            # the provider iteration didn't match yet), keep the hook enabled so it
+            # fires on the next forward pass.
+            if not input_hook._enabled:
+                for mediator in self.mediators:
+                    if mediator.alive and mediator.event_queue.has_value:
+                        input_hook._enabled = True
+                        break
+
             return args, kwargs
+
+        input_hook._enabled = False
+        input_hook._cache_enabled = False
 
         # Register the input hook to the module's forward pre-hook.
         input_handle = module.register_forward_pre_hook(
             input_hook, with_kwargs=True, prepend=True
         )
         self.hook_handles.append(input_handle)
+        self.hook_fns[input_key] = input_hook
 
         def output_hook(module: torch.nn.Module, _, output: Any):
 
@@ -287,8 +322,27 @@ class Interleaver:
             if not self.interleaving:
                 return output
 
-            # NNsight keeps the modules attribute path as the provider string on the module itself.
-            provider = module.__path__
+            # Fast path: no mediator is requesting this module's output and no cache needs it.
+            if not (output_hook._enabled or output_hook._cache_enabled):
+                if out_of_order:
+                    for mediator in self.mediators:
+                        if not mediator.alive:
+                            continue
+                        i = mediator.iteration_tracker[output_key]
+                        mediator.history.add(f"{output_key}.i{i}")
+                        mediator.iteration_tracker[output_key] += 1
+                else:
+                    for mediator in self.mediators:
+                        if not mediator.alive:
+                            continue
+                        mediator.iteration_tracker[output_key] += 1
+                return output
+
+            # Active path: a mediator is requesting this module's output or cache needs it.
+
+            # Clear one-shot flag before handle(). If the mediator re-enables it
+            # during handle() (next iteration request), it will persist.
+            output_hook._enabled = False
 
             # If we are skipping, we set the output to the value we want to return and clear the skip variable.
             if skip_container[0] is not None:
@@ -298,14 +352,26 @@ class Interleaver:
                 skip_container[0] = None
 
             # Provide the output values to the interleaver to be potentially consumed and/or modified by the mediators.
-            # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
-            output = self.handle(f"{provider}.output", output, iterate=True)
+            output = self.handle(output_key, output, iterate=True)
+
+            # If any mediator still has a pending request (event not consumed because
+            # the provider iteration didn't match yet), keep the hook enabled so it
+            # fires on the next forward pass.
+            if not output_hook._enabled:
+                for mediator in self.mediators:
+                    if mediator.alive and mediator.event_queue.has_value:
+                        output_hook._enabled = True
+                        break
 
             return output
+
+        output_hook._enabled = False
+        output_hook._cache_enabled = False
 
         # Register the output hook to the module's forward post-hook.
         output_handle = module.register_forward_hook(output_hook, prepend=True)
         self.hook_handles.append(output_handle)
+        self.hook_fns[output_key] = output_hook
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
@@ -386,6 +452,11 @@ class Interleaver:
 
         # Clear the interleaving flag on exit.
         self._interleaving = False
+
+        # Clear cache-enabled flags set during this interleaving session.
+        for hook_fn in self.hook_fns.values():
+            hook_fn._cache_enabled = False
+            hook_fn._enabled = False
 
         # Clear the mediators that are no longer alive.
         self.mediators = [mediator for mediator in self.mediators if mediator.alive]

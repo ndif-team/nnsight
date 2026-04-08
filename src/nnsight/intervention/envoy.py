@@ -149,12 +149,18 @@ class eproperty:
             return self
 
         if envoy.interleaving:
-            
-            requester = f"{envoy.path}.{self.key}"
-            
+
+            # Enable the hook so the provider side calls handle() when this module runs.
+            provider_key = f"{envoy.path}.{self.key}"
+            hook_fn = envoy._interleaver.hook_fns.get(provider_key)
+            if hook_fn is not None:
+                hook_fn._enabled = True
+
+            requester = provider_key
+
             if self.iterate:
                 requester = envoy._interleaver.iterate_requester(requester)
-                
+
             value = envoy._interleaver.current.request(requester)
         else:
             raise ValueError(
@@ -172,9 +178,15 @@ class eproperty:
             value = self._preprocess(envoy, value)
 
         if envoy.interleaving:
-            
-            requester = f"{envoy.path}.{self.key}"
-            
+
+            # Enable the hook so the provider side calls handle() when this module runs.
+            provider_key = f"{envoy.path}.{self.key}"
+            hook_fn = envoy._interleaver.hook_fns.get(provider_key)
+            if hook_fn is not None:
+                hook_fn._enabled = True
+
+            requester = provider_key
+
             if self.iterate:
                 requester = envoy._interleaver.iterate_requester(requester)
 
@@ -681,6 +693,12 @@ class Envoy(Batchable):
         Args:
             replacement (Any): The replacement value to replace the module's output with.
         """
+
+        # Enable the input hook so the skip is intercepted by handle().
+        input_key = f"{self.path}.input"
+        hook_fn = self._interleaver.hook_fns.get(input_key)
+        if hook_fn is not None:
+            hook_fn._enabled = True
 
         return self._interleaver.current.skip(
             self._interleaver.iterate_requester(f"{self.path}.input"), replacement
