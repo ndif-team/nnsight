@@ -13,13 +13,9 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    Dict,
     List,
     Optional,
     Set,
-    Tuple,
-    Union,
-    Iterator,
 )
 
 import _thread
@@ -128,10 +124,11 @@ class Interleaver:
         for mediator in self.mediators:
             mediator.cancel()
 
-        self.mediators = None
+        self.mediators = []
         self.tracer = None
         self.batcher = None
         self.default_all = None
+        self.transform = None
 
         self.current = None
 
@@ -584,8 +581,7 @@ class Mediator:
             self.lock.acquire()
 
         def put(self, value: Any):
-            self.value = value
-            self.has_value = True
+            self.restore(value)
 
             self.lock.release()
 
@@ -635,6 +631,8 @@ class Mediator:
 
         self._prev = None
 
+        self.transform = None
+
     @property
     def alive(self):
 
@@ -662,6 +660,8 @@ class Mediator:
             interleaver (Interleaver): The interleaver managing this mediator
         """
         self.interleaver = interleaver
+
+        self.transform = None
 
         # Only copy globals that the intervention code actually references.
         all_globals = self.intervention.__globals__
@@ -801,6 +801,13 @@ class Mediator:
             value = self.interleaver.batcher.narrow(self.batch_group)
 
             self.respond(value)
+
+            if self.transform:
+                value = self.transform(value)
+
+                self.interleaver.batcher.swap(self.batch_group, value)
+
+                self.transform = None
         else:
             # If the requester has been seen before, respond with an out of order error.
             if requester in self.history:

@@ -45,8 +45,11 @@ def trace_only(fn: Callable):
 
     return wrapper
 
+
 from typing import TypeVar
-T = TypeVar('T')
+
+T = TypeVar("T")
+
 
 class eproperty:
     """A descriptor for defining hookable properties on Envoy subclasses.
@@ -111,16 +114,20 @@ class eproperty:
 
     def __init__(self, key: str = None, description: str = None, iterate: bool = True):
         super().__init__()
-        
+
         self.name: str = None
         self.key = key
         self.description = description
         self.iterate = iterate
+
+        self._hook: Callable = None
         self._postprocess: Optional[Callable] = None
         self._preprocess: Optional[Callable] = None
+        self._transform: Optional[Callable] = None
 
-    def __call__(self, stub: Callable[..., T]) -> T | property:
+    def __call__(self, stub: Callable[..., T]) -> T | "eproperty":
         self.name = stub.__name__
+        self._hook = stub
         if self.key is None:
             self.key = self.name
         return self
@@ -143,44 +150,52 @@ class eproperty:
         self._preprocess = func
         return self
 
+    def transform(self, func: Callable) -> "eproperty":
+        """Register a transform function called on ``__get__`` and ``__set__``.
+
+        The function receives ``(envoy, value)`` and should return the
+        processed value.
+        """
+        self._transform = func
+        return self
+
     def __get__(self, envoy: Envoy, owner):
 
-        if envoy is None:
-            return self
-
         if envoy.interleaving:
-            
+
             requester = f"{envoy.path}.{self.key}"
-            
+
             if self.iterate:
                 requester = envoy._interleaver.iterate_requester(requester)
-                
+
             value = envoy._interleaver.current.request(requester)
+
+            if self._preprocess is not None:
+                value = self._preprocess(envoy, value)
+
+            if self._transform is not None:
+                envoy._interleaver.current.transform = self._transform
+
         else:
             raise ValueError(
                 f"Cannot access `{envoy.path}.{self.name}` outside of interleaving."
             )
 
-        if self._postprocess is not None:
-            value = self._postprocess(envoy, value)
-
         return value
 
     def __set__(self, envoy: Envoy, value: Any):
 
-        if self._preprocess is not None:
-            value = self._preprocess(envoy, value)
+        if self._postprocess is not None:
+            value = self._postprocess(envoy, value)
 
         if envoy.interleaving:
-            
+
             requester = f"{envoy.path}.{self.key}"
-            
+
             if self.iterate:
                 requester = envoy._interleaver.iterate_requester(requester)
 
-            envoy._interleaver.current.swap(
-                requester, value
-            )
+            envoy._interleaver.current.swap(requester, value)
 
         else:
             raise ValueError(
@@ -335,11 +350,11 @@ class Envoy(Batchable):
             ...     hidden_states = model.transformer.h[0].attn.input.save()
         """
 
-    @input.postprocess
+    @input.preprocess
     def input(self, value):
         return [*value[0], *value[1].values()][0]
 
-    @input.preprocess
+    @input.postprocess
     def input(self, value):
         inputs = self.inputs
         return (value, *inputs[0][1:]), inputs[1]
