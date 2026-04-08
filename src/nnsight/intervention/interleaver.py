@@ -13,13 +13,9 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    Dict,
     List,
     Optional,
     Set,
-    Tuple,
-    Union,
-    Iterator,
 )
 
 import _thread
@@ -104,7 +100,7 @@ class Interleaver:
         self.initialize(mediators, tracer, batcher)
 
         self._interleaving = False
-        self.hook_handles = []
+        self.hooks: dict[str, tuple[set, Callable]] = dict()
 
     def initialize(
         self,
@@ -128,18 +124,19 @@ class Interleaver:
         for mediator in self.mediators:
             mediator.cancel()
 
-        self.mediators = None
+        self.mediators = []
         self.tracer = None
         self.batcher = None
         self.default_all = None
+        self.transform = None
 
         self.current = None
 
     def __del__(self):
         """Remove all hooks when the interleaver is garbage collected."""
-        for handle in self.hook_handles:
-            handle.remove()
-        self.hook_handles = []
+        for container, hook in self.hooks.values():
+            container.remove(hook)
+        self.hooks.clear()
 
     def iterate_provider(self, provider: str):
         """
@@ -230,65 +227,115 @@ class Interleaver:
             skip_container = module.__nnsight_skip__
 
             module.__nnsight_forward__ = original_forward
+            module.__nnsight_input_hooks__ = set()
+            module.__nnsight_output_hooks__ = set()
 
             module_ref = weakref.ref(module)
 
             @wraps(original_forward)
             def nnsight_forward(*args, **kwargs):
+
                 m = module_ref()
+
+                input_hooks = m.__nnsight_input_hooks__
+
+                enabled = False
+
+                if input_hooks:
+                    for input_hook in input_hooks:
+                        if input_hook.enabled:
+                            args, kwargs = input_hook(m, (args, kwargs))
+                            enabled = True
+                if not enabled:
+                    for mediator in self.mediators:
+                        if not mediator.alive:
+                            continue
+
+                        i = mediator.iteration_tracker[f"{m.__path__}.input"]
+
+                        mediator.history.add(f"{m.__path__}.input.i{i}")
+
+                        mediator.iteration_tracker[f"{m.__path__}.input"] += 1
+
                 if skip_container[0] is not None:
                     # Skip is set, return the skip value
                     # (will be cleared by output hook)
                     return skip_container[0]
 
-                return m.__nnsight_forward__(m, *args, **kwargs)
+                output = m.__nnsight_forward__(m, *args, **kwargs)
+
+                output_hooks = m.__nnsight_output_hooks__
+
+                enabled = False
+
+                if output_hooks:
+                    for output_hook in output_hooks:
+                        if output_hook.enabled:
+                            enabled = True
+                            output = output_hook(m, output)
+                if not enabled:
+                    for mediator in self.mediators:
+                        if not mediator.alive:
+                            continue
+
+                        i = mediator.iteration_tracker[f"{m.__path__}.output"]
+
+                        mediator.history.add(f"{m.__path__}.output.i{i}")
+
+                        mediator.iteration_tracker[f"{m.__path__}.output"] += 1
+
+                return output
 
             module.forward = nnsight_forward
         else:
             skip_container = module.__nnsight_skip__
 
+        provider = f"{module.__path__}.input"
+
         # Hook the module's input to intercept and interleave the input values.
         # Each interleaver adds its own hooks; they coexist and each checks its own interleaving state.
-        def input_hook(module: torch.nn.Module, args, kwargs):
+        def input_hook(
+            module: torch.nn.Module, inputs: tuple[Any, Any]
+        ) -> tuple[Any, Any]:
 
             # If not interleaving, just return the original input values.
             if not self.interleaving:
-                return args, kwargs
+                return inputs
 
             # Clear any stale skip for this module from previous failed traces
             skip_container[0] = None
 
             # NNsight keeps the modules attribute path as the provider string on the module itself.
-            provider = module.__path__
+            provider = f"{module.__path__}.input"
 
             # Provide the input values to the interleaver to be potentially consumed and/or modified by the mediators.
             # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
             try:
-                inputs = self.handle(f"{provider}.input", (args, kwargs), iterate=True)
+                inputs = self.handle(provider, inputs, iterate=True)
             # To skip a module, we raise a SkipException with the value we want to return instead.
             # The skip_container is shared so the skippable forward method can read it.
             except SkipException as e:
                 skip_container[0] = e.value
-            # If not skipping, just return the potentially modified input values.
-            else:
-                args, kwargs = inputs
 
-            return args, kwargs
+            finally:
+                input_hook.enabled = False
 
-        # Register the input hook to the module's forward pre-hook.
-        input_handle = module.register_forward_pre_hook(
-            input_hook, with_kwargs=True, prepend=True
-        )
-        self.hook_handles.append(input_handle)
+            return inputs
 
-        def output_hook(module: torch.nn.Module, _, output: Any):
+        input_hook.enabled = False
+        module.__nnsight_input_hooks__.add(input_hook)
+        self.hooks[provider] = (module.__nnsight_input_hooks__, input_hook)
+
+        provider = f"{module.__path__}.output"
+
+        def output_hook(module: torch.nn.Module, output: Any) -> Any:
 
             # If not interleaving, just return the original output values.
             if not self.interleaving:
                 return output
 
             # NNsight keeps the modules attribute path as the provider string on the module itself.
-            provider = module.__path__
+            provider = f"{module.__path__}.output"
 
             # If we are skipping, we set the output to the value we want to return and clear the skip variable.
             if skip_container[0] is not None:
@@ -299,13 +346,17 @@ class Interleaver:
 
             # Provide the output values to the interleaver to be potentially consumed and/or modified by the mediators.
             # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
-            output = self.handle(f"{provider}.output", output, iterate=True)
+
+            try:
+                output = self.handle(provider, output, iterate=True)
+            finally:
+                output_hook.enabled = False
 
             return output
 
-        # Register the output hook to the module's forward post-hook.
-        output_handle = module.register_forward_hook(output_hook, prepend=True)
-        self.hook_handles.append(output_handle)
+        output_hook.enabled = False
+        module.__nnsight_output_hooks__.add(output_hook)
+        self.hooks[provider] = (module.__nnsight_output_hooks__, output_hook)
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
@@ -584,8 +635,7 @@ class Mediator:
             self.lock.acquire()
 
         def put(self, value: Any):
-            self.value = value
-            self.has_value = True
+            self.restore(value)
 
             self.lock.release()
 
@@ -635,6 +685,8 @@ class Mediator:
 
         self._prev = None
 
+        self.transform = None
+
     @property
     def alive(self):
 
@@ -662,6 +714,8 @@ class Mediator:
             interleaver (Interleaver): The interleaver managing this mediator
         """
         self.interleaver = interleaver
+
+        self.transform = None
 
         # Only copy globals that the intervention code actually references.
         all_globals = self.intervention.__globals__
@@ -801,20 +855,20 @@ class Mediator:
             value = self.interleaver.batcher.narrow(self.batch_group)
 
             self.respond(value)
-        else:
-            # If the requester has been seen before, respond with an out of order error.
-            if requester in self.history:
-                self.respond(
-                    Mediator.OutOfOrderError(
-                        f"Value was missed for {requester}. Did you call an Envoy out of order?"
-                    )
-                )
-            else:
-                # If the requester has not been seen before, add it to the history and put the value event back in the event queue to be processed later.
-                self.history.add(provider)
-                self.event_queue.restore((Events.VALUE, requester))
 
-                return False
+            if self.transform:
+                value = self.transform(value)
+
+                self.interleaver.batcher.swap(self.batch_group, value)
+
+                self.transform = None
+        else:
+
+            # If the requester has not been seen before, add it to the history and put the value event back in the event queue to be processed later.
+            self.history.add(provider)
+            self.event_queue.restore((Events.VALUE, requester))
+
+            return False
 
         return True
 
@@ -832,6 +886,7 @@ class Mediator:
         """
         # If fulfilled by this processor, swap the value and respond with the value and continue processing events.
         if provider == requester:
+
             # Swap the value in the batcher. Might only replace a slice of the value if this mediator is part of a batch group.
             self.interleaver.batcher.swap(self.batch_group, swap_value)
 
