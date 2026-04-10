@@ -1878,7 +1878,9 @@ Tips for working on nnsight internals or writing tests/benchmarks:
 | `intervention/tracing/base.py` | `Tracer.capture()` -- source extraction, AST parsing, `Info` creation |
 | `intervention/backends/base.py` | `Backend.__call__()` -- code compilation, code object caching, exec |
 | `intervention/tracing/globals.py` | `Globals.enter()/exit()` -- pymount lifecycle, `TracingCache` |
-| `intervention/interleaver.py` | Hook dispatch, thread management, mediator event loop |
+| `intervention/hooks.py` | One-shot hook registration, `requires_output`/`requires_input` decorators |
+| `intervention/interleaver.py` | Module wrapping, thread management, mediator event loop |
+| `intervention/envoy.py` | `eproperty` descriptor, `Envoy` proxy with `.output`/`.input`/`.inputs` |
 | `intervention/tracing/tracer.py` | `InterleavingTracer.compile()` -- function wrapping |
 | `intervention/tracing/invoker.py` | `Invoker.compile()` -- function wrapping with try/catch |
 
@@ -1917,8 +1919,9 @@ nnsight/
 │   │   ├── language.py      # LanguageModel class
 │   │   └── vllm/            # vLLM integration
 │   └── intervention/
-│       ├── envoy.py         # Core Envoy wrapper
-│       ├── interleaver.py   # Execution interleaving
+│       ├── envoy.py         # Envoy proxy, eproperty descriptor
+│       ├── hooks.py         # One-shot hook registration, requires_output/requires_input
+│       ├── interleaver.py   # Module wrapping, mediator thread management
 │       └── tracing/         # Tracer implementations
 └── tests/
     ├── test_tiny.py         # Basic NNsight tests

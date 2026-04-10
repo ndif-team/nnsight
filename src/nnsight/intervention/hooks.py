@@ -1,3 +1,24 @@
+"""Dynamic one-shot hook registration for lazy hook execution.
+
+Instead of permanently registering hooks on every module (which incurs overhead
+on every forward pass regardless of whether any intervention is active), hooks
+are registered **on-demand** by each mediator and **self-remove** after firing.
+
+This module provides:
+
+- :func:`add_ordered_hook` — inserts a PyTorch hook into a module's hook dict
+  at the correct position relative to other mediators, preserving mediator
+  execution order.
+- :func:`input_hook` / :func:`output_hook` — create one-shot hooks for a
+  specific mediator.  Each hook tracks iteration count, waits for the correct
+  iteration, self-removes, then delegates to ``mediator.handle()``.
+- :func:`requires_output` / :func:`requires_input` — decorators for
+  ``eproperty`` stub functions (e.g. ``Envoy.output``, ``Envoy.input``) that
+  ensure the appropriate one-shot hook is registered before the mediator
+  requests a value.  If the value is already being provided (checked via
+  ``batcher.current_provider``), hook registration is skipped.
+"""
+
 from functools import wraps
 from typing import Any, Callable, TYPE_CHECKING
 from .interleaver import Mediator
@@ -11,6 +32,23 @@ else:
 
 
 def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
+    """Register a hook on a module, inserted in mediator-index order.
+
+    When multiple mediators hook the same module, their hooks must fire in
+    mediator order (i.e. the order the invokes were defined).  PyTorch fires
+    hooks in dict-insertion order, so this function inserts the new hook at the
+    correct position by sorting on the ``mediator_idx`` attribute attached to
+    each hook function.
+
+    Args:
+        module: The PyTorch module to hook.
+        hook: The hook callable.  Must have a ``mediator_idx`` attribute.
+        type: ``"input"`` for a forward pre-hook, ``"output"`` for a forward
+            hook.
+
+    Returns:
+        A :class:`~torch.utils.hooks.RemovableHandle` that can remove the hook.
+    """
 
     if type == "input":
 
@@ -34,11 +72,10 @@ def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
         hook_dict[handle.id] = hook
         return handle
 
-    # Insert the hook into the dict at the position corresponding to its mediator_idx
-
+    # Insert the hook into the dict at the position corresponding to its mediator_idx.
+    # The dict is kept sorted by .mediator_idx so hooks fire in the correct order.
     hook_mediator_idx = getattr(hook, "mediator_idx", float("-inf"))
 
-    # Find where to insert (the dict is already sorted by .mediator_idx)
     items = list(hook_dict.items())
     inserted = False
     new_items = []
@@ -49,7 +86,6 @@ def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
             inserted = True
         new_items.append((k, v))
     if not inserted:
-        # insert at end
         new_items.append((handle.id, hook))
     hook_dict.clear()
     hook_dict.update(new_items)
@@ -58,6 +94,30 @@ def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
 
 
 def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
+    """Register a one-shot forward pre-hook for a mediator on a module.
+
+    The hook captures the mediator's current ``iteration`` at registration time.
+    On each forward call it increments ``iteration_tracker[path]``.  If the
+    tracker hasn't reached the target iteration yet, the hook returns early
+    (no-op).  Once the correct iteration fires, the hook **self-removes** via
+    ``handle.remove()`` and delegates to ``mediator.handle()`` to deliver or
+    modify the input value.
+
+    For iteration 0 the hook always fires on the first call (the
+    ``iteration != 0`` guard lets it through).  For higher iterations, the hook
+    stays registered across forward passes until the tracker matches.
+
+    Each mediator maintains its own ``iteration_tracker``, so hooks from
+    different mediators on the same module count independently.
+
+    Args:
+        mediator: The mediator requesting this hook.
+        module: The PyTorch module to hook.
+        path: The provider path prefix (e.g. ``"model.layer.0.input"``).
+
+    Returns:
+        A :class:`~torch.utils.hooks.RemovableHandle` for the registered hook.
+    """
 
     handle = None
     iteration = mediator.iteration
@@ -86,6 +146,20 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
 
 
 def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
+    """Register a one-shot forward hook for a mediator on a module.
+
+    Behaves identically to :func:`input_hook` but intercepts the module's
+    output rather than its input.  See :func:`input_hook` for details on
+    iteration tracking and self-removal.
+
+    Args:
+        mediator: The mediator requesting this hook.
+        module: The PyTorch module to hook.
+        path: The provider path prefix (e.g. ``"model.layer.0.output"``).
+
+    Returns:
+        A :class:`~torch.utils.hooks.RemovableHandle` for the registered hook.
+    """
 
     handle = None
     iteration = mediator.iteration
@@ -114,6 +188,16 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
 
 
 def requires_output(fn):
+    """Decorator that ensures an output hook is registered before the wrapped function runs.
+
+    Used on ``eproperty`` stub functions (e.g. ``Envoy.output``) to lazily
+    register a one-shot output hook when a mediator requests the value.
+
+    If ``batcher.current_provider`` already matches the requester string for
+    this module and iteration, the hook is skipped — the value is already being
+    provided (e.g. when ``output`` and another eproperty sharing the same key
+    are accessed back-to-back).
+    """
 
     @wraps(fn)
     def wrapper(self: Envoy, *args, **kwargs):
@@ -134,6 +218,14 @@ def requires_output(fn):
 
 
 def requires_input(fn):
+    """Decorator that ensures an input hook is registered before the wrapped function runs.
+
+    Used on ``eproperty`` stub functions (e.g. ``Envoy.inputs``, ``Envoy.input``,
+    ``Envoy.skip``) to lazily register a one-shot input hook when a mediator
+    requests or modifies the value.
+
+    See :func:`requires_output` for the ``current_provider`` skip logic.
+    """
 
     @wraps(fn)
     def wrapper(self: Envoy, *args, **kwargs):

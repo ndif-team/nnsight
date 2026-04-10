@@ -169,15 +169,17 @@ class Interleaver:
         return f"{provider}.i{iteration}"
 
     def iterate_requester(self, requester: str):
-        """
-        Update a requester string to include which iteration of the requester is being requested.
-        This is determined by the current mediator's iteration attribute, or influced by .iter contexts.
+        """Append the current mediator's iteration index to a requester string.
+
+        The iteration is determined by ``mediator.iteration``, which defaults
+        to 0 and is updated by :class:`IteratorTracer` when iterating over
+        generation steps (e.g. ``tracer.iter[:]``).
 
         Args:
-            requester (str): The requester string to update
+            requester: The base requester string (e.g. ``"model.layer.0.output"``).
 
         Returns:
-            str: The updated requester string
+            The requester with iteration suffix (e.g. ``"model.layer.0.output.i0"``).
         """
 
         mediator = self.current
@@ -187,21 +189,35 @@ class Interleaver:
         return f"{requester}.i{iteration}"
 
     def wrap_module(self, module: torch.nn.Module):
-        """
-        Instruments a PyTorch module to intercept inputs and outputs for interleaving.
+        """Prepare a module for lazy hook execution.
+
+        Unlike previous versions that registered permanent input/output hooks
+        on every module, this method only installs:
+
+        1. A **skippable forward wrapper** — replaces ``module.forward`` with
+           a thin wrapper that checks for ``__nnsight_skip__`` in kwargs.  If
+           present, the module's original forward is bypassed and the skip
+           value is returned directly.
+        2. A **sentinel output hook** — an empty ``register_forward_hook``
+           that returns ``output`` unchanged.  This is required because
+           PyTorch's ``Module.__call__`` fast-paths when *no* hooks are
+           registered: if a module has zero hooks at call time, dynamically
+           added hooks during the forward pass will never fire.  The sentinel
+           ensures PyTorch always goes through the hook dispatch path so that
+           one-shot hooks registered by :func:`hooks.input_hook` and
+           :func:`hooks.output_hook` can be picked up mid-forward.
+
+        Actual interception of inputs/outputs is handled lazily by one-shot
+        hooks registered on-demand by each mediator (see ``hooks.py``).
 
         Args:
-            module (torch.nn.Module): The module to instrument
-
-        Returns:
-            None
+            module: The PyTorch module to prepare.
         """
 
         # Check if already wrapped with skippable forward
         pre_wrapped = hasattr(module, "__nnsight_forward__")
 
         if not pre_wrapped:
-            # First time wrapping - create skippable forward wrapper
 
             instance_forward = module.forward
             if hasattr(instance_forward, "__self__"):
@@ -223,13 +239,13 @@ class Interleaver:
             def nnsight_forward(*args, **kwargs):
                 m = module_ref()
                 if "__nnsight_skip__" in kwargs:
-                    # Skip is set, return the skip value
-                    # (will be cleared by output hook)
                     return kwargs.pop("__nnsight_skip__")
                 return m.__nnsight_forward__(m, *args, **kwargs)
 
             module.forward = nnsight_forward
 
+            # Sentinel hook — keeps PyTorch in the hook dispatch path so
+            # dynamically registered one-shot hooks fire correctly.
             module.register_forward_hook(lambda _, __, output: output)
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
@@ -321,8 +337,16 @@ class Interleaver:
             return True
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
-        """
-        Handle a provider and its value.
+        """Broadcast a provider value to all mediators.
+
+        This is a simplified handle used only by :meth:`wrap_operation` for
+        source-level interventions, where every mediator needs to see the
+        value.  Regular module hooks bypass this entirely — they register
+        one-shot hooks that call :meth:`Mediator.handle` directly.
+
+        Args:
+            provider: The provider string identifying this value.
+            value: The value being provided.
         """
         for mediator in self.mediators:
             mediator.handle(provider, value)
@@ -600,19 +624,29 @@ class Mediator:
                 self.event_queue.get()
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
-        """
-        Process a provider and its value.
-        Depending on which event this mediator is waiting on, it will either:
-        - Respond with the value
-        - Swap (replace) the value with a new value
-        - Respond with an out of order error
-        - Skip the value
-        - Set a barrier
-        - End the execution (cancels the mediator)
+        """Process a provided value against this mediator's pending event.
+
+        Called directly by one-shot hooks (see ``hooks.py``) or by
+        :meth:`Interleaver.handle` for source operations.  This method
+        saves and restores the interleaver's ``current`` mediator and the
+        batcher's ``current_value`` / ``current_provider``, so it is safe
+        to call from within any hook without corrupting shared state.
+
+        Depending on the pending event, this will:
+        - **VALUE**: Deliver the value to the worker thread.
+        - **SWAP**: Replace the value in the batcher.
+        - **SKIP**: Inject ``__nnsight_skip__`` into kwargs so
+          ``nnsight_forward`` bypasses the module.
+        - **BARRIER**: Synchronize participating mediators.
+        - **END**: Cancel the mediator (intervention finished).
+        - **EXCEPTION**: Re-raise the exception from the worker thread.
 
         Args:
-            provider (Optional[str]): The identifier of the provider
+            provider: The provider string (e.g. ``"model.layer.0.output.i0"``).
+            value: The value being provided (e.g. the module's output tensor).
 
+        Returns:
+            The (potentially modified) value from ``batcher.current_value``.
         """
 
         prev_current = self.interleaver.current
@@ -804,6 +838,18 @@ class Mediator:
         return False
 
     def handle_skip_event(self, provider: Any, requester: Any, value: Any):
+        """Handle a skip event by injecting the replacement value into kwargs.
+
+        Instead of raising a ``SkipException`` (as in the old permanent-hook
+        approach), the replacement value is placed into ``kwargs`` under the
+        ``__nnsight_skip__`` key.  The ``nnsight_forward`` wrapper installed
+        by :meth:`Interleaver.wrap_module` checks for this key and returns
+        the value directly, bypassing the module's original forward method.
+
+        This approach works with the one-shot hook system because the input
+        hook has access to ``(args, kwargs)`` via the batcher and can
+        modify kwargs in-place before the forward call.
+        """
 
         if provider == requester:
 

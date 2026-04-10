@@ -310,82 +310,68 @@ The main thread runs the model and provides values at hook points. Worker thread
 
 The `Interleaver` class manages the coordination between model execution and all active intervention functions. It:
 
-1. **Wraps modules** with hooks to intercept inputs and outputs
+1. **Prepares modules** with a skippable forward wrapper and a sentinel hook
 2. **Manages mediators** — the worker threads running intervention code
-3. **Routes values** from the model to the appropriate mediator(s)
-4. **Handles batching** when multiple invokes share a single forward pass
+3. **Handles batching** when multiple invokes share a single forward pass
 
-#### Module Wrapping
+#### Module Wrapping (Lazy Hook Execution)
 
-When NNsight wraps a model, the Interleaver instruments every module's forward pass with input and output hooks:
+NNsight uses a **lazy hook execution** model.  When the model is first wrapped, `wrap_module()` does **not** install permanent input/output hooks on every module.  Instead, it installs only two lightweight pieces:
+
+1. A **skippable forward wrapper** — replaces `module.forward` with a thin wrapper that checks for a `__nnsight_skip__` key in kwargs.  If present, the original forward is bypassed.
+2. A **sentinel output hook** — an empty `register_forward_hook` that returns `output` unchanged.  This is required because PyTorch's `Module.__call__` fast-paths when no hooks are registered at call time; the sentinel ensures PyTorch always goes through the hook dispatch path so that dynamically added hooks can fire.
+
+Actual interception is handled by **one-shot hooks** registered on-demand by each mediator (see `hooks.py`).  When intervention code accesses `.output` or `.input` inside a trace, the `requires_output` / `requires_input` decorators register a hook for just that module and mediator.  The hook **self-removes** after firing.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Module Forward Pass (wrapped)                          │
-│                                                         │
-│  1. Input Hook fires                                    │
-│     → Interleaver.handle("module.path.input", args)     │
-│     → Mediators can inspect/modify input                │
-│                                                         │
-│  2. Original forward() executes                         │
-│                                                         │
-│  3. Output Hook fires                                   │
-│     → Interleaver.handle("module.path.output", output)  │
-│     → Mediators can inspect/modify output               │
-│                                                         │
-│  4. Return (potentially modified) output                │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Module Forward Pass (lazy hooks)                                │
+│                                                                  │
+│  1. One-shot input hook fires (if registered by a mediator)      │
+│     → mediator.handle("module.path.input.i0", (args, kwargs))   │
+│     → Hook self-removes                                          │
+│                                                                  │
+│  2. Original forward() executes (or skip if __nnsight_skip__)    │
+│                                                                  │
+│  3. One-shot output hook fires (if registered by a mediator)     │
+│     → mediator.handle("module.path.output.i0", output)           │
+│     → Hook self-removes                                          │
+│                                                                  │
+│  4. Return (potentially modified) output                         │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+Modules that no mediator accesses have **zero hook overhead** — they execute with only the sentinel hook (a no-op lambda).
 
 Each module is identified by its **path** in the model hierarchy (e.g., `model.transformer.h.0.attn`). This path becomes the **provider string** that identifies what value is being provided.
 
 #### Re-wrapping the Same Model
 
-If you wrap the same PyTorch model with `NNsight` or `LanguageModel` multiple times, the interleaver properly handles this by:
-
-1. Detecting that the module's forward method is already wrapped
-2. Removing the old hooks
-3. Applying fresh hooks
+If you wrap the same PyTorch model with `NNsight` or `LanguageModel` multiple times, the interleaver detects that the module's forward method is already wrapped and skips re-wrapping:
 
 ```python
 # This is safe:
 model1 = NNsight(my_pytorch_model)
 model2 = NNsight(my_pytorch_model)  # Same underlying model
 
-# Hooks are cleaned up and re-applied, not stacked
-# Only model2's hooks are active
+# The skippable forward wrapper is applied once and shared
 ```
 
-This prevents hooks from stacking up and ensures clean behavior when re-wrapping. The original forward function is preserved and can be restored.
+The original forward function is preserved as `module.__nnsight_forward__` and can be restored.
 
 #### The `handle()` Method
 
-The `handle()` method is the core of the Interleaver. It is called at every hook point (module input, module output, operation input/output for `.source`). Its job is to:
-
-1. Set the current value in the Batcher
-2. Iterate through all mediators, giving each a chance to consume or modify the value
-3. Return the (potentially modified) value to the model
+The `Interleaver.handle()` method is now only used for **source-level operations** (`wrap_operation`).  It broadcasts a value to all mediators:
 
 ```python
-def handle(self, provider: str, value: Any, iterate: bool = False):
-    # Store original value
-    self.batcher.current_value = value
-    
-    # Let each mediator process this provider
+def handle(self, provider: str, value: Any):
     for mediator in self.mediators:
-        self.current = mediator
-        
-        if iterate:
-            provider = self.iterate_provider(original_provider)  # e.g., "module.output.i0"
-        
-        mediator.handle(provider)
-        
-        if iterate and mediator.alive:
-            mediator.iteration_tracker[original_provider] += 1
-    
-    # Return potentially modified value
-    return self.batcher.current_value
+        mediator.handle(provider, value)
 ```
+
+For regular module hooks, each mediator's one-shot hook calls `mediator.handle()` directly — there is no centralized loop over all mediators at every hook point.
+
+The `Mediator.handle()` method manages its own context (saves/restores `interleaver.current`, `batcher.current_value`, `batcher.current_provider`) so it can be called independently from any hook.
 
 #### Iteration Tracking
 
@@ -677,9 +663,7 @@ def __init__(self, module, interleaver=None, path="model", rename=None):
     self._module.__path__ = path  # Store path on module for hooks
     
     self._interleaver = interleaver if interleaver else Interleaver()
-    self._interleaver.wrap_module(module)  # Install hooks
-    
-    self._children = []
+    self._interleaver.wrap_module(module)  # Install skippable forward + sentinel hook
     
     # Eagerly create Envoys for all children
     for name, child_module in self._module.named_children():
@@ -705,7 +689,6 @@ def _add_envoy(self, module, name):
         rename=self._alias.rename if self._alias else None,
     )
     
-    self._children.append(envoy)
     super().__setattr__(name, envoy)
     
     return envoy
@@ -742,13 +725,15 @@ def __getattr__(self, name):
 
 ### 4.2 Accessing Values
 
-The core intervention interface consists of three properties:
+The core intervention interface is built on `eproperty`, a descriptor that integrates with the interleaving and lazy hook system:
 
 | Property | Returns | Description |
 |----------|---------|-------------|
 | `.output` | Module's output | The return value of the module's forward pass |
 | `.input` | First input | The first positional argument (or first kwarg if no positional args) |
 | `.inputs` | `(args, kwargs)` | All inputs as a tuple of `(tuple, dict)` |
+
+These are defined as `eproperty` descriptors decorated with `@requires_output` or `@requires_input` from `hooks.py`.
 
 #### How Value Access Works
 
@@ -759,20 +744,18 @@ with model.trace("Hello"):
     hidden = model.transformer.h[0].output  # What happens here?
 ```
 
-The `.output` property:
-
-1. Checks if currently interleaving
-2. Constructs the requester string: `"model.transformer.h.0.output"`
-3. Calls `self._interleaver.current.request(requester)` 
-4. The current Mediator sends a `VALUE` event and **blocks** until the value is provided
-5. Returns the value when the model's hook provides it
+1. `eproperty.__get__` is invoked
+2. The `@requires_output` decorator checks if this value is already being provided (via `batcher.current_provider`). If not, it registers a **one-shot output hook** on the module for the current mediator.
+3. The requester string is constructed: `"model.transformer.h.0.output.i0"`
+4. `mediator.request(requester)` is called — the worker thread sends a `VALUE` event and **blocks**
+5. When the module's forward pass fires the one-shot hook, `mediator.handle()` matches provider to requester and delivers the value
+6. The hook **self-removes** after firing
 
 ```python
-@eproperty(description="module output")
-def output(self):
-    # During interleaving, __get__ requests the value from the interleaver.
-    # Outside interleaving, raises ValueError.
-    ...
+@eproperty()
+@requires_output
+def output(self) -> Object:
+    ...  # Stub — the decorator and descriptor handle everything
 ```
 
 #### Setting Values
@@ -784,27 +767,27 @@ with model.trace("Hello"):
     model.transformer.h[0].output[0][:] = 0  # Zero out activations
 ```
 
-The `.output` setter:
+The `eproperty.__set__` method:
 
-1. Constructs the requester string
-2. Calls `self._interleaver.current.swap(requester, value)`
+1. Constructs the requester string with iteration suffix
+2. Calls `mediator.swap(requester, value)`
 3. The Mediator sends a `SWAP` event
-4. The Interleaver's Batcher replaces the value
+4. The Batcher replaces the value
 
-```python
-@output.setter
-def output(self, value):
-    if self.interleaving:
-        self._interleaver.current.swap(
-            self._interleaver.iterate_requester(f"{self.path}.output"), value
-        )
-    else:
-        raise ValueError("Cannot set output outside of trace")
-```
+#### The `eproperty` Descriptor
 
-#### Fake Values for Scanning
+`eproperty` is a descriptor class that generalizes the `.output` / `.input` pattern.  It supports:
 
-When using `.scan()` (shape inference without full execution), fake inputs/outputs are populated:
+- **`key`** — the interleaving key appended to the envoy path.  `input` and `inputs` share the same key `"input"` since they intercept the same hook point.
+- **`postprocess`** — transform the raw value on `__get__` (e.g., `.input` extracts the first arg from `(args, kwargs)`)
+- **`preprocess`** — transform the value on `__set__` before swapping (e.g., `.input` setter repacks the single value back into `(args, kwargs)`)
+- **`provide()`** — called from the provider side (e.g., vLLM model runners) to feed a value into the interleaving system
+
+Subclasses of `Envoy` (e.g., vLLM's `VLLM`) can define additional eproperties like `.logits` and `.samples`.
+
+#### Scanning
+
+When using `.scan()` (shape inference without full execution), the same interleaving mechanism runs with fake tensors.  The one-shot hooks fire and deliver fake tensor values, so intervention code can inspect shapes:
 
 ```python
 import nnsight
@@ -1623,21 +1606,17 @@ The Interleaver wraps each module's `forward` method with a skippable wrapper:
 ```python
 @wraps(forward)
 def nnsight_forward(*args, **kwargs):
-    nonlocal skip
-    
-    if skip is None or not self.interleaving:
-        return forward(*args, **kwargs)
-    
-    return skip  # Return the skip value instead of executing
+    if "__nnsight_skip__" in kwargs:
+        return kwargs.pop("__nnsight_skip__")
+    return original_forward(*args, **kwargs)
 ```
 
 When `.skip(value)` is called:
 
-1. A `SKIP` event is sent to the Interleaver
-2. The input hook catches the `SkipException`
-3. The `skip` variable is set to the replacement value
-4. The wrapped forward returns the skip value without executing
-5. The output hook passes through the skip value
+1. The `@requires_input` decorator registers a one-shot input hook for this module
+2. A `SKIP` event is sent to the mediator
+3. The mediator's `handle_skip_event` injects the replacement value into the input kwargs as `__nnsight_skip__`
+4. The `nnsight_forward` wrapper detects this key and returns the value directly, bypassing the original forward
 
 #### Constraint
 
@@ -4094,7 +4073,7 @@ Each `with model.trace(...)` block triggers a pipeline of operations before and 
 
 **Threading** is required for the interleaving model: your intervention code runs in a worker thread that blocks on `.output` until the model's forward pass reaches that module. The main thread and worker thread coordinate via event queues and locks.
 
-**Hook dispatch** is the per-module cost of intercepting `forward()` calls. Each module in the model gets an input hook and an output hook that check whether any mediator has requested values from that module.
+**Hook dispatch** uses a lazy, one-shot model: hooks are only registered on modules that a mediator actually accesses, and self-remove after firing. Modules with no active interventions have zero hook overhead beyond the sentinel no-op hook. This eliminates the per-module cost that the old permanent-hook approach incurred on every forward pass.
 
 ---
 
