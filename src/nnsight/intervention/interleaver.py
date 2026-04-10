@@ -632,8 +632,6 @@ class Mediator:
 
             event, data = self.event_queue.get()
 
-            print("event", self.idx, event, provider)
-
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider)
             elif event == Events.SWAP:
@@ -776,20 +774,24 @@ class Mediator:
         """
         Handle a barrier event by setting a barrier.
         """
+        
+        
 
         if participants is not None:
+            
+            prev_current = self.interleaver.current
 
             for mediator in self.interleaver.mediators:
 
                 if mediator.name in participants:
-
-                    print("barrier1", mediator.idx)
+                    
+                    self.interleaver.current = mediator
 
                     mediator.respond()
 
-                    print("barrier2", mediator.idx)
-
                     mediator.handle(provider, self.interleaver.batcher.current_value)
+                    
+            self.interleaver.current = prev_current
 
         return False
 

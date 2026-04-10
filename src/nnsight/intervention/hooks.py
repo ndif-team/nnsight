@@ -124,12 +124,6 @@ def requires_output(fn):
 
         requester = f"{self.path}.output.i{mediator.iteration}"
 
-        print(
-            interleaver.batcher.current_provider != requester,
-            requester,
-            interleaver.batcher.current_provider,
-        )
-
         if interleaver.batcher.current_provider != requester:
 
             output_hook(mediator, self._module, f"{self.path}.output")

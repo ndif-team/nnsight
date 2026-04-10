@@ -966,6 +966,7 @@ class Envoy(Batchable):
 
         self._module = module
         self._module.__path__ = self.path
+        self._interleaver.wrap_module(module)
 
         if self._source is not None:
 
