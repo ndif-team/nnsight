@@ -182,15 +182,7 @@ class Interleaver:
 
         mediator = self.current
 
-        # Base case: The mediator knows which iteration it wants, which is by default the first (0) iteration
         iteration = mediator.iteration
-
-        # If the iteration is None, it means its unbounded so just request the next unseen iteration
-        if iteration is None:
-            iteration = mediator.iteration_tracker[requester]
-        # If the iteration is a tuple, it means we want to update the iteration of the meidator with a new value
-        elif isinstance(iteration, tuple):
-            iteration, mediator.iteration = iteration
 
         return f"{requester}.i{iteration}"
 
@@ -206,7 +198,7 @@ class Interleaver:
         """
 
         # Check if already wrapped with skippable forward
-        pre_wrapped = hasattr(module, "__nnsight_skip__")
+        pre_wrapped = hasattr(module, "__nnsight_forward__")
 
         if not pre_wrapped:
             # First time wrapping - create skippable forward wrapper
@@ -223,9 +215,6 @@ class Interleaver:
             else:
                 original_forward = instance_forward
 
-            module.__nnsight_skip__ = [None]
-            skip_container = module.__nnsight_skip__
-
             module.__nnsight_forward__ = original_forward
 
             module_ref = weakref.ref(module)
@@ -233,76 +222,15 @@ class Interleaver:
             @wraps(original_forward)
             def nnsight_forward(*args, **kwargs):
                 m = module_ref()
-                if skip_container[0] is not None:
+                if "__nnsight_skip__" in kwargs:
                     # Skip is set, return the skip value
                     # (will be cleared by output hook)
-                    return skip_container[0]
-
+                    return kwargs.pop("__nnsight_skip__")
                 return m.__nnsight_forward__(m, *args, **kwargs)
 
             module.forward = nnsight_forward
-        else:
-            skip_container = module.__nnsight_skip__
 
-        # Hook the module's input to intercept and interleave the input values.
-        # Each interleaver adds its own hooks; they coexist and each checks its own interleaving state.
-        def input_hook(module: torch.nn.Module, args, kwargs):
-
-            # If not interleaving, just return the original input values.
-            if not self.interleaving:
-                return args, kwargs
-
-            # Clear any stale skip for this module from previous failed traces
-            skip_container[0] = None
-
-            # NNsight keeps the modules attribute path as the provider string on the module itself.
-            provider = module.__path__
-
-            # Provide the input values to the interleaver to be potentially consumed and/or modified by the mediators.
-            # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
-            try:
-                inputs = self.handle(f"{provider}.input", (args, kwargs), iterate=True)
-            # To skip a module, we raise a SkipException with the value we want to return instead.
-            # The skip_container is shared so the skippable forward method can read it.
-            except SkipException as e:
-                skip_container[0] = e.value
-            # If not skipping, just return the potentially modified input values.
-            else:
-                args, kwargs = inputs
-
-            return args, kwargs
-
-        # Register the input hook to the module's forward pre-hook.
-        input_handle = module.register_forward_pre_hook(
-            input_hook, with_kwargs=True, prepend=True
-        )
-        self.hook_handles.append(input_handle)
-
-        def output_hook(module: torch.nn.Module, _, output: Any):
-
-            # If not interleaving, just return the original output values.
-            if not self.interleaving:
-                return output
-
-            # NNsight keeps the modules attribute path as the provider string on the module itself.
-            provider = module.__path__
-
-            # If we are skipping, we set the output to the value we want to return and clear the skip variable.
-            if skip_container[0] is not None:
-
-                output = skip_container[0]
-
-                skip_container[0] = None
-
-            # Provide the output values to the interleaver to be potentially consumed and/or modified by the mediators.
-            # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
-            output = self.handle(f"{provider}.output", output, iterate=True)
-
-            return output
-
-        # Register the output hook to the module's forward post-hook.
-        output_handle = module.register_forward_hook(output_hook, prepend=True)
-        self.hook_handles.append(output_handle)
+            module.register_forward_hook(lambda _, __, output: output)
 
     def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
         """
@@ -367,7 +295,8 @@ class Interleaver:
 
         try:
             # Start all the mediators to begin their intervention threads amd wait for their first event.
-            for mediator in self.mediators:
+            for idx, mediator in enumerate(self.mediators):
+                mediator.idx = idx
                 if mediator.alive:
                     continue
                 mediator.start(self)
@@ -390,6 +319,13 @@ class Interleaver:
         # Ignore EarlyStopException errors.
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
             return True
+
+    def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
+        """
+        Handle a provider and its value.
+        """
+        for mediator in self.mediators:
+            mediator.handle(provider, value)
 
     def check_dangling_mediators(self):
 
@@ -449,78 +385,6 @@ class Interleaver:
                                 + "\033[0m"
                             )
                             return
-
-    ### Provider Methods ###
-
-    def handle(
-        self,
-        provider: Optional[Any] = None,
-        value: Optional[Any] = None,
-        iterate: bool = False,
-    ):
-        """
-        Handle a provider's value, allowing mediators to consume and modify it.
-
-        Args:
-            provider (Optional[Any]): The identifier of the provider
-            value (Optional[Any]): The value being provided
-            iterate (bool): Whether to iterate the provider string
-
-        Returns:
-            Any: The original or modified value
-        """
-
-        # Store the original provider as mediators might modify it.
-        original_provider = provider
-        # Store the original current provided value to restore after this handle call.
-        # This is due to handle calls being potentially recursive and we need to restore the original value after the recursive calls.
-        original_value = self.batcher.current_value
-
-        # Set the current value to the value being provided.
-        self.batcher.current_value = value
-
-        skip_count = 0
-        skip_values = []
-
-        original_current = self.current
-
-        for mediator in self.mediators:
-
-            self.current = mediator
-
-            if iterate:
-                provider = self.iterate_provider(original_provider)
-            try:
-                mediator.handle(provider)
-            except SkipException as e:
-                skip_count += 1
-                skip_values.append(e.value)
-
-            if iterate and mediator.alive:
-                mediator.iteration_tracker[original_provider] += 1
-
-        self.current = original_current
-
-        value = self.batcher.current_value
-
-        # Restore the original current value.
-        self.batcher.current_value = original_value
-
-        if skip_count:
-
-            if skip_count == len(self.mediators):
-
-                def _swap(*args):
-                    return torch.cat(args, dim=0)
-
-                skip_value = applyn(skip_values, _swap, torch.Tensor)
-                raise SkipException(skip_value)
-            else:
-                raise ValueError(
-                    f"A module skip must be applied to all the invokers defined in the tracer!"
-                )
-
-        return value
 
     ### Serialization ###
 
@@ -609,6 +473,7 @@ class Mediator:
         self.intervention = intervention
 
         self.name = name if name else f"Mediator{id(self)}"
+        self.idx = None
         self.info = info
         self.batch_group = batch_group
 
@@ -618,6 +483,8 @@ class Mediator:
         self.response_queue = Mediator.Value()
 
         self.worker = None
+
+        self.skip_container = None
 
         self.history = set()
         self.user_cache: List["Cache"] = list()
@@ -632,6 +499,8 @@ class Mediator:
         self._prev = None
 
         self.transform = None
+
+        self.lock = 0
 
     @property
     def alive(self):
@@ -730,7 +599,7 @@ class Mediator:
                 self.response_queue.put(Cancelation())
                 self.event_queue.get()
 
-    def handle(self, provider: Optional[str] = None):
+    def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
         """
         Process a provider and its value.
         Depending on which event this mediator is waiting on, it will either:
@@ -745,16 +614,25 @@ class Mediator:
             provider (Optional[str]): The identifier of the provider
 
         """
+
+        prev_current = self.interleaver.current
+        prev_value = self.interleaver.batcher.current_value
+        prev_provider = self.interleaver.batcher.current_provider
+
+        self.interleaver.current = self
+        self.interleaver.batcher.current_value = value
+        self.interleaver.batcher.current_provider = provider
+
         # Check to see if this mediator has an unprocessed eventto start.
         process = self.event_queue.has_value
-
-        event = None
 
         # Continue processing events until there are no more events to process.
         # Means we can move on to the next mediator and continue the model execution.
         while process:
 
             event, data = self.event_queue.get()
+
+            print("event", self.idx, event, provider)
 
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider)
@@ -782,6 +660,14 @@ class Mediator:
                     provider,
                     self.interleaver.batcher.narrow(self.batch_group),
                 )
+
+        value = self.interleaver.batcher.current_value
+
+        self.interleaver.current = prev_current
+        self.interleaver.batcher.current_value = prev_value
+        self.interleaver.batcher.current_provider = prev_provider
+
+        return value
 
     def handle_value_event(self, requester: Any, provider: Any) -> bool:
         """
@@ -893,19 +779,17 @@ class Mediator:
 
         if participants is not None:
 
-            original_current = self.interleaver.current
-
             for mediator in self.interleaver.mediators:
 
                 if mediator.name in participants:
 
-                    self.interleaver.current = mediator
+                    print("barrier1", mediator.idx)
 
                     mediator.respond()
 
-                    mediator.handle(provider)
+                    print("barrier2", mediator.idx)
 
-            self.interleaver.current = original_current
+                    mediator.handle(provider, self.interleaver.batcher.current_value)
 
         return False
 
@@ -921,11 +805,13 @@ class Mediator:
 
         if provider == requester:
 
+            _, kwargs = self.interleaver.batcher.current_value
+
+            kwargs["__nnsight_skip__"] = value
+
             self.respond()
 
-            self.history.add(provider)
-
-            raise SkipException(value)
+            return True
 
         else:
             if requester in self.history:

@@ -31,6 +31,7 @@ from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
 from .interleaver import Interleaver, Mediator
+from .hooks import requires_output, requires_input
 
 
 def trace_only(fn: Callable):
@@ -125,9 +126,11 @@ class eproperty:
         self._preprocess: Optional[Callable] = None
         self._transform: Optional[Callable] = None
 
-    def __call__(self, stub: Callable[..., T]) -> T | "eproperty":
-        self.name = stub.__name__
-        self._hook = stub
+        self.interleaver_lock: Optional[Interleaver] = None
+
+    def __call__(self, hook: Callable[..., T]) -> T | "eproperty":
+        self.name = hook.__name__
+        self._hook = hook
         if self.key is None:
             self.key = self.name
         return self
@@ -164,6 +167,8 @@ class eproperty:
         if envoy.interleaving:
 
             requester = f"{envoy.path}.{self.key}"
+
+            self._hook(envoy)
 
             if self.iterate:
                 requester = envoy._interleaver.iterate_requester(requester)
@@ -317,6 +322,7 @@ class Envoy(Batchable):
     #### Properties ####
 
     @eproperty()
+    @requires_output
     def output(self) -> Object:
         """Get the output of the module's forward pass.
 
@@ -326,6 +332,7 @@ class Envoy(Batchable):
         """
 
     @eproperty(key="input")
+    @requires_input
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
         """Get the inputs to the module's forward pass.
 
@@ -338,6 +345,7 @@ class Envoy(Batchable):
         """
 
     @eproperty(key="input")
+    @requires_input
     def input(self) -> Object:
         """Get the first input to the module's forward pass.
 
@@ -681,6 +689,7 @@ class Envoy(Batchable):
         return self
 
     @trace_only
+    @requires_input
     def skip(self, replacement: Any):
         """Skips the execution of this module duting execution / interleaving.
         Behavior is the module will not be executed and will return a replacement value instead.
@@ -957,7 +966,6 @@ class Envoy(Batchable):
 
         self._module = module
         self._module.__path__ = self.path
-        self._interleaver.wrap_module(module)
 
         if self._source is not None:
 

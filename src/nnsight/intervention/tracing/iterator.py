@@ -45,7 +45,7 @@ class IteratorTracer(Tracer):
                     if i < 0:
                         raise ValueError("Iteration cannot be negative.")
 
-                    mediator.iteration = (i, None)
+                    mediator.iteration = i
 
                     yield i
 
@@ -125,12 +125,12 @@ class IteratorTracer(Tracer):
 
         mediator.push()
 
-        def do_iteration(iter: int, unbound: bool = False):
+        def do_iteration(iter: int):
 
             if iter < 0:
                 raise ValueError("Iteration cannot be negative.")
 
-            mediator.iteration = (iter, None) if unbound else iter
+            mediator.iteration = iter
 
             fn(mediator, self.info, iter)
 
@@ -148,7 +148,7 @@ class IteratorTracer(Tracer):
 
             while True:
 
-                do_iteration(i, unbound=True)
+                do_iteration(i)
 
                 if stop is None:
                     if mediator.all_stop is not None:
