@@ -30,7 +30,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver, Mediator
+from .interleaver import Interleaver, Mediator, eproperty
 from .hooks import requires_output, requires_input
 
 
@@ -39,7 +39,7 @@ def trace_only(fn: Callable):
     @wraps(fn)
     def wrapper(self: Envoy, *args, **kwargs):
 
-        if self._interleaver is None:
+        if self.interleaver is None:
             raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
 
         return fn(self, *args, **kwargs)
@@ -47,186 +47,7 @@ def trace_only(fn: Callable):
     return wrapper
 
 
-from typing import TypeVar
 
-T = TypeVar("T")
-
-
-class eproperty:
-    """A descriptor for defining hookable properties on Envoy subclasses.
-
-    ``eproperty`` provides a way to expose values through the same interleaving
-    request/swap mechanism that ``.output`` and ``.input`` use.  During a trace,
-    reading an ``eproperty`` issues a blocking request to the interleaver;
-    writing to it schedules a swap — just like regular module outputs.
-
-    Inherits from ``property`` so that type checkers infer the return type
-    from the stub function's annotation.
-
-    Args:
-        key: The interleaving key appended to the envoy path
-            (``<envoy.path>.<key>``).  Defaults to ``name`` (the stub
-            function's ``__name__``).  Multiple eproperties may share the
-            same ``key`` to offer different post-processing views of a
-            single value.
-        description: A short human-readable label shown in the module tree
-            when printing an Envoy (``(name): description``).  Only
-            eproperties with a description appear in the tree.
-        iterate: Whether the provider key should be iterated (appending
-            ``.i0``, ``.i1``, etc.) on each call to :meth:`provide`.
-            Defaults to ``True``.
-
-    Usage::
-
-        class MyEnvoy(Envoy):
-
-            @eproperty(description="raw logit tensor")
-            def logits(self): ...
-
-    The stub method body is not executed — the decorator is used purely for
-    readability and to infer ``name`` when not provided explicitly.
-
-    Post-processing and pre-processing can be added via decorators, similar
-    to ``@property.setter``::
-
-        @eproperty(key="input", description="first module input")
-        def input(self): ...
-
-        @input.postprocess
-        def input(self, value):
-            return [*value[0], *value[1].values()][0]
-
-        @input.preprocess
-        def input(self, value):
-            inputs = self.inputs
-            return (value, *inputs[0][1:]), inputs[1]
-
-    ``postprocess`` is called on ``__get__`` after retrieving the value.
-    ``preprocess`` is called on ``__set__`` before passing the value to
-    the interleaver's swap.
-
-    eproperties appear in the Envoy ``__repr__`` tree alongside child modules::
-
-        MyModel(
-          (layers): ModuleList(...)
-          (logits): raw logit tensor
-        )
-    """
-
-    def __init__(self, key: str = None, description: str = None, iterate: bool = True):
-        super().__init__()
-
-        self.name: str = None
-        self.key = key
-        self.description = description
-        self.iterate = iterate
-
-        self._hook: Callable = None
-        self._postprocess: Optional[Callable] = None
-        self._preprocess: Optional[Callable] = None
-        self._transform: Optional[Callable] = None
-
-        self.interleaver_lock: Optional[Interleaver] = None
-
-    def __call__(self, hook: Callable[..., T]) -> T | "eproperty":
-        self.name = hook.__name__
-        self._hook = hook
-        if self.key is None:
-            self.key = self.name
-        return self
-
-    def postprocess(self, func: Callable) -> "eproperty":
-        """Register a post-processing function called on ``__get__``.
-
-        The function receives ``(envoy, value)`` and should return the
-        processed value.
-        """
-        self._postprocess = func
-        return self
-
-    def preprocess(self, func: Callable) -> "eproperty":
-        """Register a pre-processing function called on ``__set__``.
-
-        The function receives ``(envoy, value)`` and should return the
-        value to pass to the interleaver's swap.
-        """
-        self._preprocess = func
-        return self
-
-    def transform(self, func: Callable) -> "eproperty":
-        """Register a transform function called on ``__get__`` and ``__set__``.
-
-        The function receives ``(envoy, value)`` and should return the
-        processed value.
-        """
-        self._transform = func
-        return self
-
-    def __get__(self, envoy: Envoy, owner):
-
-        if envoy.interleaving:
-
-            requester = f"{envoy.path}.{self.key}"
-
-            self._hook(envoy)
-
-            if self.iterate:
-                requester = envoy._interleaver.iterate_requester(requester)
-
-            value = envoy._interleaver.current.request(requester)
-
-            if self._preprocess is not None:
-                value = self._preprocess(envoy, value)
-
-            if self._transform is not None:
-                envoy._interleaver.current.transform = self._transform
-
-        else:
-            raise ValueError(
-                f"Cannot access `{envoy.path}.{self.name}` outside of interleaving."
-            )
-
-        return value
-
-    def __set__(self, envoy: Envoy, value: Any):
-
-        if self._postprocess is not None:
-            value = self._postprocess(envoy, value)
-
-        if envoy.interleaving:
-
-            requester = f"{envoy.path}.{self.key}"
-
-            self._hook(envoy)
-
-            if self.iterate:
-                requester = envoy._interleaver.iterate_requester(requester)
-
-            envoy._interleaver.current.swap(requester, value)
-
-        else:
-            raise ValueError(
-                f"Cannot set `{envoy.path}.{self.name}` outside of interleaving."
-            )
-
-    def provide(self, envoy: Envoy, value: Any) -> Any:
-        """Provide a value to the interleaver for this eproperty.
-
-        Called from the provider side (e.g. a model runner) to feed a value
-        into the interleaving system so that mediators can observe or modify it.
-
-        Args:
-            envoy: The Envoy instance this eproperty belongs to.
-            value: The value to provide.
-
-        Returns:
-            The (potentially modified) value after all mediators have handled it.
-        """
-        return envoy._interleaver.handle(
-            f"{envoy.path}.{self.key}",
-            value,
-            iterate=self.iterate,
-        )
 
 
 class Envoy(Batchable):
@@ -276,8 +97,8 @@ class Envoy(Batchable):
 
         self._source = None
 
-        self._interleaver = interleaver if interleaver is not None else Interleaver()
-        self._interleaver.wrap_module(module)
+        self.interleaver = interleaver if interleaver is not None else Interleaver()
+        self.interleaver.wrap_module(module)
 
         self._default_mediators: List[Mediator] = []
 
@@ -319,7 +140,7 @@ class Envoy(Batchable):
         Returns:
             True if the Envoy is interleaving, False otherwise
         """
-        return self._interleaver is not None and self._interleaver.interleaving
+        return self.interleaver is not None and self.interleaver.interleaving
 
     #### Properties ####
 
@@ -468,7 +289,7 @@ class Envoy(Batchable):
                 if op_envoy is None or not op_envoy._has_hooks():
                     return fn
 
-                return self._interleaver.wrap_operation(
+                return self.interleaver.wrap_operation(
                     fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
                 )
 
@@ -489,7 +310,7 @@ class Envoy(Batchable):
                 self.path,
                 source,
                 line_numbers,
-                interleaver=self._interleaver,
+                interleaver=self.interleaver,
             )
             _source_ref[0] = self._source
 
@@ -498,7 +319,7 @@ class Envoy(Batchable):
     def __call__(self, *args, hook: bool = False, **kwargs):
         return (
             self._module.forward(*args, **kwargs)
-            if self._interleaver.current is not None and not hook
+            if self.interleaver.current is not None and not hook
             else self._module(*args, **kwargs)
         )
 
@@ -683,7 +504,7 @@ class Envoy(Batchable):
             DeprecationWarning,
             stacklevel=2,
         )
-        return IteratorProxy(self._interleaver)
+        return IteratorProxy(self.interleaver)
 
     @trace_only
     def all(self):
@@ -703,7 +524,7 @@ class Envoy(Batchable):
             DeprecationWarning,
             stacklevel=2,
         )
-        self._interleaver.current.iteration += step
+        self.interleaver.current.iteration += step
         return self
 
     @trace_only
@@ -724,8 +545,8 @@ class Envoy(Batchable):
             replacement (Any): The replacement value to replace the module's output with.
         """
 
-        return self._interleaver.current.skip(
-            self._interleaver.iterate_requester(f"{self.path}.input"), replacement
+        return self.interleaver.current.skip(
+            self.interleaver.iterate_requester(f"{self.path}.input"), replacement
         )
 
     def to(self, device: torch.device):
@@ -858,16 +679,16 @@ class Envoy(Batchable):
             fn = getattr(self, fn)
 
         try:
-            with self._interleaver:
+            with self.interleaver:
                 result = fn(*args, **kwargs)
 
-                self._interleaver.handle("result", result)
+                self.interleaver.handle("result", result)
 
-            self._interleaver.check_cache_full()
-            self._interleaver.check_dangling_mediators()
+            self.interleaver.check_cache_full()
+            self.interleaver.check_dangling_mediators()
 
         finally:
-            self._interleaver.cancel()
+            self.interleaver.cancel()
 
     #### Private methods ####
 
@@ -888,7 +709,7 @@ class Envoy(Batchable):
             module,
             path=module_path,
             rename=self._alias.rename if self._alias is not None else None,
-            interleaver=self._interleaver,
+            interleaver=self.interleaver,
         )
 
         setattr(self._module, name, module)
@@ -984,7 +805,7 @@ class Envoy(Batchable):
 
         self._module = module
         self._module.__path__ = self.path
-        self._interleaver.wrap_module(module)
+        self.interleaver.wrap_module(module)
 
         if self._source is not None:
 
@@ -1007,7 +828,7 @@ class Envoy(Batchable):
                 if op_envoy is None or not op_envoy._has_hooks():
                     return fn
 
-                return self._interleaver.wrap_operation(
+                return self.interleaver.wrap_operation(
                     fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
                 )
 
@@ -1181,7 +1002,7 @@ class Envoy(Batchable):
             value = getattr(self._module, name)
 
             # It's a method bound to the module, create an interleaver for it
-            if not self._interleaver.interleaving and isinstance(
+            if not self.interleaver.interleaving and isinstance(
                 value,
                 (FunctionType, MethodType, BuiltinFunctionType, BuiltinMethodType),
             ):
@@ -1279,10 +1100,11 @@ class OperationEnvoy:
             interleaver: Optional interleaver for managing execution flow
         """
         self.name = name
+        self.path = name
         self.source_code = source
         self.line_number = line_number
 
-        self._interleaver = interleaver
+        self.interleaver = interleaver
 
         self._source: EnvoySource = None
         self._fn: Callable = None
@@ -1297,7 +1119,9 @@ class OperationEnvoy:
 
     def _has_hooks(self) -> bool:
         """Check if this operation has any pending hooks or a fn replacement."""
-        return bool(self.pre_hooks or self.post_hooks or self.fn_hooks or self.fn_replacement)
+        return bool(
+            self.pre_hooks or self.post_hooks or self.fn_hooks or self.fn_replacement
+        )
 
     def __str__(self):
         """
@@ -1339,10 +1163,10 @@ class OperationEnvoy:
         """
         from .hooks import operation_output_hook
 
-        mediator = self._interleaver.current
-        requester = self._interleaver.iterate_requester(f"{self.name}.output")
+        mediator = self.interleaver.current
+        requester = self.interleaver.iterate_requester(f"{self.name}.output")
 
-        if self._interleaver.batcher.current_provider != requester:
+        if self.interleaver.batcher.current_provider != requester:
             operation_output_hook(mediator, self)
 
         return mediator.request(requester)
@@ -1352,10 +1176,10 @@ class OperationEnvoy:
         """Set a new value for the operation's output."""
         from .hooks import operation_output_hook
 
-        mediator = self._interleaver.current
-        requester = self._interleaver.iterate_requester(f"{self.name}.output")
+        mediator = self.interleaver.current
+        requester = self.interleaver.iterate_requester(f"{self.name}.output")
 
-        if self._interleaver.batcher.current_provider != requester:
+        if self.interleaver.batcher.current_provider != requester:
             operation_output_hook(mediator, self)
 
         mediator.swap(requester, value)
@@ -1371,10 +1195,10 @@ class OperationEnvoy:
         """
         from .hooks import operation_input_hook
 
-        mediator = self._interleaver.current
-        requester = self._interleaver.iterate_requester(f"{self.name}.input")
+        mediator = self.interleaver.current
+        requester = self.interleaver.iterate_requester(f"{self.name}.input")
 
-        if self._interleaver.batcher.current_provider != requester:
+        if self.interleaver.batcher.current_provider != requester:
             operation_input_hook(mediator, self)
 
         return mediator.request(requester)
@@ -1384,10 +1208,10 @@ class OperationEnvoy:
         """Set new values for the operation's inputs."""
         from .hooks import operation_input_hook
 
-        mediator = self._interleaver.current
-        requester = self._interleaver.iterate_requester(f"{self.name}.input")
+        mediator = self.interleaver.current
+        requester = self.interleaver.iterate_requester(f"{self.name}.input")
 
-        if self._interleaver.batcher.current_provider != requester:
+        if self.interleaver.batcher.current_provider != requester:
             operation_input_hook(mediator, self)
 
         mediator.swap(requester, value)
@@ -1419,8 +1243,8 @@ class OperationEnvoy:
 
         if self._source is None:
             # Register fn-hook and request the function
-            operation_fn_hook(self._interleaver.current, self)
-            fn = self._interleaver.current.request(f"{self.name}.fn")
+            operation_fn_hook(self.interleaver.current, self)
+            fn = self.interleaver.current.request(f"{self.name}.fn")
 
             if isinstance(fn, torch.nn.Module):
                 msg = (
@@ -1444,20 +1268,20 @@ class OperationEnvoy:
                 if op_envoy is None or not op_envoy._has_hooks():
                     return fn
 
-                return self._interleaver.wrap_operation(
+                return self.interleaver.wrap_operation(
                     fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
                 )
 
             source, line_numbers, fn = inject(fn, wrap, self.name)
 
             self._source = EnvoySource(
-                self.name, source, line_numbers, interleaver=self._interleaver
+                self.name, source, line_numbers, interleaver=self.interleaver
             )
             self._fn = fn
 
             # Swap the function with the injected version (processed in the
             # fn-hook's mediator.handle call) and store persistently.
-            self._interleaver.current.swap(f"{self.name}.fn", self._fn)
+            self.interleaver.current.swap(f"{self.name}.fn", self._fn)
             self.fn_replacement = self._fn
         else:
             # Already injected — ensure fn_replacement is set

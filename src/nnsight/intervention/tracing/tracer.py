@@ -13,7 +13,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from ... import util
 from ..backends.base import Backend
 from ..batching import Batcher
-from ..interleaver import Events, Mediator
+from ..interleaver import Events, Interleaver, Mediator, eproperty
 from .base import ExitTracingException, Tracer
 from .globals import Object
 from .invoker import Invoker
@@ -300,6 +300,7 @@ class InterleavingTracer(Tracer):
 
         self.fn = fn
         self.model = model
+        self.path = ""
 
         self.mediators: List[Mediator] = []
 
@@ -308,6 +309,10 @@ class InterleavingTracer(Tracer):
         self._frame = None
 
         super().__init__(*args, **kwargs, backend=backend)
+
+    @property
+    def interleaver(self) -> "Interleaver":
+        return self.model.interleaver
 
     def __exit__(self, exc_type, exc_value, traceback):
         result = super().__exit__(exc_type, exc_value, traceback)
@@ -406,7 +411,7 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        interleaver = self.model._interleaver
+        interleaver = self.model.interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher)
 
         return args, kwargs
@@ -450,17 +455,17 @@ class InterleavingTracer(Tracer):
         """
         Raise an EarlyStopException to stop the execution of the model.
         """
-        self.model._interleaver.current.stop()
+        self.model.interleaver.current.stop()
 
     @property
     def iter(self):
-        return IteratorProxy(self.model._interleaver)
+        return IteratorProxy(self.model.interleaver)
 
     def all(self):
         return self.iter[:]
 
     def next(self, step: int = 1):
-        self.model._interleaver.current.iteration += step
+        self.model.interleaver.current.iteration += step
 
         return self
 
@@ -516,8 +521,8 @@ class InterleavingTracer(Tracer):
             alias_dict,
         )
 
-        mediator = self.model._interleaver.current
-        batcher = self.model._interleaver.batcher
+        mediator = self.model.interleaver.current
+        batcher = self.model.interleaver.batcher
         batch_group = mediator.batch_group
 
         # Resolve target modules to Envoy objects
@@ -581,28 +586,9 @@ class InterleavingTracer(Tracer):
 
         return Barrier(self.model, n_participants)
 
-    @property
+    @eproperty(iterate=False)
     def result(self) -> Object:
-        """
-        Get the result of the method being traced.
-
-        This property allows access to the return values produced by the method being traced.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.generate("Hello World") as tracer:
-            ...     result = tracer.result.save()
-            >>> print(result)
-
-        Returns:
-            The result of the method being traced
-        """
-
-        if self.model.interleaving:
-
-            return self.model._interleaver.current.request("result")
-        else:
-            raise ValueError("Cannot return result of Envoy that is not interleaving.")
+        """The return value of the method being traced."""
 
     ### Serialization ###
 
@@ -675,7 +661,7 @@ class Barrier:
 
     def __call__(self):
 
-        mediator = self.model._interleaver.current
+        mediator = self.model.interleaver.current
 
         self.participants.add(mediator.name)
 

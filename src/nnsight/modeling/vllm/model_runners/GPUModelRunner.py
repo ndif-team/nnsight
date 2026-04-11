@@ -116,8 +116,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 ctx = self.trace_contexts[trace_id]
 
-                model._interleaver.mediators.append(mediator)
-                mediator.start(model._interleaver)
+                model.interleaver.mediators.append(mediator)
+                mediator.start(model.interleaver)
 
                 self.mediators[new_req.req_id] = mediator
                 ctx["pending_req_ids"].add(new_req.req_id)
@@ -135,7 +135,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             """
 
             batch_start = 0
-            mediator_set = {id(m) for m in model._interleaver.mediators}
+            mediator_set = {id(m) for m in model.interleaver.mediators}
 
             for req_id in self._batch_req_ids:
                 if self._num_scheduled_tokens.get(req_id) is None:
@@ -151,7 +151,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 mediator.batch_group = [batch_start, 1]
                 batch_start += 1
-                model._interleaver.batcher.last_batch_group = mediator.batch_group
+                model.interleaver.batcher.last_batch_group = mediator.batch_group
 
         def process_batch_groups(
             self,
@@ -187,11 +187,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 batch_start += num_tokens
 
             if mediators:
-                model._interleaver.batcher.last_batch_group = mediators[-1].batch_group
+                model.interleaver.batcher.last_batch_group = mediators[-1].batch_group
             else:
-                model._interleaver.batcher.last_batch_group = None
+                model.interleaver.batcher.last_batch_group = None
 
-            model._interleaver.mediators = mediators
+            model.interleaver.mediators = mediators
 
         def match_req_ids(self, req_id_set: set) -> List[tuple]:
             """Match engine-reported request IDs to stored mediators.
@@ -227,12 +227,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 Globals.enter()
                 if mediator.alive:
-                    model._interleaver.mediators = [mediator]
+                    model.interleaver.mediators = [mediator]
                     mediator.batch_group = None
-                    with model._interleaver:
-                        model._interleaver.handle("result", [base_id])
+                    with model.interleaver:
+                        model.interleaver.handle("result", [base_id])
                         mediator.cancel()
-                        model._interleaver.handle()
+                        model.interleaver.handle()
                 Globals.exit()
 
             return finished_internal_keys
@@ -323,9 +323,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 
-        self.nnsight_model._interleaver.mediators = []
+        self.nnsight_model.interleaver.mediators = []
 
-        self.nnsight_model._interleaver.batcher = VLLMBatcher()
+        self.nnsight_model.interleaver.batcher = VLLMBatcher()
 
         # Only wrap when TP > 1: registers hooks that handle
         # gather/split of sharded tensors and CUDA synchronization
@@ -333,7 +333,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # so wrapping is pure overhead.
 
         if get_tp_group().world_size > 1:
-            self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
+            self.nnsight_model.interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
@@ -355,8 +355,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
             self.nnsight_model,
         )
 
-        self.nnsight_model._interleaver.batcher.needs_batching = (
-            len(self.nnsight_model._interleaver.mediators) > 1
+        self.nnsight_model.interleaver.batcher.needs_batching = (
+            len(self.nnsight_model.interleaver.mediators) > 1
         )
 
     def execute_model(
@@ -366,7 +366,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
     ):
 
         Globals.enter()
-        with self.nnsight_model._interleaver:
+        with self.nnsight_model.interleaver:
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
@@ -380,7 +380,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.enter()
 
-        with self.nnsight_model._interleaver:
+        with self.nnsight_model.interleaver:
 
             # Provide logits from execute_model state before sampling.
             if self.execute_model_state is not None:
@@ -404,7 +404,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.enter()
 
-        with self.nnsight_model._interleaver:
+        with self.nnsight_model.interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
 

@@ -112,7 +112,7 @@ class RemoteableMixin(MetaMixin):
     def _remoteable_persistent_objects(self) -> dict:
         """Return objects that must persist across serialization for remote execution."""
 
-        persistent_objects = {"Interleaver": self._interleaver}
+        persistent_objects = {"Interleaver": self.interleaver}
 
         for envoy in self.modules():
             persistent_objects[f"Module:{envoy.path}"] = envoy._module

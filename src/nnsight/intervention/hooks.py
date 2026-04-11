@@ -203,7 +203,7 @@ def requires_output(fn):
     @wraps(fn)
     def wrapper(self: Envoy, *args, **kwargs):
 
-        interleaver = self._interleaver
+        interleaver = self.interleaver
 
         mediator = interleaver.current
 
@@ -231,7 +231,7 @@ def requires_input(fn):
     @wraps(fn)
     def wrapper(self: Envoy, *args, **kwargs):
 
-        interleaver = self._interleaver
+        interleaver = self.interleaver
 
         mediator = interleaver.current
 

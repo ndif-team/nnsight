@@ -147,15 +147,15 @@ class LanguageModel(TransformersModel):
 
         max_new_tokens = kwargs.get("max_new_tokens", None)
 
-        if max_new_tokens is not None and self._interleaver is not None:
-            self._interleaver.default_all = max_new_tokens
+        if max_new_tokens is not None and self.interleaver is not None:
+            self.interleaver.default_all = max_new_tokens
 
         streamer = kwargs.pop("streamer", self.generator.streamer._module)
 
         output = self._model.generate(*args, streamer=streamer, **kwargs)
 
-        if self._interleaver is not None:
-            self._interleaver.default_all = None
+        if self.interleaver is not None:
+            self.interleaver.default_all = None
 
         output = self.generator(output, hook=True)
 

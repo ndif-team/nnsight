@@ -364,7 +364,7 @@ class VLLM(RemoteableMixin):
 
         # Collect all input mediators (those with batch_group, i.e. not empty invokes)
         input_mediators = []
-        for mediator in self._interleaver.mediators:
+        for mediator in self.interleaver.mediators:
             if mediator.batch_group is not None:
                 mediator.intervention.__source__ = "".join(mediator.info.source)
                 input_mediators.append(mediator)
@@ -436,7 +436,7 @@ class VLLM(RemoteableMixin):
             save(value)
 
         # Push the variables to the interleaver frame
-        push_variables(self._interleaver.mediators[0].info.frame, saves)
+        push_variables(self.interleaver.mediators[0].info.frame, saves)
 
     def trace(self, *inputs, **kwargs):
         if (
@@ -452,15 +452,15 @@ class VLLM(RemoteableMixin):
     def interleave(self, fn: Callable, *args, **kwargs):
         """Execute the traced function with vLLM, dispatching the engine if needed."""
         if not self.dispatched and not isinstance(
-            self._interleaver.tracer, ScanningTracer
+            self.interleaver.tracer, ScanningTracer
         ):
             self.dispatch()
 
         try:
             fn(*args, **kwargs)
         finally:
-            self._interleaver.check_cache_full()
-            self._interleaver.cancel()
+            self.interleaver.check_cache_full()
+            self.interleaver.cancel()
 
     def _remoteable_persistent_objects(self) -> dict:
         persistent_objects = super()._remoteable_persistent_objects()

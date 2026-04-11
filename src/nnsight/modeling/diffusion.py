@@ -417,7 +417,7 @@ class DiffusionModel(HuggingFaceModel):
         Returns:
             The pipeline output passed through the wrapper module.
         """
-        if self._interleaver is not None:
+        if self.interleaver is not None:
             steps = kwargs.get("num_inference_steps")
             if steps is None:
                 try:
@@ -428,7 +428,7 @@ class DiffusionModel(HuggingFaceModel):
                     )
                 except Exception:
                     steps = 50
-            self._interleaver.default_all = steps
+            self.interleaver.default_all = steps
 
         generator = torch.Generator(self.device)
 
@@ -447,8 +447,8 @@ class DiffusionModel(HuggingFaceModel):
             prepared_inputs, *args, generator=generator, **kwargs
         )
 
-        if self._interleaver is not None:
-            self._interleaver.default_all = None
+        if self.interleaver is not None:
+            self.interleaver.default_all = None
 
         output = self._model(output)
 

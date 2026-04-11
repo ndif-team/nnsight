@@ -31,6 +31,182 @@ if TYPE_CHECKING:
     from .tracing.tracer import Cache, InterleavingTracer, Tracer
 
 
+from typing import TypeVar
+
+T = TypeVar("T")
+
+
+class IEnvoy:
+    """Interface for objects that participate in the interleaving system.
+
+    Any object that uses :class:`eproperty` descriptors must implement this
+    interface by providing:
+
+    Attributes:
+        interleaver: The :class:`Interleaver` managing execution flow.
+        path: The provider path prefix used to build requester/provider
+            strings (e.g. ``"model.transformer.h.0"``).  Defaults to ``""``.
+    """
+
+    interleaver: "Interleaver"
+    path: str = ""
+
+
+class eproperty:
+    """A descriptor for defining hookable properties on :class:`IEnvoy` objects.
+
+    ``eproperty`` exposes values through the interleaving request/swap
+    mechanism.  During a trace, reading an ``eproperty`` issues a blocking
+    request to the interleaver; writing to it schedules a swap.
+
+    The decorated stub function (``_hook``) is called for its **side effects**
+    (e.g. registering a one-shot PyTorch hook via ``@requires_output``).  The
+    interleaver and path are obtained from the ``IEnvoy`` instance, not from
+    the hook.
+
+    Args:
+        key: The interleaving key appended to ``obj.path``
+            (``<path>.<key>``).  Defaults to the stub function's name.
+        description: A short label shown in the repr tree.  Only eproperties
+            with a description appear in the tree.
+        iterate: Whether to append an iteration suffix (``.i0``, ``.i1``, …).
+            Defaults to ``True``.
+
+    Usage::
+
+        class MyEnvoy(IEnvoy):
+
+            @eproperty(description="raw logit tensor")
+            def logits(self): ...
+
+    Post-/pre-processing via decorators::
+
+        @eproperty(key="input")
+        def input(self): ...
+
+        @input.preprocess
+        def input(self, value):
+            return [*value[0], *value[1].values()][0]
+
+        @input.postprocess
+        def input(self, value):
+            inputs = self.inputs
+            return (value, *inputs[0][1:]), inputs[1]
+    """
+
+    def __init__(self, key: str = None, description: str = None, iterate: bool = True):
+        super().__init__()
+
+        self.name: str = None
+        self.key = key
+        self.description = description
+        self.iterate = iterate
+
+        self._hook: Callable = None
+        self._postprocess: Optional[Callable] = None
+        self._preprocess: Optional[Callable] = None
+        self._transform: Optional[Callable] = None
+
+    def __call__(self, hook: Callable[..., T]) -> "T | eproperty":
+        self.name = hook.__name__
+        self._hook = hook
+        if self.key is None:
+            self.key = self.name
+        return self
+
+    def postprocess(self, func: Callable) -> "eproperty":
+        """Register a post-processing function called on ``__get__``."""
+        self._postprocess = func
+        return self
+
+    def preprocess(self, func: Callable) -> "eproperty":
+        """Register a pre-processing function called on ``__set__``."""
+        self._preprocess = func
+        return self
+
+    def transform(self, func: Callable) -> "eproperty":
+        """Register a transform function applied after ``__get__``."""
+        self._transform = func
+        return self
+
+    def _build_requester(self, obj: IEnvoy) -> str:
+        return f"{obj.path}.{self.key}" if obj.path else self.key
+
+    def __get__(self, obj: IEnvoy, owner):
+
+        if obj is None:
+            return self
+
+        interleaver = obj.interleaver
+
+        if interleaver.interleaving:
+
+            requester = self._build_requester(obj)
+
+            self._hook(obj)
+
+            if self.iterate:
+                requester = interleaver.iterate_requester(requester)
+
+            value = interleaver.current.request(requester)
+
+            if self._preprocess is not None:
+                value = self._preprocess(obj, value)
+
+            if self._transform is not None:
+                interleaver.current.transform = self._transform
+
+        else:
+            raise ValueError(
+                f"Cannot access `{obj.path}.{self.name}` outside of interleaving."
+            )
+
+        return value
+
+    def __set__(self, obj: IEnvoy, value: Any):
+
+        if self._postprocess is not None:
+            value = self._postprocess(obj, value)
+
+        interleaver = obj.interleaver
+
+        if interleaver.interleaving:
+
+            requester = self._build_requester(obj)
+
+            self._hook(obj)
+
+            if self.iterate:
+                requester = interleaver.iterate_requester(requester)
+
+            interleaver.current.swap(requester, value)
+
+        else:
+            raise ValueError(
+                f"Cannot set `{obj.path}.{self.name}` outside of interleaving."
+            )
+
+    def provide(self, obj: IEnvoy, value: Any) -> Any:
+        """Provide a value from the model side into the interleaving system.
+
+        Called by model runners (e.g. vLLM) to push a value so mediators can
+        observe or modify it.
+
+        Args:
+            obj: The :class:`IEnvoy` instance this eproperty belongs to.
+            value: The value to provide.
+
+        Returns:
+            The (potentially modified) value after all mediators have handled it.
+        """
+        requester = self._build_requester(obj)
+        return obj.interleaver.handle(
+            requester,
+            value,
+            iterate=self.iterate,
+        )
+
+
 class Events(Enum):
     """Enum for different types of events in the interleaving process."""
 
