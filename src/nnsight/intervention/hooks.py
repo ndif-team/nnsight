@@ -311,3 +311,81 @@ def cache_input_hook(cache, module: torch.nn.Module, path: str, batcher, batch_g
     handle = add_ordered_hook(module, hook, "input")
     cache.hook_handles.append(handle)
     return handle
+
+
+# ---------------------------------------------------------------------------
+# Operation hooks (for source tracing)
+# ---------------------------------------------------------------------------
+
+
+def operation_output_hook(mediator, op_envoy):
+    """Register a one-shot output hook on an OperationEnvoy.
+
+    The hook is appended to ``op_envoy.post_hooks``.  When the operation's
+    wrapper fires, it iterates post hooks and calls each one with the output
+    value.  The hook tracks iterations, waits for the correct one,
+    self-removes, then delegates to ``mediator.handle()``.
+
+    Args:
+        mediator: The mediator requesting the value.
+        op_envoy: The :class:`OperationEnvoy` to hook.
+    """
+    path = f"{op_envoy.name}.output"
+    iteration = mediator.iteration
+
+    def hook(value):
+        mediator.iteration_tracker[path] += 1
+
+        if iteration != 0 and mediator.iteration_tracker[path] - 1 != iteration:
+            return value
+
+        op_envoy.post_hooks.remove(hook)
+        return mediator.handle(f"{path}.i{iteration}", value)
+
+    op_envoy.post_hooks.append(hook)
+
+
+def operation_input_hook(mediator, op_envoy):
+    """Register a one-shot input hook on an OperationEnvoy.
+
+    Like :func:`operation_output_hook` but appended to ``op_envoy.pre_hooks``.
+    The hook receives ``(args, kwargs)`` and returns the (potentially modified) tuple.
+
+    Args:
+        mediator: The mediator requesting the value.
+        op_envoy: The :class:`OperationEnvoy` to hook.
+    """
+    path = f"{op_envoy.name}.input"
+    iteration = mediator.iteration
+
+    def hook(inputs):
+        mediator.iteration_tracker[path] += 1
+
+        if iteration != 0 and mediator.iteration_tracker[path] - 1 != iteration:
+            return inputs
+
+        op_envoy.pre_hooks.remove(hook)
+        return mediator.handle(f"{path}.i{iteration}", inputs)
+
+    op_envoy.pre_hooks.append(hook)
+
+
+def operation_fn_hook(mediator, op_envoy):
+    """Register a one-shot fn hook for recursive source tracing.
+
+    Appended to ``op_envoy.fn_hooks``.  When the operation wrapper fires, it
+    passes the original function through each fn-hook.  The hook calls
+    ``mediator.handle()`` to deliver the function to the worker thread (which
+    injects it) and receives the injected replacement via a SWAP event
+    processed in the same handle call.
+
+    Args:
+        mediator: The mediator requesting the function.
+        op_envoy: The :class:`OperationEnvoy` to hook.
+    """
+
+    def hook(fn):
+        op_envoy.fn_hooks.remove(hook)
+        return mediator.handle(f"{op_envoy.name}.fn", fn)
+
+    op_envoy.fn_hooks.append(hook)

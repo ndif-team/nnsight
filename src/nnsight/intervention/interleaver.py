@@ -218,45 +218,46 @@ class Interleaver:
             # dynamically registered one-shot hooks fire correctly.
             module.register_forward_hook(lambda _, __, output: output)
 
-    def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None):
-        """
-        Wrap an operation to intercept inputs and outputs for intervention, as well as the function itself.
-        Used by Envoy.source to hook into intermediate operations of a forward pass.
+    def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None, op_envoy: Optional[Any] = None):
+        """Create a wrapper for an operation that processes hooks from an OperationEnvoy.
+
+        Called by the ``wrap`` closure inside ``Envoy.source`` when the
+        OperationEnvoy has pending hooks.  The wrapper reads hook lists from
+        the ``op_envoy`` at call time, so hooks registered after wrapper
+        creation are still seen.
 
         Args:
-            fn (Callable): The intermediate operation function to wrap
-            name (str): The fully qualified name of the operation
-            bound_obj (Optional[Any]): The object fn is bound to if it is a method
+            fn: The original operation function.
+            name: The fully qualified name of the operation.
+            bound_obj: The object ``fn`` is bound to, if it is a method.
+            op_envoy: The :class:`OperationEnvoy` holding the hook lists.
 
         Returns:
-            Callable: A wrapped version of the function
+            A wrapped version of the function that processes registered hooks.
         """
 
         @wraps(fn)
         def inner(*args, **kwargs):
 
-            nonlocal fn
+            actual_fn = op_envoy.fn_replacement if op_envoy.fn_replacement is not None else fn
 
-            # Provide the function itself to the interleaver to allows recursive interventions for Envoy.source.
-            fn = self.handle(f"{name}.fn", fn)
+            for hook in list(op_envoy.fn_hooks):
+                actual_fn = hook(actual_fn)
 
-            # Provide the input values to the interleaver to be potentially consumed and/or modified by the mediators.
-            # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
-            args, kwargs = self.handle(f"{name}.input", (args, kwargs), iterate=True)
+            for hook in list(op_envoy.pre_hooks):
+                result = hook((args, kwargs))
+                if result is not None:
+                    args, kwargs = result
 
-            # Call the original function/method with the potentially modified input values.
-            if not inspect.ismethod(fn) and bound_obj is not None:
-                value = fn(bound_obj, *args, **kwargs)
+            if not inspect.ismethod(actual_fn) and bound_obj is not None:
+                value = actual_fn(bound_obj, *args, **kwargs)
             else:
-                value = fn(*args, **kwargs)
+                value = actual_fn(*args, **kwargs)
 
-            # Provide the output values to the interleaver to be potentially consumed and/or modified by the mediators.
-            # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
-            value = self.handle(f"{name}.output", value, iterate=True)
-
-            for mediator in self.mediators:
-                if f"{name}.fn" in mediator.history:
-                    mediator.history.remove(f"{name}.fn")
+            for hook in list(op_envoy.post_hooks):
+                result = hook(value)
+                if result is not None:
+                    value = result
 
             return value
 
@@ -311,31 +312,29 @@ class Interleaver:
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
             return True
 
-    def handle(
-        self,
-        provider: Optional[str] = None,
-        value: Optional[Any] = None,
-        iterate: bool = False,
-    ):
+    def handle(self, provider: Optional[str] = None, value: Optional[Any] = None, iterate: bool = False):
         """Broadcast a provider value to all mediators.
 
-        This is a simplified handle used only by :meth:`wrap_operation` for
-        source-level interventions, where every mediator needs to see the
-        value.  Regular module hooks bypass this entirely — they register
-        one-shot hooks that call :meth:`Mediator.handle` directly.
+        Used by ``eproperty.provide()`` and ``Envoy.interleave()`` to push
+        values (e.g. vLLM logits, generation results) into the interleaving
+        system.
 
         Args:
             provider: The provider string identifying this value.
             value: The value being provided.
+            iterate: Whether to append an iteration suffix to the provider.
         """
+        original_provider = provider
+
         for mediator in self.mediators:
-
             if iterate:
-                iteration = mediator.iteration_tracker[provider]
-
-                provider = f"{provider}.i{iteration}"
+                iteration = mediator.iteration_tracker[original_provider]
+                provider = f"{original_provider}.i{iteration}"
 
             mediator.handle(provider, value)
+
+            if iterate:
+                mediator.iteration_tracker[original_provider] += 1
 
     def check_dangling_mediators(self):
 

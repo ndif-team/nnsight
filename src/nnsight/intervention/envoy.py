@@ -442,7 +442,13 @@ class Envoy(Batchable):
         """
         if self._source is None:
 
+            # _source is set after inject so the wrap closure can reference it
+            # via self._source once it exists (for nested operations).
+            _source_ref = [None]
+
             def wrap(fn: Callable, **kwargs):
+
+                name = kwargs["name"]
 
                 bound_obj = (
                     fn.__self__
@@ -450,12 +456,21 @@ class Envoy(Batchable):
                     else None
                 )
 
-                if self.interleaving:
-                    return self._interleaver.wrap_operation(
-                        fn, **kwargs, bound_obj=bound_obj
-                    )
-                else:
+                if not self.interleaving:
                     return fn
+
+                # Fast path: look up the OperationEnvoy for this operation
+                source_obj = _source_ref[0]
+                if source_obj is None:
+                    return fn
+
+                op_envoy = source_obj._get_operation(name)
+                if op_envoy is None or not op_envoy._has_hooks():
+                    return fn
+
+                return self._interleaver.wrap_operation(
+                    fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
+                )
 
             source, line_numbers, forward = inject(
                 type(self._module).forward, wrap, self.path
@@ -476,6 +491,7 @@ class Envoy(Batchable):
                 line_numbers,
                 interleaver=self._interleaver,
             )
+            _source_ref[0] = self._source
 
         return self._source
 
@@ -972,7 +988,11 @@ class Envoy(Batchable):
 
         if self._source is not None:
 
+            _source_ref = self._source
+
             def wrap(fn: Callable, **kwargs):
+
+                name = kwargs["name"]
 
                 bound_obj = (
                     fn.__self__
@@ -980,12 +1000,16 @@ class Envoy(Batchable):
                     else None
                 )
 
-                if self.interleaving:
-                    return self._interleaver.wrap_operation(
-                        fn, **kwargs, bound_obj=bound_obj
-                    )
-                else:
+                if not self.interleaving:
                     return fn
+
+                op_envoy = _source_ref._get_operation(name)
+                if op_envoy is None or not op_envoy._has_hooks():
+                    return fn
+
+                return self._interleaver.wrap_operation(
+                    fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
+                )
 
             source, line_numbers, forward = inject(
                 type(self._module).forward, wrap, self._module.__path__
@@ -1263,6 +1287,18 @@ class OperationEnvoy:
         self._source: EnvoySource = None
         self._fn: Callable = None
 
+        # Hook lists for lazy operation interception.
+        # Populated by operation_*_hook() in hooks.py when mediators
+        # access this operation's values.  Hooks self-remove after firing.
+        self.pre_hooks: list = []
+        self.post_hooks: list = []
+        self.fn_hooks: list = []
+        self.fn_replacement: Callable = None
+
+    def _has_hooks(self) -> bool:
+        """Check if this operation has any pending hooks or a fn replacement."""
+        return bool(self.pre_hooks or self.post_hooks or self.fn_hooks or self.fn_replacement)
+
     def __str__(self):
         """
         String representation showing the operation in context.
@@ -1296,125 +1332,106 @@ class OperationEnvoy:
 
     @property
     def output(self) -> Union[Any, torch.Tensor]:
+        """Get the output of this operation.
+
+        Registers a one-shot output hook on this OperationEnvoy before
+        requesting the value, following the same lazy pattern as module hooks.
         """
-        Get the output of this operation.
+        from .hooks import operation_output_hook
 
-        This property provides access to the return value(s) produced by the operation
-        during execution.
+        mediator = self._interleaver.current
+        requester = self._interleaver.iterate_requester(f"{self.name}.output")
 
-        Returns:
-            The operation's output value(s)
-        """
+        if self._interleaver.batcher.current_provider != requester:
+            operation_output_hook(mediator, self)
 
-        return self._interleaver.current.request(
-            self._interleaver.iterate_requester(f"{self.name}.output")
-        )
+        return mediator.request(requester)
 
     @output.setter
     def output(self, value: Any) -> None:
-        """
-        Set a new value for the operation's output.
+        """Set a new value for the operation's output."""
+        from .hooks import operation_output_hook
 
-        This allows for intervention by replacing the operation's output with
-        a custom value during execution.
+        mediator = self._interleaver.current
+        requester = self._interleaver.iterate_requester(f"{self.name}.output")
 
-        Args:
-            value: The new output value
-        """
+        if self._interleaver.batcher.current_provider != requester:
+            operation_output_hook(mediator, self)
 
-        self._interleaver.current.swap(
-            self._interleaver.iterate_requester(f"{self.name}.output"), value
-        )
+        mediator.swap(requester, value)
 
     @property
     def inputs(
         self,
     ) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
-        """
-        Get the inputs to this operation.
+        """Get the inputs to this operation.
 
-        This property provides access to all input value(s) passed to the operation
-        during execution, structured as a tuple of positional and keyword arguments.
-
-        Returns:
-            The operation's input value(s)
+        Registers a one-shot input hook on this OperationEnvoy before
+        requesting the value.
         """
-        return self._interleaver.current.request(
-            self._interleaver.iterate_requester(f"{self.name}.input")
-        )
+        from .hooks import operation_input_hook
+
+        mediator = self._interleaver.current
+        requester = self._interleaver.iterate_requester(f"{self.name}.input")
+
+        if self._interleaver.batcher.current_provider != requester:
+            operation_input_hook(mediator, self)
+
+        return mediator.request(requester)
 
     @inputs.setter
     def inputs(self, value: Any) -> None:
-        """
-        Set new values for the operation's inputs.
+        """Set new values for the operation's inputs."""
+        from .hooks import operation_input_hook
 
-        This allows for intervention by replacing the operation's inputs with
-        custom values during execution.
+        mediator = self._interleaver.current
+        requester = self._interleaver.iterate_requester(f"{self.name}.input")
 
-        Args:
-            value: The new input value(s)
-        """
-        self._interleaver.current.swap(
-            self._interleaver.iterate_requester(f"{self.name}.input"), value
-        )
+        if self._interleaver.batcher.current_provider != requester:
+            operation_input_hook(mediator, self)
+
+        mediator.swap(requester, value)
 
     @property
     def input(self) -> Union[Any, torch.Tensor]:
-        """
-        Get the first input to the operation.
-
-        This is a convenience property that returns just the first input value
-        from all inputs passed to the operation.
-
-        Returns:
-            The first input value
-        """
-
+        """Get the first input to the operation."""
         inputs = self.inputs
-
         return [*inputs[0], *inputs[1].values()][0]
 
     @input.setter
     def input(self, value: Any) -> None:
-        """
-        Set a new value for the operation's first input.
-
-        This is a convenience method that replaces just the first positional input
-        while preserving all other inputs.
-
-        Args:
-            value: The new value for the first input
-        """
-
+        """Set a new value for the operation's first input."""
         inputs = self.inputs
-
         value = (value, *inputs[0][1:]), inputs[1]
-
         self.inputs = value
 
     @property
     def source(self) -> EnvoySource:
-        """
-        Get the source code of the operation.
+        """Get the source code of the operation for recursive source tracing.
 
-        This property provides access to the operation's source code with nested
-        operations highlighted, allowing for inspection and intervention at specific points.
-
-        Returns:
-            An EnvoySource object containing the operation's source code and nested operations
+        On first access, registers a fn-hook to intercept the operation's
+        function, injects it with ``wrap`` calls for nested operations, and
+        swaps the injected version back.  The injected function is stored
+        as ``fn_replacement`` on this OperationEnvoy so it's used on all
+        subsequent forward passes.
         """
+        from .hooks import operation_fn_hook
 
         if self._source is None:
+            # Register fn-hook and request the function
+            operation_fn_hook(self._interleaver.current, self)
             fn = self._interleaver.current.request(f"{self.name}.fn")
 
-            # TODO maybe do something else here
             if isinstance(fn, torch.nn.Module):
-
-                msg = f"Don't call .source on a module ({getattr(fn, '__path__', '')}) from within another .source. Call it directly with: {getattr(fn, '__path__', '')}.source"
+                msg = (
+                    f"Don't call .source on a module ({getattr(fn, '__path__', '')}) "
+                    f"from within another .source. Call it directly with: "
+                    f"{getattr(fn, '__path__', '')}.source"
+                )
                 raise ValueError(msg)
 
             def wrap(fn: Callable, **kwargs):
-
+                name = kwargs["name"]
                 bound_obj = (
                     fn.__self__
                     if getattr(fn, "__name__", None) != "forward"
@@ -1422,8 +1439,13 @@ class OperationEnvoy:
                     else None
                 )
 
+                # Look up the OperationEnvoy for this nested operation
+                op_envoy = self._source._get_operation(name)
+                if op_envoy is None or not op_envoy._has_hooks():
+                    return fn
+
                 return self._interleaver.wrap_operation(
-                    fn, **kwargs, bound_obj=bound_obj
+                    fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
                 )
 
             source, line_numbers, fn = inject(fn, wrap, self.name)
@@ -1431,13 +1453,16 @@ class OperationEnvoy:
             self._source = EnvoySource(
                 self.name, source, line_numbers, interleaver=self._interleaver
             )
-
             self._fn = fn
 
-        requester = f"{self.name}.fn"
-
-        if requester not in self._interleaver.current.history:
-            self._interleaver.current.swap(requester, self._fn)
+            # Swap the function with the injected version (processed in the
+            # fn-hook's mediator.handle call) and store persistently.
+            self._interleaver.current.swap(f"{self.name}.fn", self._fn)
+            self.fn_replacement = self._fn
+        else:
+            # Already injected — ensure fn_replacement is set
+            if self.fn_replacement is None:
+                self.fn_replacement = self._fn
 
         return self._source
 
@@ -1472,13 +1497,20 @@ class EnvoySource:
         self.line_numbers = line_numbers
 
         self.operations: List[OperationEnvoy] = []
+        self._operations_by_name: Dict[str, OperationEnvoy] = {}
 
         for _name, line_number in line_numbers.items():
+            full_name = f"{name}.{_name}"
             operation = OperationEnvoy(
-                f"{name}.{_name}", source, line_number, interleaver=interleaver
+                full_name, source, line_number, interleaver=interleaver
             )
             setattr(self, _name, operation)
             self.operations.append(operation)
+            self._operations_by_name[full_name] = operation
+
+    def _get_operation(self, name: str) -> Optional[OperationEnvoy]:
+        """Look up an OperationEnvoy by its fully qualified name."""
+        return self._operations_by_name.get(name)
 
     def __str__(self):
         """
