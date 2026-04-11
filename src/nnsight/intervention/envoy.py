@@ -30,7 +30,7 @@ from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver, Mediator, eproperty
+from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
 from .hooks import requires_output, requires_input, requires_operation_output, requires_operation_input
 
 

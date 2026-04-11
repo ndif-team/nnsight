@@ -300,7 +300,6 @@ class InterleavingTracer(Tracer):
 
         self.fn = fn
         self.model = model
-        self.path = ""
 
         self.mediators: List[Mediator] = []
 

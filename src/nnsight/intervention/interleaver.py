@@ -44,12 +44,12 @@ class IEnvoy:
 
     Attributes:
         interleaver: The :class:`Interleaver` managing execution flow.
-        path: The provider path prefix used to build requester/provider
-            strings (e.g. ``"model.transformer.h.0"``).  Defaults to ``""``.
+        path (optional): The provider path prefix used to build requester/provider
+            strings (e.g. ``"model.transformer.h.0"``).  If absent or empty,
+            the eproperty key is used as the full requester string.
     """
 
     interleaver: "Interleaver"
-    path: str = ""
 
 
 class eproperty:
@@ -61,8 +61,9 @@ class eproperty:
 
     The decorated stub function (``_hook``) is called for its **side effects**
     (e.g. registering a one-shot PyTorch hook via ``@requires_output``).  The
-    interleaver and path are obtained from the ``IEnvoy`` instance, not from
-    the hook.
+    interleaver is obtained from ``obj.interleaver``.  The path prefix is
+    obtained from ``obj.path`` if it exists; if absent or empty, the key
+    alone is used as the requester string.
 
     Args:
         key: The interleaving key appended to ``obj.path``
@@ -71,27 +72,6 @@ class eproperty:
             with a description appear in the tree.
         iterate: Whether to append an iteration suffix (``.i0``, ``.i1``, …).
             Defaults to ``True``.
-
-    Usage::
-
-        class MyEnvoy(IEnvoy):
-
-            @eproperty(description="raw logit tensor")
-            def logits(self): ...
-
-    Post-/pre-processing via decorators::
-
-        @eproperty(key="input")
-        def input(self): ...
-
-        @input.preprocess
-        def input(self, value):
-            return [*value[0], *value[1].values()][0]
-
-        @input.postprocess
-        def input(self, value):
-            inputs = self.inputs
-            return (value, *inputs[0][1:]), inputs[1]
     """
 
     def __init__(self, key: str = None, description: str = None, iterate: bool = True):
@@ -129,10 +109,11 @@ class eproperty:
         self._transform = func
         return self
 
-    def _build_requester(self, obj: IEnvoy) -> str:
-        return f"{obj.path}.{self.key}" if obj.path else self.key
+    def _build_requester(self, obj) -> str:
+        path = getattr(obj, "path", "")
+        return f"{path}.{self.key}" if path else self.key
 
-    def __get__(self, obj: IEnvoy, owner):
+    def __get__(self, obj, owner):
 
         if obj is None:
             return self
@@ -157,13 +138,14 @@ class eproperty:
                 interleaver.current.transform = self._transform
 
         else:
+            path = getattr(obj, "path", "")
             raise ValueError(
-                f"Cannot access `{obj.path}.{self.name}` outside of interleaving."
+                f"Cannot access `{path}.{self.name}` outside of interleaving."
             )
 
         return value
 
-    def __set__(self, obj: IEnvoy, value: Any):
+    def __set__(self, obj, value: Any):
 
         if self._postprocess is not None:
             value = self._postprocess(obj, value)
@@ -182,23 +164,13 @@ class eproperty:
             interleaver.current.swap(requester, value)
 
         else:
+            path = getattr(obj, "path", "")
             raise ValueError(
-                f"Cannot set `{obj.path}.{self.name}` outside of interleaving."
+                f"Cannot set `{path}.{self.name}` outside of interleaving."
             )
 
-    def provide(self, obj: IEnvoy, value: Any) -> Any:
-        """Provide a value from the model side into the interleaving system.
-
-        Called by model runners (e.g. vLLM) to push a value so mediators can
-        observe or modify it.
-
-        Args:
-            obj: The :class:`IEnvoy` instance this eproperty belongs to.
-            value: The value to provide.
-
-        Returns:
-            The (potentially modified) value after all mediators have handled it.
-        """
+    def provide(self, obj, value: Any) -> Any:
+        """Provide a value from the model side into the interleaving system."""
         requester = self._build_requester(obj)
         return obj.interleaver.handle(
             requester,
