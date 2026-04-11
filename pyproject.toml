@@ -58,11 +58,18 @@ diffusers = [
 
 vllm = [
     "vllm==0.15.1",
-    "triton==3.5.0",
 ]
 
+serve = [
+    "nnsight[vllm]",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.24",
+]
 
-all = ["nnsight[test,diffusers,vllm]"]
+all = ["nnsight[test,diffusers,vllm,serve]"]
+
+[project.scripts]
+nnsight-serve = "nnsight.modeling.vllm.serve.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ndif-team/nnsight"

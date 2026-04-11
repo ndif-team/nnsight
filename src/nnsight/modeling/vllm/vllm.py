@@ -450,7 +450,11 @@ class VLLM(RemoteableMixin):
                 raise exc_type(f"[vLLM worker] {exc_message}")
 
     def trace(self, *inputs, **kwargs):
-        if self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
+        serve = kwargs.pop("serve", None)
+        if serve is not None and kwargs.get("backend") is None:
+            from ...intervention.backends.local_serve import LocalServeBackend
+            kwargs["backend"] = LocalServeBackend(self, host=serve)
+        elif self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
             from .async_backend import AsyncVLLMBackend
             kwargs['backend'] = AsyncVLLMBackend(self)
         return super().trace(*inputs, **kwargs)
