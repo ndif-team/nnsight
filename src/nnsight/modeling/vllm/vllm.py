@@ -453,7 +453,8 @@ class VLLM(RemoteableMixin):
         serve = kwargs.pop("serve", None)
         if serve is not None and kwargs.get("backend") is None:
             from ...intervention.backends.local_serve import LocalServeBackend
-            kwargs["backend"] = LocalServeBackend(self, host=serve)
+            blocking = kwargs.pop("blocking", True)
+            kwargs["backend"] = LocalServeBackend(self, host=serve, blocking=blocking)
         elif self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
             from .async_backend import AsyncVLLMBackend
             kwargs['backend'] = AsyncVLLMBackend(self)
