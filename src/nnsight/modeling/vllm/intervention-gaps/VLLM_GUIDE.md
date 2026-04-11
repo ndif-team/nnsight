@@ -104,12 +104,14 @@ with model.trace("Hello"):
 ### vLLM gap
 vLLM's `fused_add_rms_norm` mutates tensors in-place after hooks fire, silently corrupting `.save()`'d references.
 
-### Status: **Mitigated — general inference-mode cloning**
+### Status: **Fixed — clone-on-save**
 ```python
 with model.trace("Hello"):
     hidden = model.model.layers[0].output[0].save()
-# Mutation-safe — nnsight auto-clones inference-mode tensors
+# Mutation-safe — .save() auto-clones inference-mode tensors
 ```
+
+`.save()` detects inference-mode tensors and clones them automatically. No behavior change on HF (tensors are not inference-mode).
 
 ---
 
@@ -506,7 +508,7 @@ with model.trace("Hello") as tracer:
 hidden = cache.model.layers[0].output[0] + cache.model.layers[0].output[1]  # combine manually
 ```
 
-Cached values are auto-cloned (mutation-safe) but in raw vLLM format.
+Cached values are in raw vLLM format. `.save()` auto-clones inference-mode tensors for mutation safety.
 
 ---
 

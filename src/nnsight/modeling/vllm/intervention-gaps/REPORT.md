@@ -12,7 +12,7 @@
 
 | Gap | Description | Status |
 |-----|-------------|--------|
-| 1.1 | In-place mutation corrupts `.save()` | **MITIGATED** — general inference-mode clone |
+| 1.1 | In-place mutation corrupts `.save()` | **FIXED** — clone-on-save for inference tensors |
 | 1.2 | Decoder layer output: `(mlp, res)` vs `(combined,)` | DOCUMENTED |
 | 1.3 | Decoder layer `.input` returns int64 positions | DOCUMENTED |
 | 1.4 | LayerNorm output: tuple vs tensor | DOCUMENTED |
@@ -32,7 +32,7 @@ The gap descriptions below document the **architectural differences** between vL
 
 ## Group 1: Activation Semantics
 
-### Gap 1.1 — In-place mutation corrupts `.save()` — **MITIGATED**
+### Gap 1.1 — In-place mutation corrupts `.save()` — **FIXED**
 
 **Root cause:** vLLM's `fused_add_rms_norm` mutates tensors in-place after nnsight hooks fire. `.save()` stores a reference, so the saved value silently becomes the post-mutation value.
 
@@ -41,9 +41,9 @@ The gap descriptions below document the **architectural differences** between vL
 - `layer.output[1]` ref vs clone: diff = **1013.81**
 - `mlp.output` and `self_attn.output`: unaffected (not mutated downstream)
 
-**Mitigation:** `VLLMBatcher` clones inference-mode tensors before the user sees them (`pre_user_transform`) and clones again before returning to vLLM (`post_user_transform`), so fused-kernel mutations don't corrupt `.save()`'d references.
+**Fix:** `.save()` automatically clones inference-mode tensors (`tensor.is_inference()`). The clone is a separate allocation, so downstream fused-kernel mutations affect the original tensor flowing through the model, not the user's saved reference. This is architecture-agnostic — it fires on any inference-mode tensor, not just vLLM.
 
-**Impact:** Mitigated for most use cases by general clone mechanism. The clone also exits `torch.inference_mode()` so users can do in-place ops like `output[0][:] = 0`.
+**Impact:** Transparent to users. `.save()` returns a safe copy on vLLM; no behavior change on HF (tensors are not inference-mode).
 
 ---
 
@@ -222,7 +222,7 @@ All 13 gaps stem from four architectural decisions in vLLM:
 
 | Category | Status | Notes |
 |----------|--------|-------|
-| **Gap 1.1** (mutation) | **Mitigated** | General inference-mode clone protects `.save()` refs |
+| **Gap 1.1** (mutation) | **Fixed** | `.save()` auto-clones inference-mode tensors |
 | **Gap 1.2** (dual residual output) | Documented | Users combine streams manually |
 | **Gap 1.3** (input positions) | Documented | Use `.inputs` to access hidden states at `args[1]` |
 | **Gap 1.4** (norm tuple) | Documented | Use `.output[0]` to get normalized tensor |
@@ -245,7 +245,7 @@ vLLM exposes raw internal semantics. Users must account for the differences docu
 
 | Operation | Pattern | Notes |
 |-----------|---------|-------|
-| **Save** | `layer.output[0].save()` | Cloned by nnsight, mutation-safe (Gap 1.1) |
+| **Save** | `layer.output[0].save()` | `.save()` auto-clones inference tensors (Gap 1.1) |
 | **Combined hidden** | `layer.output[0] + layer.output[1]` | Must combine dual streams manually (Gap 1.2) |
 | **Steer** | `layer.output[0][-1, :] += v` | 2D indexing (Gap 3.1) |
 | **Ablate** | `layer.output[0][:] = 0` | Only zeroes one stream; zero both for full ablation |

@@ -262,9 +262,6 @@ class Interleaver:
             # NNsight keeps the modules attribute path as the provider string on the module itself.
             provider = module.__path__
 
-            # Transform backend-native inputs to user-facing format (e.g. vLLM dual-stream → HF-style).
-            args, kwargs = self.batcher.pre_user_transform(module, "input", (args, kwargs))
-
             # Provide the input values to the interleaver to be potentially consumed and/or modified by the mediators.
             # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
             try:
@@ -276,9 +273,6 @@ class Interleaver:
             # If not skipping, just return the potentially modified input values.
             else:
                 args, kwargs = inputs
-
-            # Transform user-facing inputs back to backend-native format.
-            args, kwargs = self.batcher.post_user_transform(module, "input", (args, kwargs))
 
             return args, kwargs
 
@@ -298,24 +292,15 @@ class Interleaver:
             provider = module.__path__
 
             # If we are skipping, we set the output to the value we want to return and clear the skip variable.
-            is_skip = skip_container[0] is not None
-            if is_skip:
+            if skip_container[0] is not None:
 
                 output = skip_container[0]
 
                 skip_container[0] = None
 
-            # Transform backend-native output to user-facing format (e.g. vLLM dual-stream → HF-style).
-            # Skip values are already in user format, so only transform non-skip outputs.
-            if not is_skip:
-                output = self.batcher.pre_user_transform(module, "output", output)
-
             # Provide the output values to the interleaver to be potentially consumed and/or modified by the mediators.
             # Iterate here means this provided can be provided more than once so the provider string will be updated to include the iteration.
             output = self.handle(f"{provider}.output", output, iterate=True)
-
-            # Transform user-facing output back to backend-native format.
-            output = self.batcher.post_user_transform(module, "output", output, is_skip=is_skip)
 
             return output
 

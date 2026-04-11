@@ -313,43 +313,6 @@ class Batcher:
 
         return current_value
 
-    def pre_user_transform(self, module: "torch.nn.Module", hook_type: str, value: Any, is_skip: bool = False) -> Any:
-        """Transform a value from backend-native format to user-facing format.
-
-        Called in the interleaver hooks *before* :meth:`handle` dispatches
-        the value to mediators.  The base implementation is a no-op.
-        Backend-specific subclasses (e.g. ``VLLMBatcher``) override this
-        to present HF-compatible semantics.
-
-        Args:
-            module: The PyTorch module whose hook fired.
-            hook_type: ``"output"`` or ``"input"``.
-            value: The raw value from the hook.
-            is_skip: True when the value comes from a ``skip()`` call.
-
-        Returns:
-            The (possibly transformed) value.
-        """
-        return value
-
-    def post_user_transform(self, module: "torch.nn.Module", hook_type: str, value: Any, is_skip: bool = False) -> Any:
-        """Transform a value from user-facing format back to backend-native format.
-
-        Called in the interleaver hooks *after* :meth:`handle` returns,
-        right before the value is handed back to the PyTorch forward pass.
-        The base implementation is a no-op.
-
-        Args:
-            module: The PyTorch module whose hook fired.
-            hook_type: ``"output"`` or ``"input"``.
-            value: The (possibly user-modified) value.
-            is_skip: True when the value originated from a ``skip()`` call.
-
-        Returns:
-            The (possibly inverse-transformed) value.
-        """
-        return value
-
 
 class DiffusionBatcher(Batcher):
     """
