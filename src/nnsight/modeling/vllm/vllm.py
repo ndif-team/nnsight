@@ -159,6 +159,12 @@ class VLLM(RemoteableMixin):
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
 
+        # Disable prefix caching by default.  Prefix caching reuses KV values
+        # from previous requests, which can skip the forward pass for cached
+        # tokens — hooks won't fire and interventions on those tokens are
+        # silently skipped.  Users can override with enable_prefix_caching=True.
+        kwargs.setdefault("enable_prefix_caching", False)
+
         meta_model = self._load_meta(repo_id, **kwargs)
 
         destroy_model_parallel()
@@ -406,11 +412,15 @@ class VLLM(RemoteableMixin):
         outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_requests)
 
         saves = {}
+        deferred_exception = None
 
         # Some of the output objects will have a saves attribute, which contains the saved variables
         for output in outputs:
             if hasattr(output, "saves"):
                 saves.update(output.saves)
+
+        # Extract deferred exceptions from worker, keyed by request ID.
+        deferred_exceptions = saves.pop("__nnsight_exceptions__", None)
 
         # Save the variables in our local environment
         for value in saves.values():
@@ -419,6 +429,25 @@ class VLLM(RemoteableMixin):
 
         # Push the variables to the interleaver frame
         push_variables(self._interleaver.mediators[0].info.frame, saves)
+
+        # Raise deferred exceptions at the trace boundary (after saves are
+        # pushed so any values saved before the error are still accessible).
+        # EarlyStopException is intentional control flow — filter it out.
+        if deferred_exceptions is not None:
+            real_errors = {
+                req_id: exc_info for req_id, exc_info in deferred_exceptions.items()
+                if exc_info.get("type") != "EarlyStopException"
+            }
+            if real_errors:
+                # Raise the first real error with its original type.
+                first_id, first_exc = next(iter(real_errors.items()))
+                exc_type_name = first_exc.get("type", "Exception")
+                exc_message = first_exc.get("message", "")
+                builtins_ref = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+                exc_type = builtins_ref.get(exc_type_name, RuntimeError) if isinstance(builtins_ref, dict) else getattr(builtins_ref, exc_type_name, RuntimeError)
+                if not isinstance(exc_type, type) or not issubclass(exc_type, BaseException):
+                    exc_type = RuntimeError
+                raise exc_type(f"[vLLM worker] {exc_message}")
 
     def trace(self, *inputs, **kwargs):
         if self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
