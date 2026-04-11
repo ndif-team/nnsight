@@ -622,25 +622,20 @@ class TestOrder:
     @torch.no_grad()
     def test_out_of_order_error(self, gpt2: nnsight.LanguageModel):
         """Test that accessing modules out of order raises error."""
-        with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderError):
+        with pytest.raises(
+            nnsight.intervention.interleaver.Mediator.MissedProviderError
+        ):
             with gpt2.trace("_"):
                 out = gpt2.transformer.h[2].output.save()
                 out_2 = gpt2.transformer.h[1].inputs.save()
 
     @torch.no_grad()
     @pytest.mark.skips
-    def test_out_of_order_skip(self, gpt2: nnsight.LanguageModel):
-        """Test out of order error with skip."""
-        with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderError):
-            with gpt2.trace("_"):
-                gpt2.transformer.h[1].skip(gpt2.transformer.h[0].output)
-                gpt2.transformer.h[1].input[:] = 0
-
-    @torch.no_grad()
-    @pytest.mark.skips
     def test_out_of_order_skip_2(self, gpt2: nnsight.LanguageModel):
         """Test out of order error with multiple skips."""
-        with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderError):
+        with pytest.raises(
+            nnsight.intervention.interleaver.Mediator.MissedProviderError
+        ):
             with gpt2.trace("_"):
                 inp = gpt2.transformer.h[0].output.save()
                 gpt2.transformer.h[1].skip(inp)

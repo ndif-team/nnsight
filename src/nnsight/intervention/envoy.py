@@ -197,6 +197,8 @@ class eproperty:
 
             requester = f"{envoy.path}.{self.key}"
 
+            self._hook(envoy)
+
             if self.iterate:
                 requester = envoy._interleaver.iterate_requester(requester)
 
