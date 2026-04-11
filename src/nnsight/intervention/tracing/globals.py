@@ -1,9 +1,22 @@
+import contextvars
 from typing import Any, Callable, Tuple, Union
 
 import torch
 from typing_extensions import Self
 from ..._c.py_mount import mount
 from ... import CONFIG
+
+# Per-context state: each async task / thread gets its own stack and saves.
+_stack_var: contextvars.ContextVar[int] = contextvars.ContextVar("nnsight_stack", default=0)
+_saves_var: contextvars.ContextVar[set] = contextvars.ContextVar("nnsight_saves", default=None)
+
+
+def _get_saves() -> set:
+    s = _saves_var.get()
+    if s is None:
+        s = set()
+        _saves_var.set(s)
+    return s
 
 
 def save(object: Any):
@@ -15,7 +28,7 @@ def save(object: Any):
     if isinstance(object, torch.Tensor) and object.is_inference():
         object = object.clone()
 
-    Globals.saves.add(id(object))
+    _get_saves().add(id(object))
 
     return object
 
@@ -34,7 +47,7 @@ class Object(torch.Tensor):
         >>> print(attn_0)
         """
 
-        if Globals.stack == 0:
+        if _stack_var.get() == 0:
             raise RuntimeError(
                 ".save() called outside of a trace context. "
                 "Use .save() only inside a `with model.trace(...)` block."
@@ -93,14 +106,30 @@ class TracingCache:
         self.code_cache.clear()
 
 
-class Globals:
+class _GlobalsMeta(type):
+    """Metaclass that routes Globals.stack and Globals.saves to contextvars."""
 
-    stack = 0
+    @property
+    def stack(cls) -> int:
+        return _stack_var.get()
 
-    saves = set()
+    @stack.setter
+    def stack(cls, value: int):
+        _stack_var.set(value)
 
+    @property
+    def saves(cls) -> set:
+        return _get_saves()
+
+    @saves.setter
+    def saves(cls, value: set):
+        _saves_var.set(value)
+
+
+class Globals(metaclass=_GlobalsMeta):
+
+    # cache and _mounted are process-wide (shared across all tasks).
     cache = TracingCache()
-
     _mounted = False
 
     @staticmethod
@@ -109,14 +138,18 @@ class Globals:
         if CONFIG.APP.PYMOUNT and not Globals._mounted:
             mount(Object.save, "save")
             Globals._mounted = True
-        Globals.stack += 1
+        cur = _stack_var.get()
+        if cur == 0:
+            # New trace context — start with a fresh saves set.
+            _saves_var.set(set())
+        _stack_var.set(cur + 1)
 
     @staticmethod
     def exit():
-        Globals.stack -= 1
+        _stack_var.set(_stack_var.get() - 1)
 
     @staticmethod
     def clear():
-        Globals.saves.clear()
+        _get_saves().clear()
         Globals.cache.clear()
-        Globals.stack = 0
+        _stack_var.set(0)

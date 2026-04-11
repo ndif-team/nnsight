@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import inspect
 import types
 import warnings
@@ -702,9 +703,13 @@ class Mediator:
                 torch.cuda.set_stream(_caller_stream)
             _intervention(*_args)
 
-        # Start the worker thread.
+        # Start the worker thread. Copy the current context so the
+        # worker inherits Globals.stack / Globals.saves from the caller.
+        ctx = contextvars.copy_context()
+
         self.worker = Thread(
-            target=_worker_target,
+            target=ctx.run,
+            args=(_worker_target,),
             daemon=True,
             name=self.name,
         )

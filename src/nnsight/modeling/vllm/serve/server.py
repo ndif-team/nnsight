@@ -28,22 +28,28 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from ....intervention.backends.base import Backend
 from ....intervention.tracing.globals import Globals
 from ....schema.request import RequestModel
-from ....schema.response import ResponseModel
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
 
 logger = logging.getLogger("nnsight.serve")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[nnsight-serve] %(message)s"))
+    logger.addHandler(_handler)
 
 app = FastAPI(title="nnsight-vllm-serve")
 
 # Set by cli.py after engine initialization.
 _model: Optional["VLLM"] = None
+_persistent_objects: Optional[dict] = None
 
 
 def set_model(model: "VLLM") -> None:
-    global _model
+    global _model, _persistent_objects
     _model = model
+    _persistent_objects = model._remoteable_persistent_objects()
 
 
 @app.get("/health")
@@ -75,9 +81,14 @@ async def generate(request: Request):
     body = await request.body()
     compress = request.headers.get("nnsight-compress", "False").lower() == "true"
 
+    client_host = request.client.host if request.client else "unknown"
+    logger.info(
+        "Received request: %d bytes, compress=%s, client=%s",
+        len(body), compress, client_host,
+    )
     try:
         request_model = RequestModel.deserialize(
-            body, _model._remoteable_persistent_objects(), compress
+            body, _persistent_objects, compress
         )
     except Exception as e:
         logger.exception("Failed to deserialize request")
@@ -103,7 +114,6 @@ async def generate(request: Request):
 
         tracer.mediators.clear()
     except Exception as e:
-        Globals.exit()
         logger.exception("Failed to compile trace")
         raise HTTPException(status_code=400, detail=f"Trace compilation failed: {e}")
     finally:
@@ -129,8 +139,10 @@ async def generate(request: Request):
             "collect_nnsight",
             args=([request_id], finished),
         )
-        saves_bytes = next((r for r in results if r is not None), None)
-        saves = pickle.loads(saves_bytes) if saves_bytes else {}
+        saves = {}
+        for r in results:
+            if r is not None:
+                saves.update(pickle.loads(r))
 
         gen_output = {}
         if last_output is not None:
@@ -163,6 +175,13 @@ async def generate(request: Request):
     response_data = {"saves": all_saves, "outputs": generation_outputs}
     buf = io.BytesIO()
     torch.save(response_data, buf)
-    buf.seek(0)
+    resp_bytes = buf.getvalue()
 
-    return Response(content=buf.read(), media_type="application/octet-stream")
+    logger.info(
+        "Completed request: %d invokes, %d saves (%s), %d bytes response",
+        len(generation_outputs),
+        len(all_saves),
+        ", ".join(all_saves.keys()) if all_saves else "none",
+        len(resp_bytes),
+    )
+    return Response(content=resp_bytes, media_type="application/octet-stream")
