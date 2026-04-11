@@ -19,11 +19,12 @@ This module provides:
   ``batcher.current_provider``), hook registration is skipped.
 """
 
-from functools import wraps
-from typing import Any, Callable, TYPE_CHECKING
+from functools import partial, wraps
+from typing import Any, Callable, List, Optional, TYPE_CHECKING
 from .interleaver import Mediator
 import torch
 from torch.utils.hooks import RemovableHandle
+from ..util import apply
 
 if TYPE_CHECKING:
     from nnsight.intervention.envoy import Envoy
@@ -243,3 +244,70 @@ def requires_input(fn):
         return fn(self, *args, **kwargs)
 
     return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Persistent cache hooks
+# ---------------------------------------------------------------------------
+
+
+def cache_output_hook(cache, module: torch.nn.Module, path: str, batcher, batch_group) -> RemovableHandle:
+    """Register a persistent output hook that records values into a Cache.
+
+    Unlike one-shot intervention hooks, cache hooks are **not** self-removing.
+    They fire on every forward pass and append values to the cache.  They are
+    assigned ``mediator_idx = float('inf')`` so they always fire **after** any
+    intervention hooks, ensuring the cache captures post-intervention values.
+
+    Args:
+        cache: The :class:`Cache` object to record values into.
+        module: The PyTorch module to hook.
+        path: The module's envoy path (e.g. ``"model.transformer.h.0"``).
+        batcher: The :class:`Batcher` instance for narrowing batched values.
+        batch_group: The mediator's batch group for narrowing, or ``None``.
+
+    Returns:
+        A :class:`~torch.utils.hooks.RemovableHandle` for the registered hook.
+    """
+
+    def hook(module: torch.nn.Module, input: Any, output: Any) -> None:
+        value = output
+        if batcher.needs_batching and batch_group is not None and batch_group[0] != -1:
+            value = apply(value, partial(batcher._narrow, batch_group), torch.Tensor)
+        cache.add(path, "output", value)
+
+    hook.mediator_idx = float("inf")
+
+    handle = add_ordered_hook(module, hook, "output")
+    cache.hook_handles.append(handle)
+    return handle
+
+
+def cache_input_hook(cache, module: torch.nn.Module, path: str, batcher, batch_group) -> RemovableHandle:
+    """Register a persistent input hook that records values into a Cache.
+
+    Behaves like :func:`cache_output_hook` but intercepts the module's input
+    (as ``(args, kwargs)``).
+
+    Args:
+        cache: The :class:`Cache` object to record values into.
+        module: The PyTorch module to hook.
+        path: The module's envoy path (e.g. ``"model.transformer.h.0"``).
+        batcher: The :class:`Batcher` instance for narrowing batched values.
+        batch_group: The mediator's batch group for narrowing, or ``None``.
+
+    Returns:
+        A :class:`~torch.utils.hooks.RemovableHandle` for the registered hook.
+    """
+
+    def hook(module: torch.nn.Module, args: Any, kwargs: Any) -> None:
+        value = (args, kwargs)
+        if batcher.needs_batching and batch_group is not None and batch_group[0] != -1:
+            value = apply(value, partial(batcher._narrow, batch_group), torch.Tensor)
+        cache.add(path, "inputs", value)
+
+    hook.mediator_idx = float("inf")
+
+    handle = add_ordered_hook(module, hook, "input")
+    cache.hook_handles.append(handle)
+    return handle

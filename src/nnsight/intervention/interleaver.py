@@ -138,36 +138,6 @@ class Interleaver:
             handle.remove()
         self.hook_handles = []
 
-    def iterate_provider(self, provider: str):
-        """
-        Update a provider string to include which iteration of the provider is being provided.
-
-        Args:
-            provider (str): The provider string to update
-
-        Returns:
-            str: The updated provider string
-
-        Examples:
-            >>> provider = "model.transformer.h[0].input"
-            >>> iterate_provider(provider)
-            "model.transformer.h[0].input.i0"
-
-            >>> provider = "model.transformer.h[0].input"
-            >>> iterate_provider(provider)
-            "model.transformer.h[0].input.i1"
-
-            >>> provider = "model.transformer.h[0].input"
-            >>> iterate_provider(provider)
-            "model.transformer.h[0].input.i2"
-        """
-
-        mediator = self.current
-
-        iteration = mediator.iteration_tracker[provider]
-
-        return f"{provider}.i{iteration}"
-
     def iterate_requester(self, requester: str):
         """Append the current mediator's iteration index to a requester string.
 
@@ -329,6 +299,11 @@ class Interleaver:
         # Clear the interleaving flag on exit.
         self._interleaving = False
 
+        # Remove persistent cache hooks registered during this session.
+        for mediator in self.mediators:
+            for cache in mediator.user_cache:
+                cache.remove_hooks()
+
         # Clear the mediators that are no longer alive.
         self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
@@ -336,7 +311,12 @@ class Interleaver:
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
             return True
 
-    def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
+    def handle(
+        self,
+        provider: Optional[str] = None,
+        value: Optional[Any] = None,
+        iterate: bool = False,
+    ):
         """Broadcast a provider value to all mediators.
 
         This is a simplified handle used only by :meth:`wrap_operation` for
@@ -349,6 +329,12 @@ class Interleaver:
             value: The value being provided.
         """
         for mediator in self.mediators:
+
+            if iterate:
+                iteration = mediator.iteration_tracker[provider]
+
+                provider = f"{provider}.i{iteration}"
+
             mediator.handle(provider, value)
 
     def check_dangling_mediators(self):
@@ -366,7 +352,7 @@ class Interleaver:
                 iteration = mediator.iteration
 
                 mediator.respond(
-                    ValueError(
+                    Mediator.MissedProviderError(
                         f"Execution complete but `{requester}` was not provided. Did you call an Envoy out of order? Investigate why this module was not called."
                     )
                 )
@@ -374,7 +360,7 @@ class Interleaver:
                 if iteration != 0:
                     try:
                         mediator.handle()
-                    except ValueError as e:
+                    except Mediator.MissedProviderError as e:
                         msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
                         warnings.warn(msg)
                 else:
@@ -441,7 +427,14 @@ class Mediator:
         all_stop (Optional[int]): Optional number of times to execute this mediator
     """
 
-    class OutOfOrderError(Exception):
+    class MissedProviderError(Exception):
+        """
+        Exception raised when a provider is missed.
+        """
+
+        pass
+
+    class OutOfOrderError(MissedProviderError):
         """
         Exception raised when interventions are defined out of order.
         """
@@ -673,25 +666,11 @@ class Mediator:
             elif event == Events.EXCEPTION:
                 process = self.handle_exception_event(data)
             elif event == Events.SKIP:
-                try:
-                    process = self.handle_skip_event(provider, *data)
-                except SkipException as e:
-                    if self.user_cache:
-                        for cache in self.user_cache:
-                            cache.add(provider, e.value)
-                    raise e
+                process = self.handle_skip_event(provider, *data)
             elif event == Events.BARRIER:
                 process = self.handle_barrier_event(provider, data)
             elif event == Events.END:
                 process = self.handle_end_event()
-
-        if len(self.user_cache) > 0 and provider is not None:
-
-            for cache in self.user_cache:
-                cache.add(
-                    provider,
-                    self.interleaver.batcher.narrow(self.batch_group),
-                )
 
         value = self.interleaver.batcher.current_value
 
@@ -808,23 +787,21 @@ class Mediator:
         """
         Handle a barrier event by setting a barrier.
         """
-        
-        
 
         if participants is not None:
-            
+
             prev_current = self.interleaver.current
 
             for mediator in self.interleaver.mediators:
 
                 if mediator.name in participants:
-                    
+
                     self.interleaver.current = mediator
 
                     mediator.respond()
 
                     mediator.handle(provider, self.interleaver.batcher.current_value)
-                    
+
             self.interleaver.current = prev_current
 
         return False
