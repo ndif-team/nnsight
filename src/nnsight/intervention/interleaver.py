@@ -15,7 +15,10 @@ from typing import (
     Callable,
     List,
     Optional,
+    Protocol,
     Set,
+    Union,
+    runtime_checkable,
 )
 
 import _thread
@@ -36,20 +39,22 @@ from typing import TypeVar
 T = TypeVar("T")
 
 
-class IEnvoy:
+@runtime_checkable
+class IEnvoy(Protocol):
     """Interface for objects that participate in the interleaving system.
 
-    Any object that uses :class:`eproperty` descriptors must implement this
-    interface by providing:
+    Any object that uses :class:`eproperty` descriptors must satisfy this
+    protocol by providing:
 
     Attributes:
         interleaver: The :class:`Interleaver` managing execution flow.
-        path (optional): The provider path prefix used to build requester/provider
-            strings (e.g. ``"model.transformer.h.0"``).  If absent or empty,
-            the eproperty key is used as the full requester string.
+        path: Optional provider path prefix used to build requester/provider
+            strings (e.g. ``"model.transformer.h.0"``).  If ``None`` or
+            absent, the eproperty key alone is used as the requester string.
     """
 
     interleaver: "Interleaver"
+    path: str
 
 
 class eproperty:
@@ -138,9 +143,9 @@ class eproperty:
                 interleaver.current.transform = self._transform
 
         else:
-            path = getattr(obj, "path", "")
+            label = self._build_requester(obj)
             raise ValueError(
-                f"Cannot access `{path}.{self.name}` outside of interleaving."
+                f"Cannot access `{label}` outside of interleaving."
             )
 
         return value
@@ -164,9 +169,9 @@ class eproperty:
             interleaver.current.swap(requester, value)
 
         else:
-            path = getattr(obj, "path", "")
+            label = self._build_requester(obj)
             raise ValueError(
-                f"Cannot set `{path}.{self.name}` outside of interleaving."
+                f"Cannot set `{label}` outside of interleaving."
             )
 
     def provide(self, obj, value: Any) -> Any:
