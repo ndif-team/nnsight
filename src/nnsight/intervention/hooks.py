@@ -314,6 +314,53 @@ def cache_input_hook(cache, module: torch.nn.Module, path: str, batcher, batch_g
 
 
 # ---------------------------------------------------------------------------
+# Operation eproperty decorators
+# ---------------------------------------------------------------------------
+
+
+def requires_operation_output(fn):
+    """Decorator for OperationEnvoy eproperty stubs that need an output hook.
+
+    Equivalent to :func:`requires_output` but registers an operation-level
+    hook via :func:`operation_output_hook` on the OperationEnvoy's
+    ``post_hooks`` list.
+    """
+
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        mediator = self.interleaver.current
+        requester = f"{self.path}.output.i{mediator.iteration}"
+
+        if self.interleaver.batcher.current_provider != requester:
+            operation_output_hook(mediator, self)
+
+        return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
+def requires_operation_input(fn):
+    """Decorator for OperationEnvoy eproperty stubs that need an input hook.
+
+    Equivalent to :func:`requires_input` but registers an operation-level
+    hook via :func:`operation_input_hook` on the OperationEnvoy's
+    ``pre_hooks`` list.
+    """
+
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        mediator = self.interleaver.current
+        requester = f"{self.path}.input.i{mediator.iteration}"
+
+        if self.interleaver.batcher.current_provider != requester:
+            operation_input_hook(mediator, self)
+
+        return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
 # Operation hooks (for source tracing)
 # ---------------------------------------------------------------------------
 

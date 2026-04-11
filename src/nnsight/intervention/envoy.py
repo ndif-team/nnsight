@@ -31,7 +31,7 @@ from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
 from .interleaver import Interleaver, Mediator, eproperty
-from .hooks import requires_output, requires_input
+from .hooks import requires_output, requires_input, requires_operation_output, requires_operation_input
 
 
 def trace_only(fn: Callable):
@@ -1154,80 +1154,29 @@ class OperationEnvoy:
 
         return "\n".join(highlighted_lines)
 
-    @property
+    @eproperty()
+    @requires_operation_output
     def output(self) -> Union[Any, torch.Tensor]:
-        """Get the output of this operation.
+        """Get the output of this operation."""
 
-        Registers a one-shot output hook on this OperationEnvoy before
-        requesting the value, following the same lazy pattern as module hooks.
-        """
-        from .hooks import operation_output_hook
+    @eproperty(key="input")
+    @requires_operation_input
+    def inputs(self) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
+        """Get the inputs to this operation."""
 
-        mediator = self.interleaver.current
-        requester = self.interleaver.iterate_requester(f"{self.name}.output")
-
-        if self.interleaver.batcher.current_provider != requester:
-            operation_output_hook(mediator, self)
-
-        return mediator.request(requester)
-
-    @output.setter
-    def output(self, value: Any) -> None:
-        """Set a new value for the operation's output."""
-        from .hooks import operation_output_hook
-
-        mediator = self.interleaver.current
-        requester = self.interleaver.iterate_requester(f"{self.name}.output")
-
-        if self.interleaver.batcher.current_provider != requester:
-            operation_output_hook(mediator, self)
-
-        mediator.swap(requester, value)
-
-    @property
-    def inputs(
-        self,
-    ) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
-        """Get the inputs to this operation.
-
-        Registers a one-shot input hook on this OperationEnvoy before
-        requesting the value.
-        """
-        from .hooks import operation_input_hook
-
-        mediator = self.interleaver.current
-        requester = self.interleaver.iterate_requester(f"{self.name}.input")
-
-        if self.interleaver.batcher.current_provider != requester:
-            operation_input_hook(mediator, self)
-
-        return mediator.request(requester)
-
-    @inputs.setter
-    def inputs(self, value: Any) -> None:
-        """Set new values for the operation's inputs."""
-        from .hooks import operation_input_hook
-
-        mediator = self.interleaver.current
-        requester = self.interleaver.iterate_requester(f"{self.name}.input")
-
-        if self.interleaver.batcher.current_provider != requester:
-            operation_input_hook(mediator, self)
-
-        mediator.swap(requester, value)
-
-    @property
+    @eproperty(key="input")
+    @requires_operation_input
     def input(self) -> Union[Any, torch.Tensor]:
         """Get the first input to the operation."""
-        inputs = self.inputs
-        return [*inputs[0], *inputs[1].values()][0]
 
-    @input.setter
-    def input(self, value: Any) -> None:
-        """Set a new value for the operation's first input."""
+    @input.preprocess
+    def input(self, value):
+        return [*value[0], *value[1].values()][0]
+
+    @input.postprocess
+    def input(self, value):
         inputs = self.inputs
-        value = (value, *inputs[0][1:]), inputs[1]
-        self.inputs = value
+        return (value, *inputs[0][1:]), inputs[1]
 
     @property
     def source(self) -> EnvoySource:
