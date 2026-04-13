@@ -31,7 +31,12 @@ from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
 from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
-from .hooks import requires_output, requires_input, requires_operation_output, requires_operation_input
+from .hooks import (
+    requires_output,
+    requires_input,
+    requires_operation_output,
+    requires_operation_input,
+)
 
 
 def trace_only(fn: Callable):
@@ -45,9 +50,6 @@ def trace_only(fn: Callable):
         return fn(self, *args, **kwargs)
 
     return wrapper
-
-
-
 
 
 class Envoy(Batchable):
@@ -64,7 +66,7 @@ class Envoy(Batchable):
             Example: "model.encoder.layer1" indicates this module is the first layer of the encoder in the model.
         _module (torch.nn.Module): The underlying PyTorch module
         _source (Optional[EnvoySource]): Source code representation of the module
-        _interleaver (Optional[Interleaver]): Interleaver for managing execution flow
+        interleaver (Optional[Interleaver]): Interleaver for managing execution flow
         _default_mediators (List[List[str]]): List of default mediators created with .edit
         _children (List[Envoy]): List of child Envoys
         _alias (Aliaser): Aliaser object for managing aliases
@@ -263,11 +265,31 @@ class Envoy(Batchable):
         """
         if self._source is None:
 
-            # _source is set after inject so the wrap closure can reference it
-            # via self._source once it exists (for nested operations).
+            # ``_source_ref`` is a one-element list used as a forward
+            # reference to the EnvoySource — the ``wrap`` closure below is
+            # baked into the rewritten forward method at inject time, but
+            # the EnvoySource (and its OperationEnvoys) are only created
+            # after inject completes.  We fill in _source_ref[0] after
+            # EnvoySource construction so the wrap closure can look up the
+            # appropriate OperationEnvoy at runtime.
             _source_ref = [None]
 
             def wrap(fn: Callable, **kwargs):
+                """Runtime wrapper invoked for each operation in the module.
+
+                This is installed into the module's rewritten forward by
+                :func:`inject`.  On every forward pass, ``wrap`` is called
+                with the original function and its operation name.  It has
+                two jobs:
+
+                1. Fast path — if no OperationEnvoy for this operation has
+                   any pending hooks, return ``fn`` unchanged.  This is the
+                   zero-overhead path for untouched operations.
+                2. Lazy path — look up the OperationEnvoy and hand it to
+                   :meth:`Interleaver.wrap_operation`, which builds a
+                   wrapper that processes ``pre_hooks``, ``post_hooks``,
+                   ``fn_hooks``, and ``fn_replacement``.
+                """
 
                 name = kwargs["name"]
 
@@ -280,7 +302,6 @@ class Envoy(Batchable):
                 if not self.interleaving:
                     return fn
 
-                # Fast path: look up the OperationEnvoy for this operation
                 source_obj = _source_ref[0]
                 if source_obj is None:
                     return fn
@@ -1060,7 +1081,7 @@ class Envoy(Batchable):
 
         state = self.__dict__.copy()
 
-        state["_interleaver"]._persistent_id = "Interleaver"
+        state["interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
 
         state.pop("_source")
@@ -1075,12 +1096,39 @@ class Envoy(Batchable):
 
 # TODO extend Envoy
 class OperationEnvoy:
-    """
-    Represents a specific operation within a module's forward pass.
+    """Proxy for a single call-site inside a module's forward pass.
 
-    This class provides access to the inputs and outputs of individual
-    operations within a module's execution, allowing for fine-grained
-    inspection and intervention at the operation level.
+    Created by :class:`EnvoySource` for every function/method call found
+    by the AST walker in :mod:`nnsight.intervention.inject`.  Implements
+    :class:`IEnvoy` so it can back ``eproperty`` descriptors for
+    ``.output``, ``.input``, ``.inputs``, and ``.source`` (for recursive
+    source tracing).
+
+    Lazy hook state
+    ---------------
+
+    Unlike module-level hooks, operations aren't PyTorch modules and
+    can't use ``register_forward_hook``.  Instead, the rewritten
+    forward method calls ``wrap(fn, name=...)`` at every operation
+    site, which reads this envoy's hook lists and builds a wrapper
+    that processes them:
+
+    - ``pre_hooks`` — list of one-shot input callables registered by
+      :func:`operation_input_hook`, each called with ``(args, kwargs)``.
+    - ``post_hooks`` — list of one-shot output callables registered by
+      :func:`operation_output_hook`, each called with the return value.
+    - ``fn_hooks`` — list of one-shot callables registered by
+      :func:`operation_fn_hook` for recursive source tracing.  Each
+      receives the current function and returns a (possibly replaced)
+      function.
+    - ``fn_replacement`` — a persistent function replacement installed
+      by :meth:`source` after the first recursive ``inject``.  When
+      set, it's used in place of the original function on every call
+      until the interleaving session ends.
+
+    :meth:`_has_hooks` returns ``True`` if any of these are non-empty,
+    which is how the ``wrap`` closure decides whether to build a
+    wrapper or take the zero-overhead fast path.
     """
 
     def __init__(
@@ -1090,16 +1138,16 @@ class OperationEnvoy:
         line_number: int,
         interleaver: Optional[Interleaver] = None,
     ):
-        """
-        Initialize an OperationEnvoy.
+        """Initialize an OperationEnvoy.
 
         Args:
-            name: The fully qualified name of the operation
-            source: The source code of the module containing the operation
-            line_number: The line number of the operation in the source
-            interleaver: Optional interleaver for managing execution flow
+            name: The fully qualified path of the operation (e.g.
+                ``"model.transformer.h.0.attn.split_1"``).  Stored as
+                ``self.path`` to satisfy the :class:`IEnvoy` protocol.
+            source: The source code of the module containing the operation.
+            line_number: The line number of the operation in the source.
+            interleaver: The interleaver managing execution flow.
         """
-        self.name = name
         self.path = name
         self.source_code = source
         self.line_number = line_number
@@ -1109,16 +1157,22 @@ class OperationEnvoy:
         self._source: EnvoySource = None
         self._fn: Callable = None
 
-        # Hook lists for lazy operation interception.
-        # Populated by operation_*_hook() in hooks.py when mediators
-        # access this operation's values.  Hooks self-remove after firing.
+        # Hook lists populated by operation_*_hook() in hooks.py when
+        # mediators access this operation's values.  Hooks are one-shot
+        # and self-remove after firing.  See the class docstring for
+        # details.
         self.pre_hooks: list = []
         self.post_hooks: list = []
         self.fn_hooks: list = []
         self.fn_replacement: Callable = None
 
     def _has_hooks(self) -> bool:
-        """Check if this operation has any pending hooks or a fn replacement."""
+        """Return True if any hooks or a fn replacement are installed.
+
+        Used by the ``wrap`` closure in :attr:`Envoy.source` (and the
+        nested one in :attr:`OperationEnvoy.source`) to decide whether
+        an operation needs wrapping or can be called directly.
+        """
         return bool(
             self.pre_hooks or self.post_hooks or self.fn_hooks or self.fn_replacement
         )
@@ -1137,7 +1191,7 @@ class OperationEnvoy:
         start_idx = max(0, self.line_number - 5)
         end_idx = min(len(source_lines) - 1, self.line_number + 8)
 
-        highlighted_lines = [self.name + ":\n"]
+        highlighted_lines = [self.path + ":\n"]
 
         if start_idx != 0:
             highlighted_lines.append("    ....")
@@ -1161,7 +1215,9 @@ class OperationEnvoy:
 
     @eproperty(key="input")
     @requires_operation_input
-    def inputs(self) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
+    def inputs(
+        self,
+    ) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
         """Get the inputs to this operation."""
 
     @eproperty(key="input")
@@ -1193,7 +1249,7 @@ class OperationEnvoy:
         if self._source is None:
             # Register fn-hook and request the function
             operation_fn_hook(self.interleaver.current, self)
-            fn = self.interleaver.current.request(f"{self.name}.fn")
+            fn = self.interleaver.current.request(f"{self.path}.fn")
 
             if isinstance(fn, torch.nn.Module):
                 msg = (
@@ -1221,16 +1277,16 @@ class OperationEnvoy:
                     fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
                 )
 
-            source, line_numbers, fn = inject(fn, wrap, self.name)
+            source, line_numbers, fn = inject(fn, wrap, self.path)
 
             self._source = EnvoySource(
-                self.name, source, line_numbers, interleaver=self.interleaver
+                self.path, source, line_numbers, interleaver=self.interleaver
             )
             self._fn = fn
 
             # Swap the function with the injected version (processed in the
             # fn-hook's mediator.handle call) and store persistently.
-            self.interleaver.current.swap(f"{self.name}.fn", self._fn)
+            self.interleaver.current.swap(f"{self.path}.fn", self._fn)
             self.fn_replacement = self._fn
         else:
             # Already injected — ensure fn_replacement is set
@@ -1252,7 +1308,7 @@ class EnvoySource:
 
     def __init__(
         self,
-        name: str,
+        path: str,
         source: str,
         line_numbers: dict,
         interleaver: Optional[Interleaver] = None,
@@ -1266,6 +1322,7 @@ class EnvoySource:
             line_numbers: A dictionary mapping operation names to line numbers
             interleaver: Optional interleaver for managing execution flow
         """
+        self.path = path
         self.source = source
         self.line_numbers = line_numbers
 
@@ -1273,7 +1330,7 @@ class EnvoySource:
         self._operations_by_name: Dict[str, OperationEnvoy] = {}
 
         for _name, line_number in line_numbers.items():
-            full_name = f"{name}.{_name}"
+            full_name = f"{path}.{_name}"
             operation = OperationEnvoy(
                 full_name, source, line_number, interleaver=interleaver
             )

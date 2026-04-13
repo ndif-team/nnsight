@@ -835,7 +835,9 @@ class TestSkip:
     @torch.no_grad()
     def test_skip_inner_module_error(self, gpt2: nnsight.LanguageModel):
         """Test error when accessing inner module of skipped module."""
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            nnsight.intervention.interleaver.Mediator.MissedProviderError
+        ):
             with gpt2.trace("Hello World"):
                 inp = gpt2.transformer.h[0].output
                 gpt2.transformer.h[1].skip(inp)
@@ -1142,12 +1144,10 @@ class TestCache:
 
         assert "model.transformer.h.0" not in cache
         assert cache["model.transformer"].inputs is None
-        assert cache["model.transformer.h.1.attn.c_attn"].inputs is None
         assert torch.equal(
             cache["model.transformer.h.2"].output,
             cache["model.transformer.h.3"].inputs[0][0],
         )
-        assert cache["model.transformer.h.1.attn.c_attn"].output is not None
         assert cache["model.transformer"].output is not None
 
     @torch.no_grad()

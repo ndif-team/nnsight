@@ -116,6 +116,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 ctx = self.trace_contexts[trace_id]
 
+                mediator.idx = len(model.interleaver.mediators)
                 model.interleaver.mediators.append(mediator)
                 mediator.start(model.interleaver)
 
@@ -347,7 +348,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # condense()/reorder, not the scheduler dict order.
         # Store these for unflatten() which needs the same ordering.
         self.nnsight_request_helper._batch_req_ids = list(self.input_batch.req_ids)
-        self.nnsight_request_helper._num_scheduled_tokens = dict(scheduler_output.num_scheduled_tokens)
+        self.nnsight_request_helper._num_scheduled_tokens = dict(
+            scheduler_output.num_scheduled_tokens
+        )
 
         self.nnsight_request_helper.process_batch_groups(
             scheduler_output.num_scheduled_tokens,

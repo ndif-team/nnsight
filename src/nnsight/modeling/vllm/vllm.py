@@ -19,7 +19,7 @@ from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.llm import LLM
 
-from ...intervention.envoy import Envoy, eproperty
+from ...intervention.envoy import eproperty
 from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.tracer import ScanningTracer
 from ...intervention.tracing.util import push_variables
@@ -95,7 +95,7 @@ class VLLM(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-    @eproperty(description="Logits")
+    @eproperty(description="Logits", iterate=True)
     def logits(self):
         """The logit tensor produced by the model before sampling.
 
@@ -105,7 +105,7 @@ class VLLM(RemoteableMixin):
                 logits = model.logits.save()
         """
 
-    @eproperty(description="Sampled token ids")
+    @eproperty(description="Sampled token ids", iterate=True)
     def samples(self):
         """The sampled token IDs produced by the sampler after logits.
 

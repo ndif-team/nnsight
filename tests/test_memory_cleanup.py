@@ -300,7 +300,7 @@ class TestInterleaverCleanup:
         def create_and_trace():
             model = create_model()
             wrapper = NNsight(model)
-            interleaver_ref = weakref.ref(wrapper._interleaver)
+            interleaver_ref = weakref.ref(wrapper.interleaver)
             with torch.no_grad():
                 with wrapper.trace(test_input):
                     _ = wrapper.output.save()

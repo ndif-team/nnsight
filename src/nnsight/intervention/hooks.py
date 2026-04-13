@@ -28,8 +28,10 @@ from ..util import apply
 
 if TYPE_CHECKING:
     from nnsight.intervention.envoy import Envoy
+    from nnsight.intervention.envoy import OperationEnvoy
 else:
     Envoy = Any
+    OperationEnvoy = Any
 
 
 def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
@@ -97,19 +99,29 @@ def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
 def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     """Register a one-shot forward pre-hook for a mediator on a module.
 
-    The hook captures the mediator's current ``iteration`` at registration time.
-    On each forward call it increments ``iteration_tracker[path]``.  If the
-    tracker hasn't reached the target iteration yet, the hook returns early
-    (no-op).  Once the correct iteration fires, the hook **self-removes** via
-    ``handle.remove()`` and delegates to ``mediator.handle()`` to deliver or
-    modify the input value.
+    The hook target iteration is captured at registration time:
 
-    For iteration 0 the hook always fires on the first call (the
-    ``iteration != 0`` guard lets it through).  For higher iterations, the hook
-    stays registered across forward passes until the tracker matches.
+    - If ``mediator.iteration`` is set (i.e. the request was issued inside
+      an ``tracer.iter[i]`` loop), that value is the target.
+    - Otherwise, the current ``iteration_tracker[path]`` value is the
+      target — this is the "next" forward pass that hasn't yet fired for
+      this module.
 
-    Each mediator maintains its own ``iteration_tracker``, so hooks from
-    different mediators on the same module count independently.
+    On each forward call, the hook checks whether the tracker has
+    advanced to the target iteration.  The tracker is **not** maintained
+    by this hook — it is bumped by the persistent iter hooks registered
+    by :class:`IteratorTracer` (see :func:`_register_iter_hooks` in
+    ``iterator.py``) after each forward pass.  This means the hook only
+    needs to compare; it doesn't count.
+
+    When the tracker matches:
+
+    1. If ``iteration != 0``, the mediator's ``iteration`` attribute is
+       cleared (set to ``None``) so subsequent requests fall back to the
+       tracker again — the "I was explicitly in iter[N]" mode ends.
+    2. The hook self-removes via ``handle.remove()``.
+    3. The hook delegates to :meth:`Mediator.handle` to deliver the
+       value to the worker thread (and process any SWAP/SKIP events).
 
     Args:
         mediator: The mediator requesting this hook.
@@ -121,16 +133,23 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     """
 
     handle = None
-    iteration = mediator.iteration
+    iteration = (
+        mediator.iteration
+        if mediator.iteration is not None
+        else mediator.iteration_tracker[path]
+    )
 
     def hook(module: torch.nn.Module, args: Any, kwargs: Any) -> Any:
 
-        mediator.iteration_tracker[path] += 1
-
-        nonlocal iteration
-
-        if iteration != 0 and mediator.iteration_tracker[path] - 1 != iteration:
+        # Wait until the iter tracker has advanced to our target step.
+        if mediator.iteration_tracker[path] != iteration:
             return args, kwargs
+
+        # Non-zero iterations came from an explicit iter[N] constraint;
+        # clearing here returns the mediator to the default "next step"
+        # behavior for any subsequent requests in the same intervention.
+        if iteration != 0:
+            mediator.iteration = None
 
         nonlocal handle
         handle.remove()
@@ -150,8 +169,9 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     """Register a one-shot forward hook for a mediator on a module.
 
     Behaves identically to :func:`input_hook` but intercepts the module's
-    output rather than its input.  See :func:`input_hook` for details on
-    iteration tracking and self-removal.
+    output rather than its input.  See :func:`input_hook` for the full
+    details on iteration tracking and the ``mediator.iteration = None``
+    reset behavior.
 
     Args:
         mediator: The mediator requesting this hook.
@@ -163,16 +183,19 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     """
 
     handle = None
-    iteration = mediator.iteration
+    iteration = (
+        mediator.iteration
+        if mediator.iteration is not None
+        else mediator.iteration_tracker[path]
+    )
 
     def hook(module: torch.nn.Module, _, output: Any) -> Any:
 
-        mediator.iteration_tracker[path] += 1
-
-        nonlocal iteration
-
-        if iteration != 0 and mediator.iteration_tracker[path] - 1 != iteration:
+        if mediator.iteration_tracker[path] != iteration:
             return output
+
+        if iteration != 0:
+            mediator.iteration = None
 
         nonlocal handle
         handle.remove()
@@ -189,15 +212,22 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
 
 
 def requires_output(fn):
-    """Decorator that ensures an output hook is registered before the wrapped function runs.
+    """Decorator that ensures a one-shot output hook is registered before
+    the wrapped eproperty stub runs.
 
-    Used on ``eproperty`` stub functions (e.g. ``Envoy.output``) to lazily
-    register a one-shot output hook when a mediator requests the value.
+    Used on ``eproperty`` stubs (e.g. ``Envoy.output``) so that the
+    appropriate PyTorch hook is installed on the underlying module at the
+    moment the user accesses the value during a trace.
 
-    If ``batcher.current_provider`` already matches the requester string for
-    this module and iteration, the hook is skipped — the value is already being
-    provided (e.g. when ``output`` and another eproperty sharing the same key
-    are accessed back-to-back).
+    Iteration resolution mirrors :func:`output_hook` — the target iteration
+    is ``mediator.iteration`` when set (inside ``tracer.iter[N]``) or
+    ``iteration_tracker[path]`` otherwise.
+
+    If ``batcher.current_provider`` already matches the requester for this
+    module and iteration, hook registration is skipped — the value is
+    already being provided in the current hook's call chain (e.g. when
+    ``output`` and another eproperty sharing the same key are accessed
+    back-to-back inside the same mediator step).
     """
 
     @wraps(fn)
@@ -207,7 +237,13 @@ def requires_output(fn):
 
         mediator = interleaver.current
 
-        requester = f"{self.path}.output.i{mediator.iteration}"
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iteration_tracker[f"{self.path}.output"]
+        )
+
+        requester = f"{self.path}.output.i{iteration}"
 
         if interleaver.batcher.current_provider != requester:
 
@@ -219,13 +255,16 @@ def requires_output(fn):
 
 
 def requires_input(fn):
-    """Decorator that ensures an input hook is registered before the wrapped function runs.
+    """Decorator that ensures a one-shot input hook is registered before
+    the wrapped eproperty stub runs.
 
-    Used on ``eproperty`` stub functions (e.g. ``Envoy.inputs``, ``Envoy.input``,
-    ``Envoy.skip``) to lazily register a one-shot input hook when a mediator
-    requests or modifies the value.
+    Used on ``eproperty`` stubs (e.g. ``Envoy.inputs``, ``Envoy.input``,
+    ``Envoy.skip``) so that the appropriate PyTorch pre-hook is installed
+    on the underlying module when the user accesses (or assigns to) the
+    value during a trace.
 
-    See :func:`requires_output` for the ``current_provider`` skip logic.
+    See :func:`requires_output` for iteration resolution and the
+    ``current_provider`` skip logic.
     """
 
     @wraps(fn)
@@ -235,7 +274,13 @@ def requires_input(fn):
 
         mediator = interleaver.current
 
-        requester = f"{self.path}.input.i{mediator.iteration}"
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iteration_tracker[f"{self.path}.input"]
+        )
+
+        requester = f"{self.path}.input.i{iteration}"
 
         if interleaver.batcher.current_provider != requester:
 
@@ -251,7 +296,9 @@ def requires_input(fn):
 # ---------------------------------------------------------------------------
 
 
-def cache_output_hook(cache, module: torch.nn.Module, path: str, batcher, batch_group) -> RemovableHandle:
+def cache_output_hook(
+    cache, module: torch.nn.Module, path: str, batcher, batch_group
+) -> RemovableHandle:
     """Register a persistent output hook that records values into a Cache.
 
     Unlike one-shot intervention hooks, cache hooks are **not** self-removing.
@@ -283,7 +330,9 @@ def cache_output_hook(cache, module: torch.nn.Module, path: str, batcher, batch_
     return handle
 
 
-def cache_input_hook(cache, module: torch.nn.Module, path: str, batcher, batch_group) -> RemovableHandle:
+def cache_input_hook(
+    cache, module: torch.nn.Module, path: str, batcher, batch_group
+) -> RemovableHandle:
     """Register a persistent input hook that records values into a Cache.
 
     Behaves like :func:`cache_output_hook` but intercepts the module's input
@@ -327,9 +376,14 @@ def requires_operation_output(fn):
     """
 
     @wraps(fn)
-    def wrapper(self, *args, **kwargs):
+    def wrapper(self: OperationEnvoy, *args, **kwargs):
         mediator = self.interleaver.current
-        requester = f"{self.path}.output.i{mediator.iteration}"
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iteration_tracker[f"{self.path}.output"]
+        )
+        requester = f"{self.path}.output.i{iteration}"
 
         if self.interleaver.batcher.current_provider != requester:
             operation_output_hook(mediator, self)
@@ -348,9 +402,14 @@ def requires_operation_input(fn):
     """
 
     @wraps(fn)
-    def wrapper(self, *args, **kwargs):
+    def wrapper(self: OperationEnvoy, *args, **kwargs):
         mediator = self.interleaver.current
-        requester = f"{self.path}.input.i{mediator.iteration}"
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iteration_tracker[f"{self.path}.input"]
+        )
+        requester = f"{self.path}.input.i{iteration}"
 
         if self.interleaver.batcher.current_provider != requester:
             operation_input_hook(mediator, self)
@@ -365,26 +424,42 @@ def requires_operation_input(fn):
 # ---------------------------------------------------------------------------
 
 
-def operation_output_hook(mediator, op_envoy):
-    """Register a one-shot output hook on an OperationEnvoy.
+def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
+    """Register a one-shot output hook on an :class:`OperationEnvoy`.
 
-    The hook is appended to ``op_envoy.post_hooks``.  When the operation's
-    wrapper fires, it iterates post hooks and calls each one with the output
-    value.  The hook tracks iterations, waits for the correct one,
-    self-removes, then delegates to ``mediator.handle()``.
+    Appends a hook to ``op_envoy.post_hooks``.  When the operation's
+    wrapper (created by :meth:`Interleaver.wrap_operation`) runs, it
+    iterates ``post_hooks`` and calls each with the operation's output
+    value.
+
+    The iteration-matching protocol mirrors the module-level
+    :func:`output_hook`: target iteration is captured at registration
+    from either ``mediator.iteration`` or ``iteration_tracker[path]``,
+    and the hook only fires once the tracker advances to match.  After
+    firing with a non-zero target, ``mediator.iteration`` is cleared.
+
+    The tracker for operation paths is bumped by the same persistent
+    iter hooks registered by :class:`IteratorTracer` — those hooks fire
+    on the parent module's output and increment the tracker for all
+    provider paths under that module, including operation-level ones.
 
     Args:
         mediator: The mediator requesting the value.
         op_envoy: The :class:`OperationEnvoy` to hook.
     """
-    path = f"{op_envoy.name}.output"
-    iteration = mediator.iteration
+    path = f"{op_envoy.path}.output"
+    iteration = (
+        mediator.iteration
+        if mediator.iteration is not None
+        else mediator.iteration_tracker[path]
+    )
 
-    def hook(value):
-        mediator.iteration_tracker[path] += 1
-
-        if iteration != 0 and mediator.iteration_tracker[path] - 1 != iteration:
+    def hook(value: Any) -> Any:
+        if mediator.iteration_tracker[path] != iteration:
             return value
+
+        if iteration != 0:
+            mediator.iteration = None
 
         op_envoy.post_hooks.remove(hook)
         return mediator.handle(f"{path}.i{iteration}", value)
@@ -392,24 +467,30 @@ def operation_output_hook(mediator, op_envoy):
     op_envoy.post_hooks.append(hook)
 
 
-def operation_input_hook(mediator, op_envoy):
-    """Register a one-shot input hook on an OperationEnvoy.
+def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
+    """Register a one-shot input hook on an :class:`OperationEnvoy`.
 
-    Like :func:`operation_output_hook` but appended to ``op_envoy.pre_hooks``.
-    The hook receives ``(args, kwargs)`` and returns the (potentially modified) tuple.
+    Like :func:`operation_output_hook` but appended to
+    ``op_envoy.pre_hooks``.  The wrapper calls pre-hooks with the
+    operation's ``(args, kwargs)`` tuple before invoking the function.
 
     Args:
         mediator: The mediator requesting the value.
         op_envoy: The :class:`OperationEnvoy` to hook.
     """
-    path = f"{op_envoy.name}.input"
-    iteration = mediator.iteration
+    path = f"{op_envoy.path}.input"
+    iteration = (
+        mediator.iteration
+        if mediator.iteration is not None
+        else mediator.iteration_tracker[path]
+    )
 
-    def hook(inputs):
-        mediator.iteration_tracker[path] += 1
-
-        if iteration != 0 and mediator.iteration_tracker[path] - 1 != iteration:
+    def hook(inputs: Any) -> Any:
+        if mediator.iteration_tracker[path] != iteration:
             return inputs
+
+        if iteration != 0:
+            mediator.iteration = None
 
         op_envoy.pre_hooks.remove(hook)
         return mediator.handle(f"{path}.i{iteration}", inputs)
@@ -417,22 +498,29 @@ def operation_input_hook(mediator, op_envoy):
     op_envoy.pre_hooks.append(hook)
 
 
-def operation_fn_hook(mediator, op_envoy):
+def operation_fn_hook(mediator: Mediator, op_envoy: OperationEnvoy):
     """Register a one-shot fn hook for recursive source tracing.
 
-    Appended to ``op_envoy.fn_hooks``.  When the operation wrapper fires, it
-    passes the original function through each fn-hook.  The hook calls
-    ``mediator.handle()`` to deliver the function to the worker thread (which
-    injects it) and receives the injected replacement via a SWAP event
-    processed in the same handle call.
+    Appended to ``op_envoy.fn_hooks``.  Unlike input/output hooks,
+    fn hooks are **not** iteration-aware — they fire on the first call
+    to the operation wrapper after registration, deliver the function to
+    the worker thread (which injects it with nested ``wrap`` calls), and
+    receive the injected replacement via a SWAP event processed inside
+    the same :meth:`Mediator.handle` call.  The hook returns the injected
+    function so the wrapper uses it for the actual invocation.
+
+    After firing, the injected function is also stored persistently on
+    ``op_envoy.fn_replacement`` by :meth:`OperationEnvoy.source`, so
+    subsequent forward passes use the injected version directly without
+    re-firing this hook.
 
     Args:
         mediator: The mediator requesting the function.
         op_envoy: The :class:`OperationEnvoy` to hook.
     """
 
-    def hook(fn):
+    def hook(fn: Callable) -> Callable:
         op_envoy.fn_hooks.remove(hook)
-        return mediator.handle(f"{op_envoy.name}.fn", fn)
+        return mediator.handle(f"{op_envoy.path}.fn", fn)
 
     op_envoy.fn_hooks.append(hook)

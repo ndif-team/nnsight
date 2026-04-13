@@ -326,7 +326,9 @@ class LanguageModel(TransformersModel):
 
         batched_labels = batched_inputs["labels"]
 
-        attention_mask = batched_inputs.get("attention_mask", torch.ones_like(batched_inputs["input_ids"]))
+        attention_mask = batched_inputs.get(
+            "attention_mask", torch.ones_like(batched_inputs["input_ids"])
+        )
 
         batched_ids = [
             {"input_ids": ids}
@@ -352,9 +354,13 @@ class LanguageModel(TransformersModel):
         for row_start, mask in [(0, attention_mask), (n_old, new_attention_mask)]:
             if mask is not None:
                 if left:
-                    combined_mask[row_start : row_start + mask.shape[0], -mask.shape[1] :] = mask
+                    combined_mask[
+                        row_start : row_start + mask.shape[0], -mask.shape[1] :
+                    ] = mask
                 else:
-                    combined_mask[row_start : row_start + mask.shape[0], : mask.shape[1]] = mask
+                    combined_mask[
+                        row_start : row_start + mask.shape[0], : mask.shape[1]
+                    ] = mask
 
         new_batched_inputs["attention_mask"] = combined_mask
 

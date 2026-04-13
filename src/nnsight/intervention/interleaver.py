@@ -65,14 +65,31 @@ class eproperty:
     request to the interleaver; writing to it schedules a swap.
 
     The decorated stub function (``_hook``) is called for its **side effects**
-    (e.g. registering a one-shot PyTorch hook via ``@requires_output``).  The
-    interleaver is obtained from ``obj.interleaver``.  The path prefix is
-    obtained from ``obj.path`` if it exists; if absent or empty, the key
-    alone is used as the requester string.
+    (e.g. registering a one-shot PyTorch hook via ``@requires_output`` or
+    ``@requires_operation_output``).  The interleaver is obtained from
+    ``obj.interleaver``.  The path prefix is obtained from ``obj.path`` if
+    the attribute exists and is truthy; if absent or empty, the key alone
+    is used as the requester string.  This is how tracer-level eproperties
+    like ``InterleavingTracer.result`` work without a path prefix.
+
+    Supported implementors
+    ----------------------
+
+    Any class satisfying the :class:`IEnvoy` protocol can host
+    eproperties.  In this codebase that includes:
+
+    - :class:`Envoy` — module-level ``.output``, ``.input``, ``.inputs``
+    - :class:`OperationEnvoy` — operation-level ``.output``, ``.input``,
+      ``.inputs`` (source tracing)
+    - :class:`InterleavingTracer` — tracer-level ``.result``
+    - vLLM :class:`VLLM` — ``.logits``, ``.samples``
 
     Args:
         key: The interleaving key appended to ``obj.path``
             (``<path>.<key>``).  Defaults to the stub function's name.
+            Multiple eproperties can share a key (e.g. ``Envoy.input``
+            and ``Envoy.inputs`` both use ``"input"``) to provide
+            different views on the same underlying value.
         description: A short label shown in the repr tree.  Only eproperties
             with a description appear in the tree.
         iterate: Whether to append an iteration suffix (``.i0``, ``.i1``, …).
@@ -114,11 +131,11 @@ class eproperty:
         self._transform = func
         return self
 
-    def _build_requester(self, obj) -> str:
+    def _build_requester(self, obj: IEnvoy) -> str:
         path = getattr(obj, "path", "")
         return f"{path}.{self.key}" if path else self.key
 
-    def __get__(self, obj, owner):
+    def __get__(self, obj: IEnvoy, owner: Any) -> Any:
 
         if obj is None:
             return self
@@ -144,13 +161,11 @@ class eproperty:
 
         else:
             label = self._build_requester(obj)
-            raise ValueError(
-                f"Cannot access `{label}` outside of interleaving."
-            )
+            raise ValueError(f"Cannot access `{label}` outside of interleaving.")
 
         return value
 
-    def __set__(self, obj, value: Any):
+    def __set__(self, obj: IEnvoy, value: Any):
 
         if self._postprocess is not None:
             value = self._postprocess(obj, value)
@@ -170,11 +185,9 @@ class eproperty:
 
         else:
             label = self._build_requester(obj)
-            raise ValueError(
-                f"Cannot set `{label}` outside of interleaving."
-            )
+            raise ValueError(f"Cannot set `{label}` outside of interleaving.")
 
-    def provide(self, obj, value: Any) -> Any:
+    def provide(self, obj: IEnvoy, value: Any) -> Any:
         """Provide a value from the model side into the interleaving system."""
         requester = self._build_requester(obj)
         return obj.interleaver.handle(
@@ -294,9 +307,20 @@ class Interleaver:
     def iterate_requester(self, requester: str):
         """Append the current mediator's iteration index to a requester string.
 
-        The iteration is determined by ``mediator.iteration``, which defaults
-        to 0 and is updated by :class:`IteratorTracer` when iterating over
-        generation steps (e.g. ``tracer.iter[:]``).
+        The iteration is determined by one of two sources:
+
+        - If ``mediator.iteration`` is set (user is inside an explicit
+          ``tracer.iter[i]`` loop), use that value directly.  This is how
+          iterator tracers constrain requests to a specific generation step.
+        - If ``mediator.iteration`` is ``None`` (user is not in an iter
+          context, or a one-shot hook has just cleared it after matching),
+          fall back to ``mediator.iteration_tracker[requester]``.  The
+          tracker is maintained by persistent hooks registered by
+          :class:`IteratorTracer` (see :func:`_register_iter_hooks`), which
+          increment it after every forward pass for each module path.
+
+        This dual-mode behavior lets the same requester syntax work both
+        inside and outside an iter loop.
 
         Args:
             requester: The base requester string (e.g. ``"model.layer.0.output"``).
@@ -307,7 +331,11 @@ class Interleaver:
 
         mediator = self.current
 
-        iteration = mediator.iteration
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iteration_tracker[requester]
+        )
 
         return f"{requester}.i{iteration}"
 
@@ -371,7 +399,13 @@ class Interleaver:
             # dynamically registered one-shot hooks fire correctly.
             module.register_forward_hook(lambda _, __, output: output)
 
-    def wrap_operation(self, fn: Callable, name: str, bound_obj: Optional[Any] = None, op_envoy: Optional[Any] = None):
+    def wrap_operation(
+        self,
+        fn: Callable,
+        name: str,
+        bound_obj: Optional[Any] = None,
+        op_envoy: Optional[Any] = None,
+    ):
         """Create a wrapper for an operation that processes hooks from an OperationEnvoy.
 
         Called by the ``wrap`` closure inside ``Envoy.source`` when the
@@ -392,7 +426,9 @@ class Interleaver:
         @wraps(fn)
         def inner(*args, **kwargs):
 
-            actual_fn = op_envoy.fn_replacement if op_envoy.fn_replacement is not None else fn
+            actual_fn = (
+                op_envoy.fn_replacement if op_envoy.fn_replacement is not None else fn
+            )
 
             for hook in list(op_envoy.fn_hooks):
                 actual_fn = hook(actual_fn)
@@ -465,29 +501,56 @@ class Interleaver:
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
             return True
 
-    def handle(self, provider: Optional[str] = None, value: Optional[Any] = None, iterate: bool = False):
+    def handle(
+        self,
+        provider: Optional[str] = None,
+        value: Optional[Any] = None,
+        iterate: bool = False,
+    ):
         """Broadcast a provider value to all mediators.
 
-        Used by ``eproperty.provide()`` and ``Envoy.interleave()`` to push
-        values (e.g. vLLM logits, generation results) into the interleaving
-        system.
+        Used by :meth:`eproperty.provide` and :meth:`Envoy.interleave` to
+        push values (e.g. vLLM logits, generation results) into the
+        interleaving system.  Unlike module hooks, these values are not
+        produced by the normal PyTorch forward pass — they are pushed
+        from the model runner side, so this method acts as a fan-out to
+        every mediator and bumps the per-mediator iteration counter for
+        the provider path when ``iterate=True``.
+
+        When ``iterate=True``, the per-mediator ``iteration_tracker`` for
+        this provider path is bumped after each mediator processes the
+        value.  This mirrors the behavior of the persistent iter hooks
+        registered by :class:`IteratorTracer`, but for values that flow
+        through ``provide()`` instead of a PyTorch forward hook.
 
         Args:
             provider: The provider string identifying this value.
             value: The value being provided.
-            iterate: Whether to append an iteration suffix to the provider.
+            iterate: Whether to append an iteration suffix to the provider
+                and bump the per-mediator tracker.
+
+        Returns:
+            The (potentially modified) value after the final mediator has
+            handled it.  Used by ``operation_fn_hook`` for recursive
+            source tracing, where the injected function is returned from
+            :meth:`Mediator.handle` via a SWAP event and flows back
+            through this broadcast.
         """
         original_provider = provider
+
+        result = value
 
         for mediator in self.mediators:
             if iterate:
                 iteration = mediator.iteration_tracker[original_provider]
                 provider = f"{original_provider}.i{iteration}"
 
-            mediator.handle(provider, value)
+            result = mediator.handle(provider, value)
 
             if iterate:
                 mediator.iteration_tracker[original_provider] += 1
+
+        return result
 
     def check_dangling_mediators(self):
 
@@ -573,8 +636,19 @@ class Mediator:
         response_queue (SimpleQueue): Where the interleaver (main thread) puts responses to events, to then be processed by the mediator (worker thread). Will only ever have 1 or 0 items in the queue.
         worker (Thread): The thread that runs the intervention function
         history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
-        iteration_tracker (Dict[str, int]): A dictionary tracking the number of times each provider has been seen by the mediator.
-        iteration (int): The current iteration this mediator is interventing on
+        iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
+            :func:`IteratorTracer._register_iter_hooks` (and by
+            :meth:`Interleaver.handle` for provided values).  One-shot
+            intervention hooks read this to know which generation step
+            is currently firing.  Defaults to 0 for any path that has
+            not yet been observed.
+        iteration (Optional[int]): The target iteration this mediator is
+            currently constrained to, or ``None``.  Set by
+            :class:`IteratorTracer` before each yield so subsequent
+            requests target the correct step.  Cleared back to ``None``
+            by a one-shot hook after it matches a non-zero target, so
+            later requests in the same intervention fall back to the
+            tracker-based "current step" resolution.
         user_cache (List[Cache]): A list of caches to be used by the mediator
         all_stop (Optional[int]): Optional number of times to execute this mediator
     """
@@ -1173,6 +1247,7 @@ class Mediator:
 
         return {
             "name": self.name,
+            "idx": self.idx,
             "info": self.info,
             "batch_group": self.batch_group,
             "intervention": self.intervention,
@@ -1183,6 +1258,7 @@ class Mediator:
     def __setstate__(self, state):
         """Set the state of the mediator for deserialization."""
         self.name = state["name"]
+        self.idx = state["idx"]
         self.info = state["info"]
         self.batch_group = state["batch_group"]
         self.intervention = state["intervention"]
