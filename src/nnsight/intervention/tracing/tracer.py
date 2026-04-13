@@ -458,7 +458,7 @@ class InterleavingTracer(Tracer):
 
     @property
     def iter(self):
-        return IteratorProxy(self.model.interleaver)
+        return IteratorProxy(self.model.interleaver, self.model)
 
     def all(self):
         return self.iter[:]

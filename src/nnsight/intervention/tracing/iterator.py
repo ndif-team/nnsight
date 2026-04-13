@@ -41,17 +41,22 @@ tracker itself through :meth:`Interleaver.handle`.
 """
 
 import warnings
-from typing import Callable, List, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Union
 from .base import Tracer
 from ..interleaver import Interleaver
 from ..hooks import add_ordered_hook
+
+if TYPE_CHECKING:
+    from ..envoy import Envoy
+else:
+    Envoy = Any
 
 
 class IteratorProxy:
     """The object returned by ``tracer.iter`` — supports ``[...]`` indexing.
 
     Forwards ``__getitem__`` to create an :class:`IteratorTracer` bound
-    to the current interleaver.  Usage::
+    to the current interleaver and the root model envoy.  Usage::
 
         for step in tracer.iter[:]:        # all steps
         for step in tracer.iter[1:3]:       # steps 1 and 2
@@ -59,11 +64,12 @@ class IteratorProxy:
         for step in tracer.iter[2]:         # single step
     """
 
-    def __init__(self, interleaver: Interleaver):
+    def __init__(self, interleaver: Interleaver, model: Envoy):
         self.interleaver = interleaver
+        self.model = model
 
     def __getitem__(self, iteration: Union[int, slice, list[int]]):
-        return IteratorTracer(iteration, self.interleaver)
+        return IteratorTracer(iteration, self.interleaver, self.model)
 
 
 def _register_iter_hooks(mediator, model) -> List:
@@ -139,11 +145,15 @@ class IteratorTracer(Tracer):
     """
 
     def __init__(
-        self, iteration: Union[int, slice, list[int]], interleaver: Interleaver
+        self,
+        iteration: Union[int, slice, list[int]],
+        interleaver: Interleaver,
+        model: Envoy,
     ):
 
         self.interleaver = interleaver
         self.iteration = iteration
+        self.model = model
 
         super().__init__()
 
@@ -169,7 +179,7 @@ class IteratorTracer(Tracer):
         # on every forward pass for every module.  These are the sole source
         # of truth for "which step am I on" inside one-shot hooks.  Removed
         # in the finally block below so they don't leak outside the loop.
-        iter_handles = _register_iter_hooks(mediator, self.interleaver.tracer.model)
+        iter_handles = _register_iter_hooks(mediator, self.model)
 
         try:
             if isinstance(self.iteration, slice):
@@ -271,7 +281,7 @@ class IteratorTracer(Tracer):
 
         mediator.push()
 
-        iter_handles = _register_iter_hooks(mediator, self.interleaver.tracer.model)
+        iter_handles = _register_iter_hooks(mediator, self.model)
 
         def do_iteration(iter: int):
 
