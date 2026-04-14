@@ -28,6 +28,7 @@ from .sampling import NNsightSamplingParams
 from ...intervention.serialization import save as serialize
 from ... import save
 from ... import CONFIG
+from .engines.engine import NNsightLLMEngine
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
 
