@@ -288,7 +288,9 @@ class Interleaver:
         """Cancel all mediators / intervention threads."""
 
         for mediator in self.mediators:
-            mediator.cancel()
+            mediator.cancel()  # Remove persistent cache hooks registered during this session.
+            for cache in mediator.user_cache:
+                cache.remove_hooks()
 
         self.mediators = []
         self.tracer = None
@@ -488,11 +490,6 @@ class Interleaver:
 
         # Clear the interleaving flag on exit.
         self._interleaving = False
-
-        # Remove persistent cache hooks registered during this session.
-        for mediator in self.mediators:
-            for cache in mediator.user_cache:
-                cache.remove_hooks()
 
         # Clear the mediators that are no longer alive.
         self.mediators = [mediator for mediator in self.mediators if mediator.alive]

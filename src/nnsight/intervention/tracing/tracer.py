@@ -242,11 +242,14 @@ class Cache:
         if self.detach:
             value = util.apply(value, lambda x: x.detach(), torch.Tensor)
 
-        if self.device is not None:
-            value = util.apply(value, lambda x: x.to(self.device), torch.Tensor)
-
-        if self.dtype is not None:
-            value = util.apply(value, lambda x: x.to(self.dtype), torch.Tensor)
+        if self.device is not None or self.dtype is not None:
+            _device = self.device
+            _dtype = self.dtype
+            value = util.apply(
+                value,
+                lambda x: x.to(device=_device, dtype=_dtype, non_blocking=True),
+                torch.Tensor,
+            )
 
         if module_path not in self.cache:
             self.cache[module_path] = Cache.Entry(**{key: value})
@@ -522,7 +525,6 @@ class InterleavingTracer(Tracer):
 
         mediator = self.model.interleaver.current
         batcher = self.model.interleaver.batcher
-        batch_group = mediator.batch_group
 
         # Resolve target modules to Envoy objects
         if modules is None:
@@ -544,11 +546,11 @@ class InterleavingTracer(Tracer):
         for envoy in targets:
             if include_output:
                 cache_output_hook(
-                    cache_obj, envoy._module, envoy.path, batcher, batch_group
+                    cache_obj, envoy._module, envoy.path, batcher, mediator
                 )
             if include_inputs:
                 cache_input_hook(
-                    cache_obj, envoy._module, envoy.path, batcher, batch_group
+                    cache_obj, envoy._module, envoy.path, batcher, mediator
                 )
 
         mediator.set_user_cache(cache_obj)

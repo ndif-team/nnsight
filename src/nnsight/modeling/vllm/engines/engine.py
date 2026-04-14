@@ -1,5 +1,10 @@
 import pickle
+
+import zstandard as _zstd
+
 from vllm.v1.engine.llm_engine import LLMEngine
+
+_ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
 
 
 class NNsightLLMEngine(LLMEngine):
@@ -24,7 +29,7 @@ class NNsightLLMEngine(LLMEngine):
             # results is a list (one per worker). Rank-0 returns pickled bytes, others None.
             saves_bytes = next((r for r in results if r is not None), None)
             if saves_bytes:
-                saves = pickle.loads(saves_bytes)
+                saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(saves_bytes))
                 for ro in request_outputs:
                     if ro.finished:
                         ro.saves = saves

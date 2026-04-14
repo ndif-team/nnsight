@@ -2,6 +2,10 @@ import pickle
 import uuid
 from typing import TYPE_CHECKING, Any
 
+import zstandard as _zstd
+
+_ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
+
 from ...intervention.backends.base import Backend
 from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.util import wrap_exception
@@ -72,15 +76,13 @@ class AsyncVLLMBackend(Backend):
 
     async def __aiter__(self):
         async for output in self._generator:
-            finished = [output.request_id] if output.finished else None
-
-            # if finished:
-            #     results = await self.model.vllm_entrypoint.collective_rpc(
-            #         "collect_nnsight",
-            #         args=([output.request_id], finished),
-            #     )
-            #     saves_bytes = next((r for r in results if r is not None), None)
-            #     if saves_bytes:
-            #         saves = pickle.loads(saves_bytes)
-            #         output.saves = saves
+            if output.finished:
+                finished = [output.request_id]
+                results = await self.model.vllm_entrypoint.collective_rpc(
+                    "collect_nnsight",
+                    args=([output.request_id], finished),
+                )
+                saves_bytes = next((r for r in results if r is not None), None)
+                if saves_bytes:
+                    output.saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(saves_bytes))
             yield output

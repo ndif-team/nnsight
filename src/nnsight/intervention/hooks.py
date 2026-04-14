@@ -297,7 +297,7 @@ def requires_input(fn):
 
 
 def cache_output_hook(
-    cache, module: torch.nn.Module, path: str, batcher, batch_group
+    cache, module: torch.nn.Module, path: str, batcher, mediator
 ) -> RemovableHandle:
     """Register a persistent output hook that records values into a Cache.
 
@@ -311,15 +311,22 @@ def cache_output_hook(
         module: The PyTorch module to hook.
         path: The module's envoy path (e.g. ``"model.transformer.h.0"``).
         batcher: The :class:`Batcher` instance for narrowing batched values.
-        batch_group: The mediator's batch group for narrowing, or ``None``.
+        mediator: The owning mediator; ``mediator.batch_group`` is read live
+            on each forward pass so decode-step position updates are reflected.
 
     Returns:
         A :class:`~torch.utils.hooks.RemovableHandle` for the registered hook.
     """
 
     def hook(module: torch.nn.Module, input: Any, output: Any) -> None:
+        batch_group = mediator.batch_group
+        # Skip entirely when the owning request is not scheduled in this
+        # forward pass — otherwise the hook would narrow with stale positions
+        # or store another request's tokens in this cache.
+        if batch_group is None or batch_group[0] == -1:
+            return
         value = output
-        if batcher.needs_batching and batch_group is not None and batch_group[0] != -1:
+        if batcher.needs_batching:
             value = apply(value, partial(batcher._narrow, batch_group), torch.Tensor)
         cache.add(path, "output", value)
 
@@ -331,7 +338,7 @@ def cache_output_hook(
 
 
 def cache_input_hook(
-    cache, module: torch.nn.Module, path: str, batcher, batch_group
+    cache, module: torch.nn.Module, path: str, batcher, mediator
 ) -> RemovableHandle:
     """Register a persistent input hook that records values into a Cache.
 
@@ -343,15 +350,19 @@ def cache_input_hook(
         module: The PyTorch module to hook.
         path: The module's envoy path (e.g. ``"model.transformer.h.0"``).
         batcher: The :class:`Batcher` instance for narrowing batched values.
-        batch_group: The mediator's batch group for narrowing, or ``None``.
+        mediator: The owning mediator; ``mediator.batch_group`` is read live
+            on each forward pass so decode-step position updates are reflected.
 
     Returns:
         A :class:`~torch.utils.hooks.RemovableHandle` for the registered hook.
     """
 
     def hook(module: torch.nn.Module, args: Any, kwargs: Any) -> None:
+        batch_group = mediator.batch_group
+        if batch_group is None or batch_group[0] == -1:
+            return
         value = (args, kwargs)
-        if batcher.needs_batching and batch_group is not None and batch_group[0] != -1:
+        if batcher.needs_batching:
             value = apply(value, partial(batcher._narrow, batch_group), torch.Tensor)
         cache.add(path, "inputs", value)
 

@@ -27,9 +27,11 @@ from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
 from ...intervention.serialization import save as serialize
 from ... import save
-from .engines.engine import NNsightLLMEngine
+from ... import CONFIG
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
+
+CONFIG.APP.CROSS_INVOKER = False
 if TYPE_CHECKING:
     from torch.nn import Module
 

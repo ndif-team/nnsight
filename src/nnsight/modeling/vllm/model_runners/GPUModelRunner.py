@@ -1,6 +1,11 @@
 import pickle
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import torch
+import zstandard as _zstd
+
+_ZSTD_COMPRESSOR = _zstd.ZstdCompressor(level=1)
+
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -161,6 +166,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
             model: VLLM,
         ) -> None:
 
+            # Clear batch_group for all registered mediators first. Persistent
+            # cache hooks read mediator.batch_group live on each forward pass,
+            # so a mediator whose request isn't scheduled in this step must
+            # report "None" rather than the stale value from an earlier step
+            # (which would point out-of-range in the smaller current batch).
+            for m in self.mediators.values():
+                m.batch_group = None
+
             batch_start = 0
 
             mediators = []
@@ -234,6 +247,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         model.interleaver.handle("result", [base_id])
                         mediator.cancel()
                         model.interleaver.handle()
+                # Always remove persistent cache hooks when the request
+                # finishes — even if the mediator thread died early (e.g.
+                # intervention code was just tracer.cache(); nns.save(c)
+                # with no blocking access). Otherwise hooks pile up on the
+                # module and keep firing with stale batch_groups from dead
+                # mediators.
+                for cache in mediator.user_cache:
+                    cache.remove_hooks()
                 Globals.exit()
 
             return finished_internal_keys
@@ -455,4 +476,5 @@ class NNsightGPUModelRunner(GPUModelRunner):
         saves, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
 
-        return pickle.dumps(saves)
+        torch.cuda.synchronize()
+        return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves))
