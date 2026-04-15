@@ -6,9 +6,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.distributed.parallel_state import get_tp_group
-from nnsight.intervention.tracing.globals import Globals, _saves_var
+from nnsight.intervention.tracing.globals import Globals
 
-from ....intervention.serialization import load
+from ....modeling.common.request_helper import NNsightRequestHelper
 from ..batching import VLLMBatcher
 
 if TYPE_CHECKING:
@@ -30,293 +30,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
     correct slice of the batch.
     """
 
-    class NNsightRequestHelper:
-        """
-        Helper class for batching requests in the GPUModelRunner.
-
-        Attributes:
-            ids_to_batch_group (Dict[str, int]): Dictionary mapping request IDs to their assigned batch group indices.
-            interleaver_to_ids (Dict[Interleaver, Set[str]]): Dictionary mapping interleavers to sets of request IDs.
-            flat_batch_groups (Dict[Interleaver, List[Tuple[int, int]]]): Dictionary mapping interleavers to their flattened batch groups.
-
-        Methods:
-            process_new_reqs(new_reqs: List[NewRequestData]) -> None: Process new requests and compute the flat batch groups.
-            process_finished_req(req_id: str, interleaver: Interleaver) -> None: Process a finished request,
-                by updating batch groups and cleaning up mappings.
-        """
-
-        def __init__(self):
-
-            self.req_id_to_batch_group_idx: Dict[str, int] = {}
-            self.mediators: Dict[str, Any] = {}  # req_id -> Mediator
-            self.trace_contexts: Dict[str, dict] = {}  # trace_id -> context
-
-        def process_new_reqs(
-            self, new_reqs: List["NewRequestData"], model: VLLM
-        ) -> None:
-            """
-            Process new requests and organize them into batch groups for execution.
-
-            Each request carries its own serialized mediator. When multiple
-            mediators belong to the same trace (identified by trace_id), the
-            first arrival's ``__globals__`` become the canonical reference.
-            Subsequent arrivals graft the saved variable entries from the
-            canonical globals into their own ``__globals__``, so all mediators
-            share the same Python objects for cross-invoke state.
-
-            Args:
-                new_reqs (List[NewRequestData]): List of new request data objects to process.
-            """
-
-            for new_req in new_reqs:
-
-                extra_args = getattr(new_req.sampling_params, "extra_args", None)
-                if not extra_args:
-                    continue
-
-                trace_id = extra_args.get("nnsight_trace_id")
-                if trace_id is None:
-                    # Non-NNsight request, skip
-                    continue
-
-                mediator = load(
-                    extra_args["nnsight_mediator"],
-                    model._remoteable_persistent_objects(),
-                )
-
-                saved_names = extra_args.get("nnsight_saved_names", [])
-
-                # First mediator for this trace: create context and register
-                # its __globals__ as canonical for shared variable grafting.
-                if trace_id not in self.trace_contexts:
-                    canonical_globals = mediator.intervention.__globals__
-
-                    # Per-trace saves set: isolates save tracking between
-                    # concurrent traces and survives the Globals.enter()
-                    # reset across execute_model/sample boundaries.
-                    trace_saves = set()
-                    for name in saved_names:
-                        if name in canonical_globals:
-                            trace_saves.add(id(canonical_globals[name]))
-
-                    self.trace_contexts[trace_id] = {
-                        "saved_names": saved_names,
-                        "canonical_globals": canonical_globals,
-                        "saves": trace_saves,
-                        "expected_count": extra_args.get("nnsight_expected_count", 1),
-                        "received_count": 0,
-                        "pending_req_ids": set(),
-                    }
-                else:
-                    # Subsequent mediator: graft saved vars from canonical
-                    # globals so all mediators share the same Python objects.
-                    ctx = self.trace_contexts[trace_id]
-                    canonical = ctx["canonical_globals"]
-                    med_globals = mediator.intervention.__globals__
-                    for name in saved_names:
-                        if name in canonical:
-                            med_globals[name] = canonical[name]
-
-                ctx = self.trace_contexts[trace_id]
-
-                # Point _saves_var at this trace's set so the worker
-                # thread (via copy_context) captures the right reference.
-                # Worker .save() calls will add IDs to this trace's set,
-                # not the global one that Globals.enter() may reset.
-                mediator._trace_saves = ctx["saves"]
-                _saves_var.set(ctx["saves"])
-
-                model._interleaver.mediators.append(mediator)
-                mediator.start(model._interleaver)
-
-                self.mediators[new_req.req_id] = mediator
-                ctx["pending_req_ids"].add(new_req.req_id)
-                ctx["received_count"] += 1
-
-        def unflatten(self, model: VLLM):
-            """Re-assign batch groups from token-level to prompt-level.
-
-            After the forward pass, logits have one row per *scheduled
-            request* (in ``batch_req_ids`` order).  We must walk the
-            same ordering used by ``process_batch_groups`` so that each
-            mediator's prompt-level index matches its row in the logits
-            tensor — even when the batch contains non-NNsight requests
-            or requests whose mediators have already finished.
-            """
-
-            batch_start = 0
-            mediator_set = {id(m) for m in model._interleaver.mediators}
-
-            for req_id in self._batch_req_ids:
-                if self._num_scheduled_tokens.get(req_id) is None:
-                    continue
-
-                mediator = self.mediators.get(req_id)
-
-                if mediator is None or id(mediator) not in mediator_set:
-                    # Non-NNsight request or already-finished mediator —
-                    # still occupies a row in the logits tensor.
-                    batch_start += 1
-                    continue
-
-                mediator.batch_group = [batch_start, 1]
-                batch_start += 1
-                model._interleaver.batcher.last_batch_group = mediator.batch_group
-
-        def process_batch_groups(
-            self,
-            num_tokens_scheduled: Dict[str, int],
-            batch_req_ids: List[str],
-            model: VLLM,
-        ) -> None:
-
-            batch_start = 0
-
-            mediators = []
-
-            # Iterate in input_batch order (batch_req_ids) rather than
-            # scheduler dict order, because input_batch.condense() and
-            # _may_reorder_batch() can reorder requests after the scheduler
-            # builds num_scheduled_tokens.  The model's tensors (including
-            # sampled_token_ids) follow input_batch order.
-            for req_id in batch_req_ids:
-
-                num_tokens = num_tokens_scheduled.get(req_id)
-                if num_tokens is None:
-                    continue
-
-                mediator = self.mediators.get(req_id)
-
-                if mediator is None:
-                    batch_start += num_tokens
-                    continue
-
-                mediators.append(mediator)
-                mediator.batch_group = [batch_start, num_tokens]
-
-                batch_start += num_tokens
-
-            if mediators:
-                model._interleaver.batcher.last_batch_group = mediators[-1].batch_group
-            else:
-                model._interleaver.batcher.last_batch_group = None
-
-            model._interleaver.mediators = mediators
-
-        def match_req_ids(self, req_id_set: set) -> List[tuple]:
-            """Match engine-reported request IDs to stored mediators.
-
-            vLLM appends a hash suffix to request IDs (e.g. ``"0-abc123"``
-            or ``"uuid-abc123"``).  This method strips the suffix with
-            ``rsplit`` and falls back to an exact match.
-
-            Returns:
-                List of ``(base_id, mediator, internal_key)`` tuples.
-            """
-            matched = []
-            for req_id, mediator in self.mediators.items():
-                base_id = req_id.rsplit("-", 1)[0]
-                if base_id in req_id_set:
-                    matched.append((base_id, mediator, req_id))
-                elif req_id in req_id_set:
-                    matched.append((req_id, mediator, req_id))
-            return matched
-
-        def finalize_mediators(self, matched, finished_req_id_set, model: VLLM) -> set:
-            """Run result handler and cancel finished mediators.
-
-            Returns:
-                Set of internal keys for mediators that were finalized.
-            """
-            finished_internal_keys = set()
-            for base_id, mediator, internal_key in matched:
-                if base_id not in finished_req_id_set:
-                    continue
-
-                finished_internal_keys.add(internal_key)
-
-                Globals.enter()
-                if mediator.alive:
-                    model._interleaver.mediators = [mediator]
-                    mediator.batch_group = None
-                    with model._interleaver:
-                        model._interleaver.handle("result", [base_id])
-                        mediator.cancel()
-                        model._interleaver.handle()
-                Globals.exit()
-
-            return finished_internal_keys
-
-        def collect_saves(self, matched, finished_internal_keys: set) -> tuple:
-            """Collect saved values from mediator frames.
-
-            Gathers per-invoke saves from frame locals and trace-shared
-            saves from canonical globals (only when a trace is fully done).
-            Uses per-trace saves sets (stored in trace_contexts and
-            referenced by each mediator) instead of Globals.saves.
-
-            Returns:
-                ``(saves, removals)`` — the saves dict and set of
-                ``(id, trace_saves_ref)`` pairs to discard after collection.
-            """
-            saves = {}
-            removals = []
-
-            for base_id, mediator, internal_key in matched:
-                frame = mediator.info.frame
-                trace_saves = mediator._trace_saves
-                for key, value in frame.f_locals.items():
-                    if id(value) in trace_saves:
-                        saves[key] = value
-                        if internal_key in finished_internal_keys:
-                            removals.append((id(value), trace_saves))
-
-            # Trace-shared saves: collect when ALL mediators for a trace
-            # have been received AND completed.
-            for internal_key in finished_internal_keys:
-                for _, ctx in self.trace_contexts.items():
-                    if internal_key in ctx["pending_req_ids"]:
-                        ctx["pending_req_ids"].discard(internal_key)
-                        trace_fully_done = (
-                            not ctx["pending_req_ids"]
-                            and ctx["received_count"] == ctx["expected_count"]
-                        )
-                        if trace_fully_done:
-                            trace_saves = ctx["saves"]
-                            canonical = ctx["canonical_globals"]
-                            for name in ctx["saved_names"]:
-                                if name in canonical:
-                                    value = canonical[name]
-                                    if id(value) in trace_saves:
-                                        saves[name] = value
-                                        removals.append((id(value), trace_saves))
-                        break
-
-            return saves, removals
-
-        def cleanup_finished(self, finished_internal_keys: set, removals: list) -> None:
-            """Clean up state for finished requests.
-
-            Discards collected IDs from their per-trace saves sets,
-            deletes completed trace contexts, and drops mediator entries.
-            """
-            for _id, trace_saves in removals:
-                trace_saves.discard(_id)
-
-            done_traces = [
-                tid
-                for tid, ctx in self.trace_contexts.items()
-                if (
-                    not ctx["pending_req_ids"]
-                    and ctx["received_count"] == ctx["expected_count"]
-                )
-            ]
-            for tid in done_traces:
-                del self.trace_contexts[tid]
-
-            for internal_key in finished_internal_keys:
-                self.mediators.pop(internal_key, None)
-
     def __init__(self, *args, **kwargs):
 
         from .. import VLLM
@@ -325,7 +38,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model: VLLM
 
-        self.nnsight_request_helper = self.NNsightRequestHelper()
+        self.nnsight_request_helper = NNsightRequestHelper()
 
     def load_model(self, *args, **kwargs) -> None:
 
@@ -350,7 +63,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         super()._update_states(scheduler_output)
 
-        self.nnsight_request_helper.process_new_reqs(
+        self.nnsight_request_helper.process_new_reqs_serialized(
             scheduler_output.scheduled_new_reqs, self.nnsight_model
         )
 

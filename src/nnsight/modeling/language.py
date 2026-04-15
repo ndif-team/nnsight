@@ -78,6 +78,8 @@ class LanguageModel(TransformersModel):
         super().__init__(*args, automodel=automodel, **kwargs)
 
         self.generator: Envoy = LanguageModel.Generator()
+        self.logits: Envoy = WrapperModule()
+        self.samples: Envoy = WrapperModule()
 
     def _load_meta(
         self,
