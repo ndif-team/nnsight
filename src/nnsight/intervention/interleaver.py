@@ -266,7 +266,6 @@ class Interleaver:
         self.initialize(mediators, tracer, batcher)
 
         self._interleaving = False
-        self.hook_handles = []
 
     def initialize(
         self,
@@ -285,12 +284,18 @@ class Interleaver:
         self.current: Mediator = None
 
     def cancel(self):
-        """Cancel all mediators / intervention threads."""
+        """Cancel all mediators / intervention threads.
+
+        After each mediator's worker thread is torn down, every hook it
+        registered (module one-shot, cache, operation, gradient, iter
+        tracker) is removed via :meth:`Mediator.remove_hooks`. This is
+        the single cleanup path for all dynamic hooks registered during
+        the session.
+        """
 
         for mediator in self.mediators:
-            mediator.cancel()  # Remove persistent cache hooks registered during this session.
-            for cache in mediator.user_cache:
-                cache.remove_hooks()
+            mediator.cancel()
+            mediator.remove_hooks()
 
         self.mediators = []
         self.tracer = None
@@ -299,12 +304,6 @@ class Interleaver:
         self.transform = None
 
         self.current = None
-
-    def __del__(self):
-        """Remove all hooks when the interleaver is garbage collected."""
-        for handle in self.hook_handles:
-            handle.remove()
-        self.hook_handles = []
 
     def iterate_requester(self, requester: str):
         """Append the current mediator's iteration index to a requester string.
@@ -728,6 +727,7 @@ class Mediator:
 
         self.history = set()
         self.user_cache: List["Cache"] = list()
+        self.hooks: List[Any] = list()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
         self.all_stop: Optional[int] = stop
@@ -1237,6 +1237,19 @@ class Mediator:
 
         self.user_cache.append(cache)
 
+    def remove_hooks(self):
+        """Remove every hook registered on behalf of this mediator.
+
+        Drains ``self.hooks`` — the single list that tracks module one-shot
+        hooks, cache hooks, operation hooks, gradient hooks, and iter-tracker
+        hooks. ``.remove()`` is idempotent on every handle type used here, so
+        calling this is safe even if some hooks have already self-removed
+        after firing.
+        """
+        for handle in self.hooks:
+            handle.remove()
+        self.hooks.clear()
+
     ### Serialization ###
 
     def __getstate__(self):
@@ -1268,6 +1281,7 @@ class Mediator:
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()
+        self.hooks: List[Any] = list()
         self.iteration = 0
         self.args = list()
         self.original_globals = {}

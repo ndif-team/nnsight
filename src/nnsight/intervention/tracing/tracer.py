@@ -35,9 +35,9 @@ class Cache:
     removed automatically when the interleaver exits.
 
     The cache applies optional transformations (detach, device, dtype) to
-    values before storing them.  Hook handles are stored on the cache object
-    itself in :attr:`hook_handles` so they can be cleaned up via
-    :meth:`remove_hooks`.
+    values before storing them. Hook handles live on the owning
+    :class:`Mediator` (in ``mediator.hooks``) and are drained by
+    :meth:`Mediator.remove_hooks`, not on the cache itself.
     """
 
     @dataclass
@@ -220,8 +220,6 @@ class Cache:
         self.include_output = include_output
         self.include_inputs = include_inputs
 
-        self.hook_handles = []
-
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
 
@@ -267,13 +265,6 @@ class Cache:
                     setattr(entry[-1], key, value)
                 else:
                     entry.append(Cache.Entry(**{key: value}))
-
-    def remove_hooks(self):
-        """Remove all persistent cache hooks registered by this cache."""
-        for handle in self.hook_handles:
-            handle.remove()
-        self.hook_handles.clear()
-
 
 class InterleavingTracer(Tracer):
     """

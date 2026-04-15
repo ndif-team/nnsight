@@ -253,8 +253,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # with no blocking access). Otherwise hooks pile up on the
                 # module and keep firing with stale batch_groups from dead
                 # mediators.
-                for cache in mediator.user_cache:
-                    cache.remove_hooks()
+                mediator.remove_hooks()
                 Globals.exit()
 
             return finished_internal_keys

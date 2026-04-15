@@ -128,6 +128,10 @@ def _register_iter_hooks(mediator, model) -> List:
 
         handle = add_ordered_hook(envoy._module, hook, "output")
         handles.append(handle)
+        # Also track on the mediator so Interleaver.cancel can clean
+        # these up if the iter loop is abandoned via an exception that
+        # bypasses its own finally block.
+        mediator.hooks.append(handle)
 
     return handles
 

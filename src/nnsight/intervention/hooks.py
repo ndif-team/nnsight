@@ -34,6 +34,37 @@ else:
     OperationEnvoy = Any
 
 
+class OperationHookHandle:
+    """A ``RemovableHandle``-shaped handle for operation-level hooks.
+
+    Operation hooks live on plain lists (``op_envoy.pre_hooks``,
+    ``op_envoy.post_hooks``, ``op_envoy.fn_hooks``) rather than PyTorch's
+    module hook dicts, so PyTorch's :class:`~torch.utils.hooks.RemovableHandle`
+    doesn't apply. This handle lets callers treat them uniformly with module
+    handles: store in ``mediator.hooks`` and call ``.remove()`` at cancel.
+
+    ``remove()`` is idempotent — calling it more than once (e.g. once from
+    the hook's self-removal path, once from ``Mediator.remove_hooks``) is
+    a no-op after the first successful removal.
+    """
+
+    __slots__ = ("_target", "_hook")
+
+    def __init__(self, target: List[Callable], hook: Callable):
+        self._target = target
+        self._hook = hook
+
+    def remove(self) -> None:
+        if self._hook is None:
+            return
+        try:
+            self._target.remove(self._hook)
+        except ValueError:
+            pass
+        self._hook = None
+        self._target = None
+
+
 def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
     """Register a hook on a module, inserted in mediator-index order.
 
@@ -161,6 +192,7 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     hook.mediator_idx = mediator.idx
 
     handle = add_ordered_hook(module, hook, "input")
+    mediator.hooks.append(handle)
 
     return handle
 
@@ -207,6 +239,7 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     hook.mediator_idx = mediator.idx
 
     handle = add_ordered_hook(module, hook, "output")
+    mediator.hooks.append(handle)
 
     return handle
 
@@ -333,7 +366,7 @@ def cache_output_hook(
     hook.mediator_idx = float("inf")
 
     handle = add_ordered_hook(module, hook, "output")
-    cache.hook_handles.append(handle)
+    mediator.hooks.append(handle)
     return handle
 
 
@@ -369,7 +402,7 @@ def cache_input_hook(
     hook.mediator_idx = float("inf")
 
     handle = add_ordered_hook(module, hook, "input")
-    cache.hook_handles.append(handle)
+    mediator.hooks.append(handle)
     return handle
 
 
@@ -438,10 +471,12 @@ def requires_operation_input(fn):
 def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
     """Register a one-shot output hook on an :class:`OperationEnvoy`.
 
-    Appends a hook to ``op_envoy.post_hooks``.  When the operation's
-    wrapper (created by :meth:`Interleaver.wrap_operation`) runs, it
-    iterates ``post_hooks`` and calls each with the operation's output
-    value.
+    Appends a hook to ``op_envoy.post_hooks`` and returns an
+    :class:`OperationHookHandle` which is also tracked on
+    ``mediator.hooks`` for unified cleanup in :meth:`Mediator.remove_hooks`.
+    When the operation's wrapper (created by
+    :meth:`Interleaver.wrap_operation`) runs, it iterates ``post_hooks``
+    and calls each with the operation's output value.
 
     The iteration-matching protocol mirrors the module-level
     :func:`output_hook`: target iteration is captured at registration
@@ -457,6 +492,10 @@ def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
     Args:
         mediator: The mediator requesting the value.
         op_envoy: The :class:`OperationEnvoy` to hook.
+
+    Returns:
+        An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
+        from ``op_envoy.post_hooks``.
     """
     path = f"{op_envoy.path}.output"
     iteration = (
@@ -465,6 +504,8 @@ def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         else mediator.iteration_tracker[path]
     )
 
+    handle = None
+
     def hook(value: Any) -> Any:
         if mediator.iteration_tracker[path] != iteration:
             return value
@@ -472,10 +513,13 @@ def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         if iteration != 0:
             mediator.iteration = None
 
-        op_envoy.post_hooks.remove(hook)
+        handle.remove()
         return mediator.handle(f"{path}.i{iteration}", value)
 
     op_envoy.post_hooks.append(hook)
+    handle = OperationHookHandle(op_envoy.post_hooks, hook)
+    mediator.hooks.append(handle)
+    return handle
 
 
 def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
@@ -488,6 +532,10 @@ def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
     Args:
         mediator: The mediator requesting the value.
         op_envoy: The :class:`OperationEnvoy` to hook.
+
+    Returns:
+        An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
+        from ``op_envoy.pre_hooks``.
     """
     path = f"{op_envoy.path}.input"
     iteration = (
@@ -496,6 +544,8 @@ def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         else mediator.iteration_tracker[path]
     )
 
+    handle = None
+
     def hook(inputs: Any) -> Any:
         if mediator.iteration_tracker[path] != iteration:
             return inputs
@@ -503,10 +553,13 @@ def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         if iteration != 0:
             mediator.iteration = None
 
-        op_envoy.pre_hooks.remove(hook)
+        handle.remove()
         return mediator.handle(f"{path}.i{iteration}", inputs)
 
     op_envoy.pre_hooks.append(hook)
+    handle = OperationHookHandle(op_envoy.pre_hooks, hook)
+    mediator.hooks.append(handle)
+    return handle
 
 
 def operation_fn_hook(mediator: Mediator, op_envoy: OperationEnvoy):
@@ -528,10 +581,19 @@ def operation_fn_hook(mediator: Mediator, op_envoy: OperationEnvoy):
     Args:
         mediator: The mediator requesting the function.
         op_envoy: The :class:`OperationEnvoy` to hook.
+
+    Returns:
+        An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
+        from ``op_envoy.fn_hooks``.
     """
 
+    handle = None
+
     def hook(fn: Callable) -> Callable:
-        op_envoy.fn_hooks.remove(hook)
+        handle.remove()
         return mediator.handle(f"{op_envoy.path}.fn", fn)
 
     op_envoy.fn_hooks.append(hook)
+    handle = OperationHookHandle(op_envoy.fn_hooks, hook)
+    mediator.hooks.append(handle)
+    return handle
