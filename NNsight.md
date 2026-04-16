@@ -681,18 +681,54 @@ def __setattr__(self, key, value):
 
 def _add_envoy(self, module, name):
     module_path = f"{self.path}.{name}"
-    
-    envoy = Envoy(
+
+    envoy_cls = self._resolve_envoy_class(module)  # see "Customizing the Envoy class" below
+
+    envoy = envoy_cls(
         module,
         path=module_path,
         interleaver=self._interleaver,
         rename=self._alias.rename if self._alias else None,
+        envoys=self._envoys,
     )
-    
+
     super().__setattr__(name, envoy)
-    
+
     return envoy
 ```
+
+#### Customizing the Envoy class per module
+
+`Envoy` accepts an `envoys` parameter that controls which class wraps descendant modules. The value is propagated down the tree, so a single configuration on the root applies everywhere.
+
+It can be:
+
+- `None` (default) — every descendant is a plain `Envoy`.
+- An `Envoy` subclass — used for every descendant.
+- A `Dict[Type[torch.nn.Module], Type[Envoy]]` — each descendant is wrapped with the first `Envoy` subclass whose key appears in the module's MRO; unmatched modules fall back to the base `Envoy`.
+
+```python
+class AttentionEnvoy(Envoy):
+    @eproperty(key="output")
+    @requires_output
+    def heads(self): ...
+    # … preprocess + transform to expose per-head attention slicing
+
+model = NNsight(my_net, envoys={GPT2Attention: AttentionEnvoy})
+```
+
+`NNsight` (and any `NNsight` subclass) exposes a class-level `envoys` attribute (default `None`) for the same configuration. Subclasses set it to provide a default for all instances; users can still override per-instance via the `envoys=` constructor kwarg (pass `envoys=None` to opt out of a subclass default):
+
+```python
+class MyModel(NNsight):
+    envoys = {torch.nn.Linear: MyLinearEnvoy}
+
+m = MyModel(net)                       # uses {Linear: MyLinearEnvoy}
+m2 = MyModel(net, envoys=OtherEnvoy)   # all descendants → OtherEnvoy
+m3 = MyModel(net, envoys=None)         # all descendants → plain Envoy
+```
+
+The dict lookup uses MRO traversal: `{torch.nn.Linear: ...}` matches both `nn.Linear` and any `nn.Linear` subclass. Custom subclasses must accept the standard `Envoy` constructor kwargs (`module`, `interleaver=`, `path=`, `rename=`, `envoys=`) — `*args, **kwargs` forwarding to `super().__init__` is the safe pattern.
 
 #### The Path Attribute
 
@@ -758,6 +794,21 @@ def output(self) -> Object:
     ...  # Stub — the decorator and descriptor handle everything
 ```
 
+#### What the stub method actually is
+
+The body of an eproperty stub is **never executed for its return value**. It is a placeholder; on every `__get__` the descriptor calls `self._hook(obj)` purely to fire the side effects of the decorators stacked on top of it.
+
+So when you write a custom eproperty, you are really doing two things:
+
+1. **Picking the pre-setup decorator** that arranges for the value to arrive — almost always one of the `requires_*` decorators in `nnsight/intervention/hooks.py`:
+   - `@requires_output` / `@requires_input` — register a one-shot PyTorch forward / pre-forward hook on `self._module` (used by `Envoy`).
+   - `@requires_operation_output` / `@requires_operation_input` — register a one-shot operation hook for `.source` tracing (used by `OperationEnvoy`).
+2. **Naming the property** via the stub's `__name__` (which becomes the default `key`) and giving it a docstring (visible in `help(...)`).
+
+Without one of those decorators (or an equivalent provider-side `interleaver.handle(...)` call elsewhere), the `request()` issued by `__get__` would block forever — nothing would ever produce the value.
+
+A **bare** `@eproperty()` with no `requires_*` decorator is also valid for values that are produced by something other than a per-access hook — e.g. `InterleavingTracer.result` is fed by `Envoy.interleave` calling `self.interleaver.handle("result", ...)` at the end of the forward pass, so no per-request setup is needed.
+
 #### Setting Values
 
 You can also **set** values to modify activations:
@@ -779,11 +830,111 @@ The `eproperty.__set__` method:
 `eproperty` is a descriptor class that generalizes the `.output` / `.input` pattern.  It supports:
 
 - **`key`** — the interleaving key appended to the envoy path.  `input` and `inputs` share the same key `"input"` since they intercept the same hook point.
-- **`postprocess`** — transform the raw value on `__get__` (e.g., `.input` extracts the first arg from `(args, kwargs)`)
-- **`preprocess`** — transform the value on `__set__` before swapping (e.g., `.input` setter repacks the single value back into `(args, kwargs)`)
+- **`preprocess`** — transform the raw value on `__get__` before the user receives it (e.g., `.input` extracts the first arg from `(args, kwargs)`)
+- **`postprocess`** — transform the user-supplied value on `__set__` before it is swapped into the model (e.g., `.input` setter repacks the single value back into `(args, kwargs)`)
+- **`transform`** — see [Section 4.2.1](#421-the-transform-callback-closing-the-loop-on-preprocess) below; lets in-place edits the user makes to a `preprocess`-derived value flow back into the running model
 - **`provide()`** — called from the provider side (e.g., vLLM model runners) to feed a value into the interleaving system
 
 Subclasses of `Envoy` (e.g., vLLM's `VLLM`) can define additional eproperties like `.logits` and `.samples`.
+
+---
+
+### 4.2.1 The `transform` Callback: Closing the Loop on `preprocess`
+
+`preprocess` controls *what the user sees* when they read an eproperty. But that creates a problem: if `preprocess` returns a **derived** object (a clone, a reshape, a view onto a slice), in-place edits the user makes to it never reach the model, because the model still holds the original value.
+
+```python
+@thing.preprocess
+def thing(self, value):
+    return value.clone()        # user gets a clone
+
+# In a trace:
+thing = model.thing.save()
+thing[:] = 0                     # mutates the CLONE, not the model's tensor
+output = model.output.save()    # ← still sees the original, not zeros
+```
+
+`transform` closes that loop. Register it alongside `preprocess`, and NNsight will swap the (post-edit) preprocessed value back into the running model.
+
+```python
+class MyEnvoy(Envoy):
+    @eproperty(key="output")
+    @requires_output
+    def thing(self): ...
+
+    @thing.preprocess
+    def thing(self, value):
+        return value.clone()
+
+    @thing.transform
+    @staticmethod
+    def thing(value):
+        return value             # whatever this returns is swapped back in
+
+# Now: thing[:] = 0 inside a trace zeros out the model's downstream activations.
+```
+
+#### Why the signature is `transform() -> Any`
+
+At eproperty `__get__` time, the preprocessed value is bound into the transform via `functools.partial`. The mediator stores this zero-arg partial and fires it later — after the worker thread has had a chance to mutate the value in-place. Because the partial holds a reference to the *same* object the user is editing, the transform sees the post-edit state via its closure.
+
+#### Lifecycle
+
+```
+Worker thread                                     Main thread (Mediator)
+─────────────                                     ──────────────────────
+.thing  →  request("…thing.i0")  ──────┐
+                                       │           value = batcher.narrow(...)
+                                       │           respond(value)
+                                       ▼
+preprocess → cloned = value.clone()
+mediator.transform = partial(_transform, cloned)
+return cloned to user
+                                       
+user does: cloned[:] = 0
+                                       
+.next request / END  ──────────────────┐
+                                       ▼
+                                                   if self.transform:
+                                                     swap_value = self.transform()  # = cloned, now zeroed
+                                                     batcher.swap(group, swap_value)
+                                                     self.transform = None          # one-shot
+```
+
+#### Real-world use case: per-head attention access
+
+A model exposes attention output as `[B, S, H]`. Splitting `H` into `(n_heads, head_dim)` so users can edit a single head without touching the others requires both halves of the round-trip:
+
+```python
+class AttnEnvoy(Envoy):
+    n_heads = 12
+
+    @eproperty(key="output")
+    @requires_output
+    def heads(self): ...
+
+    @heads.preprocess
+    def heads(self, value):
+        # [B, S, H] → [B, n_heads, S, head_dim] for ergonomic per-head access.
+        B, S, H = value.shape
+        return value.view(B, S, self.n_heads, H // self.n_heads).transpose(1, 2)
+
+    @heads.transform
+    @staticmethod
+    def heads(value):
+        # Reshape back to the layout the rest of the model expects.
+        B, n_heads, S, head_dim = value.shape
+        return value.transpose(1, 2).reshape(B, S, n_heads * head_dim)
+```
+
+Inside a trace, `model.attn.heads[:, 4] = 0` zeros out head 4 *and the model's downstream computation reflects it*.
+
+#### Notes / gotchas
+
+- **One-shot per access.** Each `.thing` access registers a fresh transform; firing it on the value event clears `mediator.transform`. Two sequential accesses get two independent transforms.
+- **`transform` requires interleaving.** Like `preprocess` and `postprocess`, transforms only run inside a trace.
+- **Skip `transform` if you only want to observe.** If the user is only reading the value (no in-place edits intended to propagate), omit `transform` and just use `preprocess`.
+- **`@staticmethod` is conventional.** The preprocessed value already carries any required context via the closure, so transforms typically don't need `self`.
 
 #### Scanning
 

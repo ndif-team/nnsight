@@ -61,16 +61,61 @@ class eproperty:
     """A descriptor for defining hookable properties on :class:`IEnvoy` objects.
 
     ``eproperty`` exposes values through the interleaving request/swap
-    mechanism.  During a trace, reading an ``eproperty`` issues a blocking
+    mechanism. During a trace, reading an ``eproperty`` issues a blocking
     request to the interleaver; writing to it schedules a swap.
 
-    The decorated stub function (``_hook``) is called for its **side effects**
-    (e.g. registering a one-shot PyTorch hook via ``@requires_output`` or
-    ``@requires_operation_output``).  The interleaver is obtained from
-    ``obj.interleaver``.  The path prefix is obtained from ``obj.path`` if
-    the attribute exists and is truthy; if absent or empty, the key alone
-    is used as the requester string.  This is how tracer-level eproperties
-    like ``InterleavingTracer.result`` work without a path prefix.
+    The decorated stub
+    ------------------
+
+    Every ``eproperty`` is defined by decorating a *stub method*. The body
+    of that stub is **never executed for its return value** — it is a
+    placeholder whose only jobs are:
+
+    1. Donate its ``__name__`` and ``__doc__`` to the descriptor (the name
+       becomes the default ``key``; the docstring is what users see in
+       ``help(model.transformer.h[0].output)``).
+    2. Carry the **decorators stacked on top of it** that perform the real
+       work — registering the PyTorch hook (or operation hook) that will
+       eventually deliver the value the user is about to ``request()``.
+
+    Concretely::
+
+        @eproperty()
+        @requires_output       # ← does the work: registers a one-shot
+        def output(self): ...  #   forward hook on self._module before
+                               #   the request blocks the worker thread.
+
+    On every ``__get__`` the descriptor calls ``self._hook(obj)`` (the
+    decorated stub). Because the decorator wraps the empty stub, that
+    invocation runs the decorator's pre-setup — typically registering the
+    appropriate hook so the value will arrive when the model executes —
+    and then calls the (no-op) stub. The descriptor then issues the
+    actual ``request(requester)`` call, which blocks until the hook fires.
+
+    The pre-setup decorators live in :mod:`nnsight.intervention.hooks`:
+
+    - :func:`requires_output` / :func:`requires_input` — module-level
+      one-shot forward / pre-forward hooks (used by ``Envoy``).
+    - :func:`requires_operation_output` / :func:`requires_operation_input`
+      — operation-level hooks for ``.source`` tracing (used by
+      ``OperationEnvoy``).
+    - Custom backends (e.g. vLLM) supply their own decorators in the same
+      pattern; the contract is "make sure a provider for this requester
+      string will fire before ``request()`` blocks".
+
+    A bare ``eproperty`` with no pre-setup decorator is also valid for
+    things that are provided externally — e.g. ``InterleavingTracer.result``
+    is fed by ``Envoy.interleave`` calling ``self.interleaver.handle("result", ...)``,
+    so no per-access hook setup is needed.
+
+    Path / key resolution
+    ---------------------
+
+    The interleaver is obtained from ``obj.interleaver``. The path prefix
+    is obtained from ``obj.path`` if the attribute exists and is truthy;
+    if absent or empty, the key alone is used as the requester string.
+    This is how tracer-level eproperties like ``InterleavingTracer.result``
+    work without a path prefix.
 
     Supported implementors
     ----------------------
@@ -110,6 +155,16 @@ class eproperty:
         self._transform: Optional[Callable] = None
 
     def __call__(self, hook: Callable[..., T]) -> "T | eproperty":
+        """Register the decorated stub.
+
+        ``hook`` is the user's stub method (e.g. ``def output(self): ...``)
+        with any pre-setup decorators from :mod:`nnsight.intervention.hooks`
+        already applied. The body is treated as a no-op; what matters is
+        what the decorators do when ``hook(obj)`` is invoked from
+        :meth:`__get__` — typically registering a one-shot PyTorch hook so
+        the value will be produced by the time the request blocks. The
+        stub's ``__name__`` becomes the default ``key``.
+        """
         self.name = hook.__name__
         self._hook = hook
         if self.key is None:
@@ -117,17 +172,88 @@ class eproperty:
         return self
 
     def postprocess(self, func: Callable) -> "eproperty":
-        """Register a post-processing function called on ``__get__``."""
+        """Register a post-processing function called on ``__set__``.
+
+        Runs on the user-supplied value just before it is swapped into the
+        running model. Used by :class:`Envoy.input` to repack a single value
+        back into the ``(args, kwargs)`` shape the model's hook expects.
+        """
         self._postprocess = func
         return self
 
     def preprocess(self, func: Callable) -> "eproperty":
-        """Register a pre-processing function called on ``__set__``."""
+        """Register a pre-processing function called on ``__get__``.
+
+        Runs on the raw value pulled from the interleaver before it is
+        returned to the user. Used by :class:`Envoy.input` to extract the
+        first positional argument from ``(args, kwargs)``.
+
+        When a corresponding :meth:`transform` is also registered, the value
+        returned by ``preprocess`` is captured by the transform's closure —
+        in-place mutations the user makes are visible inside the transform.
+        """
         self._preprocess = func
         return self
 
     def transform(self, func: Callable) -> "eproperty":
-        """Register a transform function applied after ``__get__``."""
+        """Register a one-shot ``__get__`` -> swap-back transform.
+
+        ``transform`` complements :meth:`preprocess`. When ``preprocess``
+        returns a *new* object (a clone, a reshape, a view onto a slice),
+        in-place edits the user makes to that object are invisible to the
+        running model — the model still holds the original value. ``transform``
+        closes that loop: at request time the preprocessed value is bound into
+        the callable via ``functools.partial`` and parked on the current
+        mediator; once the user is done with their edits and the worker yields
+        control, the mediator invokes the transform and ``batcher.swap``s the
+        return value back into the model.
+
+        The function signature is ``transform() -> Any`` (no args — the value
+        is captured by the closure). Whatever the transform returns replaces
+        the original model-side value for the rest of the forward pass.
+
+        Use cases
+        ---------
+
+        - **Safe mutable view**: ``preprocess`` returns ``value.clone()`` so
+          users can ``thing[:] = 0`` without aliasing surprises; the transform
+          returns the (mutated) clone so the model still sees their edits.
+        - **Per-head attention access**: ``preprocess`` reshapes
+          ``[B, S, H]`` into ``[B, n_heads, S, head_dim]``; the transform
+          reshapes back to ``[B, S, H]`` so the model continues with the
+          user-edited heads.
+
+        Example::
+
+            class MyEnvoy(Envoy):
+                @eproperty(key="output")
+                @requires_output
+                def heads(self): ...
+
+                @heads.preprocess
+                def heads(self, value):
+                    # Expose attention heads as a separate dim.
+                    B, S, H = value.shape
+                    return value.view(B, S, self.n_heads, H // self.n_heads)\
+                                .transpose(1, 2)
+
+                @heads.transform
+                @staticmethod
+                def heads(value):
+                    # Reshape back to the model's [B, S, H] layout.
+                    return value.transpose(1, 2).reshape(value.shape[0], value.shape[2], -1)
+
+        Notes
+        -----
+
+        - Transform is **one-shot per access** — it fires once when the value
+          event for that access is processed and is then cleared.
+        - The transform can be a plain function (commonly decorated with
+          ``@staticmethod``) since the preprocessed value already carries the
+          context via the closure.
+        - If you only want to view the value and don't intend to swap it
+          back, omit ``transform`` and just use ``preprocess``.
+        """
         self._transform = func
         return self
 
@@ -146,6 +272,12 @@ class eproperty:
 
             requester = self._build_requester(obj)
 
+            # Run the decorated stub. We don't care about its return value —
+            # what matters is the side effect of any pre-setup decorators
+            # stacked on it (see hooks.py: `requires_output`, `requires_input`,
+            # operation variants). Those decorators register the one-shot
+            # PyTorch hook that will eventually deliver the value to the
+            # `request()` call below.
             self._hook(obj)
 
             if self.iterate:
@@ -157,6 +289,12 @@ class eproperty:
                 value = self._preprocess(obj, value)
 
             if self._transform is not None:
+                # Bind the preprocessed value into the transform NOW (at request
+                # time) rather than passing it at fire time. The partial holds
+                # a reference to the same object the user is about to receive,
+                # so any in-place mutations are visible when the mediator later
+                # invokes `self.transform()` and swaps the result back into the
+                # model. See :meth:`Mediator.handle_value_event`.
                 interleaver.current.transform = partial(self._transform, value)
 
         else:
@@ -738,6 +876,12 @@ class Mediator:
 
         self._prev = None
 
+        # One-shot transform callback for the next value event. Set by
+        # :meth:`eproperty.__get__` when an eproperty with a registered
+        # ``transform`` is accessed (already bound to the preprocessed value
+        # via ``functools.partial``); consumed and cleared by
+        # :meth:`handle_value_event` after the value is delivered to the
+        # worker.
         self.transform = None
 
         self.lock = 0
@@ -922,6 +1066,13 @@ class Mediator:
 
             self.respond(value)
 
+            # If the eproperty had a `transform` callback registered, fire it
+            # now and swap the result back into the model. The preprocessed
+            # value was bound into `self.transform` via `partial` at request
+            # time (see `eproperty.__get__`), so any in-place mutations the
+            # worker made between `respond` and now are visible inside the
+            # transform's closure. Cleared after firing — transforms are
+            # one-shot per value access.
             if self.transform:
                 value = self.transform()
 

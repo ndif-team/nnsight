@@ -4,7 +4,26 @@ Instead of permanently registering hooks on every module (which incurs overhead
 on every forward pass regardless of whether any intervention is active), hooks
 are registered **on-demand** by each mediator and **self-remove** after firing.
 
-This module provides:
+How this connects to ``eproperty``
+----------------------------------
+
+The ``requires_*`` decorators in this file are the **pre-setup glue** between
+an :class:`~nnsight.intervention.interleaver.eproperty` stub and the model.
+An eproperty stub like::
+
+    @eproperty()
+    @requires_output     # ← lives in this file
+    def output(self): ...
+
+has an empty body. The ``eproperty`` descriptor invokes that stub on every
+``__get__`` (``self._hook(obj)``) purely to fire the decorator's side effect:
+register a one-shot PyTorch hook on the underlying module so that the value
+the worker is about to ``request()`` will actually be produced. Without a
+decorator from this module (or an equivalent provider-side ``handle()``
+call elsewhere), the request would block forever.
+
+Module contents
+---------------
 
 - :func:`add_ordered_hook` — inserts a PyTorch hook into a module's hook dict
   at the correct position relative to other mediators, preserving mediator
@@ -17,6 +36,10 @@ This module provides:
   ensure the appropriate one-shot hook is registered before the mediator
   requests a value.  If the value is already being provided (checked via
   ``batcher.current_provider``), hook registration is skipped.
+- :func:`requires_operation_output` / :func:`requires_operation_input` —
+  operation-level analogues used by :class:`OperationEnvoy` for source
+  tracing; they install hooks on the OperationEnvoy's hook lists rather
+  than on a PyTorch module.
 """
 
 from functools import partial, wraps
