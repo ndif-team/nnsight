@@ -315,7 +315,13 @@ class _AttnLike(torch.nn.Module):
 
 
 class _AttnHeadsEnvoy(Envoy):
-    """Exposes `.heads` for per-head editing of `_AttnLike`'s output."""
+    """Exposes `.heads` as a list of `[B, S, head_dim]` views into the
+    attention output.
+
+    No clone, no transform: each list entry is a view into the underlying
+    `[B, S, hidden]` tensor that the model also uses downstream, so in-place
+    edits to a head propagate naturally.
+    """
 
     @eproperty(key="output")
     @requires_output
@@ -323,24 +329,11 @@ class _AttnHeadsEnvoy(Envoy):
 
     @heads.preprocess
     def heads(self, value):
-        # [B, S, hidden] -> [B, n_heads, S, head_dim].
-        # Clone so the user gets a fresh, mutable, contiguous tensor;
-        # transform will reshape back and swap into the model.
+        # [B, S, hidden] viewed as [B, S, n_heads, head_dim], then unbound
+        # along the head dim into a tuple of [B, S, head_dim] views.
         n_heads = self._module.n_heads
         B, S, H = value.shape
-        return (
-            value.clone()
-            .view(B, S, n_heads, H // n_heads)
-            .transpose(1, 2)
-            .contiguous()
-        )
-
-    @heads.transform
-    @staticmethod
-    def heads(value):
-        # [B, n_heads, S, head_dim] -> [B, S, hidden] for the rest of the model.
-        B, n_heads, S, head_dim = value.shape
-        return value.transpose(1, 2).reshape(B, S, n_heads * head_dim)
+        return list(value.view(B, S, n_heads, H // n_heads).unbind(dim=2))
 
 
 class _AttnBlock(torch.nn.Module):
@@ -356,10 +349,11 @@ class _AttnBlock(torch.nn.Module):
 
 
 @torch.no_grad()
-def test_attention_heads_split_via_envoys_and_transform():
+def test_attention_heads_split_via_envoys():
     """End-to-end: route _AttnLike → _AttnHeadsEnvoy via the envoys mapping,
-    then use preprocess+transform to enable per-head in-place editing that
-    actually flows back into the model.
+    then use preprocess to expose attention output as a list of per-head
+    views. In-place edits to a view mutate the underlying model tensor
+    directly — no transform / clone needed.
     """
     model = NNsight(_AttnBlock(), envoys={_AttnLike: _AttnHeadsEnvoy})
 
@@ -373,50 +367,57 @@ def test_attention_heads_split_via_envoys_and_transform():
     # Block submodule didn't match the mapping — falls back to base Envoy.
     assert type(model.down) is Envoy
 
-    # 1) Shape: preprocess exposes a per-head view.
+    # Per-head view of the original input, used for expected-value construction.
+    x_per_head = x.view(B, S, n_heads, head_dim).unbind(dim=2)
+
+    # 1) Shape: preprocess returns a list of per-head views.
     with model.trace(x):
         heads = model.attn.heads.save()
         out_unmodified = model.output.save()
 
-    assert heads.shape == (B, n_heads, S, head_dim)
+    assert isinstance(heads, list)
+    assert len(heads) == n_heads
+    for h in range(n_heads):
+        assert heads[h].shape == (B, S, head_dim)
+        assert torch.equal(heads[h], x_per_head[h])
     # No edits → model output unchanged from the pure forward pass.
     assert torch.equal(out_unmodified, x)
 
-    # 2) Zero out a single head; the transform should swap it back so the
-    #    model's downstream output reflects only that head being zeroed.
+    # 2) Zero out a single head via in-place edit on the view.
     with model.trace(x):
         heads = model.attn.heads.save()
-        heads[:, 1] = 0
+        heads[1][:] = 0
         out_one_head = model.output.save()
 
-    out_per_head = out_one_head.view(B, S, n_heads, head_dim).transpose(1, 2)
-    expected = x.view(B, S, n_heads, head_dim).transpose(1, 2).clone()
-    expected[:, 1] = 0
-    assert torch.equal(out_per_head, expected)
+    out_per_head = out_one_head.view(B, S, n_heads, head_dim).unbind(dim=2)
+    for h in range(n_heads):
+        if h == 1:
+            assert torch.equal(out_per_head[h], torch.zeros(B, S, head_dim))
+        else:
+            assert torch.equal(out_per_head[h], x_per_head[h])
 
-    # 3) Edit multiple heads at once with fancy indexing.
+    # 3) Edit multiple heads independently.
     with model.trace(x):
         heads = model.attn.heads.save()
-        heads[:, [0, 2]] = 0
+        heads[0][:] = 0
+        heads[2][:] = 0
         out_multi = model.output.save()
 
-    out_per_head = out_multi.view(B, S, n_heads, head_dim).transpose(1, 2)
-    expected = x.view(B, S, n_heads, head_dim).transpose(1, 2).clone()
-    expected[:, [0, 2]] = 0
-    assert torch.equal(out_per_head, expected)
+    out_per_head = out_multi.view(B, S, n_heads, head_dim).unbind(dim=2)
+    for h in range(n_heads):
+        if h in (0, 2):
+            assert torch.equal(out_per_head[h], torch.zeros(B, S, head_dim))
+        else:
+            assert torch.equal(out_per_head[h], x_per_head[h])
 
-    # 4) Replace one head's values with arbitrary content (not just zeros).
+    # 4) Replace one head's values with arbitrary content.
     replacement = torch.tensor([[100.0, 200.0, 300.0], [400.0, 500.0, 600.0]])
     with model.trace(x):
         heads = model.attn.heads.save()
-        heads[0, 3] = replacement
+        heads[3][0] = replacement
         out_replaced = model.output.save()
 
-    out_per_head = out_replaced.view(B, S, n_heads, head_dim).transpose(1, 2)
-    assert torch.equal(out_per_head[0, 3], replacement)
-    # Other heads still match the original input.
+    out_per_head = out_replaced.view(B, S, n_heads, head_dim).unbind(dim=2)
+    assert torch.equal(out_per_head[3][0], replacement)
     for h in (0, 1, 2):
-        assert torch.equal(
-            out_per_head[0, h],
-            x.view(B, S, n_heads, head_dim).transpose(1, 2)[0, h],
-        )
+        assert torch.equal(out_per_head[h], x_per_head[h])
