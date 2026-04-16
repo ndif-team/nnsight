@@ -78,6 +78,9 @@ class Envoy(Batchable):
         interleaver: Optional[Interleaver] = None,
         path: Optional[str] = "model",
         rename: Optional[Dict[str, Union[str, List[str]]]] = None,
+        envoys: Optional[
+            Union[Type["Envoy"], Dict[Type[torch.nn.Module], Type["Envoy"]]]
+        ] = None,
     ) -> None:
         """
         Initialize an Envoy for a PyTorch module.
@@ -90,6 +93,14 @@ class Envoy(Batchable):
                 Example: {"layer1": "first_layer", "layer2": "second_layer"}
                 Example: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
                 Example: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
+            envoys (Optional[Union[Type[Envoy], Dict[Type[torch.nn.Module], Type[Envoy]]]]):
+                Controls which Envoy class wraps descendant modules. Propagates down the envoy tree.
+                - None (default): all descendants are wrapped with the base Envoy class.
+                - A class: all descendants are wrapped with that class.
+                - A dict mapping ``torch.nn.Module`` subclasses to ``Envoy`` subclasses: each
+                  descendant is wrapped with the first class whose key appears in the module's MRO.
+                  Descendants without a match fall back to the base Envoy class.
+                Example: {torch.nn.Linear: MyLinearEnvoy, GPT2Block: MyBlockEnvoy}
 
         """
         self.path = path
@@ -103,6 +114,8 @@ class Envoy(Batchable):
         self.interleaver.wrap_module(module)
 
         self._default_mediators: List[Mediator] = []
+
+        self._envoys = envoys
 
         if rename is not None:
             self._alias = Aliaser(rename)
@@ -713,6 +726,29 @@ class Envoy(Batchable):
 
     #### Private methods ####
 
+    def _resolve_envoy_class(self, module: torch.nn.Module) -> Type[Envoy]:
+        """Resolve which Envoy class to use for wrapping a child module.
+
+        Consults ``self._envoys``:
+        - If None, returns the base Envoy class.
+        - If a class, returns that class.
+        - If a dict, walks the module's MRO and returns the first matching class.
+          Falls back to the base Envoy class if no entry matches.
+        """
+        mapping = self._envoys
+
+        if mapping is None:
+            return Envoy
+
+        if isinstance(mapping, type):
+            return mapping
+
+        for cls in type(module).__mro__:
+            if cls in mapping:
+                return mapping[cls]
+
+        return Envoy
+
     def _add_envoy(self, module: torch.nn.Module, name: str) -> Envoy:
         """
         Adds a new Envoy for a given torch module under this Envoy.
@@ -726,11 +762,14 @@ class Envoy(Batchable):
         """
         module_path = f"{self.path}.{name}"
 
-        envoy = Envoy(
+        envoy_cls = self._resolve_envoy_class(module)
+
+        envoy = envoy_cls(
             module,
             path=module_path,
             rename=self._alias.rename if self._alias is not None else None,
             interleaver=self.interleaver,
+            envoys=self._envoys,
         )
 
         setattr(self._module, name, module)

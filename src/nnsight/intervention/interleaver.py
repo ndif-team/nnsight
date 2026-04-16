@@ -26,7 +26,7 @@ import _thread
 import torch
 
 from .. import CONFIG
-from ..util import applyn
+from functools import partial
 from .batching import Batcher
 from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
 
@@ -157,7 +157,7 @@ class eproperty:
                 value = self._preprocess(obj, value)
 
             if self._transform is not None:
-                interleaver.current.transform = self._transform
+                interleaver.current.transform = partial(self._transform, value)
 
         else:
             label = self._build_requester(obj)
@@ -923,7 +923,7 @@ class Mediator:
             self.respond(value)
 
             if self.transform:
-                value = self.transform(value)
+                value = self.transform()
 
                 self.interleaver.batcher.swap(self.batch_group, value)
 
