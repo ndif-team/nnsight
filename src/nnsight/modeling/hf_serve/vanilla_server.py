@@ -134,11 +134,17 @@ class VanillaBatchServer:
         model: "LanguageModel",
         token_budget: int = 512,
         max_batch_size: int = 64,
+        mediator_timeout: float = 30.0,
     ):
         self.model = model
         self.request_helper = NNsightRequestHelper()
         self.token_budget = token_budget
         self.max_batch_size = max_batch_size
+        # Max seconds a single mediator's worker thread may block the
+        # forward pass. Hung user intervention code (infinite loop,
+        # blocking I/O) would otherwise wedge the entire batch. The
+        # interleaver aborts the offending mediator and continues.
+        self.mediator_timeout = mediator_timeout
 
         self._request_queue: Queue[VanillaRequest] = Queue()
         self._pending: List[VanillaRequest] = []
@@ -492,6 +498,9 @@ class VanillaBatchServer:
             num_tokens_map = {item.request.req_id: 1 for item in scheduled}
             helper.process_batch_groups(num_tokens_map, batch_req_ids, model)
             model._interleaver.batcher.needs_batching = batch_size > 1
+            # Apply per-mediator timeout so a hung user intervention
+            # can't wedge the shared forward thread.
+            model._interleaver.mediator_timeout = self.mediator_timeout
             helper._batch_req_ids = batch_req_ids
             helper._num_scheduled_tokens = num_tokens_map
 

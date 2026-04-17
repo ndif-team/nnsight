@@ -53,6 +53,20 @@ class Cancelation(Exception):
     pass
 
 
+class MediatorTimeout(Exception):
+    """Raised when a mediator's worker thread does not respond within
+    ``Interleaver.mediator_timeout`` seconds.
+
+    The main thread (forward pass) waits on the worker thread after
+    handing it a value. A worker stuck in user intervention code (CPU-
+    side infinite loop, blocking I/O) would otherwise hang the entire
+    batch. The timeout lets the outer handle loop abandon the offending
+    mediator and continue with the rest.
+    """
+
+    pass
+
+
 class EarlyStopException(Exception):
     """
     Exception raised to stop the execution of the model.
@@ -107,6 +121,12 @@ class Interleaver:
         self._interleaving = False
         self.hook_handles = []
         self._defer_exceptions = False
+        # Per-mediator timeout in seconds. ``None`` means wait forever
+        # (preserves debugging experience for local ``model.trace()``).
+        # Set to a finite value by continuous-batching servers where a
+        # hung user intervention would otherwise wedge the forward thread
+        # and block all concurrent requests.
+        self.mediator_timeout: Optional[float] = None
 
     def initialize(
         self,
@@ -375,7 +395,18 @@ class Interleaver:
             for mediator in self.mediators:
                 if mediator.alive:
                     continue
-                mediator.start(self)
+                try:
+                    mediator.start(self)
+                except MediatorTimeout as e:
+                    # Worker hung before emitting its first event. Abandon
+                    # it and continue starting the rest of the batch.
+                    mediator._deferred_exception = TimeoutError(str(e))
+                    mediator.worker = None
+                    warnings.warn(
+                        f"Mediator {mediator.name} timed out during start; "
+                        f"abandoning worker thread.",
+                        RuntimeWarning,
+                    )
 
         except:
             # Clear the interleaving flag on error.
@@ -506,6 +537,19 @@ class Interleaver:
             except SkipException as e:
                 skip_count += 1
                 skip_values.append(e.value)
+            except MediatorTimeout as e:
+                # The worker thread is stuck in user code. Abandon it
+                # (daemon → dies on process exit) and mark the mediator
+                # dead so other mediators in this batch can continue.
+                # The deferred exception is surfaced to the client via
+                # the usual save-collection path.
+                mediator._deferred_exception = TimeoutError(str(e))
+                mediator.worker = None  # marks alive=False
+                warnings.warn(
+                    f"Mediator {mediator.name} timed out; abandoning worker "
+                    f"thread and continuing with remaining mediators.",
+                    RuntimeWarning,
+                )
 
             if iterate and mediator.alive:
                 mediator.iteration_tracker[original_provider] += 1
@@ -588,8 +632,16 @@ class Mediator:
 
             return value
 
-        def wait(self):
-            self.lock.acquire()
+        def wait(self, timeout: Optional[float] = None) -> bool:
+            """Acquire the signal.
+
+            Returns ``True`` if the signal was acquired, ``False`` if
+            ``timeout`` was provided and elapsed before acquiring.
+            """
+            if timeout is None:
+                self.lock.acquire()
+                return True
+            return self.lock.acquire(timeout=timeout)
 
         def put(self, value: Any):
             self.value = value
@@ -716,7 +768,15 @@ class Mediator:
 
         self.interleaver.current = self
         self.worker.start()
-        self.event_queue.wait()
+
+        # Wait for the worker's first event. If the user's intervention
+        # code hangs before touching any module hook, we time out here
+        # instead of wedging the forward thread.
+        if not self.event_queue.wait(timeout=self.interleaver.mediator_timeout):
+            raise MediatorTimeout(
+                f"Mediator {self.name} did not emit its first event within "
+                f"{self.interleaver.mediator_timeout}s"
+            )
 
         # Handle the first event for each mediator to clear mediators that already ended.
         try:
@@ -965,7 +1025,13 @@ class Mediator:
 
         # Respond and resume the mediator thread.
         self.response_queue.put(value)
-        self.event_queue.wait()
+        # Wait for the worker's next event. A timeout here means the
+        # worker is stuck in user code after receiving our response.
+        if not self.event_queue.wait(timeout=self.interleaver.mediator_timeout):
+            raise MediatorTimeout(
+                f"Mediator {self.name} did not respond within "
+                f"{self.interleaver.mediator_timeout}s"
+            )
 
     ### Requester Methods ###
 

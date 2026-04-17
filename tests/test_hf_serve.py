@@ -460,3 +460,100 @@ class TestCrossRequestBatching:
         )
         event = server.submit(req)
         assert isinstance(event, threading.Event)
+
+
+# ------------------------------------------------------------------
+# Mediator timeout
+# ------------------------------------------------------------------
+
+class TestMediatorTimeout:
+    """Per-mediator timeout prevents a hung intervention from wedging the batch."""
+
+    def test_value_wait_returns_false_on_timeout(self):
+        """Value.wait(timeout) returns False when no value arrives in time."""
+        import time
+        from nnsight.intervention.interleaver import Mediator
+
+        v = Mediator.Value()
+        t0 = time.perf_counter()
+        result = v.wait(timeout=0.1)
+        elapsed = time.perf_counter() - t0
+        assert result is False
+        assert 0.05 < elapsed < 0.5
+
+    def test_value_wait_returns_true_after_put(self):
+        """Value.wait(timeout) returns True when a value arrives before timeout."""
+        import threading, time
+        from nnsight.intervention.interleaver import Mediator
+
+        v = Mediator.Value()
+
+        def delayed_put():
+            time.sleep(0.05)
+            v.put("payload")
+
+        threading.Thread(target=delayed_put, daemon=True).start()
+        result = v.wait(timeout=1.0)
+        assert result is True
+        assert v.get() == "payload"
+
+    def test_value_wait_no_timeout_blocks_until_put(self):
+        """Without timeout, wait() blocks until a value arrives."""
+        import threading, time
+        from nnsight.intervention.interleaver import Mediator
+
+        v = Mediator.Value()
+
+        def delayed_put():
+            time.sleep(0.1)
+            v.put("ok")
+
+        threading.Thread(target=delayed_put, daemon=True).start()
+        t0 = time.perf_counter()
+        result = v.wait()  # no timeout → blocks
+        elapsed = time.perf_counter() - t0
+        assert result is True
+        assert 0.05 < elapsed < 0.5
+
+    def test_hung_intervention_times_out(self, model):
+        """A hung intervention times out with a warning, doesn't hang the trace.
+
+        Sets a short mediator_timeout on the interleaver, runs a trace where
+        the intervention sleeps past the timeout, and verifies the trace
+        completes (via warning) rather than hanging forever.
+        """
+        import time
+        import warnings as _warnings
+
+        original_timeout = model._interleaver.mediator_timeout
+        model._interleaver.mediator_timeout = 0.3
+
+        try:
+            with _warnings.catch_warnings(record=True) as caught:
+                _warnings.simplefilter("always")
+                t0 = time.perf_counter()
+
+                # A trace whose intervention hangs for 3s with a 0.3s timeout.
+                # Without the timeout mechanism, this test would hang forever.
+                with model.trace("Hello"):
+                    time.sleep(3.0)
+                    _ = model.lm_head.output.save()
+
+                elapsed = time.perf_counter() - t0
+
+            # Should have timed out within ~1s, not waited the full 3s
+            assert elapsed < 2.0, (
+                f"Expected trace to abort within ~1s via timeout; "
+                f"took {elapsed:.2f}s (timeout may not be firing)"
+            )
+            timeout_warnings = [
+                w for w in caught
+                if issubclass(w.category, RuntimeWarning)
+                and "timed out" in str(w.message)
+            ]
+            assert timeout_warnings, (
+                f"Expected RuntimeWarning about timeout; "
+                f"got: {[str(w.message) for w in caught]}"
+            )
+        finally:
+            model._interleaver.mediator_timeout = original_timeout
