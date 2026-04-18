@@ -254,6 +254,182 @@ class TestHFBatcher:
 
 
 # ------------------------------------------------------------------
+# NNsightCBManager (paged HF CB) mediator registration wiring
+# ------------------------------------------------------------------
+
+# Skip paged HF CB tests if the installed transformers doesn't
+# expose `ContinuousBatchingConfig` (manager.py imports fail). The
+# paged path is feature-gated on HF's continuous-batching API surface
+# existing; vanilla path is unaffected.
+_paged_skip_reason = None
+try:
+    from nnsight.modeling.hf_serve.manager import NNsightCBManager  # noqa: F401
+except Exception as _e:
+    _paged_skip_reason = f"paged HF CB unavailable: {_e}"
+
+
+@pytest.mark.skipif(
+    _paged_skip_reason is not None,
+    reason=_paged_skip_reason or "",
+)
+class TestNNsightCBManagerRegistration:
+    """Paged HF CB path: `add_request` stashes mediator data and
+    `_register_pending_mediators` calls `process_new_reqs_direct` for
+    IDs that enter the batch.
+
+    These tests exercise the registration wiring in isolation (no
+    actual forward pass — HF's paged CB needs a real HF
+    PreTrainedModel and scheduler setup that's beyond a unit test).
+    """
+
+    def test_add_request_stashes_mediator_data(self):
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+
+        # Skip HF base __init__ — we only exercise the nnsight-layer bookkeeping.
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+
+        # Patch super().add_request to bypass HF init path
+        def fake_super_add(input_ids, request_id=None, max_new_tokens=None):
+            return request_id or "req_auto"
+        import nnsight.modeling.hf_serve.manager as mgr_mod
+        original = mgr_mod.ContinuousBatchingManager.add_request
+        mgr_mod.ContinuousBatchingManager.add_request = (
+            lambda self, input_ids, request_id=None, max_new_tokens=None: fake_super_add(
+                input_ids, request_id, max_new_tokens,
+            )
+        )
+        try:
+            class FakeMediator:
+                pass
+            med = FakeMediator()
+            rid = mgr.add_request(
+                input_ids=[1, 2, 3],
+                request_id="rid_1",
+                max_new_tokens=5,
+                mediator=med,
+                trace_id="trace_xyz",
+                saved_names=["logits"],
+                expected_count=1,
+            )
+            assert rid == "rid_1"
+            assert "rid_1" in mgr._pending_nnsight_data
+            m, tid, names, count = mgr._pending_nnsight_data["rid_1"]
+            assert m is med
+            assert tid == "trace_xyz"
+            assert names == ["logits"]
+            assert count == 1
+        finally:
+            mgr_mod.ContinuousBatchingManager.add_request = original
+
+    def test_add_request_requires_trace_id_when_mediator_given(self):
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+
+        import nnsight.modeling.hf_serve.manager as mgr_mod
+        original = mgr_mod.ContinuousBatchingManager.add_request
+        mgr_mod.ContinuousBatchingManager.add_request = (
+            lambda self, input_ids, request_id=None, max_new_tokens=None: "rid_2"
+        )
+        try:
+            class FakeMediator:
+                pass
+            with pytest.raises(ValueError, match="trace_id"):
+                mgr.add_request(
+                    input_ids=[1],
+                    mediator=FakeMediator(),
+                    # trace_id missing
+                )
+        finally:
+            mgr_mod.ContinuousBatchingManager.add_request = original
+
+    def test_add_request_without_mediator_is_passthrough(self):
+        """Requests without a mediator don't touch _pending_nnsight_data."""
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+
+        import nnsight.modeling.hf_serve.manager as mgr_mod
+        original = mgr_mod.ContinuousBatchingManager.add_request
+        mgr_mod.ContinuousBatchingManager.add_request = (
+            lambda self, input_ids, request_id=None, max_new_tokens=None: "rid_plain"
+        )
+        try:
+            rid = mgr.add_request(input_ids=[1, 2])
+            assert rid == "rid_plain"
+            assert mgr._pending_nnsight_data == {}
+        finally:
+            mgr_mod.ContinuousBatchingManager.add_request = original
+
+    def test_register_pending_mediators_forwards_to_helper(self):
+        """`_register_pending_mediators` drains stashed data and calls
+        `process_new_reqs_direct` with the right tuple shape.
+        """
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+
+        class FakeMediator:
+            pass
+        med_a, med_b = FakeMediator(), FakeMediator()
+        mgr._pending_nnsight_data = {
+            "req_a": (med_a, "trace_a", ["x"], 1),
+            "req_b": (med_b, "trace_b", [], 2),
+            "req_c": (FakeMediator(), "trace_c", [], 1),  # not in this batch
+        }
+
+        # Use a real helper and intercept process_new_reqs_direct
+        mgr.request_helper = NNsightRequestHelper()
+        captured = {"entries": None, "model": None}
+
+        def fake_direct(entries, model):
+            captured["entries"] = list(entries)
+            captured["model"] = model
+        mgr.request_helper.process_new_reqs_direct = fake_direct
+
+        class FakeModel:
+            pass
+        mgr.nnsight_model = FakeModel()
+
+        # Only req_a and req_b are scheduled this step
+        mgr._register_pending_mediators(["req_a", "req_b"])
+
+        # Drained the two scheduled entries, left req_c alone
+        assert "req_a" not in mgr._pending_nnsight_data
+        assert "req_b" not in mgr._pending_nnsight_data
+        assert "req_c" in mgr._pending_nnsight_data
+
+        assert captured["model"] is mgr.nnsight_model
+        assert len(captured["entries"]) == 2
+        # Entry shape: (req_id, mediator, trace_id, saved_names, expected_count)
+        entries_by_id = {e[0]: e for e in captured["entries"]}
+        assert entries_by_id["req_a"] == ("req_a", med_a, "trace_a", ["x"], 1)
+        assert entries_by_id["req_b"] == ("req_b", med_b, "trace_b", [], 2)
+
+    def test_register_pending_mediators_is_noop_when_empty(self):
+        """No pending data → no helper call."""
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+        mgr.request_helper = NNsightRequestHelper()
+
+        called = [False]
+        def fake_direct(entries, model):
+            called[0] = True
+        mgr.request_helper.process_new_reqs_direct = fake_direct
+        mgr.nnsight_model = object()
+
+        mgr._register_pending_mediators(["req_x", "req_y"])
+        assert called[0] is False
+
+
+# ------------------------------------------------------------------
 # Request helper tests
 # ------------------------------------------------------------------
 
