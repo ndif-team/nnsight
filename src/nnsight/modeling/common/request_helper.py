@@ -42,26 +42,28 @@ class NNsightRequestHelper:
         saved_names: List[str],
         expected_count: int,
         model: Any,
-        start_worker: bool = True,
     ) -> None:
-        """Shared logic for registering a mediator regardless of how it arrived.
+        """Pure bookkeeping for a new mediator.
 
-        Handles trace context creation, ``__globals__`` grafting for
-        cross-invoke variable sharing, per-trace saves isolation, and
-        (optionally) mediator startup.
+        Sets up the trace context, grafts canonical globals for
+        cross-invoke variable sharing, attaches the per-trace saves
+        set as ``mediator._trace_saves``, and records the mediator in
+        the helper's dict. Does NOT start the worker or touch the
+        interleaver's ``mediators`` list.
 
-        Args:
-            start_worker: If True (default), append the mediator to the
-                interleaver's mediator list and call ``mediator.start()``
-                immediately — appropriate for callers that are already
-                inside a ``with interleaver:`` block (e.g. vLLM, where
-                ``_update_states`` runs mid-forward). If False, skip both;
-                the caller must ensure the mediator gets started later
-                from within an interleaver context. HF CB's
-                ``VanillaBatchServer`` registers mediators during
-                scheduling (outside the interleaver) and relies on
-                ``Interleaver.__enter__``'s own start loop to pick them
-                up when ``_step()`` enters the interleaver.
+        Start policy is the caller's responsibility:
+
+        - Callers that register while an interleaver is already active
+          (vLLM: ``_update_states`` runs inside ``with interleaver:``,
+          so ``__enter__`` has already run and won't pick up new
+          mediators) must call :meth:`_start_mediator_now` immediately
+          after this method.
+        - Callers that register before an interleaver is entered (HF
+          CB vanilla, and the paged HF path when completed: scheduler
+          runs before ``_step()`` enters the interleaver) can rely on
+          ``Interleaver.__enter__``'s auto-start loop, which restores
+          ``_saves_var`` from ``mediator._trace_saves`` per-mediator
+          before calling ``mediator.start()``.
         """
         # First mediator for this trace: create context and register
         # its __globals__ as canonical for shared variable grafting.
@@ -95,28 +97,37 @@ class NNsightRequestHelper:
                     med_globals[name] = canonical[name]
 
         ctx = self.trace_contexts[trace_id]
-
-        # Point _saves_var at this trace's set so the worker
-        # thread (via copy_context) captures the right reference.
         mediator._trace_saves = ctx["saves"]
-        _saves_var.set(ctx["saves"])
-
-        if start_worker:
-            # Caller is already inside a `with interleaver:` block
-            # (e.g. vLLM's execute_model). Safe to start the worker —
-            # the interleaver's `_interleaving` flag is True, so user
-            # code accessing envoy.output will see it.
-            model._interleaver.mediators.append(mediator)
-            mediator.start(model._interleaver)
 
         self.mediators[req_id] = mediator
         ctx["pending_req_ids"].add(req_id)
         ctx["received_count"] += 1
 
+    def _start_mediator_now(self, mediator: Any, model: Any) -> None:
+        """Start a mediator's worker immediately.
+
+        Appropriate only when called from inside an already-entered
+        ``with model._interleaver:`` block (``_interleaving`` is True).
+        Points ``_saves_var`` at the mediator's per-trace set first so
+        the worker thread's ``copy_context()`` captures the right
+        reference — the set/start pair must be atomic to survive any
+        intervening ``Globals.enter()`` that would otherwise reset
+        ``_saves_var``.
+        """
+        _saves_var.set(mediator._trace_saves)
+        model._interleaver.mediators.append(mediator)
+        mediator.start(model._interleaver)
+
     def process_new_reqs_serialized(
         self, new_reqs: list, model: Any
     ) -> None:
-        """vLLM path: deserialize mediators from sampling params extra_args.
+        """vLLM path: deserialize mediators from sampling params extra_args,
+        register them, and start their workers immediately.
+
+        Called from ``GPUModelRunner._update_states`` inside a live
+        ``with interleaver:`` block — ``__enter__`` has already run
+        and won't auto-start newly registered mediators, so we start
+        them inline after registration.
 
         Args:
             new_reqs: List of vLLM ``NewRequestData`` objects.
@@ -148,17 +159,17 @@ class NNsightRequestHelper:
                 expected_count=expected_count,
                 model=model,
             )
+            self._start_mediator_now(mediator, model)
 
     def process_new_reqs_direct(
         self, entries: List[tuple], model: Any
     ) -> None:
         """HF CB path: receive mediators directly (no serialization).
 
-        Registers bookkeeping only; does NOT start mediator workers.
-        HF CB invokes this during scheduling, outside any interleaver
-        context. The workers are started later by
-        ``Interleaver.__enter__`` when ``VanillaBatchServer._step()``
-        enters ``with model._interleaver:``.
+        Registers bookkeeping only; does NOT start workers. HF CB's
+        scheduler runs before ``_step()`` enters the interleaver, so
+        ``Interleaver.__enter__`` picks up newly-registered mediators
+        via its auto-start loop.
 
         Args:
             entries: List of ``(req_id, mediator, trace_id, saved_names,
@@ -173,7 +184,6 @@ class NNsightRequestHelper:
                 saved_names=saved_names,
                 expected_count=expected_count,
                 model=model,
-                start_worker=False,
             )
 
     # ------------------------------------------------------------------
