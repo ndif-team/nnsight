@@ -514,13 +514,15 @@ class VanillaBatchServer:
                         past_key_values=past_key_values,
                         use_cache=True,
                     )
-                    model._interleaver.handle("result", None)
-
-                model._interleaver.check_cache_full()
-                model._interleaver.check_dangling_mediators()
             finally:
-                model._interleaver.cancel()
                 Globals.exit()
+            # NOTE: intentionally skipping handle("result")/check_cache_full/
+            # check_dangling_mediators/cancel here. Those finalize the
+            # mediator and null interleaver state (batcher, mediators,
+            # tracer) — appropriate for a one-shot trace, but wrong for
+            # continuous batching where the interleaver is reused across
+            # forward passes. Per-request finalization happens below in
+            # `helper.finalize_mediators` when max_new_tokens/EOS hits.
         else:
             # Plain forward pass — no nnsight interventions
             with torch.no_grad():

@@ -42,12 +42,26 @@ class NNsightRequestHelper:
         saved_names: List[str],
         expected_count: int,
         model: Any,
+        start_worker: bool = True,
     ) -> None:
         """Shared logic for registering a mediator regardless of how it arrived.
 
         Handles trace context creation, ``__globals__`` grafting for
         cross-invoke variable sharing, per-trace saves isolation, and
-        mediator startup.
+        (optionally) mediator startup.
+
+        Args:
+            start_worker: If True (default), append the mediator to the
+                interleaver's mediator list and call ``mediator.start()``
+                immediately — appropriate for callers that are already
+                inside a ``with interleaver:`` block (e.g. vLLM, where
+                ``_update_states`` runs mid-forward). If False, skip both;
+                the caller must ensure the mediator gets started later
+                from within an interleaver context. HF CB's
+                ``VanillaBatchServer`` registers mediators during
+                scheduling (outside the interleaver) and relies on
+                ``Interleaver.__enter__``'s own start loop to pick them
+                up when ``_step()`` enters the interleaver.
         """
         # First mediator for this trace: create context and register
         # its __globals__ as canonical for shared variable grafting.
@@ -87,8 +101,13 @@ class NNsightRequestHelper:
         mediator._trace_saves = ctx["saves"]
         _saves_var.set(ctx["saves"])
 
-        model._interleaver.mediators.append(mediator)
-        mediator.start(model._interleaver)
+        if start_worker:
+            # Caller is already inside a `with interleaver:` block
+            # (e.g. vLLM's execute_model). Safe to start the worker —
+            # the interleaver's `_interleaving` flag is True, so user
+            # code accessing envoy.output will see it.
+            model._interleaver.mediators.append(mediator)
+            mediator.start(model._interleaver)
 
         self.mediators[req_id] = mediator
         ctx["pending_req_ids"].add(req_id)
@@ -135,6 +154,12 @@ class NNsightRequestHelper:
     ) -> None:
         """HF CB path: receive mediators directly (no serialization).
 
+        Registers bookkeeping only; does NOT start mediator workers.
+        HF CB invokes this during scheduling, outside any interleaver
+        context. The workers are started later by
+        ``Interleaver.__enter__`` when ``VanillaBatchServer._step()``
+        enters ``with model._interleaver:``.
+
         Args:
             entries: List of ``(req_id, mediator, trace_id, saved_names,
                 expected_count)`` tuples.
@@ -148,6 +173,7 @@ class NNsightRequestHelper:
                 saved_names=saved_names,
                 expected_count=expected_count,
                 model=model,
+                start_worker=False,
             )
 
     # ------------------------------------------------------------------

@@ -557,3 +557,130 @@ class TestMediatorTimeout:
             )
         finally:
             model._interleaver.mediator_timeout = original_timeout
+
+
+class TestEndToEndTrace:
+    """Drive a real nnsight trace through VanillaBatchServer.
+
+    Catches the class of bugs where mediator workers execute user code
+    outside the interleaver context (``_interleaving=False``), which
+    surfaces as ``ValueError: The model did not execute`` from
+    ``envoy.output``. Previous tests mocked ``_activate_request``, so
+    that path was never exercised.
+    """
+
+    def _reset_interleaver(self, model):
+        """Clear any mediators the server left on the module-scoped model.
+
+        The server path intentionally leaves the interleaver live across
+        generation steps, but the ``model`` fixture is shared with tests
+        that use the default local trace path — stale mediators from a
+        server test would leak into the next local trace.
+        """
+        iv = model._interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def _make_server_backend(self, server):
+        """A local backend mirroring ``api/server.py``'s submission flow."""
+        from nnsight.intervention.backends import Backend
+        from nnsight.intervention.tracing.globals import Globals
+
+        class VanillaServerBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                try:
+                    Globals.enter()
+                    _args, kwargs = tracer._setup_interleaver(interventions)
+                    entries = self_inner.server.build_entries(kwargs)
+                    tracer.mediators.clear()
+                    pending = [
+                        (e, self_inner.server.submit(e)) for e in entries
+                    ]
+                finally:
+                    Globals.exit()
+                all_saves = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=30.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id)
+                    if saves and "__error__" in saves:
+                        raise RuntimeError(
+                            f"Server reported error for {entry.req_id}: "
+                            f"{saves['__error__']}"
+                        )
+                    if saves:
+                        all_saves.update(saves)
+                tracer.push(all_saves)
+
+        return VanillaServerBackend(server)
+
+    def test_real_trace_captures_activations(self, model):
+        """End-to-end: user code runs, saves come back as real tensors.
+
+        The server generates ``max_new_tokens`` decode steps after
+        prefill, so the captured tensor corresponds to whichever forward
+        pass satisfied the ``.output`` hook first (prefill's last-layer
+        activations). We assert shape + non-zero content, not
+        numerical equality against a direct forward — that comparison
+        would need to fix the generation step the save targets.
+        """
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello world", backend=backend):
+                hidden = model.transformer.h[0].output[0].save()
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        # User intervention code actually ran and produced real tensors.
+        assert hidden is not None and hidden.dim() == 3
+        assert logits is not None and logits.dim() == 3
+        assert hidden.shape[-1] == 768
+        assert logits.shape[-1] == model._model.config.vocab_size
+        # Not all zeros — real activations were captured, not a placeholder.
+        assert hidden.abs().max().item() > 0
+        assert logits.abs().max().item() > 0
+
+    def test_real_trace_intervention_applied(self, model):
+        """Interventions written against the server also mutate activations."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello world", backend=backend):
+                model.transformer.h[0].output[0][:] = 0
+                post_zero = model.transformer.h[0].output[0].save()
+                final = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert torch.all(post_zero == 0), (
+            "In-place zeroing did not take effect — intervention path broken"
+        )
+        # Logits must DIFFER from the un-patched forward now.
+        tokens = model.tokenizer("Hello world", return_tensors="pt")
+        input_ids = tokens["input_ids"].to(model.device)
+        with torch.no_grad():
+            direct = model._model(input_ids=input_ids)
+        assert not torch.allclose(final, direct.logits, atol=1e-3)

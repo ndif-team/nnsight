@@ -30,6 +30,7 @@ import torch
 from .. import CONFIG
 from ..util import applyn
 from .batching import Batcher
+from .tracing.globals import _saves_var
 from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
 
 if TYPE_CHECKING:
@@ -396,6 +397,17 @@ class Interleaver:
                 if mediator.alive:
                     continue
                 try:
+                    # If this mediator was registered with a per-trace
+                    # saves set (server paths — HF CB's VanillaBatchServer,
+                    # vLLM — where concurrent traces share a thread and
+                    # need isolated save tracking), restore _saves_var to
+                    # that set before starting. The worker thread's
+                    # copy_context() then captures the right set. For
+                    # local traces, `_trace_saves` is absent and
+                    # _saves_var is whatever `Globals.enter()` last set.
+                    trace_saves = getattr(mediator, "_trace_saves", None)
+                    if trace_saves is not None:
+                        _saves_var.set(trace_saves)
                     mediator.start(self)
                 except MediatorTimeout as e:
                     # Worker hung before emitting its first event. Abandon
