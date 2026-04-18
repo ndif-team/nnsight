@@ -14,11 +14,11 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch
@@ -136,32 +136,27 @@ def baseline_model():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_serve_backend(client_model, url, blocking=True):
+def _make_serve_backend(client_model, url):
     """Explicit LocalServeBackend — `serve=` kwarg isn't yet wired on
     `LanguageModel.trace` (only on `VLLM.trace`), so we construct the
     client backend directly.
     """
     from nnsight.intervention.backends.local_serve import LocalServeBackend
-    return LocalServeBackend(
-        client_model, host=url, blocking=blocking,
-    )
+    return LocalServeBackend(client_model, host=url, blocking=True)
 
 
-SERVER_MAX_NEW_TOKENS = 20  # server's default; the baseline matches this for timing
+SERVER_MAX_NEW_TOKENS = 20  # server's default; baseline matches this for timing
 
 
 def _submit_via_serve(client_model, prompt, url):
-    """Issue one trace through the real HTTP client path (blocking).
-
-    Must be called from the main thread — nnsight's AST-capture
-    mechanism uses ``sys.settrace`` which behaves correctly only on
-    the thread that originally owns the trace context.
+    """Issue one trace through the real HTTP client path.
 
     The server generates ``SERVER_MAX_NEW_TOKENS`` per request (one
     prefill + N-1 decode forwards). The user's trace only captures
-    activations on the first (prefill) forward.
+    activations on the first (prefill) forward — later decode steps
+    run without user code.
     """
-    backend = _make_serve_backend(client_model, url, blocking=True)
+    backend = _make_serve_backend(client_model, url)
     with client_model.trace(prompt, backend=backend):
         logits = client_model.lm_head.output.save()
     return logits
@@ -174,45 +169,19 @@ def _submit_local(model, prompt):
     return logits
 
 
-async def _submit_via_serve_async(client_model, prompt, url):
-    """Async submission: fires the HTTP POST in a background thread and
-    returns a coroutine that awaits the response.
-
-    The ``with client.trace(...)`` body runs on the main (event-loop)
-    thread — so AST capture works — but the HTTP I/O runs off-thread
-    via ``blocking=False``'s threadpool. Concurrency comes from the
-    event loop multiplexing many such in-flight futures.
-    """
-    backend = _make_serve_backend(client_model, url, blocking=False)
-    with client_model.trace(prompt, backend=backend) as tracer:
-        _ = client_model.lm_head.output.save()
-    # Wrap the blocking future so we can await it.
-    saves = await asyncio.wrap_future(tracer._serve_future)
-    # Saves dict is keyed by the user's variable name. We used `_` above.
-    if "_" in saves:
-        return saves["_"]
-    if "logits" in saves:
-        return saves["logits"]
-    if saves:
-        return next(iter(saves.values()))
-    return None
-
-
-async def _run_concurrent_async(client_model, url, prompts):
-    """Issue N prompts concurrently via asyncio (single-thread cooperative).
-
-    Trace construction is serial on the main thread; HTTP I/O overlaps
-    via the backend's threadpool. This is the only concurrency pattern
-    that works with nnsight's AST-capture mechanism.
-    """
-    tasks = [
-        _submit_via_serve_async(client_model, p, url) for p in prompts
-    ]
-    return await asyncio.gather(*tasks)
-
-
 def _run_concurrent(client_model, url, prompts):
-    return asyncio.run(_run_concurrent_async(client_model, url, prompts))
+    """Issue N prompts concurrently via a thread pool.
+
+    Each worker holds the GIL while constructing its trace (fast —
+    AST capture and serialization are CPU-bound but microseconds) and
+    releases it while awaiting the HTTP response (network I/O). So N
+    requests can have HTTP in-flight simultaneously against the
+    server, which batches them in the background generation loop.
+    """
+    with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
+        return list(pool.map(
+            lambda p: _submit_via_serve(client_model, p, url), prompts,
+        ))
 
 
 # ---------------------------------------------------------------------------
