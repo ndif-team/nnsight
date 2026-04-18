@@ -47,10 +47,13 @@ class NNsight(Envoy):
 
     - ``None`` (default) — every descendant is a plain :class:`Envoy`.
     - An :class:`Envoy` subclass — used for every descendant.
-    - A ``Dict[Type[torch.nn.Module], Type[Envoy]]`` — each descendant
-      is wrapped with the first :class:`Envoy` subclass whose key
-      appears in the module's MRO; unmatched modules fall back to
-      :class:`Envoy`.
+    - A ``Dict`` whose values are :class:`Envoy` subclasses. Keys may be
+      ``torch.nn.Module`` subclasses (matched via MRO) or strings
+      (matched as a dotted suffix on the envoy path, with single-component
+      rename aliases applied — so ``{"attn": ...}`` hits a path ending
+      in ``self_attn`` when the user passed
+      ``rename={"self_attn": "attn"}``). Type keys win over string keys;
+      unmatched modules fall back to :class:`Envoy`.
 
     Subclasses may set ``envoys`` as a class attribute to provide a
     default for all instances; users can still override it per-instance

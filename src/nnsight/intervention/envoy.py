@@ -93,14 +93,21 @@ class Envoy(Batchable):
                 Example: {"layer1": "first_layer", "layer2": "second_layer"}
                 Example: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
                 Example: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
-            envoys (Optional[Union[Type[Envoy], Dict[Type[torch.nn.Module], Type[Envoy]]]]):
+            envoys (Optional[Union[Type[Envoy], Dict]]):
                 Controls which Envoy class wraps descendant modules. Propagates down the envoy tree.
                 - None (default): all descendants are wrapped with the base Envoy class.
                 - A class: all descendants are wrapped with that class.
-                - A dict mapping ``torch.nn.Module`` subclasses to ``Envoy`` subclasses: each
-                  descendant is wrapped with the first class whose key appears in the module's MRO.
-                  Descendants without a match fall back to the base Envoy class.
-                Example: {torch.nn.Linear: MyLinearEnvoy, GPT2Block: MyBlockEnvoy}
+                - A dict whose values are ``Envoy`` subclasses. Keys may be:
+                    * A ``torch.nn.Module`` subclass — matches when the class appears in the
+                      descendant's MRO. Example: ``{torch.nn.Linear: MyLinearEnvoy}``.
+                    * A string — matches when the descendant's envoy path ends with the key
+                      treated as a dotted suffix (component-wise). With a rename dict in play,
+                      each component also matches via single-component aliases — so
+                      ``{"attn": MyAttnEnvoy}`` matches a path ending in ``self_attn`` when
+                      the user passed ``rename={"self_attn": "attn"}``.
+                  Type keys are tried first; string keys are a fallback. Descendants without
+                  a match fall back to the base Envoy class.
+                Example: {torch.nn.Linear: MyLinearEnvoy, "self_attn": MyAttnEnvoy}
 
         """
         self.path = path
@@ -726,14 +733,25 @@ class Envoy(Batchable):
 
     #### Private methods ####
 
-    def _resolve_envoy_class(self, module: torch.nn.Module) -> Type[Envoy]:
+    def _resolve_envoy_class(
+        self, module: torch.nn.Module, path: Optional[str] = None
+    ) -> Type[Envoy]:
         """Resolve which Envoy class to use for wrapping a child module.
 
         Consults ``self._envoys``:
         - If None, returns the base Envoy class.
         - If a class, returns that class.
-        - If a dict, walks the module's MRO and returns the first matching class.
-          Falls back to the base Envoy class if no entry matches.
+        - If a dict, keys can be:
+            - A ``torch.nn.Module`` subclass. Matches when the class appears in
+              ``module``'s MRO. Type-keyed matches are tried first.
+            - A string. Matches when ``path`` ends with the key treated as a
+              dotted suffix (component-wise, not substring). With a rename dict
+              in play, each component matches either literally or via an alias
+              from a single-component rename entry — so a key like ``"attn"``
+              will match a path ending in ``self_attn`` when the user passed
+              ``rename={"self_attn": "attn"}``.
+          Type keys are checked before string keys. Falls back to the base
+          Envoy class if no entry matches.
         """
         mapping = self._envoys
 
@@ -747,7 +765,58 @@ class Envoy(Batchable):
             if cls in mapping:
                 return mapping[cls]
 
+        if path is not None:
+            for key, envoy_cls in mapping.items():
+                if isinstance(key, str) and self._path_matches_key(path, key):
+                    return envoy_cls
+
         return Envoy
+
+    def _path_matches_key(self, path: str, key: str) -> bool:
+        """Does ``path`` end with dotted ``key``, with alias-aware components?
+
+        Both path and key are split on ``.``. The key is matched as a suffix of
+        the path, component by component. A key component matches a path
+        component if they are equal, or if the path component has the key
+        component as a rename alias (see :meth:`_component_matches`).
+        """
+        key = key.removeprefix(".")
+        if not key:
+            return False
+        path_parts = path.split(".")
+        key_parts = key.split(".")
+        if len(key_parts) > len(path_parts):
+            return False
+        tail = path_parts[-len(key_parts):]
+        return all(
+            self._component_matches(pc, kc) for pc, kc in zip(tail, key_parts)
+        )
+
+    def _component_matches(self, path_component: str, key_component: str) -> bool:
+        """Whether ``key_component`` is a valid name for ``path_component``.
+
+        True if they are equal, or if the rename dict contains a
+        single-component entry ``{path_component: [..., key_component, ...]}``
+        (the user aliased ``path_component`` to ``key_component``).
+
+        Multi-component rename entries (e.g. ``{"transformer.h": "layers"}``)
+        are not consulted here; component matching is single-component only.
+        """
+        if path_component == key_component:
+            return True
+        if self._alias is None:
+            return False
+        for rename_key, aliases in self._alias.rename.items():
+            stripped = rename_key.removeprefix(".")
+            if "." in stripped:
+                continue
+            if stripped != path_component:
+                continue
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            if key_component in aliases:
+                return True
+        return False
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> Envoy:
         """
@@ -762,7 +831,7 @@ class Envoy(Batchable):
         """
         module_path = f"{self.path}.{name}"
 
-        envoy_cls = self._resolve_envoy_class(module)
+        envoy_cls = self._resolve_envoy_class(module, module_path)
 
         envoy = envoy_cls(
             module,
