@@ -397,17 +397,18 @@ class Interleaver:
                 if mediator.alive:
                     continue
                 try:
-                    # If this mediator was registered with a per-trace
-                    # saves set (server paths — HF CB's VanillaBatchServer,
-                    # vLLM — where concurrent traces share a thread and
-                    # need isolated save tracking), restore _saves_var to
-                    # that set before starting. The worker thread's
-                    # copy_context() then captures the right set. For
-                    # local traces, `_trace_saves` is absent and
-                    # _saves_var is whatever `Globals.enter()` last set.
-                    trace_saves = getattr(mediator, "_trace_saves", None)
-                    if trace_saves is not None:
-                        _saves_var.set(trace_saves)
+                    # Server paths (HF CB's VanillaBatchServer, any future
+                    # pre-forward server path) register mediators before
+                    # the interleaver is entered, then rely on this
+                    # auto-start loop. `Globals.enter()` between register
+                    # and here will have reset `_saves_var`, so restore
+                    # it from the mediator's per-trace saves set before
+                    # `mediator.start()` captures context. Local
+                    # mediators leave `_trace_saves = None`, so the
+                    # `_saves_var` reset from `Globals.enter()` stays
+                    # (which is what local traces want).
+                    if mediator._trace_saves is not None:
+                        _saves_var.set(mediator._trace_saves)
                     mediator.start(self)
                 except MediatorTimeout as e:
                     # Worker hung before emitting its first event. Abandon
@@ -705,6 +706,12 @@ class Mediator:
 
         self.original_globals = {}
         self._deferred_exception = None
+
+        # Per-trace saves set for concurrent-trace isolation (set by
+        # server paths via `NNsightRequestHelper._register_mediator`).
+        # Stays `None` for local traces, which share a single saves
+        # set managed by `Globals.enter()`/`Globals.exit()`.
+        self._trace_saves: Optional[set] = None
 
         self._prev = None
 
