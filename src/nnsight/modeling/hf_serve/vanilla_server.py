@@ -560,16 +560,29 @@ class VanillaBatchServer:
                 finished_ids.add(req.req_id)
 
         # -- 8. Finalize finished requests --
+        # Collect saves per-request (not across all finished at once) so each
+        # client gets its own saves dict. Collating into a single dict
+        # would alias same-named variables (e.g. every trace saves
+        # ``logits``) and hand the last-writer's value to every caller.
         if finished_ids:
             matched = helper.match_req_ids(finished_ids, strip_suffix=False)
             finished_keys = helper.finalize_mediators(
                 matched, finished_ids, model,
             )
-            saves, removals = helper.collect_saves(matched, finished_keys)
-            helper.cleanup_finished(finished_keys, removals)
+            per_req = {}
+            for base_id, mediator, internal_key in matched:
+                if base_id not in finished_ids:
+                    continue
+                one_matched = [(base_id, mediator, internal_key)]
+                one_keys = {internal_key}
+                one_saves, one_removals = helper.collect_saves(
+                    one_matched, one_keys,
+                )
+                helper.cleanup_finished(one_keys, one_removals)
+                per_req[base_id] = one_saves
 
             for req_id in finished_ids:
-                self._finish_request(req_id, saves)
+                self._finish_request(req_id, per_req.get(req_id, {}))
 
     # ------------------------------------------------------------------
     # Cache merge / split helpers
