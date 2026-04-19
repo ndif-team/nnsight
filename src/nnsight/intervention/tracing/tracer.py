@@ -406,8 +406,19 @@ class InterleavingTracer(Tracer):
 
         return self._frame
 
-    def _setup_interleaver(self, fn: Callable):
-        """Run compiled user code, collect batched args, and initialize the interleaver.
+    def _setup_interleaver(self, fn: Callable, init_interleaver: bool = True):
+        """Run compiled user code, collect batched args, and (optionally) initialize the interleaver.
+
+        ``init_interleaver=False`` is for server paths (HTTP handlers) that
+        share ``model._interleaver`` with a background execution thread.
+        ``Interleaver.initialize`` resets ``self.current = None`` and replaces
+        ``self.mediators``/``self.batcher``. On a background thread, this races
+        with ``Mediator.start()`` — which relies on ``current = self`` staying
+        stable between ``worker.start()`` and the worker's first ``.output``
+        access. Callers that pass ``init_interleaver=False`` must read
+        mediators from ``self.mediators`` (the tracer's own list, always
+        populated here by ``fn(info, tracer)``) rather than
+        ``model._interleaver.mediators``.
 
         Returns:
             (args, kwargs): The batched positional and keyword arguments.
@@ -420,8 +431,9 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        interleaver = self.model._interleaver
-        interleaver.initialize(self.mediators, self, batcher=self.batcher)
+        if init_interleaver:
+            interleaver = self.model._interleaver
+            interleaver.initialize(self.mediators, self, batcher=self.batcher)
 
         return args, kwargs
 
