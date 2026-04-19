@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
 from transformers import DynamicCache
+from transformers.cache_utils import DynamicLayer
 
 from ...intervention.batching import Batcher
 from ...intervention.tracing.globals import Globals
@@ -484,7 +485,7 @@ class VanillaBatchServer:
                 position_ids[i, max_input_len - n_tok + j] = seq_start + j
 
         # -- 3. Merge KV caches --
-        past_key_values = self._merge_caches(scheduled, max_cache_len, device)
+        past_key_values = self._merge_caches(scheduled, max_cache_len)
 
         # -- 4. Check if nnsight mediators are active --
         has_mediators = any(
@@ -588,54 +589,87 @@ class VanillaBatchServer:
     # Cache merge / split helpers
     # ------------------------------------------------------------------
 
+    def _get_layer_devices(self) -> List[torch.device]:
+        """Per-layer devices for the wrapped HF model (cached).
+
+        Handles multi-GPU shards from ``device_map="auto"``. Reads each
+        transformer layer's parameter device directly — works whether or
+        not ``hf_device_map`` was set, and independent of architecture.
+        """
+        cached = getattr(self, "_layer_devices_cached", None)
+        if cached is not None:
+            return cached
+
+        hf_model = self.model._model
+        for path in ("model.layers", "transformer.h", "gpt_neox.layers", "transformer.layers"):
+            module = hf_model
+            found = True
+            for part in path.split("."):
+                if not hasattr(module, part):
+                    found = False
+                    break
+                module = getattr(module, part)
+            if found and hasattr(module, "__len__") and len(module) > 0:
+                self._layer_devices_cached = [
+                    next(layer.parameters()).device for layer in module
+                ]
+                return self._layer_devices_cached
+
+        raise RuntimeError(
+            "Could not locate transformer layer list on model; "
+            "add its path to _get_layer_devices."
+        )
+
     def _merge_caches(
         self,
         scheduled: List[ScheduledItem],
         max_cache_len: int,
-        device: torch.device,
     ) -> Optional[DynamicCache]:
         """Merge per-request DynamicCaches into one batched cache.
 
-        Left-pads shorter caches with zeros to ``max_cache_len``.
-        Returns ``None`` if all caches are empty (pure prefill batch).
+        Allocates each layer's K/V on that layer's own device (handles
+        ``device_map="auto"`` sharding). Left-pads shorter caches with
+        zeros to ``max_cache_len``. Returns ``None`` if all caches are
+        empty (pure prefill batch).
         """
         if max_cache_len == 0:
             return None
 
-        # Get cache structure from first non-empty cache
-        ref_cache = None
+        ref_layer = None
         for item in scheduled:
-            if item.request.past_key_values.get_seq_length() > 0:
-                ref_cache = item.request.past_key_values
+            c = item.request.past_key_values
+            if c.get_seq_length() > 0:
+                ref_layer = c.layers[0]
                 break
-
-        if ref_cache is None:
+        if ref_layer is None:
             return None
 
-        num_layers = len(ref_cache.to_legacy_cache())
-        ref_k, _ = ref_cache[0]
-        _, num_heads, _, head_dim = ref_k.shape
+        _, num_heads, _, head_dim = ref_layer.keys.shape
+        dtype = ref_layer.keys.dtype
+        layer_devices = self._get_layer_devices()
+        num_layers = len(layer_devices)
+        batch = len(scheduled)
 
-        legacy_layers = []
-        for layer in range(num_layers):
-            keys = torch.zeros(
-                len(scheduled), num_heads, max_cache_len, head_dim,
-                dtype=ref_k.dtype, device=device,
-            )
+        merged = DynamicCache()
+        for layer_idx in range(num_layers):
+            dev = layer_devices[layer_idx]
+            keys = torch.zeros(batch, num_heads, max_cache_len, head_dim, dtype=dtype, device=dev)
             vals = torch.zeros_like(keys)
 
             for i, item in enumerate(scheduled):
                 req_cache = item.request.past_key_values
                 seq_len = req_cache.get_seq_length()
                 if seq_len > 0:
-                    k, v = req_cache[layer]
-                    # Left-pad: copy real entries to the right
-                    keys[i, :, max_cache_len - seq_len:, :] = k[0]
-                    vals[i, :, max_cache_len - seq_len:, :] = v[0]
+                    rk = req_cache.layers[layer_idx].keys
+                    rv = req_cache.layers[layer_idx].values
+                    keys[i, :, max_cache_len - seq_len:, :] = rk[0].to(dev, non_blocking=True)
+                    vals[i, :, max_cache_len - seq_len:, :] = rv[0].to(dev, non_blocking=True)
 
-            legacy_layers.append((keys, vals))
+            layer = DynamicLayer()
+            layer.update(keys, vals)
+            merged.layers.append(layer)
 
-        return DynamicCache.from_legacy_cache(tuple(legacy_layers))
+        return merged
 
     def _split_cache(
         self,
@@ -646,22 +680,25 @@ class VanillaBatchServer:
     ):
         """Split batched output cache back to per-request caches.
 
-        Updates each request's ``past_key_values`` and ``cache_mask``
-        with the new cache state (including any padding from merging).
+        Each slice stays on its layer's device (the next step's merge
+        expects tensors to already be device-correct). ``.contiguous()``
+        detaches the per-request handle from the shared batched storage.
         """
-        legacy = output_cache.to_legacy_cache()
-        num_layers = len(legacy)
+        num_layers = len(output_cache.layers)
 
         for i, item in enumerate(scheduled):
             req = item.request
             n_tok = item.num_tokens
 
-            # Build per-request cache from the batched output
-            req_legacy = tuple(
-                (legacy[layer][0][i:i+1], legacy[layer][1][i:i+1])
-                for layer in range(num_layers)
-            )
-            req.past_key_values = DynamicCache.from_legacy_cache(req_legacy)
+            per_req = DynamicCache()
+            for layer_idx in range(num_layers):
+                out_layer = output_cache.layers[layer_idx]
+                k = out_layer.keys[i:i+1].contiguous()
+                v = out_layer.values[i:i+1].contiguous()
+                new_layer = DynamicLayer()
+                new_layer.update(k, v)
+                per_req.layers.append(new_layer)
+            req.past_key_values = per_req
 
             # Update cache_mask: [old_mask_padded_to_max_cache | input_mask_padded]
             old_mask = req.cache_mask

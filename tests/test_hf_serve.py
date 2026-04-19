@@ -41,8 +41,10 @@ class TestLanguageModelTrace:
         assert output.dim() == 3  # [batch, seq, vocab]
 
     def test_hidden_states_standard_shape(self, model):
+        # transformers 5.x: GPT2Block.forward returns the hidden_states
+        # tensor directly (3-D), not the legacy (hidden_states, ...) tuple.
         with model.trace("Hello"):
-            hs = model.transformer.h[0].output[0].save()
+            hs = model.transformer.h[0].output.save()
         assert hs.dim() == 3
         assert hs.shape[0] == 1
         assert hs.shape[-1] == 768
@@ -819,7 +821,7 @@ class TestEndToEndTrace:
 
         try:
             with model.trace("Hello world", backend=backend):
-                hidden = model.transformer.h[0].output[0].save()
+                hidden = model.transformer.h[0].output.save()
                 logits = model.lm_head.output.save()
         finally:
             server.stop()
@@ -844,8 +846,8 @@ class TestEndToEndTrace:
 
         try:
             with model.trace("Hello world", backend=backend):
-                model.transformer.h[0].output[0][:] = 0
-                post_zero = model.transformer.h[0].output[0].save()
+                model.transformer.h[0].output[:] = 0
+                post_zero = model.transformer.h[0].output.save()
                 final = model.lm_head.output.save()
         finally:
             server.stop()
@@ -860,3 +862,200 @@ class TestEndToEndTrace:
         with torch.no_grad():
             direct = model._model(input_ids=input_ids)
         assert not torch.allclose(final, direct.logits, atol=1e-3)
+
+
+# ------------------------------------------------------------------
+# Multi-GPU: cache merge/split must respect per-layer devices under
+# ``device_map``-sharded models. Runs only with ≥2 CUDA GPUs.
+# ------------------------------------------------------------------
+
+_HAS_2GPU = torch.cuda.is_available() and torch.cuda.device_count() >= 2
+
+
+@pytest.fixture(scope="module")
+def split_model():
+    """GPT-2 split across cuda:0 (layers 0-5) and cuda:1 (layers 6-11)."""
+    if not _HAS_2GPU:
+        pytest.skip(f"needs ≥2 GPUs, have {torch.cuda.device_count()}")
+    from nnsight import LanguageModel
+
+    # Tied weights: lm_head shares weight with transformer.wte, so they
+    # must co-locate. Put embedding + lm_head on cuda:0.
+    device_map = {
+        "transformer.wte": 0,
+        "transformer.wpe": 0,
+        "transformer.drop": 0,
+        "transformer.h.0": 0, "transformer.h.1": 0, "transformer.h.2": 0,
+        "transformer.h.3": 0, "transformer.h.4": 0, "transformer.h.5": 0,
+        "transformer.h.6": 1, "transformer.h.7": 1, "transformer.h.8": 1,
+        "transformer.h.9": 1, "transformer.h.10": 1, "transformer.h.11": 1,
+        "transformer.ln_f": 1,
+        "lm_head": 0,
+    }
+    m = LanguageModel(
+        "openai-community/gpt2",
+        device_map=device_map,
+        dispatch=True,
+    )
+    yield m
+
+
+@pytest.mark.skipif(not _HAS_2GPU, reason="needs ≥2 CUDA GPUs")
+class TestMultiGPUCache:
+    """Verify _merge_caches / _split_cache work under ``device_map``-split
+    models. Guards against the bug where the merged KV cache is
+    allocated on a single ``model.device`` — attention on a layer that
+    lives elsewhere then crashes with ``Expected all tensors to be on
+    the same device`` inside ``torch.cat``.
+    """
+
+    def _reset_interleaver(self, model):
+        iv = model._interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def _make_server_backend(self, server):
+        """Mirror ``api/server.py`` submission flow without HTTP."""
+        from nnsight.intervention.backends import Backend
+        from nnsight.intervention.tracing.globals import Globals
+
+        class VanillaServerBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                try:
+                    Globals.enter()
+                    _args, kwargs = tracer._setup_interleaver(interventions)
+                    entries = self_inner.server.build_entries(kwargs)
+                    tracer.mediators.clear()
+                    pending = [
+                        (e, self_inner.server.submit(e)) for e in entries
+                    ]
+                finally:
+                    Globals.exit()
+                all_saves = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=60.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id)
+                    if saves and "__error__" in saves:
+                        raise RuntimeError(
+                            f"Server reported error for {entry.req_id}: "
+                            f"{saves['__error__']}"
+                        )
+                    if saves:
+                        all_saves.update(saves)
+                tracer.push(all_saves)
+
+        return VanillaServerBackend(server)
+
+    def test_layers_actually_split_across_gpus(self, split_model):
+        """Sanity: sharding took effect; early and late layers are on
+        different CUDA devices."""
+        hf = split_model._model
+        early_dev = next(hf.transformer.h[2].parameters()).device
+        late_dev = next(hf.transformer.h[9].parameters()).device
+        assert early_dev.type == "cuda" and early_dev.index == 0
+        assert late_dev.type == "cuda" and late_dev.index == 1
+
+    def test_merged_cache_layer_devices(self, split_model):
+        """Directly assert ``_merge_caches`` places per-layer K/V on the
+        layer's own device.
+
+        Populates per-request caches with tensors on cuda:0 (as if from
+        a previous step that hadn't yet been device-corrected), calls
+        ``_merge_caches``, and checks that layer 2's merged K/V lives on
+        cuda:0 while layer 9's lives on cuda:1 — i.e. the merge code is
+        copying per-layer onto the layer's device.
+        """
+        from transformers import DynamicCache
+        from transformers.cache_utils import DynamicLayer
+        from nnsight.modeling.hf_serve.vanilla_server import (
+            VanillaBatchServer, ActiveRequest, ScheduledItem,
+        )
+
+        server = VanillaBatchServer(split_model)
+        num_heads = split_model._model.config.n_head
+        head_dim = split_model._model.config.n_embd // num_heads
+        num_layers = split_model._model.config.n_layer
+        seq_len = 4
+
+        def make_cache_on(device):
+            cache = DynamicCache()
+            for _ in range(num_layers):
+                k = torch.zeros(1, num_heads, seq_len, head_dim, device=device)
+                v = torch.zeros_like(k)
+                layer = DynamicLayer()
+                layer.update(k, v)
+                cache.layers.append(layer)
+            return cache
+
+        reqs = []
+        for i in range(2):
+            reqs.append(ActiveRequest(
+                req_id=f"req_{i}",
+                prompt_ids=[0] * seq_len,
+                generated_ids=[],
+                max_new_tokens=1,
+                eos_token_id=-1,
+                past_key_values=make_cache_on(torch.device("cuda:0")),
+                prefilled_len=seq_len,
+                cache_mask=[1] * seq_len,
+            ))
+        scheduled = [
+            ScheduledItem(request=r, num_tokens=1, is_prefill=False, token_ids=[0])
+            for r in reqs
+        ]
+
+        merged = server._merge_caches(scheduled, max_cache_len=seq_len)
+        assert merged is not None
+        assert len(merged.layers) == num_layers
+        assert merged.layers[2].keys.device.index == 0
+        assert merged.layers[9].keys.device.index == 1
+        assert merged.layers[2].values.device.index == 0
+        assert merged.layers[9].values.device.index == 1
+
+    def test_prefill_decode_cycle_on_split_model(self, split_model):
+        """End-to-end trace over a device_map-split model.
+
+        Exercises ``_merge_caches`` / ``_split_cache`` on every decode
+        step. If those allocated the merged cache on a single device,
+        attention on layer 9 (cuda:1) would crash with a device-mismatch
+        error inside ``torch.cat``.
+        """
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(split_model, max_batch_size=2)
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with split_model.trace("Hello world", backend=backend):
+                early = split_model.transformer.h[2].output.save()
+                late = split_model.transformer.h[9].output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(split_model)
+
+        assert early is not None and early.dim() == 3
+        assert late is not None and late.dim() == 3
+        assert early.shape[-1] == 768
+        assert late.shape[-1] == 768
+        # Saved tensors come back on their originating layer's device.
+        assert early.device.type == "cuda" and early.device.index == 0, (
+            f"early (layer 2) expected cuda:0, got {early.device}"
+        )
+        assert late.device.type == "cuda" and late.device.index == 1, (
+            f"late (layer 9) expected cuda:1, got {late.device}"
+        )
+        assert early.abs().max().item() > 0
+        assert late.abs().max().item() > 0
