@@ -42,15 +42,20 @@ class AsyncVLLMBackend(Backend):
         try:
             Globals.enter()
 
-            # Set up mediators and collect batched args (shared with sync path).
-            args, kwargs = tracer._setup_interleaver(fn)
+            # init_interleaver=False: vLLM async workers mutate
+            # ``model._interleaver`` on another thread. Calling
+            # ``Interleaver.initialize`` here would reset
+            # ``interleaver.current`` to ``None`` and race with a concurrent
+            # ``Mediator.start()`` on the worker thread.
+            args, kwargs = tracer._setup_interleaver(fn, init_interleaver=False)
 
             if not self.model.dispatched:
                 self.model.dispatch()
 
-            # Serialize mediators into sampling params.
+            # Serialize mediators into sampling params. Pass tracer.mediators
+            # explicitly because we skipped initialize() above.
             prompts, params, lora_requests = self.model._serialize_mediators(
-                *args, **kwargs
+                *args, mediators=tracer.mediators, **kwargs
             )
             self._prompts = prompts
             self._params = params

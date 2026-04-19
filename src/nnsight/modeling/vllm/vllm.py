@@ -16,7 +16,7 @@ if _installed_version != NNS_VLLM_VERSION:
 import torch
 
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.inputs import TokensPrompt
 
@@ -339,14 +339,24 @@ class VLLM(RemoteableMixin):
         prompts: List[str],
         params: List[NNsightSamplingParams],
         lora_requests: List[Any],
+        mediators: Optional[List[Any]] = None,
         **kwargs,
     ) -> Tuple[List[str], List[NNsightSamplingParams], List[Any]]:
         """Serialize mediators and attach them to sampling params.
 
-        Collects all input mediators from the interleaver, serializes
-        each one into the corresponding ``NNsightSamplingParams.extra_args``,
-        and propagates any root-trace kwargs to params that still carry
-        defaults.
+        Collects all input mediators, serializes each into the corresponding
+        ``NNsightSamplingParams.extra_args``, and propagates any root-trace
+        kwargs to params that still carry defaults.
+
+        Args:
+            mediators: Explicit mediator list. Server paths pass
+                ``tracer.mediators`` because they call ``_setup_interleaver``
+                with ``init_interleaver=False`` to avoid racing with
+                ``Mediator.start()`` on the vLLM worker thread; those paths
+                cannot rely on ``self._interleaver.mediators`` being current.
+                When ``None`` (local sync/async paths), falls back to
+                ``self._interleaver.mediators`` as populated by
+                ``Interleaver.initialize``.
 
         Returns:
             ``(prompts, params, lora_requests)`` with mediator data attached.
@@ -354,9 +364,13 @@ class VLLM(RemoteableMixin):
 
         default_param = NNsightSamplingParams.from_optional()
 
+        source_mediators = (
+            mediators if mediators is not None else self._interleaver.mediators
+        )
+
         # Collect all input mediators (those with batch_group, i.e. not empty invokes)
         input_mediators = []
-        for mediator in self._interleaver.mediators:
+        for mediator in source_mediators:
             if mediator.batch_group is not None:
                 mediator.intervention.__source__ = "".join(mediator.info.source)
                 input_mediators.append(mediator)

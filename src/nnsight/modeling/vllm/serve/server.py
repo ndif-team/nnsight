@@ -101,15 +101,22 @@ async def generate(request: Request):
         Globals.enter()
 
         # Set up mediators from the compiled intervention function.
-        args, kwargs = tracer._setup_interleaver(fn)
+        # init_interleaver=False: the vLLM worker runs on a separate
+        # thread / process and owns ``model._interleaver`` state via
+        # ``process_new_reqs_serialized`` → ``_start_mediator_now``.
+        # Calling ``initialize`` here would reset ``interleaver.current``
+        # to ``None`` and race with a concurrent ``Mediator.start()``.
+        args, kwargs = tracer._setup_interleaver(fn, init_interleaver=False)
 
         if not _model.dispatched:
             # Should already be dispatched by cli.py, but just in case.
             _model.dispatch()
 
         # Serialize mediators into SamplingParams.extra_args.
+        # Pass tracer.mediators explicitly because we skipped initialize()
+        # above, so self._interleaver.mediators is stale from prior traffic.
         prompts, params, lora_requests = _model._serialize_mediators(
-            *args, **kwargs
+            *args, mediators=tracer.mediators, **kwargs
         )
 
         tracer.mediators.clear()
