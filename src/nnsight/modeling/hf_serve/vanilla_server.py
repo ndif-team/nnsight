@@ -186,12 +186,25 @@ class VanillaBatchServer:
     # Build entries from compiled trace
     # ------------------------------------------------------------------
 
-    def build_entries(self, batched_kwargs: dict) -> List[VanillaRequest]:
+    def build_entries(
+        self,
+        batched_kwargs: dict,
+        mediators: Optional[List[Any]] = None,
+    ) -> List[VanillaRequest]:
         """Build request entries from a compiled trace's batched output.
 
         Extracts per-invoke token IDs from the batched ``input_ids``
-        tensor, collects input mediators from the model's interleaver,
+        tensor, filters for input mediators (those with ``batch_group``),
         and creates one ``VanillaRequest`` per invoke.
+
+        Args:
+            mediators: Explicit mediator list. The HTTP handler passes
+                ``tracer.mediators`` because it calls
+                ``_setup_interleaver(init_interleaver=False)`` to avoid
+                racing with the bg thread on ``model._interleaver``;
+                that path cannot rely on ``model._interleaver.mediators``
+                being current. When ``None``, falls back to the shared
+                interleaver's list (for callers that own it exclusively).
         """
         input_ids = batched_kwargs.get("input_ids")
         attention_mask = batched_kwargs.get("attention_mask")
@@ -207,8 +220,11 @@ class VanillaBatchServer:
                     ids = input_ids[i].tolist()
                 prompts.append(ids)
 
+        source_mediators = (
+            mediators if mediators is not None else self.model._interleaver.mediators
+        )
         input_mediators = [
-            m for m in self.model._interleaver.mediators
+            m for m in source_mediators
             if m.batch_group is not None
         ]
 

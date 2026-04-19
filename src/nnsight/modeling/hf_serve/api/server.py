@@ -107,11 +107,16 @@ async def generate(request: Request):
 
     # --- Sync-atomic compile + extract + submit ---
     # No `await` between _setup_interleaver and submit_async, so two
-    # concurrent handlers cannot race on the shared model._interleaver.
+    # concurrent handlers cannot race with each other on the compile step.
+    # `init_interleaver=False` prevents racing with the background
+    # generation thread: `Interleaver.initialize()` would reset
+    # `interleaver.current=None` mid-`Mediator.start()`, causing a worker
+    # to read None at its first `.output` access and crash the whole
+    # in-flight batch. See commit introducing the flag.
     try:
         Globals.enter()
-        _args, kwargs = tracer._setup_interleaver(fn)
-        entries = _server.build_entries(kwargs)
+        _args, kwargs = tracer._setup_interleaver(fn, init_interleaver=False)
+        entries = _server.build_entries(kwargs, mediators=tracer.mediators)
         tracer.mediators.clear()
         futures = [_server.submit_async(req) for req in entries]
     except Exception as e:
