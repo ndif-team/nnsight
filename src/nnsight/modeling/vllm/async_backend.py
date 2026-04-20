@@ -104,6 +104,12 @@ class AsyncVLLMBackend(Backend):
             )
             saves_bytes = next((r for r in results if r is not None), None)
             if saves_bytes:
-                saves = pickle.loads(saves_bytes)
-                output.saves = saves
+                # Worker returns ``{base_id: {var_name: value}}``.  Pull
+                # out this request's own sub-dict — the outer layer
+                # exists to keep concurrent separate-trace requests
+                # from colliding at shared variable names.
+                saves_by_req = pickle.loads(saves_bytes)
+                per_req = saves_by_req.get(output.request_id)
+                if per_req:
+                    output.saves = per_req
             yield output

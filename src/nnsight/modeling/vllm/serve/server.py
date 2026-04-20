@@ -140,7 +140,11 @@ async def generate(request: Request):
         ):
             last_output = output
 
-        # Collect saves from workers.
+        # Collect saves from workers.  Each rank returns per-request
+        # ``{base_id: {var_name: value}}``; we extract THIS request's
+        # sub-dict rather than flat-merging across ranks.  collect_rpc
+        # is already scoped to one request_id here, but we still unwrap
+        # the outer layer so the payload shape matches the new protocol.
         finished = [request_id]
         results = await engine.collective_rpc(
             "collect_nnsight",
@@ -149,7 +153,10 @@ async def generate(request: Request):
         saves = {}
         for r in results:
             if r is not None:
-                saves.update(pickle.loads(r))
+                rank_saves = pickle.loads(r)
+                per_req = rank_saves.get(request_id) if rank_saves else None
+                if per_req:
+                    saves.update(per_req)
 
         gen_output = {}
         if last_output is not None:

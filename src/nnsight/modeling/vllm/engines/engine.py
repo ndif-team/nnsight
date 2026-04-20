@@ -24,9 +24,18 @@ class NNsightLLMEngine(LLMEngine):
             # results is a list (one per worker). Rank-0 returns pickled bytes, others None.
             saves_bytes = next((r for r in results if r is not None), None)
             if saves_bytes:
-                saves = pickle.loads(saves_bytes)
+                # Worker returns ``{base_id: {var_name: value}}`` so the
+                # step attaches each request's OWN saves sub-dict to its
+                # OWN RequestOutput.  The previous ``ro.saves = saves``
+                # (same dict bound to every finished output) entangled
+                # concurrent separate traces whose user code used
+                # overlapping variable names — one winner clobbered the
+                # rest.  See Bug A in PP_DESIGN notes.
+                saves_by_req = pickle.loads(saves_bytes)
                 for ro in request_outputs:
                     if ro.finished:
-                        ro.saves = saves
+                        per_req = saves_by_req.get(ro.request_id)
+                        if per_req:
+                            ro.saves = per_req
 
         return request_outputs

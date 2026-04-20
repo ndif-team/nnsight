@@ -248,7 +248,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             return finished_internal_keys
 
         def collect_saves(self, matched, finished_internal_keys: set) -> tuple:
-            """Collect saved values from mediator frames.
+            """Collect saved values from mediator frames, namespaced per request.
 
             Gathers per-invoke saves from frame locals and trace-shared
             saves from canonical globals (only when a trace is fully done).
@@ -256,24 +256,37 @@ class NNsightGPUModelRunner(GPUModelRunner):
             referenced by each mediator) instead of Globals.saves.
 
             Returns:
-                ``(saves, removals)`` — the saves dict and set of
-                ``(id, trace_saves_ref)`` pairs to discard after collection.
+                ``(saves_by_req, removals)`` —
+                ``saves_by_req`` is ``{base_id: {var_name: value}}`` so
+                concurrent requests whose user code uses the same
+                variable name (``logits``, ``x``, …) don't collide at
+                the outer flat-dict layer.  The caller (engine / server)
+                routes each sub-dict to the matching request output.
+                ``removals`` is a list of ``(id, trace_saves_ref)`` pairs
+                to discard after collection.
             """
-            saves = {}
+            saves_by_req: dict = {}
             removals = []
 
+            # Map internal_key -> base_id so trace-shared saves from a
+            # finished internal_key can be attached to the right bucket.
+            base_by_internal = {ik: b for b, _, ik in matched}
+
             for base_id, mediator, internal_key in matched:
+                per_req = saves_by_req.setdefault(base_id, {})
                 frame = mediator.info.frame
                 trace_saves = mediator._trace_saves
                 for key, value in frame.f_locals.items():
                     if id(value) in trace_saves:
-                        saves[key] = value
+                        per_req[key] = value
                         if internal_key in finished_internal_keys:
                             removals.append((id(value), trace_saves))
 
             # Trace-shared saves: collect when ALL mediators for a trace
-            # have been received AND completed.
+            # have been received AND completed.  Attach to the base_id
+            # whose finishing triggered the trace completion.
             for internal_key in finished_internal_keys:
+                owning_base = base_by_internal.get(internal_key, internal_key)
                 for _, ctx in self.trace_contexts.items():
                     if internal_key in ctx["pending_req_ids"]:
                         ctx["pending_req_ids"].discard(internal_key)
@@ -284,15 +297,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         if trace_fully_done:
                             trace_saves = ctx["saves"]
                             canonical = ctx["canonical_globals"]
+                            per_req = saves_by_req.setdefault(owning_base, {})
                             for name in ctx["saved_names"]:
                                 if name in canonical:
                                     value = canonical[name]
                                     if id(value) in trace_saves:
-                                        saves[name] = value
+                                        per_req[name] = value
                                         removals.append((id(value), trace_saves))
                         break
 
-            return saves, removals
+            return saves_by_req, removals
 
         def cleanup_finished(self, finished_internal_keys: set, removals: list) -> None:
             """Clean up state for finished requests.
@@ -470,23 +484,29 @@ class NNsightGPUModelRunner(GPUModelRunner):
         finished_keys = helper.finalize_mediators(
             matched, finished_req_id_set, self.nnsight_model
         )
-        saves, removals = helper.collect_saves(matched, finished_keys)
+        saves_by_req, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
 
-        # Collect deferred exceptions from mediators, keyed by request ID.
-        # Each invoke has its own mediator and its own exception.
-        # The wrapped exception can't be pickled (dynamic class), so send type + message.
-        exceptions = {}
+        # Collect deferred exceptions.  Each mediator has its own —
+        # nest it inside THAT request's sub-dict under
+        # ``__nnsight_exceptions__`` in the ``{base_id: exc_info}``
+        # shape the existing sync ``vllm.py`` consumer understands.
+        # The wrapped exception can't be pickled (dynamic class) so
+        # we send type + message strings.
         for base_id, mediator, internal_key in matched:
             if mediator._deferred_exception is not None:
                 exc = mediator._deferred_exception
-                exceptions[base_id] = {
-                    "type": type(exc).__bases__[0].__name__ if hasattr(type(exc), "__bases__") else type(exc).__name__,
-                    "message": str(exc),
+                per_req = saves_by_req.setdefault(base_id, {})
+                per_req["__nnsight_exceptions__"] = {
+                    base_id: {
+                        "type": (
+                            type(exc).__bases__[0].__name__
+                            if hasattr(type(exc), "__bases__")
+                            else type(exc).__name__
+                        ),
+                        "message": str(exc),
+                    }
                 }
                 mediator._deferred_exception = None
 
-        if exceptions:
-            saves["__nnsight_exceptions__"] = exceptions
-
-        return pickle.dumps(saves)
+        return pickle.dumps(saves_by_req)

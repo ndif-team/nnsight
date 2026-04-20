@@ -417,13 +417,23 @@ class VLLM(RemoteableMixin):
         outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_requests)
 
         saves = {}
+        all_exceptions: dict = {}
 
         for output in outputs:
-            if hasattr(output, "saves"):
-                saves.update(output.saves)
+            if not hasattr(output, "saves"):
+                continue
+            # Each output's saves is this request's own sub-dict now
+            # (per-request namespacing in the engine/worker).  Its
+            # ``__nnsight_exceptions__`` entry is a ``{base_id: exc}``
+            # map holding only THIS request's failure; combine across
+            # invokes into one trace-level map.
+            for k, v in output.saves.items():
+                if k == "__nnsight_exceptions__":
+                    all_exceptions.update(v)
+                else:
+                    saves[k] = v
 
-        # Extract deferred exceptions from worker, keyed by request ID.
-        deferred_exceptions = saves.pop("__nnsight_exceptions__", None)
+        deferred_exceptions = all_exceptions or None
 
         # Save the variables in our local environment
         for value in saves.values():
