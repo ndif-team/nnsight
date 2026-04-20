@@ -121,7 +121,21 @@ class Interleaver:
 
         self._interleaving = False
         self.hook_handles = []
-        self._defer_exceptions = False
+        # User-code exceptions are always stored on
+        # ``mediator._deferred_exception`` (see ``handle_exception_event``)
+        # so a single failing intervention never tanks its co-batched
+        # siblings. ``_raise_at_exit`` controls whether ``__exit__`` then
+        # propagates the first such exception:
+        #
+        # - ``True`` (default): ``__exit__`` scans mediators and raises.
+        #   This is what local ``model.trace()`` wants — the user expects
+        #   their failed intervention to surface at the ``with`` boundary.
+        # - ``False``: servers (vLLM, HF CB) opt out because they read
+        #   ``mediator._deferred_exception`` themselves and finalize the
+        #   offending request with ``__error__`` per-client. Raising from
+        #   ``__exit__`` inside the bg generation thread would crash the
+        #   engine.
+        self._raise_at_exit = True
         # Per-mediator timeout in seconds. ``None`` means wait forever
         # (preserves debugging experience for local ``model.trace()``).
         # Set to a finite value by continuous-batching servers where a
@@ -433,6 +447,30 @@ class Interleaver:
         # Clear the interleaving flag on exit.
         self._interleaving = False
 
+        # Scan ALL mediators (not just live ones) for deferred user-code
+        # exceptions before filtering. ``handle_exception_event`` cancels
+        # the failing mediator (sets ``worker = None``), so it's no longer
+        # alive — we'd lose the exception if we filtered first.
+        #
+        # Skipped:
+        # - ``Cancelation`` / ``EarlyStopException``: intentional control
+        #   flow, never user-visible failures.
+        # - ``TimeoutError``: ``__enter__`` already warned and abandoned
+        #   the worker; raising here would double-surface the same event.
+        #   Servers still see it via direct ``_deferred_exception`` reads.
+        deferred = None
+        if self._raise_at_exit and exc_type is None:
+            for mediator in self.mediators:
+                exc = getattr(mediator, "_deferred_exception", None)
+                if exc is None:
+                    continue
+                # Clear so a re-entered interleaver doesn't re-raise.
+                mediator._deferred_exception = None
+                if isinstance(exc, (Cancelation, EarlyStopException, TimeoutError)):
+                    continue
+                deferred = exc
+                break
+
         # Clear the mediators that are no longer alive.
         self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
@@ -440,11 +478,8 @@ class Interleaver:
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
             return True
 
-        # In defer mode (vLLM), don't raise here — exceptions are stored
-        # per-mediator and will be raised on the client side.
-        # Raising from __exit__ would kill the vLLM engine process.
-        if self._defer_exceptions:
-            return
+        if deferred is not None:
+            raise deferred
 
     def check_dangling_mediators(self):
 
@@ -466,14 +501,20 @@ class Interleaver:
                     )
                 )
 
-                if iteration != 0:
-                    try:
-                        mediator.handle()
-                    except ValueError as e:
+                mediator.handle()
+                # ``mediator.handle()`` no longer raises directly —
+                # ``handle_exception_event`` defers user-code exceptions
+                # to ``_deferred_exception``. For iter > 0 we rewrite the
+                # message into a warning (matches prior behavior); for
+                # iter 0 we re-raise so the local trace surfaces it.
+                deferred = getattr(mediator, "_deferred_exception", None)
+                if deferred is not None:
+                    mediator._deferred_exception = None
+                    if iteration != 0:
                         msg = f"Execution complete but `{requester}` was not provided. If this was in an Iterator at iteration {iteration} this iteration did not happen. If you were using `.iter[:]`, this is likely not an error."
                         warnings.warn(msg)
-                else:
-                    mediator.handle()
+                    else:
+                        raise deferred
 
         self.mediators = []
 
@@ -967,14 +1008,13 @@ class Mediator:
             # because of the defered execution of NNsight, we need to rebuild where the execption was in the original user code instead of this execption.
             exception = wrap_exception(exception, self.info)
 
-            # In vLLM mode, defer the exception instead of re-raising inside
-            # the forward pass.  The mediator is already cancelled (above),
-            # so subsequent hooks will skip it.  Other mediators keep running.
-            if self.interleaver._defer_exceptions:
-                self._deferred_exception = exception
-                return False
-
-            raise exception
+            # Always defer to ``_deferred_exception`` so a single failing
+            # intervention never escapes the hook to crash co-batched
+            # siblings or the engine process. The interleaver's
+            # ``_raise_at_exit`` flag (default ``True``) decides whether
+            # ``__exit__`` then propagates it; servers set it to ``False``
+            # and finalize the offending request per-client.
+            self._deferred_exception = exception
 
         return False
 

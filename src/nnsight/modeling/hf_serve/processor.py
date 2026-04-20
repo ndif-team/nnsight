@@ -49,7 +49,10 @@ class NNsightCBProcessor(ContinuousBatchProcessor):
 
         Globals.enter()
         interleaver = nns._interleaver
-        interleaver._defer_exceptions = True
+        # The HF paged manager reads ``mediator._deferred_exception``
+        # itself when finalizing requests; raising from ``__exit__``
+        # in the bg generation thread would crash the engine.
+        interleaver._raise_at_exit = False
 
         try:
             with interleaver:
@@ -63,7 +66,7 @@ class NNsightCBProcessor(ContinuousBatchProcessor):
                 self.request_helper.unflatten(nns)
 
         finally:
-            interleaver._defer_exceptions = False
+            interleaver._raise_at_exit = True
             Globals.exit()
 
         return logits
@@ -81,6 +84,10 @@ class NNsightCBProcessor(ContinuousBatchProcessor):
 
         Globals.enter()
         interleaver = nns._interleaver
+        # Same reasoning as ``_model_forward`` — engine reads
+        # ``mediator._deferred_exception`` itself; raising from
+        # ``__exit__`` here would crash the engine.
+        interleaver._raise_at_exit = False
 
         try:
             with interleaver:
@@ -90,4 +97,5 @@ class NNsightCBProcessor(ContinuousBatchProcessor):
                 nns.samples(output_ids, hook=True)
 
         finally:
+            interleaver._raise_at_exit = True
             Globals.exit()

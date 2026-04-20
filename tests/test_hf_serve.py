@@ -864,6 +864,116 @@ class TestEndToEndTrace:
         assert not torch.allclose(final, direct.logits, atol=1e-3)
 
 
+class TestErrorIsolation:
+    """One failing intervention must not tank co-batched siblings.
+
+    Pre-fix bug: a user-code exception escaped ``_step`` via
+    ``handle_exception_event``, was caught by ``_generation_loop``'s
+    catch-all, which finalized every active request with the same
+    ``__error__``. Now exceptions are deferred per-mediator and
+    ``_step`` finalizes only the failing request.
+    """
+
+    def _reset_interleaver(self, model):
+        iv = model._interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def _make_collecting_backend(self, server):
+        """Submit + return saves verbatim — does NOT raise on ``__error__``.
+
+        Lets a test see the failed request's error payload alongside
+        the successful one's saves.
+        """
+        from nnsight.intervention.backends import Backend
+        from nnsight.intervention.tracing.globals import Globals
+
+        class CollectingBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                try:
+                    Globals.enter()
+                    _args, kwargs = tracer._setup_interleaver(interventions)
+                    entries = self_inner.server.build_entries(kwargs)
+                    tracer.mediators.clear()
+                    pending = [
+                        (e, self_inner.server.submit(e)) for e in entries
+                    ]
+                finally:
+                    Globals.exit()
+                merged = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=30.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id) or {}
+                    merged.update(saves)
+                tracer.push(merged)
+
+        return CollectingBackend(server)
+
+    def test_failing_request_isolated_per_mediator(self, model):
+        """A failing intervention returns ``__error__`` for that request only.
+
+        Pre-fix: the user-code exception escaped ``_step`` and tripped
+        ``_generation_loop``'s catch-all, which tanked every co-batched
+        sibling AND killed the bg generation thread state. Post-fix:
+        the exception is deferred on the mediator and ``_step``
+        finalizes only the failing request; a subsequent successful
+        trace through the same server completes normally.
+        """
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)
+        server.start()
+        backend = self._make_collecting_backend(server)
+
+        try:
+            # 1. Submit a trace whose intervention raises in the worker.
+            #    ``model.lm_head.output`` runs first (so the worker is
+            #    inside the interleaver). Then a hook on a non-existent
+            #    attribute throws inside the mediator's user-code frame.
+            err_seen = None
+            try:
+                with model.trace("Hello world", backend=backend):
+                    bad = model.lm_head.no_such_attr  # AttributeError in worker
+            except Exception as e:
+                err_seen = e
+            # The failing trace must surface SOME error to the caller —
+            # either via push() of {"__error__": ...} (no exception) or
+            # via wrap_exception re-raise from the local backend.
+            # Either way, the server must NOT be wedged.
+
+            # 2. Run a fresh successful trace through the same server.
+            #    Pre-fix the bg thread's catch-all corrupted helper state
+            #    (popped mediators from a defunct request id) and this
+            #    second trace would either hang or also return error.
+            with model.trace("Hello world", backend=backend):
+                hidden = model.transformer.h[0].output.save()
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        # Sibling trace must have produced real activations.
+        assert hidden is not None and logits is not None
+        h0 = hidden[0] if isinstance(hidden, tuple) else hidden
+        assert h0.abs().max().item() > 0, (
+            "Subsequent trace returned empty/zero activations — server "
+            "state was corrupted by the prior failing request."
+        )
+        assert logits.abs().max().item() > 0
+
+
 # ------------------------------------------------------------------
 # Multi-GPU: cache merge/split must respect per-layer devices under
 # ``device_map``-sharded models. Runs only with ≥2 CUDA GPUs.

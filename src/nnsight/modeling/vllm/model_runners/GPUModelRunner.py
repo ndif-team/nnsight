@@ -93,7 +93,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         return_value = None
         interleaver = self.nnsight_model._interleaver
-        interleaver._defer_exceptions = True
+        # vLLM reads ``mediator._deferred_exception`` itself in
+        # ``collect_nnsight`` and surfaces it per-client; raising from
+        # ``__exit__`` here would crash the engine process.
+        interleaver._raise_at_exit = False
 
         with interleaver:
 
@@ -113,7 +116,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     **{**state._asdict(), "logits": logits}
                 )
 
-        interleaver._defer_exceptions = False
+        interleaver._raise_at_exit = True
 
         # Safety net: if __enter__ failed or forward was interrupted before
         # return_value could be assigned, build a minimal valid output.
@@ -135,7 +138,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         sampler_output = None
         interleaver = self.nnsight_model._interleaver
-        interleaver._defer_exceptions = True
+        interleaver._raise_at_exit = False
 
         with interleaver:
 
@@ -145,7 +148,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 sampler_output.sampled_token_ids, hook=True
             )
 
-        interleaver._defer_exceptions = False
+        interleaver._raise_at_exit = True
 
         Globals.exit()
 

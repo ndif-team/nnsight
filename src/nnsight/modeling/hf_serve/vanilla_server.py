@@ -522,6 +522,12 @@ class VanillaBatchServer:
             helper._num_scheduled_tokens = num_tokens_map
 
             Globals.enter()
+            # Per-request error isolation: read each mediator's
+            # ``_deferred_exception`` after the forward pass and finalize
+            # only the failing requests below. Raising from ``__exit__``
+            # would escape ``_step`` and trip ``_generation_loop``'s
+            # catch-all, tanking every co-batched sibling.
+            model._interleaver._raise_at_exit = False
             try:
                 with model._interleaver:
                     outputs = model._model(
@@ -532,6 +538,7 @@ class VanillaBatchServer:
                         use_cache=True,
                     )
             finally:
+                model._interleaver._raise_at_exit = True
                 Globals.exit()
             # NOTE: intentionally skipping handle("result")/check_cache_full/
             # check_dangling_mediators/cancel here. Those finalize the
@@ -554,12 +561,30 @@ class VanillaBatchServer:
         # -- 6. Split output cache back to per-request --
         self._split_cache(scheduled, outputs.past_key_values, max_cache_len, max_input_len)
 
+        # -- 6b. Detect per-mediator deferred exceptions and finalize
+        # those requests with ``__error__``. Skips them in the sampling
+        # loop below so we don't append a generated token to a request
+        # the user code never finished setting up.
+        failed_req_ids: Dict[str, str] = {}
+        for item in scheduled:
+            req_id = item.request.req_id
+            med = helper.mediators.get(req_id)
+            if med is None:
+                continue
+            exc = getattr(med, "_deferred_exception", None)
+            if exc is not None:
+                failed_req_ids[req_id] = str(exc)
+                # Clear so a re-used mediator doesn't re-trigger.
+                med._deferred_exception = None
+
         # -- 7. Sample and update state --
         logits = outputs.logits[:, -1, :]  # [batch, vocab] — last position (left-padded)
 
         finished_ids = set()
         for i, item in enumerate(scheduled):
             req = item.request
+            if req.req_id in failed_req_ids:
+                continue
 
             if item.is_prefill:
                 req.prefilled_len += item.num_tokens
@@ -575,6 +600,16 @@ class VanillaBatchServer:
                 finished_ids.add(req.req_id)
             elif next_token == req.eos_token_id:
                 finished_ids.add(req.req_id)
+
+        # -- 7b. Finalize failed requests with __error__ --
+        for req_id, err in failed_req_ids.items():
+            # Clean up helper state (matches normal finalize path) so the
+            # mediator doesn't linger in ``helper.mediators``.
+            matched = helper.match_req_ids({req_id}, strip_suffix=False)
+            finished_keys = helper.finalize_mediators(matched, {req_id}, model)
+            _, removals = helper.collect_saves(matched, finished_keys)
+            helper.cleanup_finished(finished_keys, removals)
+            self._finish_request(req_id, {"__error__": err})
 
         # -- 8. Finalize finished requests --
         # Collect saves per-request (not across all finished at once) so each
