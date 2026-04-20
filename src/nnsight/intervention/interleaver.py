@@ -143,6 +143,17 @@ class Interleaver:
         # and block all concurrent requests.
         self.mediator_timeout: Optional[float] = None
 
+        # Optional factory that wraps the user's intervention function in
+        # a per-thread context (e.g. NDIF's import/builtin sandbox). The
+        # worker thread calls ``worker_context(intervention.__globals__)``
+        # and runs the user code inside the returned context manager. The
+        # factory receives the intervention's ``__globals__`` so it can
+        # scope a ``__builtins__`` swap to exactly the user frame without
+        # touching process state. Set by servers that accept untrusted
+        # user code (``VanillaBatchServer(worker_context=...)``). ``None``
+        # disables the wrap — local ``model.trace()`` runs unsandboxed.
+        self.worker_context: Optional[Callable[[dict], Any]] = None
+
     def initialize(
         self,
         mediators: List[Mediator],
@@ -809,11 +820,22 @@ class Mediator:
 
         _intervention = self.intervention
         _args = (self, self.info, *self.args)
+        _worker_context = self.interleaver.worker_context
 
         def _worker_target():
             if _caller_stream is not None:
                 torch.cuda.set_stream(_caller_stream)
-            _intervention(*_args)
+            if _worker_context is None:
+                _intervention(*_args)
+            else:
+                # Scope any caller-provided sandbox (e.g. NDIF's import/
+                # builtin Protector) to exactly this worker thread and the
+                # user frame it's about to execute. The factory receives
+                # the intervention's ``__globals__`` so it can swap
+                # ``__builtins__`` on the user frame without touching
+                # process state.
+                with _worker_context(_intervention.__globals__):
+                    _intervention(*_args)
 
         # Start the worker thread. Copy the current context so the
         # worker inherits Globals.stack / Globals.saves from the caller.

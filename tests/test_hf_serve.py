@@ -1169,3 +1169,245 @@ class TestMultiGPUCache:
         )
         assert early.abs().max().item() > 0
         assert late.abs().max().item() > 0
+
+
+# ------------------------------------------------------------------
+# worker_context: per-worker-thread sandbox for user intervention code
+# ------------------------------------------------------------------
+
+class TestWorkerContext:
+    """``worker_context`` wraps user intervention code on the worker
+    thread — the only thread that actually runs attacker-controlled
+    Python. Bg thread runs framework code (hook dispatch, cache
+    merge, finalize) and stays unsandboxed. Handler thread runs
+    compile+extract and is sandboxed by the caller (e.g. NDIF's
+    deserialization wrap).
+    """
+
+    def _make_server_backend(self, server):
+        """Mirror api/server.py submission flow in-process."""
+        from nnsight.intervention.backends import Backend
+        from nnsight.intervention.tracing.globals import Globals
+
+        class VanillaServerBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                try:
+                    Globals.enter()
+                    _args, kwargs = tracer._setup_interleaver(interventions)
+                    entries = self_inner.server.build_entries(kwargs)
+                    tracer.mediators.clear()
+                    pending = [
+                        (e, self_inner.server.submit(e)) for e in entries
+                    ]
+                finally:
+                    Globals.exit()
+                all_saves = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=30.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id)
+                    if saves and "__error__" in saves:
+                        raise RuntimeError(
+                            f"Server reported {entry.req_id} error: "
+                            f"{saves['__error__']}"
+                        )
+                    if saves:
+                        all_saves.update(saves)
+                tracer.push(all_saves)
+
+        return VanillaServerBackend(server)
+
+    def _reset_interleaver(self, model):
+        iv = model._interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def test_factory_receives_intervention_globals_on_worker_thread(self, model):
+        """Factory is called inside the worker thread with the
+        intervention function's ``__globals__`` as its only argument."""
+        import threading as _th
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        calls = []
+
+        class RecordingCtx:
+            def __init__(self_inner, globals_):
+                self_inner.globals_ = globals_
+                self_inner.enter_thread = None
+                self_inner.exit_thread = None
+
+            def __enter__(self_inner):
+                self_inner.enter_thread = _th.current_thread()
+                calls.append(self_inner)
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc_val, exc_tb):
+                self_inner.exit_thread = _th.current_thread()
+                return False
+
+        def factory(target_globals):
+            return RecordingCtx(target_globals)
+
+        server = VanillaBatchServer(
+            model, max_batch_size=2, worker_context=factory,
+        )
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello world", backend=backend):
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert calls, "worker_context factory was never called"
+        ctx = calls[0]
+        assert isinstance(ctx.globals_, dict), (
+            f"factory arg should be a globals dict, got {type(ctx.globals_)}"
+        )
+        # Worker-thread name pattern is ``Mediator<id>`` (see Mediator.__init__).
+        assert ctx.enter_thread.name.startswith("Mediator"), (
+            f"worker_context entered on wrong thread: "
+            f"{ctx.enter_thread.name} (want Mediator*)"
+        )
+        assert ctx.exit_thread is ctx.enter_thread, (
+            f"enter/exit on different threads: "
+            f"{ctx.enter_thread.name} vs {ctx.exit_thread.name}"
+        )
+
+    def test_bg_generation_thread_is_not_wrapped(self, model):
+        """The bg thread running ``_schedule``/``_step`` must NOT enter
+        the worker_context — it runs only framework code."""
+        import threading as _th
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        bg_thread_seen = {"value": False}
+
+        class Ctx:
+            def __init__(self_inner, _globals):
+                pass
+
+            def __enter__(self_inner):
+                if _th.current_thread().name == "vanilla-cb-server":
+                    bg_thread_seen["value"] = True
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        server = VanillaBatchServer(
+            model, max_batch_size=2, worker_context=Ctx,
+        )
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello", backend=backend):
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert not bg_thread_seen["value"], (
+            "worker_context entered on the bg generation thread; "
+            "it should run only inside mediator worker threads."
+        )
+
+    def test_no_factory_runs_user_code_unwrapped(self, model):
+        """Default ``worker_context=None`` leaves the worker to run
+        the intervention directly (no wrap), matching pre-feature
+        behavior."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)  # no worker_context
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello", backend=backend):
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        # Interleaver.worker_context stayed None (or got reset to None on start()).
+        assert model._interleaver.worker_context is None
+
+    def test_context_exit_runs_even_on_intervention_exception(self, model):
+        """If user code raises, the worker's ``__exit__`` must still
+        fire — sandbox state restoration is a correctness requirement."""
+        import threading as _th
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        exits = []
+
+        class Ctx:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc_val, exc_tb):
+                exits.append(exc_type)
+                return False  # don't suppress
+
+        def factory(_globals):
+            return Ctx()
+
+        server = VanillaBatchServer(
+            model, max_batch_size=2, worker_context=factory,
+        )
+        server.start()
+        backend = self._make_server_backend(server)
+
+        # User code that raises: access an out-of-range layer index.
+        try:
+            with pytest.raises(Exception):
+                with model.trace("Hello", backend=backend):
+                    bad = model.transformer.h[999].output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert exits, "worker_context __exit__ never fired on user exception"
+
+    def test_start_restart_updates_worker_context(self, model):
+        """``start()`` installs the current ``worker_context`` on the
+        interleaver. Stop + restart with a different factory picks up
+        the new one (important if a server instance is re-bound to a
+        different sandbox policy)."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        def factory_a(_globals):
+            class C:
+                def __enter__(s): return s
+                def __exit__(s, *exc): return False
+            C.__name__ = "Ctx_A"
+            return C()
+
+        server = VanillaBatchServer(model, max_batch_size=2, worker_context=factory_a)
+        server.start()
+        try:
+            assert model._interleaver.worker_context is factory_a
+        finally:
+            server.stop()
+
+        server.worker_context = None
+        server.start()
+        try:
+            assert model._interleaver.worker_context is None, (
+                "start() did not refresh worker_context to the current value"
+            )
+        finally:
+            server.stop()
+            self._reset_interleaver(model)

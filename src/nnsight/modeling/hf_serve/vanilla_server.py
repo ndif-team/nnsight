@@ -40,7 +40,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from queue import Queue, Empty
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import torch
 from transformers import DynamicCache
@@ -136,6 +136,7 @@ class VanillaBatchServer:
         token_budget: int = 512,
         max_batch_size: int = 64,
         mediator_timeout: float = 30.0,
+        worker_context: Optional[Callable[[dict], Any]] = None,
     ):
         self.model = model
         self.request_helper = NNsightRequestHelper()
@@ -146,6 +147,14 @@ class VanillaBatchServer:
         # blocking I/O) would otherwise wedge the entire batch. The
         # interleaver aborts the offending mediator and continues.
         self.mediator_timeout = mediator_timeout
+        # Optional factory that wraps each mediator worker's execution of
+        # user code in a per-thread context (e.g. NDIF's import/builtin
+        # sandbox). Called as ``worker_context(intervention.__globals__)``
+        # inside the worker thread right before ``_intervention(*_args)``.
+        # Installed on the interleaver in ``start()``; the bg generation
+        # thread itself runs no user code, so it intentionally stays
+        # unsandboxed.
+        self.worker_context = worker_context
 
         self._request_queue: Queue[VanillaRequest] = Queue()
         self._pending: List[VanillaRequest] = []
@@ -166,6 +175,11 @@ class VanillaBatchServer:
     def start(self):
         if self._thread is not None and self._thread.is_alive():
             return
+        # Install the worker sandbox on the shared interleaver before the
+        # bg thread starts. Set unconditionally so prior ``stop()``/
+        # ``start()`` cycles pick up a fresh (possibly None) value rather
+        # than inheriting the previous server's policy.
+        self.model._interleaver.worker_context = self.worker_context
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._generation_loop, daemon=True,
