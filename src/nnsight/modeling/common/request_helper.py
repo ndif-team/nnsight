@@ -26,9 +26,15 @@ class NNsightRequestHelper:
     """
 
     def __init__(self):
-        self.req_id_to_batch_group_idx: Dict[str, int] = {}
         self.mediators: Dict[str, Any] = {}  # req_id -> Mediator
         self.trace_contexts: Dict[str, dict] = {}  # trace_id -> context
+        # Set per batch step by the engine driver (vLLM ``_update_states``,
+        # HF ``_assign_batch_groups``/vanilla ``_step``) and read by
+        # ``unflatten()``. Initialised here so a fresh helper or a call
+        # before the first batch step is a clean no-op rather than an
+        # ``AttributeError``.
+        self._batch_req_ids: List[str] = []
+        self._num_scheduled_tokens: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Mediator registration (engine-specific entry points)
