@@ -1,17 +1,6 @@
-from ... import NNS_VLLM_VERSION
-
 import atexit
 import uuid
 import vllm
-
-# Check vLLM version compatibility
-_installed_version = getattr(vllm, "__version__", "unknown")
-if _installed_version != NNS_VLLM_VERSION:
-    raise ImportError(
-        f"nnsight requires vLLM version {NNS_VLLM_VERSION}, but found {_installed_version}. "
-        f"Please install the correct version:\n\n"
-        f"    pip install vllm=={NNS_VLLM_VERSION}\n"
-    )
 
 import torch
 
@@ -28,6 +17,7 @@ from vllm.distributed import (
     initialize_model_parallel,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.entrypoints.llm import LLM
 
 from ...intervention.envoy import Envoy
@@ -105,9 +95,10 @@ class VLLM(RemoteableMixin):
                 backend="gloo",
             )
 
-            initialize_model_parallel(
-                tensor_model_parallel_size=1, pipeline_model_parallel_size=1
-            )
+            with set_current_vllm_config(VllmConfig()):
+                initialize_model_parallel(
+                    tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+                )
 
         atexit.register(VLLM._cleanup_distributed)
 
