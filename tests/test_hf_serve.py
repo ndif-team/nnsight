@@ -1411,3 +1411,147 @@ class TestWorkerContext:
         finally:
             server.stop()
             self._reset_interleaver(model)
+
+    def test_per_request_allowlist_isolation(self, model):
+        """Per-request allowlists are honored — request A's permission
+        does not bleed into request B's check, even though A ran first
+        and populated ``sys.modules`` for the imported module.
+
+        Simulates NDIF's planned TLS-keyed Protector: a single
+        ``__import__`` dispatcher is installed in process builtins
+        (matches the planned NDIF design — CPython binds
+        ``__builtins__`` at function creation, so per-frame
+        ``__builtins__`` swaps have no effect on already-compiled
+        intervention functions). The dispatcher consults a TLS slot
+        that each per-request CM push/pops on
+        ``__enter__``/``__exit__``. Other threads (bg generation
+        thread, test framework) see ``_tls.active = None`` and pass
+        through unchanged.
+
+        Verifies:
+        - Request A (allowlist={'json'}): ``__import__('json')``
+          succeeds, real saves come back.
+        - Request B (allowlist=set()): ``__import__('json')`` raises
+          PermissionError, surfacing as ``__error__`` for that request
+          only — even though A's prior successful import populated
+          ``sys.modules['json']``.
+
+        Per-request allowlist data flows through the user code's
+        globals: ``backends/base.py`` builds ``intervention.__globals__``
+        as ``{frame.f_globals, frame.f_locals}``, so a local
+        ``__test_allowlist__`` in each helper's frame ends up in its
+        intervention's globals — the factory reads it from there.
+
+        Runs A then B sequentially. The intent is to prove per-request
+        scope, not cross-thread races (a separate concern covered by
+        the HTTP integration tests). Local ``with model.trace()`` calls
+        from two threads share the model envoy and are not a clean
+        concurrency test.
+        """
+        import builtins
+        import threading
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        # Per-thread "active Protector" slot. Set by each worker's CM;
+        # every other thread sees ``getattr(_tls, 'active', None) is None``.
+        _tls = threading.local()
+        real_import = builtins.__import__
+
+        def dispatching_import(name, *args, **kwargs):
+            active = getattr(_tls, "active", None)
+            if active is not None:
+                top = name.split(".")[0]
+                if top not in active.allowlist:
+                    raise PermissionError(
+                        f"import of {name!r} blocked by per-request allowlist"
+                    )
+            return real_import(name, *args, **kwargs)
+
+        class TLSProtector:
+            """Per-call Protector — TLS-active for the duration of one
+            ``_intervention(*_args)`` call. Reads the per-request
+            allowlist from the user code's globals."""
+
+            def __init__(self, target_globals):
+                self.allowlist = target_globals.get(
+                    "__test_allowlist__", set()
+                )
+
+            def __enter__(self):
+                _tls.active = self
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                _tls.active = None
+                return False
+
+        # Install dispatcher process-globally for the test, restore on
+        # teardown. ``builtins.__import__`` is a normal attribute swap.
+        builtins.__import__ = dispatching_import
+
+        server = VanillaBatchServer(
+            model, max_batch_size=4, worker_context=TLSProtector,
+        )
+        server.start()
+
+        # Each helper has its own local ``__test_allowlist__`` — gets
+        # folded into intervention.__globals__ at trace compile time.
+        # Result reporting via shared dict so we can read errors without
+        # the auto-raising backend swallowing them.
+        results = {}
+
+        def run_a():
+            __test_allowlist__ = {"json"}  # noqa: F841 — captured by trace
+            backend = self._make_server_backend(server)
+            try:
+                with model.trace("Hello", backend=backend):
+                    __import__("json")  # allowed
+                    out = model.transformer.h[0].output.save()
+                results["A"] = ("ok", out)
+            except Exception as e:
+                results["A"] = ("err", repr(e))
+
+        def run_b():
+            __test_allowlist__ = set()  # noqa: F841 — captured by trace
+            backend = self._make_server_backend(server)
+            try:
+                with model.trace("Hello", backend=backend):
+                    __import__("json")  # blocked
+                    out = model.transformer.h[0].output.save()
+                results["B"] = ("ok", out)
+            except Exception as e:
+                results["B"] = ("err", repr(e))
+
+        try:
+            # Run sequentially first to verify per-request isolation
+            # without the additional variable of cross-thread races on
+            # shared model state. Concurrent submission is exercised by
+            # other tests in this class.
+            run_a()
+            run_b()
+        finally:
+            # Restore process-global __import__ before anything else —
+            # subsequent tests must run unsandboxed.
+            builtins.__import__ = real_import
+            server.stop()
+            self._reset_interleaver(model)
+
+        # A: allowlist permitted the import → real saves came back.
+        a_kind, a_value = results["A"]
+        assert a_kind == "ok", (
+            f"Request A (allowlist={{'json'}}) should succeed, got error: "
+            f"{a_value}"
+        )
+        assert a_value is not None
+
+        # B: allowlist rejected → PermissionError surfaced. The
+        # collecting backend re-raises ``__error__`` payloads as
+        # RuntimeError; either RuntimeError or PermissionError in the
+        # message is acceptable.
+        b_kind, b_value = results["B"]
+        assert b_kind == "err", (
+            f"Request B (empty allowlist) should fail, got: {b_value}"
+        )
+        assert "PermissionError" in b_value or "blocked" in b_value, (
+            f"B's error should mention the import block; got: {b_value}"
+        )
