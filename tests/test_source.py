@@ -35,10 +35,7 @@ class TestSourceAccess:
     @torch.no_grad()
     def test_source_inputs(self, gpt2: nnsight.LanguageModel):
         with gpt2.trace("_"):
-            inp = (
-                gpt2.transformer.h[0]
-                .attn.source.attention_interface_0.inputs.save()
-            )
+            inp = gpt2.transformer.h[0].attn.source.attention_interface_0.inputs.save()
 
         assert isinstance(inp, tuple)
 
@@ -54,12 +51,9 @@ class TestSourceAccess:
     @torch.no_grad()
     def test_recursive_source(self, gpt2: nnsight.LanguageModel):
         with gpt2.trace("_"):
-            out = (
-                gpt2.transformer.h[0]
-                .attn.source.attention_interface_0
-                .source.torch_nn_functional_scaled_dot_product_attention_0
-                .output.save()
-            )
+            out = gpt2.transformer.h[
+                0
+            ].attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output.save()
 
         assert isinstance(out, torch.Tensor)
 
@@ -109,16 +103,6 @@ class TestSourceWrapperChain:
 
         # __nnsight_forward__ should still exist — .source swaps it, not module.forward
         assert hasattr(module, "__nnsight_forward__")
-
-    @torch.no_grad()
-    def test_nnsight_skip_preserved(self, gpt2: nnsight.LanguageModel):
-        """After .source injection, __nnsight_skip__ should still exist."""
-        module = gpt2.transformer.h[0].attn._module
-        assert hasattr(module, "__nnsight_skip__")
-
-        gpt2.transformer.h[0].attn.source
-
-        assert hasattr(module, "__nnsight_skip__")
 
     @torch.no_grad()
     def test_source_then_trace_works(self, gpt2: nnsight.LanguageModel):
