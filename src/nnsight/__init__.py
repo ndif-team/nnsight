@@ -1,3 +1,8 @@
+# Apply engineio SSL race condition fix before any socketio imports.
+# This fixes a ~30-55% connection failure rate over TLS.
+# See: https://github.com/miguelgrinberg/python-socketio/issues/1568
+from . import _engineio_patch  # noqa: F401
+
 # This section ensures that the source code for both the main script and the file where `nnsight` is imported
 # is cached in Python's `linecache` module. This is important for robust stack trace and debugging support,
 # especially in interactive or dynamic environments where files may change after import.
@@ -59,8 +64,6 @@ except NameError:
     __IPYTHON__ = False
 
 __INTERACTIVE__ = (sys.flags.interactive or not sys.argv[0]) and not __IPYTHON__
-
-NNS_VLLM_VERSION = "0.15.1"
 
 
 from .intervention.envoy import Envoy

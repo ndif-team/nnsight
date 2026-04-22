@@ -17,6 +17,7 @@ from vllm.distributed import (
 )
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.entrypoints.llm import LLM
 
 from ...intervention.envoy import eproperty
