@@ -57,7 +57,12 @@ diffusers = [
 
 
 vllm = [
+<<<<<<< vllm-serve-combined
     "vllm==0.15.1",
+=======
+    "vllm",
+    "triton",
+>>>>>>> dev
 ]
 
 serve = [
