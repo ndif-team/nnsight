@@ -216,7 +216,7 @@ class ExceptionWrapper(Exception):
                     frames.append((real_fname, line_number, func_name, code_line, False))
                 
                 # Reconstruct to captured function location
-                if fname in Globals.converted_fn_files:
+                elif fname in Globals.converted_fn_files:
                     co_filename, co_firstlineno, co_name = Globals.converted_fn_files[fname]
                     line_number = co_firstlineno - 1 + lineno
                     try:
