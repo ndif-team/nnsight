@@ -116,4 +116,5 @@ class Globals:
     def clear():
         Globals.saves.clear()
         Globals.cache.clear()
+        Globals.converted_fn_files = {}
         Globals.stack = 0
