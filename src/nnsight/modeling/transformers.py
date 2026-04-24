@@ -1,3 +1,4 @@
+from peft import PeftModel
 from .huggingface import HuggingFaceModel
 
 from torch.nn.modules import Module
@@ -87,6 +88,10 @@ class TransformersModel(HuggingFaceModel):
 
         self.config = model.config
 
+        if self.peft is not None:
+            peft_model = PeftModel.from_pretrained(model, self.peft)
+            model = peft_model.get_base_model()
+
         return model
 
     def _load(
@@ -101,5 +106,9 @@ class TransformersModel(HuggingFaceModel):
         model = self.automodel.from_pretrained(repo_id, revision=revision, **kwargs)
 
         self.config = model.config
+
+        if self.peft is not None:
+            peft_model = PeftModel.from_pretrained(model, self.peft)
+            model = peft_model.get_base_model()
 
         return model
