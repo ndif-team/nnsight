@@ -7,6 +7,7 @@ import sys
 from builtins import open
 from types import FrameType
 from typing import TYPE_CHECKING, Callable, Dict, List
+from .globals import Globals
 
 if TYPE_CHECKING:
     from .base import Tracer
@@ -201,17 +202,32 @@ class ExceptionWrapper(Exception):
 
             if fname.startswith("<nnsight"):
                 # Reconstruct to original user code location
-                real_fname = filename_mapping[fname]
-                start_line = start_lines[fname]
-                func_name = (
-                    co_names[fname]
-                    if "__nnsight_tracing_info__" in frame.f_locals
-                    else frame.f_code.co_name
-                )
-                source = source_lines[fname]
-                line_number = lineno - 1 + start_line + 1 + co_first_line
-                code_line = source[lineno - 1].strip()
-                frames.append((real_fname, line_number, func_name, code_line, False))
+                if fname in filename_mapping:
+                    real_fname = filename_mapping[fname]
+                    start_line = start_lines[fname]
+                    func_name = (
+                        co_names[fname]
+                        if "__nnsight_tracing_info__" in frame.f_locals
+                        else frame.f_code.co_name
+                    )
+                    source = source_lines[fname]
+                    line_number = lineno - 1 + start_line + 1 + co_first_line
+                    code_line = source[lineno - 1].strip()
+                    frames.append((real_fname, line_number, func_name, code_line, False))
+                
+                # Reconstruct to captured function location
+                if fname in Globals.converted_fn_files:
+                    co_filename, co_firstlineno, co_name = Globals.converted_fn_files[fname]
+                    line_number = co_firstlineno - 1 + lineno
+                    try:
+                        line = linecache.getline(co_filename, line_number).strip()
+                    except:
+                        line = ""
+                    frames.append((co_filename, line_number, co_name, line, False))
+                
+                # Catch it all
+                else:
+                    frames.append((fname, lineno, name, "", False))
 
             elif "nnsight/" in fname:
                 # Internal nnsight code - only include in DEBUG mode

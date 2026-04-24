@@ -5,6 +5,7 @@ import textwrap
 from builtins import compile, exec
 from collections import defaultdict
 from typing import Callable
+from .tracing.globals import Globals
 
 import astor
 
@@ -97,7 +98,17 @@ class FunctionCallWrapper(ast.NodeTransformer):
 
 def convert(fn: Callable, wrap: Callable, name: str):
 
-    # TODO what about exceptions?
+    metadata_key = hash((
+        fn.__code__.co_filename,
+        fn.__code__.co_firstlineno,
+        fn.__code__.co_name,
+    ))
+    filename = f"<nnsight {metadata_key}>"
+    Globals.converted_fn_files[filename] = (
+        fn.__code__.co_filename,
+        fn.__code__.co_firstlineno,
+        fn.__code__.co_name
+    )
 
     source = textwrap.dedent(inspect.getsource(fn))
 
@@ -124,8 +135,6 @@ def convert(fn: Callable, wrap: Callable, name: str):
     global_namespace = globals().copy()
     global_namespace.update(module_globals)
     global_namespace["wrap"] = wrap
-
-    filename = "<nnsight>"
 
     # Compile directly from AST (Python 3.8+), which is faster than converting to source first
     # However, compile() with AST requires mode='exec' and the AST must be a Module node

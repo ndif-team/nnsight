@@ -96,6 +96,8 @@ class Globals:
 
     cache = TracingCache()
 
+    converted_fn_files = {} 
+
     _mounted = False
 
     @staticmethod
