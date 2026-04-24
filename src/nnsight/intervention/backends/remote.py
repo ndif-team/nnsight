@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import json
 import os
 import sys
 import time
@@ -440,6 +441,10 @@ class RemoteBackend(Backend):
         api_key: NDIF API key. Falls back to NDIF_API_KEY env var or CONFIG.
         callback: Optional webhook URL to receive job completion notification.
         verbose: If True, preserve each status update on its own line.
+        extras: Optional dict of extra server-side kwargs forwarded in the
+            ``ndif-extras`` request header (JSON-encoded). Typically supplied
+            by ``RemoteableMixin._remoteable_extras()`` and consumed by a
+            specialized actor class on the server (e.g. ``PEFTModelActor``).
 
     Attributes:
         address: HTTP address of the remote server.
@@ -464,6 +469,7 @@ class RemoteBackend(Backend):
     compress: bool
     blocking: bool
     callback: str
+    extras: Dict[str, Any]
     job_status: Optional[Any]  # ResponseModel.JobStatus
     status_display: JobStatusDisplay
 
@@ -476,6 +482,7 @@ class RemoteBackend(Backend):
         api_key: str = "",
         callback: str = "",
         verbose: bool = False,
+        extras: Optional[Dict[str, Any]] = None,
     ) -> None:
 
         self.model_key = model_key
@@ -496,6 +503,7 @@ class RemoteBackend(Backend):
         self.compress = CONFIG.API.COMPRESS
         self.blocking = blocking
         self.callback = callback
+        self.extras = extras or {}
 
         # Derive WebSocket protocol from HTTP protocol (https → wss, http → ws)
         if self.address.startswith("https://"):
@@ -543,6 +551,9 @@ class RemoteBackend(Backend):
             "ndif-timestamp": str(time.time()),
             "ndif-callback": self.callback or "",
         }
+
+        if self.extras:
+            headers["ndif-extras"] = json.dumps(self.extras)
 
         return data, headers
 

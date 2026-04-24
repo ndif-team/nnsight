@@ -60,11 +60,18 @@ class RemoteableMixin(MetaMixin):
         elif remote == 'local':
             backend = LocalSimulationBackend(self)
         elif remote:
-            backend = RemoteBackend(self.to_model_key(), blocking=blocking)
+            backend = RemoteBackend(
+                self.to_model_key(),
+                blocking=blocking,
+                extras=self._remoteable_extras(),
+            )
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
             backend = RemoteBackend(
-                self.to_model_key(), host=backend, blocking=blocking
+                self.to_model_key(),
+                host=backend,
+                blocking=blocking,
+                extras=self._remoteable_extras(),
             )
         return super().trace(
             *inputs,
@@ -96,11 +103,18 @@ class RemoteableMixin(MetaMixin):
         if backend is not None:
             pass
         elif remote:
-            backend = RemoteBackend(self.to_model_key(), blocking=blocking)
+            backend = RemoteBackend(
+                self.to_model_key(),
+                blocking=blocking,
+                extras=self._remoteable_extras(),
+            )
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
             backend = RemoteBackend(
-                self.to_model_key(), host=backend, blocking=blocking
+                self.to_model_key(),
+                host=backend,
+                blocking=blocking,
+                extras=self._remoteable_extras(),
             )
         return super().session(
             *inputs,
@@ -118,6 +132,18 @@ class RemoteableMixin(MetaMixin):
             persistent_objects[f"Module:{envoy.path}"] = envoy._module
 
         return persistent_objects
+
+    def _remoteable_extras(self) -> Dict[str, Any]:
+        """Return a dict of extra server-side kwargs for this model.
+
+        Forwarded by :class:`RemoteBackend` to NDIF via the ``ndif-extras``
+        request header (JSON-encoded). The server exposes this dict as
+        ``BackendRequestModel.extras``, where actor classes (e.g.
+        ``PEFTModelActor``) can read specialized settings. Defaults to an
+        empty dict; subclasses override to supply model-specific extras.
+        """
+
+        return {}
 
     def _remoteable_model_key(self) -> str:
         """Return a string that uniquely identifies this model for the remote server.

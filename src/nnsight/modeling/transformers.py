@@ -2,7 +2,7 @@ from .huggingface import HuggingFaceModel
 
 from torch.nn.modules import Module
 from transformers import AutoConfig, PreTrainedModel, PretrainedConfig
-from typing import Optional
+from typing import Any, Dict, Optional
 from typing import Type
 from transformers.models.auto import modeling_auto
 from transformers import AutoModel
@@ -26,24 +26,45 @@ class TransformersModel(HuggingFaceModel):
         automodel (Type[AutoModel]): The ``AutoModel`` class to use for
             loading (e.g. ``AutoModelForCausalLM``).
             Defaults to ``AutoModel``.
+        peft (Optional[str]): HuggingFace repo id of a PEFT adapter to
+            apply during remote execution. Forwarded to NDIF via the
+            ``ndif-extras`` header; a PEFT-aware server actor wraps the
+            base model with ``PeftModel.from_pretrained`` for the request
+            and unloads the adapter on cleanup. Defaults to ``None``
+            (no adapter).
         **kwargs: Forwarded to ``from_pretrained`` / ``from_config``.
 
     Attributes:
         config (PretrainedConfig): The model's HuggingFace configuration.
         automodel (Type[AutoModel]): The ``AutoModel`` class used for loading.
+        peft (Optional[str]): PEFT adapter repo id, if any.
     """
 
-    def __init__(self, *args, config_model: Type[PretrainedConfig] = None, automodel: Type[AutoModel] = AutoModel, **kwargs):
+    def __init__(
+        self,
+        *args,
+        config_model: Type[PretrainedConfig] = None,
+        automodel: Type[AutoModel] = AutoModel,
+        peft: Optional[str] = None,
+        **kwargs,
+    ):
 
         self.config: PretrainedConfig = config_model
-        
+
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
             else getattr(modeling_auto, automodel)
         )
 
+        self.peft = peft
+
         super().__init__(*args, **kwargs)
+
+    def _remoteable_extras(self) -> Dict[str, Any]:
+        if self.peft is None:
+            return {}
+        return {"peft_repo_id": self.peft}
 
     def _load_config(self, repo_id: str, revision: Optional[str] = None, **kwargs):
 
