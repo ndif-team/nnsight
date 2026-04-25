@@ -530,66 +530,31 @@ class Interleaver:
                 m = module_ref()
                 if "__nnsight_skip__" in kwargs:
                     return kwargs.pop("__nnsight_skip__")
+                source_accessor = nnsight_forward.__source_accessor__
+
+                # Once a SourceAccessor exists for this module (built on the
+                # first ``.source`` access by anyone), route through it so the
+                # injected forward fires the per-op ``wrap`` lookups. The
+                # injected forward has its own fast path — ``wrap`` returns
+                # ``fn`` unchanged for unhooked operations — so the per-call
+                # cost is just a dict lookup + bool check per call site.
+                #
+                # We deliberately do *not* gate on ``source_accessor.hooked``
+                # here: hooks may be registered mid-forward (e.g. an op-level
+                # hook registered after the worker resumes from an upstream
+                # module hook), and an entry-time check would have already
+                # taken the un-injected path by then.
+                if source_accessor is not None:
+                    return source_accessor(m, *args, **kwargs)
                 return m.__nnsight_forward__(m, *args, **kwargs)
+
+            nnsight_forward.__source_accessor__ = None
 
             module.forward = nnsight_forward
 
             # Sentinel hook — keeps PyTorch in the hook dispatch path so
             # dynamically registered one-shot hooks fire correctly.
             module.register_forward_hook(lambda _, __, output: output)
-
-    def wrap_operation(
-        self,
-        fn: Callable,
-        name: str,
-        bound_obj: Optional[Any] = None,
-        op_envoy: Optional[Any] = None,
-    ):
-        """Create a wrapper for an operation that processes hooks from an OperationEnvoy.
-
-        Called by the ``wrap`` closure inside ``Envoy.source`` when the
-        OperationEnvoy has pending hooks.  The wrapper reads hook lists from
-        the ``op_envoy`` at call time, so hooks registered after wrapper
-        creation are still seen.
-
-        Args:
-            fn: The original operation function.
-            name: The fully qualified name of the operation.
-            bound_obj: The object ``fn`` is bound to, if it is a method.
-            op_envoy: The :class:`OperationEnvoy` holding the hook lists.
-
-        Returns:
-            A wrapped version of the function that processes registered hooks.
-        """
-
-        @wraps(fn)
-        def inner(*args, **kwargs):
-
-            actual_fn = (
-                op_envoy.fn_replacement if op_envoy.fn_replacement is not None else fn
-            )
-
-            for hook in list(op_envoy.fn_hooks):
-                actual_fn = hook(actual_fn)
-
-            for hook in list(op_envoy.pre_hooks):
-                result = hook((args, kwargs))
-                if result is not None:
-                    args, kwargs = result
-
-            if not inspect.ismethod(actual_fn) and bound_obj is not None:
-                value = actual_fn(bound_obj, *args, **kwargs)
-            else:
-                value = actual_fn(*args, **kwargs)
-
-            for hook in list(op_envoy.post_hooks):
-                result = hook(value)
-                if result is not None:
-                    value = result
-
-            return value
-
-        return inner
 
     @property
     def interleaving(self) -> bool:

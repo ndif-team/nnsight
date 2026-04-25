@@ -51,17 +51,18 @@ from ..util import apply
 
 if TYPE_CHECKING:
     from nnsight.intervention.envoy import Envoy
-    from nnsight.intervention.envoy import OperationEnvoy
+    from nnsight.intervention.source import OperationAccessor, OperationEnvoy
 else:
     Envoy = Any
     OperationEnvoy = Any
+    OperationAccessor = Any
 
 
 class OperationHookHandle:
     """A ``RemovableHandle``-shaped handle for operation-level hooks.
 
-    Operation hooks live on plain lists (``op_envoy.pre_hooks``,
-    ``op_envoy.post_hooks``, ``op_envoy.fn_hooks``) rather than PyTorch's
+    Operation hooks live on plain lists (``op_accessor.pre_hooks``,
+    ``op_accessor.post_hooks``, ``op_accessor.fn_hooks``) rather than PyTorch's
     module hook dicts, so PyTorch's :class:`~torch.utils.hooks.RemovableHandle`
     doesn't apply. This handle lets callers treat them uniformly with module
     handles: store in ``mediator.hooks`` and call ``.remove()`` at cancel.
@@ -439,7 +440,7 @@ def requires_operation_output(fn):
 
     Equivalent to :func:`requires_output` but registers an operation-level
     hook via :func:`operation_output_hook` on the OperationEnvoy's
-    ``post_hooks`` list.
+    underlying :class:`OperationAccessor`'s ``post_hooks`` list.
     """
 
     @wraps(fn)
@@ -453,7 +454,7 @@ def requires_operation_output(fn):
         requester = f"{self.path}.output.i{iteration}"
 
         if self.interleaver.batcher.current_provider != requester:
-            operation_output_hook(mediator, self)
+            operation_output_hook(mediator, self.accessor)
 
         return fn(self, *args, **kwargs)
 
@@ -465,7 +466,7 @@ def requires_operation_input(fn):
 
     Equivalent to :func:`requires_input` but registers an operation-level
     hook via :func:`operation_input_hook` on the OperationEnvoy's
-    ``pre_hooks`` list.
+    underlying :class:`OperationAccessor`'s ``pre_hooks`` list.
     """
 
     @wraps(fn)
@@ -479,7 +480,7 @@ def requires_operation_input(fn):
         requester = f"{self.path}.input.i{iteration}"
 
         if self.interleaver.batcher.current_provider != requester:
-            operation_input_hook(mediator, self)
+            operation_input_hook(mediator, self.accessor)
 
         return fn(self, *args, **kwargs)
 
@@ -491,15 +492,15 @@ def requires_operation_input(fn):
 # ---------------------------------------------------------------------------
 
 
-def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
-    """Register a one-shot output hook on an :class:`OperationEnvoy`.
+def operation_output_hook(mediator: Mediator, op_accessor: OperationAccessor):
+    """Register a one-shot output hook on an :class:`OperationAccessor`.
 
-    Appends a hook to ``op_envoy.post_hooks`` and returns an
+    Appends a hook to ``op_accessor.post_hooks`` and returns an
     :class:`OperationHookHandle` which is also tracked on
     ``mediator.hooks`` for unified cleanup in :meth:`Mediator.remove_hooks`.
-    When the operation's wrapper (created by
-    :meth:`Interleaver.wrap_operation`) runs, it iterates ``post_hooks``
-    and calls each with the operation's output value.
+    When the operation's wrapper (created by :func:`wrap_operation`) runs,
+    it iterates ``post_hooks`` and calls each with the operation's output
+    value.
 
     The iteration-matching protocol mirrors the module-level
     :func:`output_hook`: target iteration is captured at registration
@@ -514,13 +515,13 @@ def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
 
     Args:
         mediator: The mediator requesting the value.
-        op_envoy: The :class:`OperationEnvoy` to hook.
+        op_accessor: The :class:`OperationAccessor` to hook.
 
     Returns:
         An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
-        from ``op_envoy.post_hooks``.
+        from ``op_accessor.post_hooks``.
     """
-    path = f"{op_envoy.path}.output"
+    path = f"{op_accessor.path}.output"
     iteration = (
         mediator.iteration
         if mediator.iteration is not None
@@ -539,28 +540,28 @@ def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         handle.remove()
         return mediator.handle(f"{path}.i{iteration}", value)
 
-    op_envoy.post_hooks.append(hook)
-    handle = OperationHookHandle(op_envoy.post_hooks, hook)
+    op_accessor.post_hooks.append(hook)
+    handle = OperationHookHandle(op_accessor.post_hooks, hook)
     mediator.hooks.append(handle)
     return handle
 
 
-def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
-    """Register a one-shot input hook on an :class:`OperationEnvoy`.
+def operation_input_hook(mediator: Mediator, op_accessor: OperationAccessor):
+    """Register a one-shot input hook on an :class:`OperationAccessor`.
 
     Like :func:`operation_output_hook` but appended to
-    ``op_envoy.pre_hooks``.  The wrapper calls pre-hooks with the
+    ``op_accessor.pre_hooks``.  The wrapper calls pre-hooks with the
     operation's ``(args, kwargs)`` tuple before invoking the function.
 
     Args:
         mediator: The mediator requesting the value.
-        op_envoy: The :class:`OperationEnvoy` to hook.
+        op_accessor: The :class:`OperationAccessor` to hook.
 
     Returns:
         An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
-        from ``op_envoy.pre_hooks``.
+        from ``op_accessor.pre_hooks``.
     """
-    path = f"{op_envoy.path}.input"
+    path = f"{op_accessor.path}.input"
     iteration = (
         mediator.iteration
         if mediator.iteration is not None
@@ -579,16 +580,16 @@ def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         handle.remove()
         return mediator.handle(f"{path}.i{iteration}", inputs)
 
-    op_envoy.pre_hooks.append(hook)
-    handle = OperationHookHandle(op_envoy.pre_hooks, hook)
+    op_accessor.pre_hooks.append(hook)
+    handle = OperationHookHandle(op_accessor.pre_hooks, hook)
     mediator.hooks.append(handle)
     return handle
 
 
-def operation_fn_hook(mediator: Mediator, op_envoy: OperationEnvoy):
+def operation_fn_hook(mediator: Mediator, op_accessor: OperationAccessor):
     """Register a one-shot fn hook for recursive source tracing.
 
-    Appended to ``op_envoy.fn_hooks``.  Unlike input/output hooks,
+    Appended to ``op_accessor.fn_hooks``.  Unlike input/output hooks,
     fn hooks are **not** iteration-aware — they fire on the first call
     to the operation wrapper after registration, deliver the function to
     the worker thread (which injects it with nested ``wrap`` calls), and
@@ -596,27 +597,28 @@ def operation_fn_hook(mediator: Mediator, op_envoy: OperationEnvoy):
     the same :meth:`Mediator.handle` call.  The hook returns the injected
     function so the wrapper uses it for the actual invocation.
 
-    After firing, the injected function is also stored persistently on
-    ``op_envoy.fn_replacement`` by :meth:`OperationEnvoy.source`, so
-    subsequent forward passes use the injected version directly without
-    re-firing this hook.
+    After firing, the injected function is installed (one-shot) as
+    ``op_accessor.fn_replacement`` by :attr:`OperationEnvoy.source` and
+    cleared again by :func:`wrap_operation` once it executes — re-accessing
+    ``.source`` on an OperationEnvoy reinstalls it from the cached nested
+    accessor.
 
     Args:
         mediator: The mediator requesting the function.
-        op_envoy: The :class:`OperationEnvoy` to hook.
+        op_accessor: The :class:`OperationAccessor` to hook.
 
     Returns:
         An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
-        from ``op_envoy.fn_hooks``.
+        from ``op_accessor.fn_hooks``.
     """
 
     handle = None
 
     def hook(fn: Callable) -> Callable:
         handle.remove()
-        return mediator.handle(f"{op_envoy.path}.fn", fn)
+        return mediator.handle(f"{op_accessor.path}.fn", fn)
 
-    op_envoy.fn_hooks.append(hook)
-    handle = OperationHookHandle(op_envoy.fn_hooks, hook)
+    op_accessor.fn_hooks.append(hook)
+    handle = OperationHookHandle(op_accessor.fn_hooks, hook)
     mediator.hooks.append(handle)
     return handle
