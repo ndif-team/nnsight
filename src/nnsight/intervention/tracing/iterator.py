@@ -115,9 +115,8 @@ def register_iter_hooks(mediator, model) -> List:
     - When the module has a :class:`SourceAccessor`, the hook also bumps
       every operation-level path under it (recursing into nested
       accessors for recursive ``.source``). The accessor is looked up
-      *per fire* (via ``module.forward.__source_accessor__``), so an
-      accessor built mid-loop is picked up from its first forward pass
-      onward.
+      *per fire* (via ``module.__source_accessor__``), so an accessor
+      built mid-loop is picked up from its first forward pass onward.
     - WrapperModules (``generator``, ``streamer``, etc.) are skipped.
       They don't go through PyTorch's forward dispatch on every step;
       their values flow through :meth:`eproperty.provide` which bumps
@@ -166,7 +165,7 @@ def register_iter_hooks(mediator, model) -> List:
             # Op-path tracker bumping — only relevant if the module has
             # had ``.source`` touched at some point. Looked up per fire so
             # accessors built mid-loop are picked up.
-            accessor = getattr(module.forward, "__source_accessor__", None)
+            accessor = getattr(module, "__source_accessor__", None)
             if accessor is not None:
                 bump_source_paths(mediator, accessor)
 

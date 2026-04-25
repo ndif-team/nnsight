@@ -5,9 +5,9 @@ Architecture
 
 Each nnsight-wrapped module has one *global* :class:`SourceAccessor` that
 is lazily built on the first ``.source`` access (by any Envoy / Interleaver
-/ Mediator). The SourceAccessor is cached on the module's ``nnsight_forward``
-wrapper as ``__source_accessor__`` (see :meth:`Interleaver.wrap_module`)
-and owns:
+/ Mediator). The SourceAccessor is cached on the module itself as
+``module.__source_accessor__`` so it survives any later replacement of
+``module.forward`` (e.g. ``torch.compile``, accelerate hot-swap). It owns:
 
 - The injected version of the module's forward — its AST has been
   rewritten so every call site is wrapped by a ``wrap(fn, name=...)``
@@ -29,7 +29,7 @@ Forward routing
 ---------------
 
 ``nnsight_forward`` (installed by :meth:`Interleaver.wrap_module`)
-checks ``__source_accessor__`` on each call:
+checks ``module.__source_accessor__`` on each call:
 
 - If a SourceAccessor exists and ``.hooked`` is True (any
   OperationAccessor under it has any active hook), it invokes
@@ -366,7 +366,7 @@ class SourceAccessor:
 
     The injected forward is **not** written onto the module. Instead,
     ``nnsight_forward`` (installed by :meth:`Interleaver.wrap_module`)
-    branches on ``__source_accessor__``: if hooked, it calls the
+    branches on ``module.__source_accessor__``: if present, it calls the
     accessor; otherwise it calls the original ``__nnsight_forward__``
     directly. This keeps the non-source path zero-overhead.
     """
@@ -548,18 +548,18 @@ def resolve_true_forward(module: torch.nn.Module) -> Callable:
 def get_or_create_source_accessor(module: torch.nn.Module) -> SourceAccessor:
     """Return the module's :class:`SourceAccessor`, building it on first access.
 
-    The accessor is cached on ``module.forward.__source_accessor__`` (the
-    ``nnsight_forward`` wrapper installed by :meth:`Interleaver.wrap_module`).
-    Subsequent calls — even from different Envoys / Interleavers / Mediators —
-    return the same instance.
+    The accessor is cached on ``module.__source_accessor__`` directly so it
+    survives any replacement of ``module.forward`` (e.g. by ``torch.compile``,
+    accelerate's hot-swap, or other wrappers that re-bind forward after
+    nnsight has wrapped the module). Subsequent calls — even from different
+    Envoys / Interleavers / Mediators — return the same instance.
     """
-    nnsight_forward = module.forward
-    accessor = getattr(nnsight_forward, "__source_accessor__", None)
+    accessor = getattr(module, "__source_accessor__", None)
     if accessor is None:
         fn = resolve_true_forward(module)
         path = getattr(module, "__path__", "") or ""
         accessor = SourceAccessor(fn, path)
-        nnsight_forward.__source_accessor__ = accessor
+        module.__source_accessor__ = accessor
     return accessor
 
 

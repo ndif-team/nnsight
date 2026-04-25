@@ -812,21 +812,19 @@ class Envoy(Batchable):
         # Capture the existing SourceAccessor (if any) before the old module
         # is dropped — its OperationAccessors carry hook state and any
         # nested SourceAccessors for recursive source tracing.
-        old_accessor = None
-        if hasattr(self._module, "forward"):
-            old_accessor = getattr(self._module.forward, "__source_accessor__", None)
+        old_accessor = getattr(self._module, "__source_accessor__", None)
 
         self._module = module
         self._module.__path__ = self.path
         self.interleaver.wrap_module(module)
 
-        # Transfer the SourceAccessor onto the new module's nnsight_forward,
-        # rebinding its injected forward against the new module's true fn.
+        # Transfer the SourceAccessor onto the new module, rebinding its
+        # injected forward against the new module's true fn.
         # OperationAccessors are kept intact so any pre-existing
         # OperationEnvoy / SourceEnvoy references remain valid after dispatch.
         if old_accessor is not None:
             old_accessor.rebind(resolve_true_forward(module))
-            module.forward.__source_accessor__ = old_accessor
+            module.__source_accessor__ = old_accessor
 
     def _update_alias(self, alias: Dict[str, str]):
         """

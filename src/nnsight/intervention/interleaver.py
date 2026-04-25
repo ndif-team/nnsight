@@ -530,7 +530,7 @@ class Interleaver:
                 m = module_ref()
                 if "__nnsight_skip__" in kwargs:
                     return kwargs.pop("__nnsight_skip__")
-                source_accessor = nnsight_forward.__source_accessor__
+                source_accessor = getattr(m, "__source_accessor__", None)
 
                 # Once a SourceAccessor exists for this module (built on the
                 # first ``.source`` access by anyone), route through it so the
@@ -547,8 +547,6 @@ class Interleaver:
                 if source_accessor is not None:
                     return source_accessor(m, *args, **kwargs)
                 return m.__nnsight_forward__(m, *args, **kwargs)
-
-            nnsight_forward.__source_accessor__ = None
 
             module.forward = nnsight_forward
 
