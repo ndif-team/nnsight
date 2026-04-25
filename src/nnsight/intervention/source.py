@@ -215,7 +215,7 @@ def wrap_operation(
 ) -> Callable:
     """Wrap ``fn`` so it processes the hook lists on ``op_accessor``.
 
-    Installed by :meth:`SourceAccessor._wrap` only when the OperationAccessor
+    Installed by :meth:`SourceAccessor.wrap` only when the OperationAccessor
     has at least one active hook (otherwise the call site uses ``fn`` directly).
     Hook lists are read live at call time so hooks registered after wrapper
     creation are still seen.
@@ -235,6 +235,14 @@ def wrap_operation(
             else fn
         )
 
+        # Consume the one-shot replacement *now*, before invoking actual_fn.
+        # Clearing only at the end would race with the worker thread, which
+        # may set ``fn_replacement`` for the next forward pass while
+        # ``actual_fn`` is still running here (the worker resumes from
+        # mid-wrap_op after a hook delivers a value). An end-of-call clear
+        # would silently overwrite that next-step setup.
+        op_accessor.fn_replacement = None
+
         for hook in list(op_accessor.fn_hooks):
             actual_fn = hook(actual_fn)
 
@@ -252,11 +260,6 @@ def wrap_operation(
             result = hook(value)
             if result is not None:
                 value = result
-
-        # One-shot: clear the replacement now that it has run. Subsequent
-        # forward passes use the un-injected fn unless `.source` is re-accessed
-        # on the OperationEnvoy to install a new replacement.
-        op_accessor.fn_replacement = None
 
         return value
 
@@ -292,7 +295,7 @@ class OperationAccessor:
 
     All input/output/fn hooks are one-shot and self-remove when they
     fire. The ``hooked`` property is True if any list is non-empty;
-    :class:`SourceAccessor._wrap` checks it to take the zero-overhead
+    :class:`SourceAccessor.wrap` checks it to take the zero-overhead
     fast path for unhooked sites.
     """
 
@@ -373,14 +376,14 @@ class SourceAccessor:
 
         Args:
             fn: Unwrapped original function whose AST should be rewritten.
-                For modules this is found by :func:`_resolve_true_forward`;
+                For modules this is found by :func:`resolve_true_forward`;
                 for recursive source it is the op's own fn (delivered via
                 :func:`operation_fn_hook`).
             path: Dotted prefix for operation names (e.g.
                 ``"model.transformer.h.0.attn"``).
         """
         self.path = path
-        source, line_numbers, injected = convert(fn, self._wrap, path)
+        source, line_numbers, injected = convert(fn, self.wrap, path)
 
         self.source = source
         self.line_numbers = line_numbers
@@ -393,7 +396,7 @@ class SourceAccessor:
                 full_name, source, line
             )
 
-    def _wrap(self, fn: Callable, **kwargs) -> Callable:
+    def wrap(self, fn: Callable, **kwargs) -> Callable:
         """Per-call-site dispatcher baked into the injected forward.
 
         Fast path: return ``fn`` unchanged when the op's accessor has no
@@ -425,7 +428,7 @@ class SourceAccessor:
         """
         return any(op.hooked for op in self.operations.values())
 
-    def _rebind(self, fn: Callable) -> None:
+    def rebind(self, fn: Callable) -> None:
         """Re-inject against ``fn`` while preserving OperationAccessor state.
 
         Called by :meth:`Envoy._update` when a module is replaced (typically
@@ -435,7 +438,7 @@ class SourceAccessor:
         nested SourceAccessors are kept intact, so any pre-existing
         OperationEnvoy / SourceEnvoy references remain valid.
         """
-        source, line_numbers, injected = convert(fn, self._wrap, self.path)
+        source, line_numbers, injected = convert(fn, self.wrap, self.path)
         self.source = source
         self.line_numbers = line_numbers
         self._forward = injected
@@ -511,7 +514,7 @@ class SourceAccessor:
         return "\n".join(formatted_lines)
 
 
-def _resolve_true_forward(module: torch.nn.Module) -> Callable:
+def resolve_true_forward(module: torch.nn.Module) -> Callable:
     """Find the unwrapped fn whose AST should be injected.
 
     A module's ``forward`` may have been wrapped by accelerate
@@ -553,7 +556,7 @@ def get_or_create_source_accessor(module: torch.nn.Module) -> SourceAccessor:
     nnsight_forward = module.forward
     accessor = getattr(nnsight_forward, "__source_accessor__", None)
     if accessor is None:
-        fn = _resolve_true_forward(module)
+        fn = resolve_true_forward(module)
         path = getattr(module, "__path__", "") or ""
         accessor = SourceAccessor(fn, path)
         nnsight_forward.__source_accessor__ = accessor

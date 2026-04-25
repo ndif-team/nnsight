@@ -26,7 +26,7 @@ from ..util import apply
 from .batching import Batchable
 from .source import (
     SourceEnvoy,
-    _resolve_true_forward,
+    resolve_true_forward,
     get_or_create_source_accessor,
 )
 from .tracing.base import Tracer, WithBlockNotFoundError
@@ -825,7 +825,7 @@ class Envoy(Batchable):
         # OperationAccessors are kept intact so any pre-existing
         # OperationEnvoy / SourceEnvoy references remain valid after dispatch.
         if old_accessor is not None:
-            old_accessor._rebind(_resolve_true_forward(module))
+            old_accessor.rebind(resolve_true_forward(module))
             module.forward.__source_accessor__ = old_accessor
 
     def _update_alias(self, alias: Dict[str, str]):

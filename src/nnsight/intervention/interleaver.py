@@ -455,7 +455,7 @@ class Interleaver:
           context, or a one-shot hook has just cleared it after matching),
           fall back to ``mediator.iteration_tracker[requester]``.  The
           tracker is maintained by persistent hooks registered by
-          :class:`IteratorTracer` (see :func:`_register_iter_hooks`), which
+          :class:`IteratorTracer` (see :func:`register_iter_hooks`), which
           increment it after every forward pass for each module path.
 
         This dual-mode behavior lets the same requester syntax work both
@@ -736,7 +736,7 @@ class Mediator:
         worker (Thread): The thread that runs the intervention function
         history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
         iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
-            :func:`IteratorTracer._register_iter_hooks` (and by
+            :func:`IteratorTracer.register_iter_hooks` (and by
             :meth:`Interleaver.handle` for provided values).  One-shot
             intervention hooks read this to know which generation step
             is currently firing.  Defaults to 0 for any path that has

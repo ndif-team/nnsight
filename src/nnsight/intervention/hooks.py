@@ -165,7 +165,7 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     On each forward call, the hook checks whether the tracker has
     advanced to the target iteration.  The tracker is **not** maintained
     by this hook — it is bumped by the persistent iter hooks registered
-    by :class:`IteratorTracer` (see :func:`_register_iter_hooks` in
+    by :class:`IteratorTracer` (see :func:`register_iter_hooks` in
     ``iterator.py``) after each forward pass.  This means the hook only
     needs to compare; it doesn't count.
 
