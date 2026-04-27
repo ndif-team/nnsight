@@ -1,6 +1,17 @@
-"""LLM Agent client for generating nnsight code and answering MCQs."""
+"""LLM Agent client for generating nnsight code and answering MCQs.
+
+Three providers supported:
+- ``anthropic`` — Anthropic API (requires ``ANTHROPIC_API_KEY``).
+- ``openai`` — OpenAI API (requires ``OPENAI_API_KEY``).
+- ``claude-code`` — shells out to the local ``claude`` CLI (the Claude Code
+  binary). Uses whatever auth Claude Code itself has — typically a Max
+  subscription OAuth login. No API key needed; you must have run
+  ``claude /login`` once.
+"""
 
 import os
+import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
@@ -158,11 +169,117 @@ class OpenAIAgent(Agent):
         )
 
 
+class ClaudeCodeAgent(Agent):
+    """Agent that shells out to the local ``claude`` CLI.
+
+    Lets the eval suite use a Claude Code (Max subscription) login instead
+    of an Anthropic API key. Each call spawns ``claude -p`` once with the
+    chosen system prompt and the user prompt piped via stdin.
+
+    Setup:
+        - Install Claude Code: see https://docs.claude.com/claude-code
+        - Run ``claude /login`` once in your shell so the CLI has a valid
+          OAuth token (or set ``ANTHROPIC_API_KEY`` if you prefer API auth).
+
+    Implementation notes:
+        - We pass the documentation bundle through ``--system-prompt-file``
+          rather than ``--system-prompt`` so we don't hit OS argument-length
+          limits on the larger bundles (the ``full`` bundle is ~870 KB).
+        - The CLI is invoked with ``cwd=/tmp`` so its automatic CLAUDE.md
+          discovery (which walks up from cwd) doesn't pull in the nnsight
+          repo's own CLAUDE.md and contaminate the chosen doc bundle.
+        - ``--tools ""`` disables tool use; we want pure text-in / text-out.
+        - ``--no-session-persistence`` keeps each call independent.
+        - ``--allow-dangerously-skip-permissions`` skips the per-session
+          trust dialog. Safe here because the agent has no tools.
+        - ``config.model`` is passed via ``--model``. Aliases like ``sonnet``
+          / ``opus`` work; the Max subscription chooses what's available.
+    """
+
+    DEFAULT_TIMEOUT_SECONDS = 180
+
+    def __init__(self, config: AgentConfig):
+        self.config = config
+        # Verify the CLI is actually present.
+        try:
+            r = subprocess.run(
+                ["claude", "--version"], capture_output=True, text=True, timeout=10
+            )
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.strip() or "claude --version failed")
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                "`claude` CLI not found on PATH. Install Claude Code (see "
+                "https://docs.claude.com/claude-code) and run `claude /login`."
+            ) from e
+
+    def _send(
+        self,
+        system: str,
+        user: str,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Run a single ``claude -p`` call and return the printed response."""
+        # Write the (potentially large) system prompt to a tmpfile.
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".sysprompt.md", delete=False
+        ) as f:
+            f.write(system)
+            sys_path = f.name
+
+        try:
+            cmd = [
+                "claude",
+                "-p",
+                "--system-prompt-file", sys_path,
+                "--tools", "",
+                "--no-session-persistence",
+                "--allow-dangerously-skip-permissions",
+                "--model", self.config.model,
+            ]
+            r = subprocess.run(
+                cmd,
+                input=user,
+                capture_output=True,
+                text=True,
+                timeout=timeout or self.DEFAULT_TIMEOUT_SECONDS,
+                cwd="/tmp",  # avoid CLAUDE.md auto-discovery
+            )
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"`claude -p` exited {r.returncode}. "
+                    f"stderr: {r.stderr.strip()[:500]}"
+                )
+            return r.stdout
+        finally:
+            try:
+                os.unlink(sys_path)
+            except OSError:
+                pass
+
+    def generate_code(self, task_prompt: str, documentation: str) -> str:
+        return self._send(
+            CODE_SYSTEM_PROMPT.format(documentation=documentation),
+            task_prompt,
+        )
+
+    def answer_mcq(
+        self, question: str, choices: list[str], documentation: str
+    ) -> str:
+        return self._send(
+            MCQ_SYSTEM_PROMPT.format(documentation=documentation),
+            _format_mcq_prompt(question, choices),
+            timeout=60,
+        )
+
+
 def create_agent(config: AgentConfig) -> Agent:
     """Factory function to create an agent based on provider."""
     if config.provider == "anthropic":
         return AnthropicAgent(config)
     elif config.provider == "openai":
         return OpenAIAgent(config)
+    elif config.provider == "claude-code":
+        return ClaudeCodeAgent(config)
     else:
         raise ValueError(f"Unknown provider: {config.provider}")

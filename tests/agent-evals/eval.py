@@ -259,16 +259,22 @@ def main():
     )
     parser.add_argument(
         "--provider",
-        choices=["anthropic", "openai"],
+        choices=["anthropic", "openai", "claude-code"],
         default="anthropic",
-        help="LLM provider to use"
+        help=(
+            "LLM provider. 'anthropic'/'openai' use the API "
+            "(requires *_API_KEY env var). 'claude-code' shells out to the "
+            "local `claude` CLI — useful with a Max subscription instead of "
+            "API billing. Run `claude /login` once before using."
+        ),
     )
     parser.add_argument(
         "--model",
         default="claude-sonnet-4-6",
         help=(
             "Model name to use. Examples: claude-sonnet-4-6, "
-            "claude-opus-4-7, gpt-4o."
+            "claude-opus-4-7, gpt-4o. For --provider claude-code aliases "
+            "like 'sonnet' or 'opus' also work."
         ),
     )
     parser.add_argument(

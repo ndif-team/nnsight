@@ -36,18 +36,27 @@ python run_agent_session.py --difficulty basic
 
 ---
 
-## Quick start: programmatic eval against an LLM API
+## Quick start: programmatic eval
+
+Three provider backends are supported:
 
 ```bash
-# Anthropic (default; uses the docs/router bundle)
+# 1) Anthropic API (default; requires API key)
 export ANTHROPIC_API_KEY=...
 python eval.py --provider anthropic --model claude-sonnet-4-6 --verbose
 
-# OpenAI
+# 2) OpenAI API
 export OPENAI_API_KEY=...
 python eval.py --provider openai --model gpt-4o --verbose
 
-# Single task / one difficulty / only MCQs
+# 3) Claude Code CLI — uses your Claude Code (e.g. Max subscription)
+#    login instead of API billing. No API key needed; just run
+#    `claude /login` once and ensure `claude` is on PATH.
+python eval.py --provider claude-code --model sonnet --verbose
+python eval.py --provider claude-code --model opus --verbose
+python eval.py --provider claude-code --model claude-opus-4-7 --verbose
+
+# Common selectors (work with any provider):
 python eval.py --task-id basic_01_trace_and_save --verbose
 python eval.py --difficulty basic --verbose
 python eval.py --kind mcq --verbose
@@ -55,6 +64,17 @@ python eval.py --kind mcq --verbose
 # List every registered task
 python eval.py --list-tasks
 ```
+
+### Notes on `--provider claude-code`
+
+- It shells out to `claude -p` once per task. Slower than the raw API
+  (each call spawns the CLI) but uses your subscription, not API tokens.
+- Each call is independent: `--no-session-persistence` is set, the CLI
+  is invoked from `/tmp` to avoid auto-loading the nnsight repo's own
+  `CLAUDE.md`, and tool use is disabled. The agent sees only what
+  `--doc-bundle` puts in the system prompt.
+- 65 tasks back-to-back is roughly 30–60 minutes of CLI time depending
+  on bundle size and model.
 
 ### Documentation bundles (`--doc-bundle`)
 
