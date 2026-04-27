@@ -38,7 +38,7 @@ with model.trace(prompt):
     # Apply final ln + unembedding to every block's residual output.
     layer_top_tokens = []
     for block in model.transformer.h:
-        hs = block.output[0]                    # residual stream at this layer
+        hs = block.output                    # residual stream at this layer
         logits = model.lm_head(model.transformer.ln_f(hs))
         top_tok = logits[:, -1, :].argmax(dim=-1).save()
         layer_top_tokens.append(top_tok)
@@ -57,7 +57,7 @@ You should see early layers predict generic tokens and the final layer converge 
 with model.trace(prompt):
     per_layer_topk = []
     for block in model.transformer.h:
-        hs = block.output[0]
+        hs = block.output
         logits = model.lm_head(model.transformer.ln_f(hs))
         topk = logits[:, -1, :].topk(5, dim=-1).indices.save()
         per_layer_topk.append(topk)
@@ -78,7 +78,7 @@ target_id = model.tokenizer.encode(target)[0]
 with model.trace(prompt):
     target_probs = []
     for block in model.transformer.h:
-        hs = block.output[0]
+        hs = block.output
         logits = model.lm_head(model.transformer.ln_f(hs))
         prob = logits[:, -1, :].softmax(dim=-1)[:, target_id].save()
         target_probs.append(prob)
@@ -96,7 +96,7 @@ If you have a tuned-lens checkpoint with one affine map `A_L` per layer, replace
 with model.trace(prompt):
     per_layer = []
     for L, block in enumerate(model.transformer.h):
-        hs = block.output[0]
+        hs = block.output
         logits = model.lm_head(tuned_maps[L](hs))
         per_layer.append(logits[:, -1, :].argmax(dim=-1).save())
 ```

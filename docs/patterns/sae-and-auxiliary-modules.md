@@ -52,9 +52,9 @@ LAYER = 6
 prompt = "The Eiffel Tower is in the city of"
 
 with model.trace(prompt):
-    hs = model.transformer.h[LAYER].output[0]
+    hs = model.transformer.h[LAYER].output
     reconstructed = sae(hs)                                  # plain Python call
-    model.transformer.h[LAYER].output[0][:] = reconstructed
+    model.transformer.h[LAYER].output[:] = reconstructed
     logits = model.lm_head.output[:, -1, :].save()
 ```
 
@@ -70,10 +70,10 @@ from nnsight import NNsight
 wrapped_sae = NNsight(sae)
 
 with model.trace(prompt):
-    hs = model.transformer.h[LAYER].output[0]
+    hs = model.transformer.h[LAYER].output
     reconstructed = wrapped_sae(hs, hook=True)               # fire hooks
     sae_acts = wrapped_sae.encoder.output.save()             # works because hook=True
-    model.transformer.h[LAYER].output[0][:] = reconstructed
+    model.transformer.h[LAYER].output[:] = reconstructed
 ```
 
 The `hook` flag is part of `Envoy.__call__` (`src/nnsight/intervention/envoy.py:239`). By default, calling a wrapped module inside a trace dispatches to `forward()` and bypasses hooks - this is the right default for things like `model.lm_head(...)` in a logit-lens recipe. Setting `hook=True` opts back into the hook path so you can observe the call.
@@ -105,9 +105,9 @@ prompt = "The Eiffel Tower is in the city of"
 with model.trace() as tracer:
     with tracer.invoke(prompt):
         # Use the SAE inline; hook=True so its .output is observable in another invoke.
-        hs = model.transformer.h[LAYER].output[0]
+        hs = model.transformer.h[LAYER].output
         recon = model.transformer.h[LAYER].sae(hs, hook=True)
-        model.transformer.h[LAYER].output[0][:] = recon
+        model.transformer.h[LAYER].output[:] = recon
 
     with tracer.invoke():
         # Empty invoke runs on the same batch - read SAE activations here.

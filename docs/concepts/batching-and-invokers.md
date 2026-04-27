@@ -130,12 +130,12 @@ with model.trace() as tracer:
     barrier = tracer.barrier(2)
 
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[0][:, -1, :]
+        clean_hs = model.transformer.h[5].output[:, -1, :]
         barrier()  # invoke 1 reaches here, parks
 
     with tracer.invoke("The Colosseum is in"):
         barrier()  # invoke 2 hits, both released
-        model.transformer.h[5].output[0][:, -1, :] = clean_hs  # now defined
+        model.transformer.h[5].output[:, -1, :] = clean_hs  # now defined
         out = model.lm_head.output.save()
 ```
 

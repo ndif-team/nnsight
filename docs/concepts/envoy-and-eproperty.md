@@ -38,11 +38,11 @@ model = nnsight.LanguageModel("openai-community/gpt2", device_map="auto", dispat
 
 with model.trace("Hello"):
     # Read
-    out = model.transformer.h[0].output[0].save()
+    out = model.transformer.h[0].output.save()
     args, kwargs = model.transformer.h[0].inputs
 
     # Write (in-place)
-    model.transformer.h[0].output[0][:] = 0
+    model.transformer.h[0].output[:] = 0
 
     # Skip
     model.transformer.h[1].skip((model.transformer.h[1].input, None))
@@ -182,7 +182,7 @@ The canonical use is logit-lens-style decoding, where you want to run `lm_head` 
 ```python
 with model.trace("The Eiffel Tower is in"):
     for i in range(12):
-        hs = model.transformer.h[i].output[0]
+        hs = model.transformer.h[i].output
         # Call lm_head and ln_f directly — no .output / .input hooks fire.
         logits = model.lm_head(model.transformer.ln_f(hs))
         tokens = logits.argmax(dim=-1).save()
@@ -193,9 +193,9 @@ Pass `hook=True` when you need the auxiliary call to participate in interception
 ```python
 # Apply an auxiliary SAE module and access its hooked .output afterwards.
 with model.trace("Hello"):
-    hidden = model.transformer.h[5].output[0]
+    hidden = model.transformer.h[5].output
     reconstructed = model.sae(hidden, hook=True)   # hooks fire on model.sae
-    model.transformer.h[5].output[0][:] = reconstructed
+    model.transformer.h[5].output[:] = reconstructed
 ```
 
 ## Custom Envoy classes

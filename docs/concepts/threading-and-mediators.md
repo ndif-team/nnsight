@@ -34,10 +34,10 @@ with model.trace() as tracer:
     # Each invoke -> one Mediator -> one worker thread.
     # They run in definition order, serially.
     with tracer.invoke("Hello"):
-        a = model.transformer.h[0].output[0].save()  # worker blocks until layer 0 fires
+        a = model.transformer.h[0].output.save()  # worker blocks until layer 0 fires
 
     with tracer.invoke("World"):
-        b = model.transformer.h[0].output[0].save()  # this whole invoke runs after the first finishes
+        b = model.transformer.h[0].output.save()  # this whole invoke runs after the first finishes
 ```
 
 ## The event protocol

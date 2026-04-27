@@ -29,11 +29,11 @@ The session itself is a base `Tracer` (no interleaving), so it has no `tracer.in
 ```python
 with model.session() as session:
     with model.trace("Hello"):
-        hs = model.transformer.h[0].output[0].save()
+        hs = model.transformer.h[0].output.save()
 
     with model.trace("World"):
         # use hs from the previous trace — it's a real captured tensor
-        model.transformer.h[0].output[0][:] = hs
+        model.transformer.h[0].output[:] = hs
         out = model.lm_head.output.save()
 ```
 
@@ -61,13 +61,13 @@ See `docs/usage/conditionals-and-loops.md` for `if`/`for` semantics.
 with model.session(remote=True):
     # First trace: capture activations
     with model.trace("Megan Rapinoe plays the sport of"):
-        hs = model.model.layers[5].output[0][:, -1, :]   # no .save() needed inside
+        hs = model.model.layers[5].output[:, -1, :]   # no .save() needed inside
 
     with model.trace("Shaquille O'Neal plays the sport of"):
         clean = model.lm_head.output[0][-1].argmax(dim=-1).save()
 
     with model.trace("Shaquille O'Neal plays the sport of"):
-        model.model.layers[5].output[0][:, -1, :] = hs   # cross-trace reference
+        model.model.layers[5].output[:, -1, :] = hs   # cross-trace reference
         patched = model.lm_head.output[0][-1].argmax(dim=-1).save()
 
 print(model.tokenizer.decode(clean), "->", model.tokenizer.decode(patched))
@@ -125,13 +125,13 @@ Locally, intermediate variables that are not `.save()`d but are assigned in the 
 ```python
 with model.session():
     with model.trace("Hello"):
-        hs = model.transformer.h[0].output[0]   # no .save needed for session-scope use
+        hs = model.transformer.h[0].output   # no .save needed for session-scope use
 
     # Plain Python — runs between traces
     print("captured tensor:", hs.shape)
 
     with model.trace("World"):
-        model.transformer.h[0].output[0][:] = hs
+        model.transformer.h[0].output[:] = hs
         out = model.lm_head.output.save()
 ```
 

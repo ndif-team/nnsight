@@ -24,7 +24,7 @@ Inside the backward block, the **only** thing you can request is `.grad` on a te
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]
+    hs = model.transformer.h[-1].output
     hs.requires_grad_(True)
 
     logits = model.lm_head.output
@@ -43,7 +43,7 @@ print(grad.shape)
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]
+    hs = model.transformer.h[-1].output
     hs.requires_grad_(True)
     logits = model.lm_head.output
 
@@ -56,7 +56,7 @@ with model.trace("Hello"):
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]
+    hs = model.transformer.h[-1].output
     hs.requires_grad_(True)
     logits = model.lm_head.output
 
@@ -74,7 +74,7 @@ with model.trace("Hello"):
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]
+    hs = model.transformer.h[-1].output
     hs.requires_grad_(True)
     hs = hs.save()
     logits = model.lm_head.output.save()

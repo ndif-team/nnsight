@@ -30,13 +30,13 @@ with model.trace() as tracer:
 
     # Clean run
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[0][:, -1, :]
+        clean_hs = model.transformer.h[5].output[:, -1, :]
         barrier()                  # signal: clean_hs is now available
 
     # Patched run
     with tracer.invoke("The Colosseum is in"):
         barrier()                  # wait until invoke 1 has materialized clean_hs
-        model.transformer.h[5].output[0][:, -1, :] = clean_hs
+        model.transformer.h[5].output[:, -1, :] = clean_hs
         patched = model.lm_head.output.save()
 ```
 
@@ -89,9 +89,9 @@ with model.trace() as tracer:
     barrier = tracer.barrier(2)
 
     with tracer.invoke("A"):
-        h_a_5 = model.transformer.h[5].output[0]
+        h_a_5 = model.transformer.h[5].output
         barrier()
-        h_a_8 = model.transformer.h[8].output[0]
+        h_a_8 = model.transformer.h[8].output
         barrier()
 
     with tracer.invoke("B"):

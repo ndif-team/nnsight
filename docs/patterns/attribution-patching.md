@@ -52,7 +52,7 @@ n_layers = len(model.transformer.h)
 clean_acts = [None] * n_layers
 with model.trace(clean):
     for L in range(n_layers):
-        clean_acts[L] = model.transformer.h[L].output[0].save()
+        clean_acts[L] = model.transformer.h[L].output.save()
 
 # Pass 2: corrupt forward + backward; capture corrupt activations and grads.
 corrupt_acts = [None] * n_layers
@@ -61,7 +61,7 @@ corrupt_grads = [None] * n_layers
 with model.trace(corrupt):
     hidden_refs = []
     for L in range(n_layers):
-        hs = model.transformer.h[L].output[0]
+        hs = model.transformer.h[L].output
         hs.requires_grad_(True)
         hidden_refs.append(hs)
         corrupt_acts[L] = hs.save()
@@ -119,7 +119,7 @@ To run both passes as a single remote request:
 with model.session(remote=True):
     with model.trace(clean):
         for L in range(n_layers):
-            clean_acts[L] = model.transformer.h[L].output[0]   # no .save()
+            clean_acts[L] = model.transformer.h[L].output   # no .save()
     with model.trace(corrupt):
         # ...same as above...
 ```

@@ -79,7 +79,7 @@ import nnsight
 model = nnsight.LanguageModel("openai-community/gpt2", dispatch=True)
 
 with model.trace("Hello", backend=LoggingBackend("/tmp/nn.log")):
-    out = model.transformer.h[0].output[0].save()
+    out = model.transformer.h[0].output.save()
 ```
 
 ### What you must call

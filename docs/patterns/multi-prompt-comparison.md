@@ -85,13 +85,13 @@ with model.trace() as tracer:
 
     # Capture clean residual.
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[0][:, -1, :]
+        clean_hs = model.transformer.h[5].output[:, -1, :]
         barrier()
 
     # Patch into corrupt run.
     with tracer.invoke("The Colosseum is in"):
         barrier()
-        model.transformer.h[5].output[0][:, -1, :] = clean_hs
+        model.transformer.h[5].output[:, -1, :] = clean_hs
         patched = model.lm_head.output[:, -1, :].save()
 ```
 
@@ -125,10 +125,10 @@ with model.trace() as tracer:
     pos_a, neg_a = [], []
     for p in positive:
         with tracer.invoke(p):
-            pos_a.append(model.transformer.h[LAYER].output[0][:, -1, :].save())
+            pos_a.append(model.transformer.h[LAYER].output[:, -1, :].save())
     for p in negative:
         with tracer.invoke(p):
-            neg_a.append(model.transformer.h[LAYER].output[0][:, -1, :].save())
+            neg_a.append(model.transformer.h[LAYER].output[:, -1, :].save())
 
 import torch
 pos = torch.cat([a for a in pos_a]).mean(0)

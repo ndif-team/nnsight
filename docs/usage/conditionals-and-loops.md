@@ -24,13 +24,13 @@ This replaces the v0.4 proxy-based `nnsight.cond` / `session.iter` machinery —
 
 ```python
 with model.trace("Hello"):
-    output = model.transformer.h[0].output[0]
+    output = model.transformer.h[0].output
 
     # Real tensor — torch.all returns a real bool
     if torch.all(output < 1e5):
-        model.transformer.h[-1].output[0][:] = 0
+        model.transformer.h[-1].output[:] = 0
 
-    final = model.transformer.h[-1].output[0].save()
+    final = model.transformer.h[-1].output.save()
 ```
 
 ## Looping over prompts (use `model.session`)
@@ -53,12 +53,12 @@ For remote workloads always wrap in `model.session(remote=True)` so it's one net
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[5].output[0]
+    hs = model.transformer.h[5].output
     norm = hs.norm(dim=-1).mean()
 
     if norm > 10.0:
         # Standard Python — no nnsight magic
-        model.transformer.h[6].output[0][:] = 0
+        model.transformer.h[6].output[:] = 0
 
     final = model.lm_head.output.save()
 ```
@@ -75,7 +75,7 @@ with model.trace("Hello"):
 
     # OK: layers[0]..layers[N-1] are accessed in execution order
     for i in range(len(model.transformer.h)):
-        activations.append(model.transformer.h[i].output[0])
+        activations.append(model.transformer.h[i].output)
 ```
 
 Reading `model.transformer.h[5].output` then `model.transformer.h[2].output` in the same invoke is a deadlock → `OutOfOrderError`. Loops are fine as long as the iteration order matches the forward pass.
@@ -91,7 +91,7 @@ There is no proxy class wrapping `.output` — the worker just receives the actu
 ```python
 with model.trace("Hello"):
     # Real tensors -> real comprehension
-    means = [model.transformer.h[i].output[0].mean() for i in range(12)]
+    means = [model.transformer.h[i].output.mean() for i in range(12)]
     means = nnsight.save(means)
 
 # All entries are real torch tensors, fully resolved.
@@ -104,7 +104,7 @@ def normalize(x):
     return (x - x.mean()) / x.std()
 
 with model.trace("Hello"):
-    out = model.transformer.h[0].output[0]
+    out = model.transformer.h[0].output
     norm = normalize(out).save()
 ```
 

@@ -84,12 +84,12 @@ Variables defined in one invoke are visible to later invokes (when `CONFIG.APP.C
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[0][:, -1, :]
+        clean_hs = model.transformer.h[5].output[:, -1, :]
 
     with tracer.invoke("The Colosseum is in"):
         # Use clean_hs from the previous invoke. If both invokes touch the
         # same module a barrier is required — see Gotchas.
-        model.transformer.h[5].output[0][:, -1, :] = clean_hs
+        model.transformer.h[5].output[:, -1, :] = clean_hs
         patched = model.lm_head.output.save()
 ```
 

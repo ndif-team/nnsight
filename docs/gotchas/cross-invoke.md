@@ -35,9 +35,9 @@ Without explicit synchronization, invoke 2 sees nothing for that path. The fix i
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[0][:, -1, :].clone()
+        clean_hs = model.transformer.h[5].output[:, -1, :].clone()
     with tracer.invoke("The Colosseum is in"):
-        model.transformer.h[5].output[0][:, -1, :] = clean_hs   # NameError
+        model.transformer.h[5].output[:, -1, :] = clean_hs   # NameError
         logits = model.lm_head.output.save()
 ```
 
@@ -46,11 +46,11 @@ with model.trace() as tracer:
 with model.trace() as tracer:
     barrier = tracer.barrier(2)
     with tracer.invoke("The Eiffel Tower is in"):
-        clean_hs = model.transformer.h[5].output[0][:, -1, :].clone()
+        clean_hs = model.transformer.h[5].output[:, -1, :].clone()
         barrier()       # invoke 1 reaches barrier after capturing clean_hs
     with tracer.invoke("The Colosseum is in"):
         barrier()       # invoke 2 waits here until invoke 1 has reached its barrier
-        model.transformer.h[5].output[0][:, -1, :] = clean_hs
+        model.transformer.h[5].output[:, -1, :] = clean_hs
         logits = model.lm_head.output.save()
 ```
 
@@ -74,10 +74,10 @@ Cross-invoke variable sharing works *automatically* via the `cross_invoker` push
 ```python
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        h2 = model.transformer.h[2].output[0].clone().save()    # only invoke 1 reads h[2]
+        h2 = model.transformer.h[2].output.clone().save()    # only invoke 1 reads h[2]
     with tracer.invoke("World"):
         # only invoke 2 reads h[5] — no module conflict, no barrier needed
-        model.transformer.h[5].output[0][:] = h2
+        model.transformer.h[5].output[:] = h2
         logits = model.lm_head.output.save()
 ```
 
@@ -104,11 +104,11 @@ nnsight.CONFIG.APP.CROSS_INVOKER = False
 with model.trace() as tracer:
     barrier = tracer.barrier(2)
     with tracer.invoke("A"):
-        x = model.transformer.h[2].output[0].clone()
+        x = model.transformer.h[2].output.clone()
         barrier()
     with tracer.invoke("B"):
         barrier()
-        model.transformer.h[5].output[0][:] = x   # NameError — frame is isolated
+        model.transformer.h[5].output[:] = x   # NameError — frame is isolated
 ```
 
 ### Right approach
@@ -120,10 +120,10 @@ nnsight.CONFIG.APP.CROSS_INVOKER = True
 
 # or do the work in two passes (different traces)
 with model.trace("A"):
-    saved_x = model.transformer.h[2].output[0].clone().save()
+    saved_x = model.transformer.h[2].output.clone().save()
 
 with model.trace("B"):
-    model.transformer.h[5].output[0][:] = saved_x
+    model.transformer.h[5].output[:] = saved_x
     logits = model.lm_head.output.save()
 ```
 

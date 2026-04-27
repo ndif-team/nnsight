@@ -27,9 +27,9 @@ It is an `InterleavingTracer` subclass — `ScanningTracer` (`src/nnsight/interv
 import nnsight
 
 with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+    dim = nnsight.save(model.transformer.h[0].output.shape[-1])
     # Index validation: this raises if the tensor's last dim < 11
-    model.transformer.h[0].output[0][:, 10] = 0
+    model.transformer.h[0].output[:, 10] = 0
 
 print(dim)  # e.g. 768
 ```
@@ -44,7 +44,7 @@ Use `nnsight.save(...)` for non-tensor values:
 import nnsight
 
 with model.scan("Hello"):
-    shape_int = nnsight.save(model.transformer.h[0].output[0].shape[-1])  # int
+    shape_int = nnsight.save(model.transformer.h[0].output.shape[-1])  # int
     n_layers = nnsight.save(len(model.transformer.h))                      # int
     last_logits = model.lm_head.output[:, -1].save()                       # FakeTensor
 

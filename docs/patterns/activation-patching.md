@@ -47,13 +47,13 @@ with model.trace() as tracer:
 
     # Invoke 1: capture clean residual stream at the last token of LAYER.
     with tracer.invoke(clean):
-        clean_hs = model.transformer.h[LAYER].output[0][:, -1, :]
+        clean_hs = model.transformer.h[LAYER].output[:, -1, :]
         barrier()                       # signal: clean_hs is ready
 
     # Invoke 2: corrupt run, with the clean activation patched in.
     with tracer.invoke(corrupt):
         barrier()                       # wait until clean_hs is materialized
-        model.transformer.h[LAYER].output[0][:, -1, :] = clean_hs
+        model.transformer.h[LAYER].output[:, -1, :] = clean_hs
         patched_logits = model.lm_head.output[:, -1, :].save()
 
     # Invoke 3: corrupt-only baseline (for comparison), no patching.
@@ -83,11 +83,11 @@ for layer in range(len(model.transformer.h)):
     with model.trace() as tracer:
         barrier = tracer.barrier(2)
         with tracer.invoke(clean):
-            hs = model.transformer.h[layer].output[0][:, -1, :]
+            hs = model.transformer.h[layer].output[:, -1, :]
             barrier()
         with tracer.invoke(corrupt):
             barrier()
-            model.transformer.h[layer].output[0][:, -1, :] = hs
+            model.transformer.h[layer].output[:, -1, :] = hs
             logits = model.lm_head.output[:, -1, :].save()
     results[layer] = logits.softmax(-1)[0, paris].item()
 ```

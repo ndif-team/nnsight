@@ -46,7 +46,7 @@ For plain `tracer.iter[:]` outside `generate(...)`, none of those fire — the l
 with model.generate("Hello", max_new_tokens=3) as tracer:
     hidden_steps = list().save()
     for step in tracer.iter[:]:
-        hidden_steps.append(model.transformer.h[-1].output[0])
+        hidden_steps.append(model.transformer.h[-1].output)
 
     # The line below requests a module value AFTER all forward passes are done →
     # OutOfOrderError, plus a "was not provided" warning.
@@ -61,7 +61,7 @@ with model.generate(max_new_tokens=3) as tracer:
     with tracer.invoke("Hello"):                # iter loop lives here
         hidden_steps = list().save()
         for step in tracer.iter[:]:
-            hidden_steps.append(model.transformer.h[-1].output[0])
+            hidden_steps.append(model.transformer.h[-1].output)
 
     with tracer.invoke():                       # empty invoke — runs after
         final_logits = model.lm_head.output.save()    # safe: own thread, own forward pass
@@ -73,7 +73,7 @@ with model.generate(max_new_tokens=3) as tracer:
 with model.generate("Hello", max_new_tokens=3) as tracer:
     hidden_steps = list().save()
     for step in tracer.iter[:3]:    # bounded — but iterations may still be skipped if model stops early
-        hidden_steps.append(model.transformer.h[-1].output[0])
+        hidden_steps.append(model.transformer.h[-1].output)
     # No module access after the loop — only post-loop pure-Python is safe
 ```
 
@@ -98,7 +98,7 @@ Same as the above — module-access code after `tracer.all()` raises `OutOfOrder
 ```python
 with model.generate("Hello", max_new_tokens=3) as tracer:
     for step in tracer.all():
-        model.transformer.h[0].output[0][:] = 0
+        model.transformer.h[0].output[:] = 0
     final = model.lm_head.output.save()    # OutOfOrderError — model already done
 ```
 
@@ -106,7 +106,7 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 ```python
 with model.generate("Hello", max_new_tokens=3) as tracer:
     for step in tracer.iter[:3]:           # bounded
-        model.transformer.h[0].output[0][:] = 0
+        model.transformer.h[0].output[:] = 0
     final = model.lm_head.output.save()
 ```
 
@@ -135,15 +135,15 @@ Use `.next()` when each step is its own logical block of code; use `iter[...]` w
 with model.generate("Hello", max_new_tokens=3) as tracer:
     for step in tracer.iter[:3]:
         if step == 2:
-            model.transformer.h[0].output[0][:] = 0
+            model.transformer.h[0].output[:] = 0
 ```
 
 ### Right code (next)
 ```python
 with model.generate("Hello", max_new_tokens=3) as tracer:
-    hs1 = model.transformer.h[-1].output[0].save()
-    hs2 = model.transformer.h[-1].next().output[0].save()
-    hs3 = model.transformer.h[-1].next().output[0].save()
+    hs1 = model.transformer.h[-1].output.save()
+    hs2 = model.transformer.h[-1].next().output.save()
+    hs3 = model.transformer.h[-1].next().output.save()
 ```
 
 ### Mitigation / how to spot it early

@@ -140,7 +140,7 @@ Verify the module actually executes for your input. Two ways:
 import nnsight
 
 with model.scan("Hi"):
-    nnsight.save(model.transformer.h[5].output[0].shape)
+    nnsight.save(model.transformer.h[5].output.shape)
     # Add scan reads of every path you intend to access in the real trace.
 ```
 

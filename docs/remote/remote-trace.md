@@ -49,7 +49,7 @@ Only values touched by `.save()` (or `nnsight.save(...)`) are returned. Everythi
 
 ```python
 with model.trace("Hello", remote=True):
-    hidden = model.transformer.h[5].output[0]   # not saved -> not returned
+    hidden = model.transformer.h[5].output   # not saved -> not returned
     answer = model.lm_head.output.argmax(dim=-1).save()   # returned
 
 # 'hidden' is undefined here; 'answer' is a real tensor.
@@ -63,7 +63,7 @@ Saved values are pickled and shipped over HTTPS. For large activations, calling 
 
 ```python
 with model.trace("Hello", remote=True):
-    hidden = model.transformer.h[0].output[0].detach().cpu().save()
+    hidden = model.transformer.h[0].output.detach().cpu().save()
 ```
 
 The deserializer always uses `torch.load(..., map_location="cpu")` (`src/nnsight/intervention/backends/remote.py:773`), so CPU is the local default regardless — but `.detach().cpu()` runs the conversion server-side, where the tensor is already in GPU memory, instead of bouncing the autograd-attached payload over the network.
@@ -74,7 +74,7 @@ Anything you `print(...)` inside the trace runs on the server and is forwarded a
 
 ```python
 with model.trace("Hello", remote=True):
-    h = model.transformer.h[0].output[0]
+    h = model.transformer.h[0].output
     print(f"hidden mean: {h.mean()}")    # rendered as: ℹ [job-id] LOG  hidden mean: ...
     out = model.lm_head.output.save()
 ```

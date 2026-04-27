@@ -97,7 +97,7 @@ with model.trace("Hello") as tracer:
 
 entry = cache['model.transformer.h.11']
 print(type(entry))            # Cache.Entry
-print(entry.output[0].shape)  # works directly
+print(entry.output.shape)  # works directly
 ```
 
 ```python
@@ -108,7 +108,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 entries = cache['model.transformer.h.11']
 print(type(entries))               # list
 print(len(entries))                # 5
-print(entries[0].output[0].shape)  # per-step access via indexing
+print(entries[0].output.shape)  # per-step access via indexing
 ```
 
 Defensive read pattern when you don't know which case you're in:
@@ -127,9 +127,9 @@ Cache hooks run after intervention hooks (`mediator_idx=inf`), so caches see pos
 ```python
 with model.trace("Hello") as tracer:
     cache = tracer.cache()
-    model.transformer.h[0].output[0][:] = 0
+    model.transformer.h[0].output[:] = 0
 
-# cache['model.transformer.h.0'].output[0] is all zeros
+# cache['model.transformer.h.0'].output is all zeros
 ```
 
 ## API

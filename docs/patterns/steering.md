@@ -14,7 +14,7 @@ Activation steering (a.k.a. "activation addition", ActAdd) modifies model behavi
 
 The same machinery is used for refusal-direction work, sentiment / topic steering, sycophancy mitigation, and "control vectors". The interpretability claim is: if a single low-rank addition to one layer reliably changes behavior, that behavior has a linearly-decodable representation at that layer.
 
-In nnsight this is just an in-place `+=` to `block.output[0]` inside a trace, plus a separate (typically session-level) computation of the steering direction.
+In nnsight this is just an in-place `+=` to `block.output` (in transformers <5, `block.output[0]`) inside a trace, plus a separate (typically session-level) computation of the steering direction.
 
 ## When to use
 
@@ -48,7 +48,7 @@ with model.trace() as tracer:
         baseline = model.lm_head.output[:, -1, :].save()
 
     with tracer.invoke(prompt):
-        model.transformer.h[LAYER].output[0][:, -1, :] += direction * coef
+        model.transformer.h[LAYER].output[:, -1, :] += direction * coef
         steered = model.lm_head.output[:, -1, :].save()
 
 print("baseline argmax:", model.tokenizer.decode(baseline.argmax(-1)[0]))
@@ -80,10 +80,10 @@ with model.session():
     with model.trace() as tracer:
         for p in positive:
             with tracer.invoke(p):
-                pos_acts.append(model.transformer.h[LAYER].output[0][:, -1, :].save())
+                pos_acts.append(model.transformer.h[LAYER].output[:, -1, :].save())
         for p in negative:
             with tracer.invoke(p):
-                neg_acts.append(model.transformer.h[LAYER].output[0][:, -1, :].save())
+                neg_acts.append(model.transformer.h[LAYER].output[:, -1, :].save())
 
 pos = torch.cat([a for a in pos_acts], dim=0).mean(0)   # [hidden]
 neg = torch.cat([a for a in neg_acts], dim=0).mean(0)
@@ -99,13 +99,13 @@ Sweep `coef` and the layer to find the operating point. Typical magnitudes are a
 
 ```python
 # All positions: nudges every token's residual.
-model.transformer.h[LAYER].output[0][:] += direction * coef
+model.transformer.h[LAYER].output[:] += direction * coef
 
 # Only the last position: cleaner targeting on next-token prediction.
-model.transformer.h[LAYER].output[0][:, -1, :] += direction * coef
+model.transformer.h[LAYER].output[:, -1, :] += direction * coef
 
 # A specific span (e.g. positions 5-10): targeted intervention.
-model.transformer.h[LAYER].output[0][:, 5:10, :] += direction * coef
+model.transformer.h[LAYER].output[:, 5:10, :] += direction * coef
 ```
 
 ### Multi-layer steering
@@ -115,7 +115,7 @@ Adding the same direction at multiple consecutive layers often produces stronger
 ```python
 with model.trace(prompt):
     for L in [4, 5, 6, 7]:
-        model.transformer.h[L].output[0][:, -1, :] += direction * (coef / 4)
+        model.transformer.h[L].output[:, -1, :] += direction * (coef / 4)
     out = model.lm_head.output.save()
 ```
 
@@ -125,7 +125,7 @@ Wrap the forward intervention with `model.generate(...)` and the addition will f
 
 ```python
 with model.generate(prompt, max_new_tokens=20) as tracer:
-    model.transformer.h[LAYER].output[0][:, -1, :] += direction * coef
+    model.transformer.h[LAYER].output[:, -1, :] += direction * coef
     text = tracer.result.save()
 
 print(model.tokenizer.decode(text[0]))
@@ -150,7 +150,7 @@ The "refusal direction" line of work computes `mean(harmful prompts) - mean(harm
 
 - `+= direction * coef` mutates the residual in place. Save a `clone()` before the addition if you need the pre-steer state.
 - Device placement: `direction.to(model.device)` if you computed it elsewhere. See `docs/usage/access-and-modify.md`.
-- For models like Llama, the residual at layer L lives at `model.model.layers[L].output[0]`, not `model.transformer.h[L].output[0]`. Use `print(model)`.
+- For models like Llama, the residual at layer L lives at `model.model.layers[L].output`, not `model.transformer.h[L].output`. Use `print(model)`.
 - Steering one layer's output is *cumulative* downstream - every later layer reads the modified residual. If you want to test "does layer L need this concept added?", use activation patching instead.
 
 ## Related

@@ -47,7 +47,7 @@ with model.trace("Hello"):
     logits = model.lm_head.output
     with logits.sum().backward():
         # ValueError — can't access .output inside a backward tracer
-        hs = model.transformer.h[-1].output[0]
+        hs = model.transformer.h[-1].output
         grad = hs.grad.save()
 ```
 
@@ -55,7 +55,7 @@ with model.trace("Hello"):
 ```python
 with model.trace("Hello"):
     # 1) Capture forward-pass tensors BEFORE the backward block
-    hs = model.transformer.h[-1].output[0]
+    hs = model.transformer.h[-1].output
     hs.requires_grad_(True)
     logits = model.lm_head.output
 
@@ -92,7 +92,7 @@ with model.trace("Hello"):
 ### Right code
 ```python
 with model.trace("Hello"):
-    hs5 = model.transformer.h[5].output[0]
+    hs5 = model.transformer.h[5].output
     hs5.requires_grad_(True)
     logits = model.lm_head.output
 
@@ -116,8 +116,8 @@ Backprop runs in reverse: gradients reach the deepest layer first, then propagat
 ### Wrong code
 ```python
 with model.trace("Hello"):
-    h3 = model.transformer.h[3].output[0]; h3.requires_grad_(True)
-    h10 = model.transformer.h[10].output[0]; h10.requires_grad_(True)
+    h3 = model.transformer.h[3].output; h3.requires_grad_(True)
+    h10 = model.transformer.h[10].output; h10.requires_grad_(True)
     logits = model.lm_head.output
 
     with logits.sum().backward():
@@ -128,8 +128,8 @@ with model.trace("Hello"):
 ### Right code
 ```python
 with model.trace("Hello"):
-    h3 = model.transformer.h[3].output[0]; h3.requires_grad_(True)
-    h10 = model.transformer.h[10].output[0]; h10.requires_grad_(True)
+    h3 = model.transformer.h[3].output; h3.requires_grad_(True)
+    h10 = model.transformer.h[10].output; h10.requires_grad_(True)
     logits = model.lm_head.output
 
     with logits.sum().backward():
@@ -155,7 +155,7 @@ PyTorch frees the autograd graph after the first `.backward()` call. nnsight res
 ### Wrong code
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]; hs.requires_grad_(True)
+    hs = model.transformer.h[-1].output; hs.requires_grad_(True)
     logits = model.lm_head.output
 
     with logits.sum().backward():
@@ -168,7 +168,7 @@ with model.trace("Hello"):
 ### Right code
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]; hs.requires_grad_(True)
+    hs = model.transformer.h[-1].output; hs.requires_grad_(True)
     logits = model.lm_head.output
 
     with logits.sum().backward(retain_graph=True):
@@ -195,7 +195,7 @@ You want to inspect gradients of a forward result you already saved, without hol
 ```python
 # 1) Forward pass — save the tensors you'll want gradients for
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]
+    hs = model.transformer.h[-1].output
     hs.requires_grad_(True)
     hs = hs.save()
     logits = model.lm_head.output.save()

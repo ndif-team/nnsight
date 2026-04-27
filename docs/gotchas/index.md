@@ -61,7 +61,7 @@ This folder is the failure-mode reference. Each doc covers one cluster of relate
 ### [types-and-values.md](types-and-values.md)
 - Inside a trace, `.output`/`.input` deliver *real* tensors — `print`, `.shape`, arithmetic all work directly. There are no proxies.
 - Use `model.scan(...)` to inspect shapes *without* running the model — values come back as `FakeTensor`s.
-- Tensors you create inside a trace must be moved onto the right device (e.g. `torch.randn(...).to(model.transformer.h[0].output[0].device)`).
+- Tensors you create inside a trace must be moved onto the right device (e.g. `torch.randn(...).to(model.transformer.h[0].output.device)`).
 - Inside `.scan()`, `FakeTensor.__bool__` is patched to always return `True` — Python `if` statements on fake tensors don't reflect runtime truthiness.
 
 ### [integrations.md](integrations.md)

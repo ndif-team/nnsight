@@ -24,7 +24,7 @@ When you submit a remote trace, the intervention code is serialized via cloudpic
 ```python
 # my_utils.py — local file, NOT installed on the NDIF server
 def my_steering_vector(model, layer):
-    return model.transformer.h[layer].output[0].mean(dim=1)
+    return model.transformer.h[layer].output.mean(dim=1)
 ```
 
 ```python

@@ -23,8 +23,8 @@ sources: [src/nnsight/intervention/tracing/tracer.py:269, src/nnsight/interventi
 
 ```python
 with model.trace("Hello world"):
-    hidden = model.transformer.h[-1].output[0].save()
-    model.transformer.h[0].output[0][:] = 0
+    hidden = model.transformer.h[-1].output.save()
+    model.transformer.h[0].output[:] = 0
     logits = model.lm_head.output.save()
 ```
 

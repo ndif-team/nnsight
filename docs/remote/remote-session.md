@@ -34,7 +34,7 @@ with model.session(remote=True):
     # Trace 1: capture clean hidden state. No .save() needed; the value is
     # used in a later trace within the same session.
     with model.trace("Megan Rapinoe plays the sport of"):
-        hs = model.model.layers[5].output[0][:, -1, :]
+        hs = model.model.layers[5].output[:, -1, :]
 
     # Trace 2: clean baseline.
     with model.trace("Shaquille O'Neal plays the sport of"):
@@ -42,7 +42,7 @@ with model.session(remote=True):
 
     # Trace 3: patched. Reuses 'hs' captured in Trace 1.
     with model.trace("Shaquille O'Neal plays the sport of"):
-        model.model.layers[5].output[0][:, -1, :] = hs
+        model.model.layers[5].output[:, -1, :] = hs
         patched = model.lm_head.output[0][-1].argmax(dim=-1).save()
 
 print("clean:  ", model.tokenizer.decode(clean))
@@ -63,10 +63,10 @@ Inside a session, traces share Python state directly. You only call `.save()` on
 ```python
 with model.session(remote=True):
     with model.trace("Hello"):
-        hs = model.transformer.h[0].output[0]   # captured but not transmitted
+        hs = model.transformer.h[0].output   # captured but not transmitted
 
     with model.trace("World"):
-        model.transformer.h[0].output[0] = hs   # used directly — no save() round-trip
+        model.transformer.h[0].output = hs   # used directly — no save() round-trip
         out = model.lm_head.output.save()       # this one IS returned
 
 print(out.shape)
@@ -101,7 +101,7 @@ with model.session(remote=True):
     for i in range(12):
         with model.trace("Hello"):
             layer_logits.append(model.lm_head(model.transformer.ln_f(
-                model.transformer.h[i].output[0]
+                model.transformer.h[i].output
             )).argmax(dim=-1))
 
 print(len(layer_logits))   # 12

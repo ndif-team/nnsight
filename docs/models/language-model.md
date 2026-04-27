@@ -173,7 +173,7 @@ from nnsight import LanguageModel
 model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
 
 with model.trace("The Eiffel Tower is in"):
-    hidden = model.transformer.h[-1].output[0].save()
+    hidden = model.transformer.h[-1].output.save()
     logits = model.lm_head.output.save()
 
 print(hidden.shape)

@@ -92,13 +92,13 @@ Tensors saved with `.save()` are serialized at their current device and dtype. G
 ### Wrong code
 ```python
 with model.trace("Hello", remote=True):
-    hs = model.transformer.h[0].output[0].save()    # GPU tensor with grad info
+    hs = model.transformer.h[0].output.save()    # GPU tensor with grad info
 ```
 
 ### Right code
 ```python
 with model.trace("Hello", remote=True):
-    hs = model.transformer.h[0].output[0].detach().cpu().save()
+    hs = model.transformer.h[0].output.detach().cpu().save()
 ```
 
 ### Mitigation / how to spot it early
@@ -130,9 +130,9 @@ with model.session():
 # Single session-level request — values flow between traces directly
 with model.session(remote=True):
     with model.trace("A"):
-        a = model.transformer.h[5].output[0]    # no .save() needed within session
+        a = model.transformer.h[5].output    # no .save() needed within session
     with model.trace("B"):
-        model.transformer.h[5].output[0][:] = a
+        model.transformer.h[5].output[:] = a
         result = model.lm_head.output.save()
 ```
 

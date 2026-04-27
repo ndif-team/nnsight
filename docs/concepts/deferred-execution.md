@@ -28,7 +28,7 @@ model = nnsight.LanguageModel("openai-community/gpt2", device_map="auto", dispat
 with model.trace("Hello"):
     # This block is extracted, compiled, and run in a worker thread.
     # Accessing .output blocks the worker until the layer-0 forward hook fires.
-    hs = model.transformer.h[0].output[0].save()
+    hs = model.transformer.h[0].output.save()
 
 # After exiting the with-block, hs is a real torch.Tensor.
 print(hs.shape)

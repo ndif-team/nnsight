@@ -123,9 +123,9 @@ For module calls where you want post-call inspection of `.input`/`.output`, pass
 # model.sae is an SAE you've added to the envoy tree
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        hs = model.transformer.h[5].output[0]
+        hs = model.transformer.h[5].output
         recon = model.sae(hs)         # default: hook=False, routes through .forward
-        model.transformer.h[5].output[0][:] = recon
+        model.transformer.h[5].output[:] = recon
 
     with tracer.invoke():
         sae_out = model.sae.output.save()   # never fires — no hook was registered
@@ -135,9 +135,9 @@ with model.trace() as tracer:
 ```python
 with model.trace() as tracer:
     with tracer.invoke("Hello"):
-        hs = model.transformer.h[5].output[0]
+        hs = model.transformer.h[5].output
         recon = model.sae(hs, hook=True)   # routes through __call__, hooks fire
-        model.transformer.h[5].output[0][:] = recon
+        model.transformer.h[5].output[:] = recon
 
     with tracer.invoke():
         sae_out = model.sae.output.save()   # OK — hook fired in invoke 1

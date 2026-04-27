@@ -40,7 +40,7 @@ residual_grads = [None] * n_layers
 with model.trace(prompt):
     refs = []
     for L in range(n_layers):
-        hs = model.transformer.h[L].output[0]
+        hs = model.transformer.h[L].output
         hs.requires_grad_(True)
         refs.append(hs)
 
@@ -132,7 +132,7 @@ You can write to `.grad` inside the backward context to do gradient surgery (e.g
 
 ```python
 with model.trace(prompt):
-    hs = model.transformer.h[5].output[0]
+    hs = model.transformer.h[5].output
     hs.requires_grad_(True)
     metric = model.lm_head.output[:, -1, target]
     with metric.sum().backward():
@@ -146,7 +146,7 @@ Use `retain_graph=True` to backprop more than once:
 
 ```python
 with model.trace(prompt):
-    hs = model.transformer.h[5].output[0]
+    hs = model.transformer.h[5].output
     hs.requires_grad_(True)
     logits = model.lm_head.output
 

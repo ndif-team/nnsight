@@ -29,14 +29,14 @@ On exit, the tracer filters the trace frame's local variables. When the global `
 ### Wrong code
 ```python
 with model.trace("Hello"):
-    output = model.transformer.h[-1].output[0]   # not saved
+    output = model.transformer.h[-1].output   # not saved
 print(output)   # NameError or stale
 ```
 
 ### Right code
 ```python
 with model.trace("Hello"):
-    output = model.transformer.h[-1].output[0].save()
+    output = model.transformer.h[-1].output.save()
 print(output.shape)   # torch.Size([1, 2, 768])
 ```
 
@@ -74,11 +74,11 @@ import nnsight
 with model.session():
     # Inner trace 1: capture a value, no .save() needed inside the session
     with model.trace("Madison Square Garden is in the city of"):
-        hs = model.transformer.h[5].output[0][:, -1, :]   # no .save()
+        hs = model.transformer.h[5].output[:, -1, :]   # no .save()
 
     # Inner trace 2: use the value from the previous trace
     with model.trace("_ _ _ _ _ _ _"):
-        model.transformer.h[5].output[0][:, -1, :] = hs   # works
+        model.transformer.h[5].output[:, -1, :] = hs   # works
         patched = model.lm_head.output[0][-1].argmax(dim=-1).save()  # SAVE — leaves the session
 
 print(patched)  # available outside the session
@@ -91,9 +91,9 @@ print(patched)  # available outside the session
 ```python
 with model.session():
     with model.trace("Hello"):
-        hs1 = model.transformer.h[0].output[0]    # no save
+        hs1 = model.transformer.h[0].output    # no save
     with model.trace("World"):
-        hs2 = model.transformer.h[0].output[0]    # no save
+        hs2 = model.transformer.h[0].output    # no save
     with model.trace("Combined"):
         combined = (hs1 + hs2).save()             # save — leaves the session
 ```
@@ -120,7 +120,7 @@ Calling `model.scan("Hello")` to inspect shapes, then trying to read the result 
 ### Wrong code
 ```python
 with model.scan("Hello"):
-    dim = model.transformer.h[0].output[0].shape[-1]
+    dim = model.transformer.h[0].output.shape[-1]
 print(dim)   # NameError
 ```
 
@@ -129,7 +129,7 @@ print(dim)   # NameError
 import nnsight
 
 with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+    dim = nnsight.save(model.transformer.h[0].output.shape[-1])
 print(dim)   # 768
 ```
 
@@ -222,7 +222,7 @@ import nnsight
 nnsight.CONFIG.APP.PYMOUNT = False   # imagine a deployment where pymount is disabled
 
 with model.trace("Hello"):
-    shape = model.transformer.h[0].output[0].shape.save()   # AttributeError
+    shape = model.transformer.h[0].output.shape.save()   # AttributeError
 ```
 
 ### Right code
@@ -230,7 +230,7 @@ with model.trace("Hello"):
 import nnsight
 
 with model.trace("Hello"):
-    shape = nnsight.save(model.transformer.h[0].output[0].shape)
+    shape = nnsight.save(model.transformer.h[0].output.shape)
 print(shape)
 ```
 

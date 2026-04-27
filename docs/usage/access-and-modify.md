@@ -31,14 +31,14 @@ These are `eproperty` descriptors (`src/nnsight/intervention/interleaver.py:60`)
 
 ```python
 with model.trace("Hello"):
-    # Read
-    hidden = model.transformer.h[-1].output[0].save()
+    # Read (in transformers 5+, transformer blocks return a tensor)
+    hidden = model.transformer.h[-1].output.save()
 
-    # In-place modify (zeros first hidden state slot)
-    model.transformer.h[0].output[0][:] = 0
+    # In-place modify (zero the residual)
+    model.transformer.h[0].output[:] = 0
 
     # Replacement
-    model.transformer.h[0].output = (torch.zeros_like(hidden),) + model.transformer.h[0].output[1:]
+    model.transformer.h[0].output = torch.zeros_like(hidden)
 ```
 
 ## In-place vs replacement
@@ -46,31 +46,31 @@ with model.trace("Hello"):
 ```python
 # IN-PLACE: mutates the tensor underlying the model's value.
 # All later references through the same descriptor see the mutation.
-model.transformer.h[0].output[0][:] = 0
+model.transformer.h[0].output[:] = 0
 
 # REPLACEMENT: triggers the eproperty's __set__, which calls
 # mediator.swap(...) — the model's downstream computation gets the new value.
-model.transformer.h[0].output = my_new_tuple
+model.transformer.h[0].output = my_new_tensor
 ```
 
 Replacement goes through `eproperty.__set__` (`interleaver.py:306`) which calls `self._postprocess` (if any), builds the requester string, registers the hook, and emits a SWAP event.
 
 ## Tuple outputs
 
-Many modules return a tuple (e.g. HuggingFace transformer blocks return `(hidden_states, attention_weights, ...)`):
+Some modules return a tuple. The most common in HuggingFace LLMs is the **attention module**, which returns `(attn_out, attn_weights)`. In transformers <5, transformer blocks themselves also returned tuples; in transformers 5+ they return a plain tensor.
 
 ```python
 with model.trace("Hello"):
-    full = model.transformer.h[0].output      # tuple
-    hs = full[0]                               # tensor
+    full = model.transformer.h[0].attn.output    # tuple (attn_out, weights)
+    attn_out = full[0]                            # tensor
 
     # In-place on the first element
-    model.transformer.h[0].output[0][:] = 0
+    model.transformer.h[0].attn.output[0][:] = 0
 
     # Replace the entire tuple (preserve other elements)
-    model.transformer.h[0].output = (
-        torch.zeros_like(hs),
-    ) + model.transformer.h[0].output[1:]
+    model.transformer.h[0].attn.output = (
+        torch.zeros_like(attn_out),
+    ) + model.transformer.h[0].attn.output[1:]
 ```
 
 ## `.input` vs `.inputs`
@@ -96,9 +96,9 @@ In-place modifications happen on the live tensor — **after** the modification,
 
 ```python
 with model.trace("Hello"):
-    before = model.transformer.h[0].output[0].clone().save()  # capture pre-mod
-    model.transformer.h[0].output[0][:] = 0
-    after = model.transformer.h[0].output[0].save()           # post-mod
+    before = model.transformer.h[0].output.clone().save()  # capture pre-mod
+    model.transformer.h[0].output[:] = 0
+    after = model.transformer.h[0].output.save()           # post-mod
 # without the clone, before == after
 ```
 
@@ -114,7 +114,7 @@ To access modules out of order, use additional invokes — see `docs/usage/invok
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[5].output[0]
+    hs = model.transformer.h[5].output
     # Calling the envoy directly uses .forward() (no hook),
     # so this re-runs ln_f + lm_head WITHOUT triggering interleaving.
     logits = model.lm_head(model.transformer.ln_f(hs)).save()
@@ -133,7 +133,7 @@ For sub-module operations (e.g. `attention_interface_0`, `self_c_proj_0`), use `
 ## Gotchas
 
 - Within an invoke, modules **must** be accessed in forward-pass order. See `docs/gotchas/out-of-order.md`.
-- `module.output[0] = x` when output is a tuple **replaces the whole tuple with `x`** — it triggers `eproperty.__set__`, not tuple item assignment. Use `model.transformer.h[0].output[0][:] = x` for in-place on the first tuple element, or build a new tuple `(x,) + module.output[1:]` and assign to `module.output`.
+- For tuple-returning modules (e.g. attention), `module.output[0] = x` is a `__setitem__` on the underlying tuple and raises `TypeError`. Use `module.output[0][:] = x` for in-place on the first tuple element, or build a new tuple `(x,) + module.output[1:]` and assign to `module.output`.
 - Reading `.output` returns the actual runtime tensor — `print`, `.shape`, `.mean()`, etc. all work. There is no proxy layer to unwrap.
 - Outside interleaving, accessing `.output` raises `ValueError: Cannot access ...`. Use `model.scan(...)` if you only need shapes without execution.
 - If a module's class defines an attribute named `input` or `output`, nnsight remounts its proxy to `.nns_input` / `.nns_output` (with a warning). See `Envoy._handle_overloaded_mount` in `envoy.py:733`.

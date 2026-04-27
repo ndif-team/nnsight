@@ -11,7 +11,7 @@ sources: [src/nnsight/__init__.py:128, src/nnsight/intervention/tracing/tracer.p
 ## TL;DR
 - Inside a trace, `.output`/`.input` deliver *real* tensors. `print(...)`, `.shape`, and arithmetic all work directly. There are no proxies.
 - Use `model.scan(input)` to inspect shapes and validate operations *without* running the model — values arrive as `FakeTensor`s.
-- Tensors you create inside a trace must be put on the right device, e.g. `torch.randn(...).to(model.transformer.h[0].output[0].device)` — the model's tensors are on whatever device map you loaded with.
+- Tensors you create inside a trace must be put on the right device, e.g. `torch.randn(...).to(model.transformer.h[0].output.device)` — the model's tensors are on whatever device map you loaded with.
 - Inside `.scan()`, `FakeTensor.__bool__` is patched to always return `True` (`src/nnsight/__init__.py:128`). Python `if` on a fake tensor does not reflect runtime truthiness.
 
 ---
@@ -27,7 +27,7 @@ nnsight's threading model is value-passing, not proxy-passing. When the worker t
 ### Wrong assumption (no error, but unnecessary code)
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[0].output[0]
+    hs = model.transformer.h[0].output
     shape = hs.shape   # already a real torch.Size, no .resolve() needed
     print(shape)
     zeros = torch.zeros(shape)   # works directly
@@ -37,7 +37,7 @@ with model.trace("Hello"):
 ### Right code (the same, framed correctly)
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[0].output[0]
+    hs = model.transformer.h[0].output
     print(hs.shape)              # torch.Size([1, 5, 768])
     print(hs.mean())             # real scalar
     print(hs.dtype, hs.device)   # all real attributes
@@ -64,7 +64,7 @@ You want to know the output shape of a layer without paying the cost of a real f
 import nnsight
 
 with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+    dim = nnsight.save(model.transformer.h[0].output.shape[-1])
 
 print(dim)   # 768
 ```
@@ -89,13 +89,13 @@ The model's tensors live on whatever device map you loaded with (e.g. `device_ma
 steering = torch.randn(768)   # CPU
 
 with model.trace("Hello"):
-    model.transformer.h[10].output[0][:, -1, :] += steering   # device mismatch
+    model.transformer.h[10].output[:, -1, :] += steering   # device mismatch
 ```
 
 ### Right code
 ```python
 with model.trace("Hello"):
-    target = model.transformer.h[10].output[0]
+    target = model.transformer.h[10].output
     steering = torch.randn(768).to(target.device)
     target[:, -1, :] += steering
 ```
@@ -107,7 +107,7 @@ device = next(model.parameters()).device   # rough proxy for "main" device
 steering = torch.randn(768, device=device)
 
 with model.trace("Hello"):
-    model.transformer.h[10].output[0][:, -1, :] += steering
+    model.transformer.h[10].output[:, -1, :] += steering
 ```
 
 ### Mitigation / how to spot it early
@@ -129,7 +129,7 @@ nnsight patches `FakeTensor.__bool__` to return `True` unconditionally (`src/nns
 import nnsight
 
 with model.scan("Hello"):
-    out = model.transformer.h[0].output[0]
+    out = model.transformer.h[0].output
     if (out > 0).all():           # always True under fake mode
         print("non-negative")
     if out.shape[-1] > 1000:      # this is on torch.Size — works correctly

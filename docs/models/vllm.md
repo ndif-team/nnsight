@@ -92,7 +92,7 @@ from nnsight.modeling.vllm import VLLM
 model = VLLM("openai-community/gpt2", gpu_memory_utilization=0.1, dispatch=True)
 
 with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
-    hidden = model.transformer.h[-2].output[0].save()
+    hidden = model.transformer.h[-2].output.save()
     logits = model.logits.save()
 
 print(model.tokenizer.decode(logits.argmax(dim=-1)))
@@ -179,7 +179,7 @@ model = VLLM("meta-llama/Llama-3.1-8B", tensor_parallel_size=4, dispatch=True)
 
 with model.trace("Hello", temperature=0.0):
     # Always sees the full unsharded tensor, regardless of tp_size
-    hidden = model.model.layers[16].output[0].save()
+    hidden = model.model.layers[16].output.save()
     print(hidden.shape)        # [seq, hidden] — full hidden dim
 ```
 

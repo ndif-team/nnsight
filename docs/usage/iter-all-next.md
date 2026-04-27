@@ -46,8 +46,8 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
     hidden_states = list().save()
 
     for step in tracer.all():                          # = tracer.iter[:]
-        model.transformer.h[0].output[0][:] = 0        # zero-ablate every step
-        hidden_states.append(model.transformer.h[-1].output[0])
+        model.transformer.h[0].output[:] = 0        # zero-ablate every step
+        hidden_states.append(model.transformer.h[-1].output)
 ```
 
 ## Variations
@@ -86,7 +86,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 with model.generate("Hello", max_new_tokens=5) as tracer:
     for step in tracer.iter[:]:
         if step == 2:
-            model.transformer.h[0].output[0][:] = 0
+            model.transformer.h[0].output[:] = 0
         # other steps pass through unchanged
 ```
 
@@ -94,11 +94,11 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 
 ```python
 with model.generate("Hello", max_new_tokens=3) as tracer:
-    hs0 = model.transformer.h[-1].output[0].save()
+    hs0 = model.transformer.h[-1].output.save()
     tracer.next()                                                  # advance to step 1
-    hs1 = model.transformer.h[-1].output[0].save()
+    hs1 = model.transformer.h[-1].output.save()
     tracer.next()                                                  # advance to step 2
-    hs2 = model.transformer.h[-1].output[0].save()
+    hs2 = model.transformer.h[-1].output.save()
 ```
 
 `tracer.next(step=1)` does `self.model.interleaver.current.iteration += step` and returns the tracer (`src/nnsight/intervention/tracing/tracer.py:460`).
@@ -107,9 +107,9 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 
 ```python
 with model.generate("Hello", max_new_tokens=3) as tracer:
-    hs0 = model.transformer.h[-1].output[0].save()                # step 0
-    hs1 = model.transformer.h[-1].next().output[0].save()         # step 1
-    hs2 = model.transformer.h[-1].next().output[0].save()         # step 2
+    hs0 = model.transformer.h[-1].output.save()                # step 0
+    hs1 = model.transformer.h[-1].next().output.save()         # step 1
+    hs2 = model.transformer.h[-1].next().output.save()         # step 2
 ```
 
 `module.next(step=1)` is an alias for `tracer.next(step=1)` — both bump the same `mediator.iteration`. The `module.next()` form **emits a `DeprecationWarning`** (`src/nnsight/intervention/envoy.py:440`); prefer `tracer.next()`.

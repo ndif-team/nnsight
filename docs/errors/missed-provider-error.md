@@ -55,7 +55,7 @@ Sanity-check the module path actually executes:
 
 ```python
 with model.scan("Hello"):
-    print(model.transformer.h[5].output[0].shape)  # raises if path doesn't fire
+    print(model.transformer.h[5].output.shape)  # raises if path doesn't fire
 ```
 
 For unbounded iter:

@@ -29,7 +29,7 @@ model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
 
 with model.generate("Hello", max_new_tokens=5) as tracer:
     output = tracer.result.save()         # final generation tensor
-    last_hidden = model.transformer.h[-1].output[0].save()
+    last_hidden = model.transformer.h[-1].output.save()
 
 print(model.tokenizer.decode(output[0]))
 ```

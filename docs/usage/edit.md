@@ -29,24 +29,24 @@ Two flavors:
 ```python
 # Non-inplace: returns a shallow-copied edited model
 with model.edit() as edited_model:
-    edited_model.transformer.h[1].output[0][:, 1] = 0
+    edited_model.transformer.h[1].output[:, 1] = 0
 
 with model.trace("Hello"):
-    out_original = model.transformer.h[1].output[0].save()
+    out_original = model.transformer.h[1].output.save()
 
 with edited_model.trace("Hello"):
-    out_edited = edited_model.transformer.h[1].output[0].save()
+    out_edited = edited_model.transformer.h[1].output.save()
 ```
 
 ## In-place editing
 
 ```python
 with model.edit(inplace=True):
-    model.transformer.h[1].output[0][:] = 0
+    model.transformer.h[1].output[:] = 0
 
 # Now every trace through model uses the edit
 with model.trace("Hello"):
-    out = model.transformer.h[1].output[0].save()  # zeros
+    out = model.transformer.h[1].output.save()  # zeros
 ```
 
 ## Clearing edits
@@ -79,10 +79,10 @@ In `InterleavingTracer.compile` (`tracing/tracer.py:344`), every new tracer prep
 
 ```python
 with model.edit(inplace=True):
-    model.transformer.h[0].output[0][:] = 0   # first edit
+    model.transformer.h[0].output[:] = 0   # first edit
 
 with model.edit(inplace=True):
-    model.transformer.h[1].output[0][:] = 0   # second edit, both apply
+    model.transformer.h[1].output[:] = 0   # second edit, both apply
 ```
 
 Each `edit` appends a new `Mediator` to `_default_mediators`. They run in registration order on every subsequent trace.

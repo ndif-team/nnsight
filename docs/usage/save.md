@@ -25,7 +25,7 @@ import nnsight
 
 with model.trace("Hello"):
     # PREFERRED: works on any object, no C-extension needed
-    hidden = nnsight.save(model.transformer.h[-1].output[0])
+    hidden = nnsight.save(model.transformer.h[-1].output)
 
     # ALSO WORKS: backwards-compatible method form
     logits = model.lm_head.output.save()
@@ -53,10 +53,10 @@ if Globals.stack == 1:
 import nnsight
 
 # Function form — recommended
-out = nnsight.save(model.transformer.h[0].output[0])
+out = nnsight.save(model.transformer.h[0].output)
 
 # Method form — backwards-compatible
-out = model.transformer.h[0].output[0].save()
+out = model.transformer.h[0].output.save()
 ```
 
 The method form depends on **pymount**, a C extension that monkey-patches a `.save` attribute onto every Python object at runtime. The function form does not. If a class defines its own `.save` method (e.g. `transformers.PreTrainedModel.save_pretrained` is unrelated, but third-party classes can shadow it), `obj.save()` will call that one instead of nnsight's. `nnsight.save()` is unaffected.
@@ -79,7 +79,7 @@ Controlled by `CONFIG.APP.PYMOUNT` (defaults to `True`):
 import nnsight
 
 with model.scan("Hello"):
-    dim = nnsight.save(model.transformer.h[0].output[0].shape[-1])
+    dim = nnsight.save(model.transformer.h[0].output.shape[-1])
     paths = nnsight.save([m.path for m in model.modules()])
 
 print(dim, len(paths))
@@ -103,7 +103,7 @@ The backward context is a separate interleaving session. Save gradients there:
 
 ```python
 with model.trace("Hello"):
-    hs = model.transformer.h[-1].output[0]
+    hs = model.transformer.h[-1].output
     hs.requires_grad_(True)
     logits = model.lm_head.output
 

@@ -25,7 +25,7 @@ This is how you "save what you need and bail" without dragging the rest of the f
 
 ```python
 with model.trace("Hello") as tracer:
-    h0 = model.transformer.h[0].output[0].save()
+    h0 = model.transformer.h[0].output.save()
     # We don't need anything past layer 0
     tracer.stop()
 
@@ -76,7 +76,7 @@ For values you intend to consume after the trace exits, **always** call `.save()
 
 ```python
 with model.trace("Hello") as tracer:
-    h = model.transformer.h[0].output[0].save()   # <-- save first
+    h = model.transformer.h[0].output.save()   # <-- save first
     tracer.stop()
 ```
 
