@@ -101,12 +101,13 @@ async def generate(request: Request):
         Globals.enter()
 
         # Set up mediators from the compiled intervention function.
-        # init_interleaver=False: the vLLM worker runs on a separate
-        # thread / process and owns ``model._interleaver`` state via
-        # ``process_new_reqs_serialized`` → ``_start_mediator_now``.
-        # Calling ``initialize`` here would reset ``interleaver.current``
-        # to ``None`` and race with a concurrent ``Mediator.start()``.
-        args, kwargs = tracer._setup_interleaver(fn, init_interleaver=False)
+        # We deliberately do NOT call ``_init_shared_interleaver()``: the
+        # vLLM worker runs on a separate thread / process and owns
+        # ``model._interleaver`` state via ``process_new_reqs_serialized``
+        # → ``_start_mediator_now``. Calling ``initialize`` here would reset
+        # ``interleaver.current`` to ``None`` and race with a concurrent
+        # ``Mediator.start()``.
+        args, kwargs = tracer._run_user_fn(fn)
 
         if not _model.dispatched:
             # Should already be dispatched by cli.py, but just in case.

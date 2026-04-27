@@ -17,7 +17,7 @@ class AsyncVLLMBackend(Backend):
 
     Usage pattern:
     - ``__call__(tracer)``: Called from ``__exit__``. Compiles the traced
-      code, sets up mediators via ``_setup_interleaver()``, serializes them
+      code, sets up mediators via ``_run_user_fn()``, serializes them
       into sampling params, and stores the prepared data on this backend.
     - ``__call__()``: Called by user via ``tracer.backend()``. Returns an
       async generator that streams ``RequestOutput`` objects from ``AsyncLLM``.
@@ -33,21 +33,21 @@ class AsyncVLLMBackend(Backend):
     def _compile_and_execute(self, tracer):
         """Compile traced code, set up mediators, and serialize them.
 
-        Uses ``tracer._setup_interleaver()`` directly instead of going
-        through ``tracer.execute()`` / ``model.interleave()``, since the
-        async path only needs to serialize mediators — not run the model.
+        Uses ``tracer._run_user_fn()`` directly instead of going through
+        ``tracer.execute()`` / ``model.interleave()``, since the async path
+        only needs to serialize mediators — not run the model.
         """
         fn = Backend.__call__(self, tracer)
 
         try:
             Globals.enter()
 
-            # init_interleaver=False: vLLM async workers mutate
-            # ``model._interleaver`` on another thread. Calling
-            # ``Interleaver.initialize`` here would reset
+            # We deliberately do NOT call ``_init_shared_interleaver()``:
+            # vLLM async workers mutate ``model._interleaver`` on another
+            # thread. Calling ``Interleaver.initialize`` here would reset
             # ``interleaver.current`` to ``None`` and race with a concurrent
             # ``Mediator.start()`` on the worker thread.
-            args, kwargs = tracer._setup_interleaver(fn, init_interleaver=False)
+            args, kwargs = tracer._run_user_fn(fn)
 
             if not self.model.dispatched:
                 self.model.dispatch()

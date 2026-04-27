@@ -341,8 +341,8 @@ class VLLM(RemoteableMixin):
 
         Args:
             mediators: Explicit mediator list. Server paths pass
-                ``tracer.mediators`` because they call ``_setup_interleaver``
-                with ``init_interleaver=False`` to avoid racing with
+                ``tracer.mediators`` because they call ``_run_user_fn``
+                without ``_init_shared_interleaver`` to avoid racing with
                 ``Mediator.start()`` on the vLLM worker thread; those paths
                 cannot rely on ``self._interleaver.mediators`` being current.
                 When ``None`` (local sync/async paths), falls back to
@@ -466,9 +466,11 @@ class VLLM(RemoteableMixin):
         serve = kwargs.pop("serve", None)
         if serve is not None and kwargs.get("backend") is None:
             from ...intervention.backends.local_serve import LocalServeBackend
+            from .serve_tracer import ServeInterleavingTracer
             blocking = kwargs.pop("blocking", True)
             api_key = kwargs.pop("api_key", None)
             kwargs["backend"] = LocalServeBackend(self, host=serve, blocking=blocking, api_key=api_key)
+            kwargs.setdefault("tracer_cls", ServeInterleavingTracer)
         else:
             if "api_key" in kwargs:
                 raise ValueError("api_key= requires serve= to specify the server URL")

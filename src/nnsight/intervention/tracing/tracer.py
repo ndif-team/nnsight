@@ -406,19 +406,10 @@ class InterleavingTracer(Tracer):
 
         return self._frame
 
-    def _setup_interleaver(self, fn: Callable, init_interleaver: bool = True):
-        """Run compiled user code, collect batched args, and (optionally) initialize the interleaver.
+    def _run_user_fn(self, fn: Callable):
+        """Run compiled user code and collect the batched arguments.
 
-        ``init_interleaver=False`` is for server paths (HTTP handlers) that
-        share ``model._interleaver`` with a background execution thread.
-        ``Interleaver.initialize`` resets ``self.current = None`` and replaces
-        ``self.mediators``/``self.batcher``. On a background thread, this races
-        with ``Mediator.start()`` — which relies on ``current = self`` staying
-        stable between ``worker.start()`` and the worker's first ``.output``
-        access. Callers that pass ``init_interleaver=False`` must read
-        mediators from ``self.mediators`` (the tracer's own list, always
-        populated here by ``fn(info, tracer)``) rather than
-        ``model._interleaver.mediators``.
+        Populates ``self.mediators`` as a side effect of ``fn(info, self)``.
 
         Returns:
             (args, kwargs): The batched positional and keyword arguments.
@@ -431,11 +422,22 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        if init_interleaver:
-            interleaver = self.model._interleaver
-            interleaver.initialize(self.mediators, self, batcher=self.batcher)
-
         return args, kwargs
+
+    def _init_shared_interleaver(self):
+        """Bind this tracer's mediators onto ``model._interleaver``.
+
+        Skip this from server-side paths (HTTP handlers, async vLLM backends)
+        where another thread / process already owns ``model._interleaver``.
+        ``Interleaver.initialize`` resets ``current = None`` and replaces
+        ``mediators``/``batcher``; on a background thread that races with
+        ``Mediator.start()`` (which relies on ``current = self`` staying
+        stable between ``worker.start()`` and the worker's first ``.output``
+        access). Callers that skip this must read mediators from
+        ``self.mediators`` rather than ``model._interleaver.mediators``.
+        """
+        interleaver = self.model._interleaver
+        interleaver.initialize(self.mediators, self, batcher=self.batcher)
 
     def execute(self, fn: Callable):
         """
@@ -443,7 +445,8 @@ class InterleavingTracer(Tracer):
         then creates an Interleaver to manage the interventions during model execution.
         """
 
-        args, kwargs = self._setup_interleaver(fn)
+        args, kwargs = self._run_user_fn(fn)
+        self._init_shared_interleaver()
 
         try:
             self.model.interleave(self.fn, *args, **kwargs)
@@ -471,36 +474,6 @@ class InterleavingTracer(Tracer):
         """
         # TODO make sure not already executing
         return Invoker(self, *args, **kwargs)
-
-    def collect(self, timeout: float = None) -> Dict:
-        """Block until a non-blocking serve request completes and return saves.
-
-        Only valid after ``model.trace(..., serve=url, blocking=False)``.
-
-        Args:
-            timeout: Maximum seconds to wait. ``None`` means wait forever.
-
-        Returns:
-            Dict mapping saved variable names to their values.
-
-        Raises:
-            AttributeError: If the tracer was not used with ``blocking=False``.
-            Exception: Any exception from the server or network.
-
-        Example::
-
-            with model.trace("prompt", serve=url, blocking=False) as t:
-                out = model.logits.output.save()
-            saves = t.collect()
-            out = saves["out"]
-        """
-        future = getattr(self, "_serve_future", None)
-        if future is None:
-            raise AttributeError(
-                "Tracer has no pending serve request. "
-                "Did you use blocking=False?"
-            )
-        return future.result(timeout=timeout)
 
     def stop(self):
         """
