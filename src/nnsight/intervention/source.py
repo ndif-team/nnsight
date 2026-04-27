@@ -75,8 +75,11 @@ from typing import (
 import astor
 import torch
 
-from .hooks import requires_operation_input, requires_operation_output
-from .interleaver import IEnvoy, Interleaver, eproperty
+from .hooks import (
+    hooked_operation_input,
+    hooked_operation_output,
+)
+from .interleaver import IEnvoy, Interleaver
 
 if sys.version_info >= (3, 9):
     _ast_to_source = ast.unparse
@@ -600,8 +603,7 @@ class OperationEnvoy:
     def __str__(self):
         return str(self.accessor)
 
-    @eproperty()
-    @requires_operation_output
+    @hooked_operation_output()
     def output(self) -> Any:
         """Get the output of this operation.
 
@@ -610,13 +612,11 @@ class OperationEnvoy:
             ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
         """
 
-    @eproperty(key="input")
-    @requires_operation_input
+    @hooked_operation_input()
     def inputs(self) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
         """Get the inputs to this operation as ``(args, kwargs)``."""
 
-    @eproperty(key="input")
-    @requires_operation_input
+    @hooked_operation_input()
     def input(self) -> Any:
         """Get the first positional (or first keyword) input to this operation."""
 

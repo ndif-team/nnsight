@@ -95,5 +95,5 @@ Source operations participate in `tracer.iter[...]`. The iteration tracker is bu
 ## Related
 
 - [access-and-modify](access-and-modify.md) — Module-level `.output` / `.input`.
-- [iter](iter.md) — Iteration semantics (operation-level paths included).
+- [iter-all-next](iter-all-next.md) — Iteration semantics (operation-level paths included).
 - [docs/concepts/source-tracing.md](../concepts/source-tracing.md) — Architecture deep dive.

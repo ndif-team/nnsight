@@ -91,7 +91,7 @@ with model.trace("Hello", backend=backend) as tracer:
 print(tracer.backend.job_id)   # save this; your webhook handler can fetch the result by ID
 ```
 
-The `callback` value is forwarded as the `ndif-callback` header (`src/nnsight/intervention/backends/remote.py:537`).
+The `callback` value is forwarded as the `ndif-callback` header (`src/nnsight/intervention/backends/remote.py:537`). NDIF will POST status-update objects (`RECEIVED`, `QUEUED`, `RUNNING`, `COMPLETED`, etc.) to that URL — not the result itself. Your webhook handler should call `get_response(job_id)` after seeing `COMPLETED` to download the actual saves.
 
 ## Reattaching to an existing job
 
@@ -124,11 +124,12 @@ Same shape as a single trace: `session.backend()` returns `None` until done, the
 
 ## Gotchas
 
-- `tracer.backend.job_status` updates only when you call `backend()` again — there's no background polling thread. The status is whatever the most recent HTTP response said.
+- `tracer.backend.job_status` updates only when you call `backend()` again — there's no background polling thread. The status is whatever the most recent HTTP response said. **`backend()` does not advance status itself**; it just fetches the latest response object from NDIF's object store. If you wait long enough and call once, you may go straight from `RECEIVED` to `COMPLETED` with no intermediate states observed.
 - `backend()` blocks for one HTTP round-trip per call. Don't hammer it; sleep between polls.
-- The job will be cleaned up server-side after a TTL. If you wait too long to fetch, the result may be gone — store it locally as soon as it's ready.
+- **Server-side TTL is 24 hours.** Completed-but-unfetched results are garbage-collected after 24h — store the result locally as soon as you fetch it.
 - `blocking=False` with `verbose=True` can produce noisy status output every poll. The standard status display is designed for the WebSocket flow; non-blocking polls re-display each status.
 - `print(...)` statements in the trace are streamed over the WebSocket in blocking mode but only appear in the **final** response in non-blocking mode (you'll see them all at once when the job completes).
+- The `callback` URL receives **status-update notifications** (`RECEIVED`, `QUEUED`, `RUNNING`, `COMPLETED`, etc.) — not the actual result payload. Your webhook handler should fetch the result with `get_response(job_id)` after seeing `COMPLETED`.
 
 ## Related
 

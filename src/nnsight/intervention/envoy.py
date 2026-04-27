@@ -35,7 +35,11 @@ from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
 from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
-from .hooks import requires_input, requires_output
+from .hooks import (
+    hooked_input,
+    hooked_output,
+    requires_input,
+)
 
 
 def trace_only(fn: Callable):
@@ -165,8 +169,7 @@ class Envoy(Batchable):
 
     #### Properties ####
 
-    @eproperty()
-    @requires_output
+    @hooked_output()
     def output(self) -> Object:
         """Get the output of the module's forward pass.
 
@@ -175,8 +178,7 @@ class Envoy(Batchable):
             ...     attn = model.transformer.h[0].attn.output[0].save()
         """
 
-    @eproperty(key="input")
-    @requires_input
+    @hooked_input()
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
         """Get the inputs to the module's forward pass.
 
@@ -188,8 +190,7 @@ class Envoy(Batchable):
             ...     args, kwargs = model.transformer.h[0].attn.inputs
         """
 
-    @eproperty(key="input")
-    @requires_input
+    @hooked_input()
     def input(self) -> Object:
         """Get the first input to the module's forward pass.
 

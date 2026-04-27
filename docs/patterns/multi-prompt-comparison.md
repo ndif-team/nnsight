@@ -73,7 +73,7 @@ with model.trace() as tracer:
         full = model.lm_head.output[:, -1, :].save()         # shape [3, vocab]
 ```
 
-Empty invokes do **not** trigger the `_batch()` machinery, so they work on the base `NNsight` (which does not implement batching) too - one input invoke + as many empty invokes as you want.
+Empty invokes trigger **neither** `_prepare_input()` nor `_batch()` — they reuse the existing batched state from the preceding input invokes. So they work on the base `NNsight` (which does not implement batching) too — one input invoke + as many empty invokes as you want.
 
 ## When you need a barrier
 

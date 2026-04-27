@@ -1,12 +1,14 @@
 ---
 title: MissedProviderError
-one_liner: "Mediator.MissedProviderError: Execution complete but `<requester>` was not provided — a value request was never satisfied by any provider."
+one_liner: "Mediator.MissedProviderError: Execution complete but `<requester>` was not provided — a value request was never satisfied by any provider. The primary post-refactor error class for execution-order failures."
 tags: [error, execution-order, threading]
-related: [docs/errors/out-of-order-error.md, docs/errors/value-was-not-provided.md, docs/concepts/threading-and-mediators.md, docs/usage/iter.md]
+related: [docs/errors/out-of-order-error.md, docs/errors/value-was-not-provided.md, docs/concepts/threading-and-mediators.md, docs/usage/iter-all-next.md]
 sources: [src/nnsight/intervention/interleaver.py:753, src/nnsight/intervention/interleaver.py:667, src/nnsight/intervention/interleaver.py:652]
 ---
 
 # MissedProviderError
+
+> **Primary error class.** Post-`refactor/transform`, the main failure mode users see when a value isn't delivered is `MissedProviderError`. The classic `OutOfOrderError` is now a **subclass** of `MissedProviderError` (see [out-of-order-error.md](out-of-order-error.md)) — it covers the early-detection case where nnsight already saw the provider fire and consumed it, so it can answer "out of order" immediately rather than waiting until forward finishes. Same root cause, different code paths.
 
 ## Symptom
 
@@ -45,7 +47,7 @@ The "iteration N did not happen" variant is downgraded to a `warnings.warn` beca
 - Typo or stale path on a module that doesn't actually fire (e.g., requesting `model.transformer.h[100]` on a 12-layer model — earlier `IndexError` usually catches this, but a path that resolves but is not called slides through).
 - Using `tracer.iter[N]` for a step that the model stops generating before reaching (e.g., due to EOS).
 - A skipped module: `module.skip(value)` was called and you also tried to read its `.output` directly.
-- Code after `for step in tracer.iter[:]:` — the unbounded iterator never returns control, so subsequent requests are stranded. See [unbounded-iter](../gotchas/) and `docs/usage/iter.md`.
+- Code after `for step in tracer.iter[:]:` — the unbounded iterator never returns control, so subsequent requests are stranded. See [unbounded-iter](../gotchas/) and `docs/usage/iter-all-next.md`.
 
 ## Fix
 
@@ -87,4 +89,4 @@ with model.generate(max_new_tokens=3) as tracer:
 - `docs/errors/out-of-order-error.md`
 - `docs/errors/value-was-not-provided.md`
 - `docs/concepts/threading-and-mediators.md`
-- `docs/usage/iter.md`
+- `docs/usage/iter-all-next.md`

@@ -23,7 +23,6 @@ NDIF service docs live at https://nnsight.net and https://login.ndif.us. These d
 | Run a single trace remotely (most common starting point) | [remote-trace.md](./remote-trace.md) |
 | Bundle several traces into one request to skip multiple queue waits | [remote-session.md](./remote-session.md) |
 | Submit a job and poll for it later instead of blocking | [non-blocking-jobs.md](./non-blocking-jobs.md) |
-| Stream token-by-token output from vLLM async engines | [async-vllm.md](./async-vllm.md) |
 | Use local helper modules in remote intervention code | [register-local-modules.md](./register-local-modules.md) |
 | Check if a model is up before submitting | [status-and-availability.md](./status-and-availability.md) |
 | Debug a "works locally, fails remotely" mismatch | [env-comparison.md](./env-comparison.md) |

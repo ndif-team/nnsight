@@ -98,6 +98,10 @@ nnsight.register("myproj.steering")
 
 Or register the whole top-level package and import submodules through it after registration.
 
+## Transitive imports
+
+If `my_utils.py` does `from helpers import something` where `helpers` is also a local module, **`pull_env()`'s auto-registration covers it** — anything detected as `version="local"` in the environment gets registered. If auto-registration fails or you've disabled it, you need to register both `my_utils` and `helpers` explicitly.
+
 ## Gotchas
 
 - **Call `register` BEFORE the trace.** Cloudpickle decides how to serialize a function based on the registry at pickle time. Registering after the trace body has been captured is too late.

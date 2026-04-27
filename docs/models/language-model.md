@@ -104,7 +104,66 @@ tokenizer = AutoTokenizer.from_pretrained("gpt2")
 model = LanguageModel(hf_model, tokenizer=tokenizer)   # tokenizer is required
 ```
 
-Without `tokenizer=`, you'll get `AttributeError: Tokenizer not found.` from `language.py:204`.
+#### Common error: `AttributeError: Tokenizer not found.`
+
+```
+AttributeError: Tokenizer not found. If you passed a pre-loaded model to `LanguageModel`,
+you need to provide a tokenizer when initializing: `LanguageModel(model, tokenizer=tokenizer)`.
+```
+
+`LanguageModel._tokenize` (`src/nnsight/modeling/language.py:200`) needs a tokenizer to convert string input into token IDs:
+
+```python
+if self.tokenizer is None:
+    if self.repo_id is not None:
+        self._load_tokenizer(self.repo_id, **kwargs)
+    else:
+        raise AttributeError(
+            "Tokenizer not found. If you passed a pre-loaded model to "
+            "`LanguageModel`, you need to provide a tokenizer when initializing: "
+            "`LanguageModel(model, tokenizer=tokenizer)`."
+        )
+```
+
+`LanguageModel` only auto-loads a tokenizer when it was constructed from a HuggingFace **repo id string**. When you pass an already-loaded `nn.Module` instance there is no repo id to look up, so the tokenizer must be supplied explicitly.
+
+**Common triggers**
+
+- Building the model yourself and wrapping it: `LanguageModel(AutoModelForCausalLM.from_pretrained(...))` without `tokenizer=`.
+- Passing a custom `nn.Module` that isn't a HuggingFace model to `LanguageModel`.
+- Loading the wrapper from a checkpoint that didn't persist `repo_id` and re-using it with string inputs.
+
+**Fixes**
+
+```python
+# WRONG — pre-loaded model, no tokenizer supplied
+hf_model = AutoModelForCausalLM.from_pretrained("gpt2")
+model = LanguageModel(hf_model)
+with model.trace("Hello"):                   # AttributeError on tokenize
+    ...
+
+# FIXED — pass tokenizer alongside the pre-loaded model
+hf_model = AutoModelForCausalLM.from_pretrained("gpt2")
+tok = AutoTokenizer.from_pretrained("gpt2")
+model = LanguageModel(hf_model, tokenizer=tok)
+
+# ALSO FIXED — let LanguageModel load both from the repo id
+model = LanguageModel("gpt2")                # tokenizer auto-loaded
+```
+
+If you have no tokenizer at all, you can still pass tensor input directly — `_tokenize` short-circuits on `torch.Tensor`:
+
+```python
+input_ids = torch.tensor([[1, 2, 3]])
+with model.trace(input_ids):
+    ...
+```
+
+**How to avoid**
+
+- When wrapping a pre-loaded model, always pair it with a tokenizer in the constructor.
+- If you subclass `LanguageModel` for a custom architecture, override `_load_tokenizer` so future `repo_id`-based loads work.
+- For tensor-only pipelines (already-tokenized data), pass tensors and the error never fires.
 
 ## Canonical pattern
 
@@ -125,10 +184,12 @@ print(model.tokenizer.decode(logits.argmax(dim=-1)[0]))
 
 ```python
 with model.generate("Hello", max_new_tokens=5) as tracer:
-    output = model.generator.output.save()
+    output = tracer.result.save()        # preferred
 
 print(model.tokenizer.decode(output[0]))
 ```
+
+`tracer.result` is the recommended path for grabbing the final generated token IDs. `model.generator.output.save()` still works (and is what the streamer-based machinery writes to internally), but new code should prefer `tracer.result`.
 
 ### Iterate over generation steps
 
@@ -171,10 +232,10 @@ with model.trace(input_ids=ids):
 | `model.repo_id` | The HuggingFace repo ID string (or `name_or_path` of a pre-loaded module). | `huggingface.py:46` |
 | `model.revision` | The git revision pinned at load time. | `huggingface.py:51` |
 | `model.dispatched` | Boolean — whether real weights are loaded. | `mixins/meta.py:47` |
-| `model.generator` | A `LanguageModel.Generator` wrapper module that captures the final generation output. Access `model.generator.output.save()` inside `.generate()` to get the full token sequence. The inner `model.generator.streamer` receives tokens as they are generated (used internally by `.generate()`). | `language.py:44`, `language.py:80` |
+| `model.generator` | A `LanguageModel.Generator` wrapper module that captures the final generation output. The inner `model.generator.streamer` receives tokens as they are generated (used internally by `.generate()`). Prefer `tracer.result` over `model.generator.output` in new code. | `language.py:44`, `language.py:80` |
 | `model._model` / `model._module` | The underlying HuggingFace `PreTrainedModel`. | base `NNsight` |
 
-`model.generator.output` is the canonical place to read the final generated token IDs. Newer code can use `tracer.result` instead, which is provided by `Envoy.interleave()` and works the same way.
+`tracer.result` is the **preferred** way to read the final generated token IDs (it's provided by `Envoy.interleave()`). `model.generator.output` is kept for backwards compatibility and still works.
 
 ### Module renaming
 
@@ -203,10 +264,10 @@ with model.trace("Hello"):
 
 ## Gotchas
 
-- **Tokenizer required when wrapping pre-loaded models.** `AttributeError: Tokenizer not found.` at first `.trace()` if you forgot. See [docs/gotchas/](../gotchas/).
+- **Tokenizer required when wrapping pre-loaded models.** `AttributeError: Tokenizer not found.` at first `.trace()` if you forgot. See [Wrapping a pre-loaded model](#wrapping-a-pre-loaded-model) above for the full error message and fixes.
 - **`dispatch=False` means weights load lazily.** A long pause on first `.trace()` is expected — that's the actual model download. Pass `dispatch=True` if you want loading to happen during `__init__`.
 - **`device_map="auto"` requires `accelerate`.** `accelerate` is already a hard dep of nnsight via `meta.py`, so this works out of the box.
-- **`.generator.output` vs `tracer.result`.** Both refer to the final generation output. `tracer.result` is the newer, preferred path. `model.generator.output` is kept for backwards compatibility and for the streamer hook.
+- **`tracer.result` vs `.generator.output`.** Both refer to the final generation output. `tracer.result` is the newer, preferred path. `model.generator.output` is kept for backwards compatibility and for the streamer hook.
 - **Cross-invoke variable sharing.** Variables from one invoke are visible in later invokes (`CONFIG.APP.CROSS_INVOKER` is `True` by default). When two invokes both access the same module, you need a `tracer.barrier(n)` to synchronize.
 
 ## Related

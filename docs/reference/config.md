@@ -35,7 +35,7 @@ CONFIG.save()                                 # explicit save
 
 | Name | Type | Default | What it does | When to change |
 |------|------|---------|--------------|----------------|
-| `APP.DEBUG` | `bool` | `False` (yaml; the schema default is `True`, yaml overrides) | When `True`, exceptions inside a trace include the full nnsight internal stack frames. When `False`, tracebacks are reconstructed to point at user code only. | Turn on while debugging an exception you suspect originates in nnsight internals; otherwise leave off. Also enabled by `python -d`. |
+| `APP.DEBUG` | `bool` | `False` | When `True`, exceptions inside a trace include the full nnsight internal stack frames. When `False`, tracebacks are reconstructed to point at user code only. | Turn on while debugging an exception you suspect originates in nnsight internals; otherwise leave off. Also enabled by `python -d`. |
 | `APP.REMOTE_LOGGING` | `bool` | `True` | Whether `print(...)` from a remote-trace worker is streamed back as `LOG` events. | Disable to silence remote logs (e.g. for noisy production scripts). |
 | `APP.PYMOUNT` | `bool` | `True` | When `True`, the `py_mount.c` C extension injects `.save()` and `.stop()` onto every Python `object` while a trace is active, enabling `tensor.save()` syntax. When `False`, you must use `nnsight.save(obj)` instead. | Disable if (a) you only use `nnsight.save()`, or (b) you have classes whose own `.save()` method is being shadowed/conflicting. |
 | `APP.CROSS_INVOKER` | `bool` | `True` | When `True`, variables assigned in one invoke are pushed/pulled across worker threads so later invokes can read them. | Disable to isolate invokes (e.g. while debugging a value-leakage bug) or for a small perf gain when you don't need cross-invoke sharing. |

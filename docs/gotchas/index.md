@@ -31,10 +31,10 @@ This folder is the failure-mode reference. Each doc covers one cluster of relate
 - You cannot create a `tracer.invoke(...)` *inside* an active forward pass — invokes are top-level only.
 
 ### [iteration.md](iteration.md)
-- `for step in tracer.iter[:]` and `tracer.all()` are unbounded — code *after* the for-loop body inside the trace never runs because the iterator never terminates.
-- Fix with bounded `iter[:N]` or by wrapping the iter in its own `tracer.invoke(...)` and putting trailing logic in a separate empty invoke.
-- `.next()` is the manual alternative for stepping through generations one at a time.
-- The iteration tracker counts module *call counts*, not generation steps — relevant for recurrent inner modules (e.g. Mamba) that fire multiple times per generation step.
+- `for step in tracer.iter[:]` and `tracer.all()` are unbounded — pure-Python after the loop runs, but any module `.output`/`.input` access in the trailing code raises `OutOfOrderError` because the model's forward passes are already done.
+- Fix with bounded `iter[:N]` or by wrapping the iter in its own `tracer.invoke(...)` and putting trailing module-access logic in a separate empty invoke.
+- `.next()` is the manual alternative *inside* an iter loop. Outside an iter loop the iteration tracker is dormant, so `.next()` chains do not work as the older docs suggested — use `tracer.iter[...]` instead.
+- The iteration tracker is per-module, only maintained while inside an `iter[...]` loop (lifecycle is `__iter__` setup / `finally` teardown). Outside an iter loop it stays at whatever value it was when the last loop ended.
 
 ### [cross-invoke.md](cross-invoke.md)
 - If two invokes both access the same module's `.output`/`.input`, sharing a Python variable between them requires `tracer.barrier(n)`.

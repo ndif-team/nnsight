@@ -49,9 +49,61 @@ NNsight(module: torch.nn.Module, *, rename: dict[str, str] | None = None, envoys
 |-----------|-------------|
 | `module` | An already-instantiated `torch.nn.Module`. There is no repo loading; the model is wrapped as-is. |
 | `rename` | Optional dict of module-path aliases (e.g. `{"transformer.h": "layers"}`). See `Envoy` rename docs. |
-| `envoys` | Optional override for the descendant Envoy class or a `{module_cls: EnvoyCls}` dict. Subclasses can set this as a class attribute to apply throughout the tree. See `src/nnsight/modeling/base.py:40-65`. |
+| `envoys` | Optional override for the descendant Envoy class. Accepts `None` (default base `Envoy`), a single `Envoy` subclass (applied to the whole tree), a `{module_cls: EnvoyCls}` dict (matched by module MRO), or a `{path_suffix_str: EnvoyCls}` dict (matched as a dotted path suffix, alias-aware). Subclasses can set this as a class attribute to apply throughout the tree. See `src/nnsight/intervention/envoy.py:615` (`_resolve_envoy_class`) and `:654` (`_path_matches_key`). |
 
-There is **no** `dispatch=`, **no** `device_map=`, **no** `torch_dtype=` here — those belong to the HF-backed subclasses. Move the model to a device with standard `module.to("cuda")` before or after wrapping; `NNsight` is transparent to device placement.
+There is **no** `dispatch=`, **no** `device_map=`, **no** `torch_dtype=` here — those belong to the HF-backed subclasses. Move the model to a device with standard `module.to("cuda")` before or after wrapping (or use the Envoy's own `.to()`/`.cuda()`/`.cpu()` — see [Device movement](#device-movement) below).
+
+### `envoys=` examples
+
+```python
+import torch
+from nnsight import NNsight
+from nnsight.intervention.envoy import Envoy
+
+class MyLinearEnvoy(Envoy):
+    pass
+
+class MyAttnEnvoy(Envoy):
+    pass
+
+net = torch.nn.Sequential(
+    torch.nn.Linear(5, 10),
+    torch.nn.Linear(10, 2),
+)
+
+# 1. Single class — every descendant is wrapped with MyLinearEnvoy
+model = NNsight(net, envoys=MyLinearEnvoy)
+
+# 2. Dict by module class — matched against each descendant's MRO.
+#    Type keys are checked first.
+model = NNsight(net, envoys={torch.nn.Linear: MyLinearEnvoy})
+
+# 3. Dict by path suffix — matched as a dotted suffix of the envoy path.
+#    "0" matches the first Linear (path ends in ".0"); "1" matches the second.
+model = NNsight(net, envoys={"0": MyLinearEnvoy, "1": MyAttnEnvoy})
+
+# Mixing type and string keys is fine — types win on conflict.
+model = NNsight(net, envoys={
+    torch.nn.Linear: MyLinearEnvoy,   # tried first
+    "self_attn": MyAttnEnvoy,         # alias-aware string suffix fallback
+})
+```
+
+String keys honour `rename=`: `envoys={"attn": MyAttnEnvoy}` matches a path ending in `self_attn` if you also passed `rename={"self_attn": "attn"}`.
+
+### Device movement
+
+`NNsight` overrides `.to()`, `.cuda()`, and `.cpu()` so they call the underlying module's method but **return the Envoy** (not the raw `torch.nn.Module`). This means you can stay on the wrapper after moving devices:
+
+```python
+model = NNsight(net).to("cuda")     # still an NNsight wrapper
+model = model.cpu()                 # still an NNsight wrapper
+
+with model.trace(torch.rand(1, 5, device="cuda")):
+    out = model.output.save()
+```
+
+Source: `src/nnsight/intervention/envoy.py:472` (`.to`), `:488` (`.cpu`), `:495` (`.cuda`). The wrapper also exposes `model.device` (first parameter's device) and `model.devices` (set of all parameter devices).
 
 ## Canonical pattern
 

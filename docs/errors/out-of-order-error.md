@@ -20,14 +20,21 @@ The same surface text can appear from a `Setting ... is out of scope` swap path:
 ValueError: Setting model.transformer.h.5.output.i0 is out of scope for scope <provider>. Did you call an Envoy out of order?
 ```
 
-## Naming note
+## Relationship to MissedProviderError
 
-In `refactor/transform`, `OutOfOrderError` is a **subclass of `Mediator.MissedProviderError`** (see `src/nnsight/intervention/interleaver.py:760`). The `MissedProviderError` base class did not exist in earlier versions; legacy code or tutorials referring to "OutOfOrderError" still resolve to the same exception class. New code should `except Mediator.MissedProviderError` to catch both.
+In `refactor/transform`, `OutOfOrderError` is a **subclass of `Mediator.MissedProviderError`** (see `src/nnsight/intervention/interleaver.py:760`). They surface in **different code paths** but have the **same root cause**: the value you asked for is not (or no longer) available.
 
 ```python
 class MissedProviderError(Exception): ...
 class OutOfOrderError(MissedProviderError): ...
 ```
+
+- `OutOfOrderError` is the **eager** detection: the mediator already saw a provider with that requester string fire, so it raises immediately when the request arrives (`src/nnsight/intervention/interleaver.py:1049`). This catches the "ask for layer 1 after layer 5" pattern at the moment of asking.
+- `MissedProviderError` (its parent) is the **late** detection: the model finished, the worker is still waiting, and `check_dangling_mediators` raises (`src/nnsight/intervention/interleaver.py:652`). This catches the "module didn't fire" or "iter step never happened" patterns where the mediator never saw the provider at all.
+
+**Catching both at once:** `except Mediator.MissedProviderError` covers both. Legacy code or tutorials referring to "OutOfOrderError" still resolve to the same exception class.
+
+`MissedProviderError` is the **primary** error class post-refactor; `OutOfOrderError` is its eager-detection subclass.
 
 ## Cause
 

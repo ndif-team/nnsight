@@ -28,7 +28,11 @@ Or, for trace-only methods (`.skip`, `.next`, etc.) called with no live trace:
 ValueError: Must be within a trace to use `.skip(...)`
 ```
 
-> Older docs (and `CLAUDE.md`) reference a `ValueError: The model did not execute` — that exact string does not appear in the current source. The actual symptom users see is one of the three above.
+> Older docs (and `CLAUDE.md`) reference a `ValueError: The model did not execute` — that exact string does **not appear in the current source**. The actual symptom users see is one of the three above.
+>
+> **Why the historical phrasing existed:** in earlier versions, the most common path to a "trace didn't run" failure was passing no input to `.trace()` and not adding any `tracer.invoke(input)`. The model frame never ran, so accessing `.output` inside an empty trace bottomed out without a clear message. That specific path is much rarer now; the current code raises the more specific `Cannot access ... outside of interleaving` text instead.
+>
+> **Followup item for maintainers:** consider whether to add an explicit early-fail in `tracer.py` for the "no input, no invokes" case so the user gets a friendlier message before the harder-to-read `Cannot access ... outside of interleaving` fires. Either path tells the user the same thing; the interleaving message just requires more context to interpret.
 
 ## Cause
 

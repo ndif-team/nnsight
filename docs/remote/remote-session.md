@@ -131,6 +131,8 @@ See [non-blocking-jobs.md](./non-blocking-jobs.md) for the polling pattern.
 - Sessions don't make the server faster — they cut **queue** and **transport** overhead. A 5-minute session is still 5 minutes of GPU time.
 - Variables defined outside the session can't be referenced inside it (they aren't serialized into the request). Build everything from scratch inside the session.
 - When using `for layer in model.transformer.h:` inside a session, the loop runs once during code extraction — module access is just normal Python, not a server-side iteration. This is the same as local tracing.
+- **One trace fails → whole session aborts.** If any inner trace raises, the session terminates and no further traces run. Don't design fault-tolerant pipelines that expect partial-session success; structure them as separate jobs instead.
+- **No hard cap on traces-per-session today**, but a request-size limit may be added in the future. Very large sessions (hundreds of traces) may run into payload-size or memory limits server-side without an explicit error message.
 
 ## Related
 

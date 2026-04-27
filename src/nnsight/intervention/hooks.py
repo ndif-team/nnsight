@@ -43,8 +43,8 @@ Module contents
 """
 
 from functools import partial, wraps
-from typing import Any, Callable, List, Optional, TYPE_CHECKING
-from .interleaver import Mediator
+from typing import Any, Callable, List, Optional, TYPE_CHECKING, TypeVar
+from .interleaver import Mediator, eproperty
 import torch
 from torch.utils.hooks import RemovableHandle
 from ..util import apply
@@ -349,6 +349,126 @@ def requires_input(fn):
 
 
 # ---------------------------------------------------------------------------
+# Sugar decorators: @hooked_output / @hooked_input
+# ---------------------------------------------------------------------------
+#
+# These combine the lower-level pair (``@eproperty(...)`` + ``@requires_*``)
+# into a single decorator. The lower-level forms remain valid for advanced
+# cases (e.g. custom requires_* implementations, externally-fed eproperties
+# without a hook setup like ``InterleavingTracer.result`` /
+# ``VLLM.logits``).
+#
+# The returned object is the same :class:`eproperty` descriptor, so
+# ``.preprocess`` / ``.postprocess`` / ``.transform`` continue to work for
+# subclasses like :class:`Envoy.input` that need a single-arg view.
+
+T = TypeVar("T")
+
+
+def _make_hooked(requires_decorator: Callable, *, default_key: Optional[str] = None):
+    """Build a sugar decorator that combines ``eproperty`` with ``requires_*``.
+
+    The returned factory mirrors :class:`eproperty`'s call signature
+    (``key=None, description=None, iterate=True``) and produces a decorator
+    that wraps a stub method with the supplied ``requires_decorator`` before
+    feeding it through :class:`eproperty`.
+
+    Args:
+        requires_decorator: One of the ``requires_*`` functions in this
+            module (or a custom equivalent). It is applied to the stub
+            before the resulting :class:`eproperty` is constructed.
+        default_key: Optional key to use when the caller does not pass one.
+            For ``hooked_input`` this is forced to ``"input"`` so both the
+            ``(args, kwargs)`` view and a single-arg view (via ``.preprocess``)
+            can share the same provider key. ``None`` means "fall back to
+            the stub's function name" (matches the default behavior of
+            :class:`eproperty`).
+    """
+
+    def factory(
+        key: Optional[str] = None,
+        description: Optional[str] = None,
+        iterate: bool = True,
+    ):
+        resolved_key = key if key is not None else default_key
+
+        def decorator(fn: Callable[..., T]) -> T:
+            return eproperty(
+                key=resolved_key, description=description, iterate=iterate
+            )(requires_decorator(fn))
+
+        return decorator
+
+    return factory
+
+
+hooked_output = _make_hooked(requires_output)
+"""Sugar for ``@eproperty()`` + ``@requires_output``.
+
+Use this when defining a module-level ``output`` eproperty that should
+register a one-shot forward hook on the underlying module on access.
+
+Example::
+
+    class MyEnvoy(Envoy):
+        @hooked_output()
+        def output(self): ...
+
+Equivalent to::
+
+    @eproperty()
+    @requires_output
+    def output(self): ...
+
+Accepts the same kwargs as :class:`eproperty` — ``key``, ``description``,
+``iterate``. The default ``key`` is the stub's function name.
+"""
+
+
+hooked_input = _make_hooked(requires_input, default_key="input")
+"""Sugar for ``@eproperty(key="input")`` + ``@requires_input``.
+
+Default ``key`` is ``"input"``. Use for any input-flavored eproperty —
+both the raw ``(args, kwargs)`` view and a single-arg convenience view
+(via ``.preprocess`` / ``.postprocess``). Multiple eproperties keyed on
+``"input"`` share a single underlying provider, so the same hook fires
+for both.
+
+Example — raw inputs::
+
+    class MyEnvoy(Envoy):
+        @hooked_input()
+        def inputs(self): ...                # returns (args, kwargs)
+
+Example — convenience first-arg view, sharing the same provider::
+
+    class MyEnvoy(Envoy):
+        @hooked_input()
+        def input(self): ...                 # returns first positional/kwarg
+
+        @input.preprocess
+        def input(self, value):
+            return [*value[0], *value[1].values()][0]
+
+        @input.postprocess
+        def input(self, value):
+            inputs = self.inputs
+            return (value, *inputs[0][1:]), inputs[1]
+
+Equivalent to::
+
+    @eproperty(key="input")
+    @requires_input
+    def input(self): ...
+"""
+
+
+# Operation-level variants (``hooked_operation_output`` /
+# ``hooked_operation_input``) are defined further down, after
+# :func:`requires_operation_output` and :func:`requires_operation_input`.
+
+
+# ---------------------------------------------------------------------------
 # Persistent cache hooks
 # ---------------------------------------------------------------------------
 
@@ -485,6 +605,26 @@ def requires_operation_input(fn):
         return fn(self, *args, **kwargs)
 
     return wrapper
+
+
+# Operation-level sugar decorators — analogues of ``hooked_*`` for source
+# tracing on :class:`OperationEnvoy`.
+
+hooked_operation_output = _make_hooked(requires_operation_output)
+"""Sugar for ``@eproperty()`` + ``@requires_operation_output``.
+
+Use on :class:`OperationEnvoy` stubs that intercept an operation's return
+value (post-hook on the underlying :class:`OperationAccessor`).
+"""
+
+hooked_operation_input = _make_hooked(requires_operation_input, default_key="input")
+"""Sugar for ``@eproperty(key="input")`` + ``@requires_operation_input``.
+
+Use on :class:`OperationEnvoy` stubs that intercept an operation's inputs.
+Multiple stubs keyed on ``"input"`` share a single underlying provider, so
+both the raw ``(args, kwargs)`` view and a convenience first-arg view via
+``.preprocess`` / ``.postprocess`` see the same hook firing.
+"""
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,20 @@ def session(self, *args, tracer_cls: Type[Tracer] = Tracer, **kwargs):
 
 The base `Tracer` (`src/nnsight/intervention/tracing/base.py:47`) captures the with-block body, compiles it into a function, and runs it in the caller's frame via `ExecutionBackend`. Inside that function, every `with model.trace(...):` block is an independent interleaving session — each opens its own worker thread, runs its forward pass, exits, and pushes saved values back into the session frame.
 
+### What `*inputs` does on `model.session(*inputs, ...)`
+
+Positional arguments to `model.session(*inputs, ...)` are forwarded to `Tracer.__init__(*args, ...)` and stored on the tracer as `self.args`. They are then passed to the compiled session function as positional parameters when it runs. **They do NOT propagate into inner `model.trace(...)` blocks** — each inner trace opens its own interleaving session with its own positional arguments.
+
+In practice this is rarely useful — most users define inputs inside the session body. If you do pass `*inputs` here, you're effectively parameterizing the entire compiled session function:
+
+```python
+# inputs become positional args of the compiled session function;
+# they are NOT auto-forwarded into inner trace(...) calls.
+with model.session(some_payload, remote=True) as session:
+    with model.trace("Hello"):                   # "Hello" is the trace input here, not some_payload
+        out = model.lm_head.output.save()
+```
+
 There is also a top-level `nnsight.session(...)` helper (`src/nnsight/__init__.py:116`):
 
 ```python

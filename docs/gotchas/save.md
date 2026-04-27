@@ -9,8 +9,9 @@ sources: [src/nnsight/intervention/tracing/globals.py:9, src/nnsight/interventio
 # Save Pitfalls
 
 ## TL;DR
-- Forget `.save()` and the variable is filtered out when the trace exits — you get `NameError` or stale references.
+- Forget `.save()` and the variable is filtered out when the **root** trace exits — you get `NameError` or stale references.
 - `.save()` is required inside `model.scan(...)` too, not only `model.trace(...)`.
+- **Nested traces don't need `.save()` between them.** Variables flow freely between an inner trace and its enclosing tracing context (e.g. inside a `model.session()`). Only the root-trace boundary applies the save filter.
 - For remote traces, `.save()` is the *only* mechanism that transmits values back — non-saved values are dropped on the server.
 - `local_list.append(x.save())` where `local_list` was defined *outside* the trace ends up empty for remote traces; create the list *inside* the trace.
 - Prefer `nnsight.save(x)` over `x.save()` for non-tensor values — it does not rely on the `PYMOUNT` C extension that monkey-patches `object.save`.
@@ -42,6 +43,69 @@ print(output.shape)   # torch.Size([1, 2, 768])
 ### Mitigation / how to spot it early
 - If a variable "exists inside the trace but disappears outside", you forgot `.save()`.
 - Make `.save()` your default — strip it back if you don't need the value.
+
+---
+
+## Nested traces don't need `.save()` between them
+
+### Symptom
+You're inside a `model.session()` (or any outer tracing context) and want to use a variable produced inside an inner `model.trace()` from another inner trace. You're not sure whether to `.save()` it.
+
+### Cause
+The save filter runs **only when the root tracing context exits**. While `Globals.stack > 1` (i.e., you are inside one tracing context that is itself inside another), the inner context's `push` keeps every variable, not just saved ones (`src/nnsight/intervention/tracing/base.py:537`).
+
+The check is literally:
+
+```python
+if Globals.stack == 1:        # only the outermost trace filters
+    filtered_state = {
+        k: v for k, v in filtered_state.items() if id(v) in Globals.saves
+    }
+    Globals.saves.clear()
+```
+
+So `.save()` only matters at the **root** trace boundary. For variables that need to cross the **outer** boundary (the session's `with` block exiting back to user code), `.save()` is required. For variables that just need to flow between sibling traces inside the session, `.save()` is unnecessary.
+
+### Right code
+
+```python
+import nnsight
+
+with model.session():
+    # Inner trace 1: capture a value, no .save() needed inside the session
+    with model.trace("Madison Square Garden is in the city of"):
+        hs = model.transformer.h[5].output[0][:, -1, :]   # no .save()
+
+    # Inner trace 2: use the value from the previous trace
+    with model.trace("_ _ _ _ _ _ _"):
+        model.transformer.h[5].output[0][:, -1, :] = hs   # works
+        patched = model.lm_head.output[0][-1].argmax(dim=-1).save()  # SAVE — leaves the session
+
+print(patched)  # available outside the session
+```
+
+`patched` needed `.save()` because it crosses the outermost tracing boundary back into ordinary Python. `hs` did not — it only crossed an inner-to-inner boundary.
+
+### Right code — three traces in a session
+
+```python
+with model.session():
+    with model.trace("Hello"):
+        hs1 = model.transformer.h[0].output[0]    # no save
+    with model.trace("World"):
+        hs2 = model.transformer.h[0].output[0]    # no save
+    with model.trace("Combined"):
+        combined = (hs1 + hs2).save()             # save — leaves the session
+```
+
+### Mitigation / how to spot it early
+- The rule is simple: **`.save()` at the root boundary only**. Anything you write to need outside the outermost `with` block.
+- Inside any inner trace (a trace inside a session, a trace inside a session inside a session), variables propagate freely. Only the outermost exit filters.
+- This is also true for remote sessions: only the outermost remote `with model.session(remote=True):` exit triggers the save filter on the server side.
+
+### Related
+- `docs/usage/sessions.md` — full session semantics.
+- [docs/gotchas/cross-invoke.md](cross-invoke.md) — for cross-*invoke* (not cross-trace) variable propagation, which is governed by `CONFIG.APP.CROSS_INVOKER`.
 
 ---
 

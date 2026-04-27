@@ -55,14 +55,21 @@ Any object that hosts `eproperty` descriptors must satisfy the `IEnvoy` protocol
 ```python
 class IEnvoy(Protocol):
     interleaver: "Interleaver"
-    path: str  # may be None / empty for tracer-level eproperties
+    path: Optional[str]  # absent / empty for tracer-level eproperties
 ```
+
+`path` is the provider-path prefix used to build the requester string. `eproperty._build_requester` (`interleaver.py:260`) uses it like this:
+
+- If the IEnvoy has no `path` attribute, or `path` is `None` / empty, the requester is just the eproperty key (e.g. `"result"`).
+- Otherwise the requester is `f"{path}.{key}"` (e.g. `"model.transformer.h.0.output"`).
+
+Concretely: `Envoy.path` is the dotted module path; `InterleavingTracer` has no `path`, so `tracer.result` resolves to the bare key `"result"`.
 
 Implementors in this codebase:
 
 - `Envoy` — module-level (`.output`, `.input`, `.inputs`, `.skip`)
 - `OperationEnvoy` — operation-level for `.source` (`.output`, `.input`, `.inputs`)
-- `InterleavingTracer` — tracer-level (`.result`)
+- `InterleavingTracer` — tracer-level (`.result`, no path)
 - vLLM `VLLM` — `.logits`, `.samples`
 
 ## eproperty: the descriptor
@@ -153,6 +160,44 @@ For values that don't come from a PyTorch hook (vLLM logits, generation results,
 
 An `eproperty` without a `requires_*` decorator is valid for values that are pushed externally rather than pulled from a hook. Example: `InterleavingTracer.result` (`tracing/tracer.py:581`) — fed by `Envoy.interleave` calling `interleaver.handle("result", result)`.
 
+## Calling modules in a trace
+
+`Envoy.__call__(*args, hook=False, **kwargs)` (`envoy.py:239`) lets you invoke a module from inside a trace as an "ad hoc" computation. The `hook` flag controls whether interleaving hooks fire:
+
+```python
+def __call__(self, *args, hook: bool = False, **kwargs):
+    return (
+        self._module.forward(*args, **kwargs)
+        if self.interleaver.current is not None and not hook
+        else self._module(*args, **kwargs)
+    )
+```
+
+- **Default (`hook=False`) inside an active trace:** routes through `module.forward(...)`, bypassing the wrapped `__call__` and therefore **not** firing the `.output` / `.input` hooks. The call runs as a one-off computation that doesn't show up in the interleaver's request stream.
+- **`hook=True`:** routes through `module(...)`, firing all registered hooks just like a normal forward pass.
+- **Outside a trace** (`interleaver.current is None`): always routes through `module(...)`.
+
+The canonical use is logit-lens-style decoding, where you want to run `lm_head` on intermediate hidden states without interception:
+
+```python
+with model.trace("The Eiffel Tower is in"):
+    for i in range(12):
+        hs = model.transformer.h[i].output[0]
+        # Call lm_head and ln_f directly — no .output / .input hooks fire.
+        logits = model.lm_head(model.transformer.ln_f(hs))
+        tokens = logits.argmax(dim=-1).save()
+```
+
+Pass `hook=True` when you need the auxiliary call to participate in interception — e.g. caching, source tracing, or feeding through another envoy's eproperty:
+
+```python
+# Apply an auxiliary SAE module and access its hooked .output afterwards.
+with model.trace("Hello"):
+    hidden = model.transformer.h[5].output[0]
+    reconstructed = model.sae(hidden, hook=True)   # hooks fire on model.sae
+    model.transformer.h[5].output[0][:] = reconstructed
+```
+
 ## Custom Envoy classes
 
 Wire custom Envoy classes into the model via the `envoys=` parameter:
@@ -176,7 +221,7 @@ model = nnsight.LanguageModel(
 
 - **eproperty `__get__` raises outside interleaving.** `model.transformer.h[0].output` outside a trace gives `ValueError: Cannot access ...`. Wrap in `with model.trace(...)`.
 - **Don't mutate `Envoy._module` directly.** Reassign through `setattr` so child Envoys are reconstructed and the source accessor cache is preserved.
-- **`Envoy.__call__(*args, hook=False)` bypasses interleaving** when called from inside a trace and `hook=False` (the default). Pass `hook=True` to apply hooks (used for SAE/auxiliary modules — see [Patterns](../patterns/index.md)).
+- **`Envoy.__call__` defaults to `hook=False` inside a trace.** It routes through `module.forward(...)` and skips interception — see [Calling modules in a trace](#calling-modules-in-a-trace).
 - **`transform` is one-shot per access.** Re-accessing the same eproperty re-binds a fresh transform. Don't rely on the previous transform persisting.
 - **`@input.preprocess` / `@input.postprocess` reuse the property name.** It's a mini-DSL on the descriptor — Python sees three `def input` blocks but only the first one (the `@eproperty(...)` call) is the descriptor; the others register hooks on it.
 

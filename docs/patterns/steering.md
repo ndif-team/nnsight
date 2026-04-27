@@ -131,7 +131,7 @@ with model.generate(prompt, max_new_tokens=20) as tracer:
 print(model.tokenizer.decode(text[0]))
 ```
 
-For step-conditional steering (e.g. steer only on the first 5 tokens), use `tracer.iter[...]`. See `docs/usage/iter.md`.
+For step-conditional steering (e.g. steer only on the first 5 tokens), use `tracer.iter[...]`. See `docs/usage/iter-all-next.md`.
 
 ### Refusal direction
 

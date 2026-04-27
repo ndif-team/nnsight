@@ -93,9 +93,23 @@ For anything else (e.g. a subscript): name = `"unknown_<idx>"`.
 
 The `name_index` `defaultdict(int)` ensures repeated calls to the same fn get distinct names.
 
-#### Why decorators are stripped (source.py:177)
+#### Why decorators are stripped (source.py:183-185)
 
-Before walking the AST, `convert()` strips `decorator_list` from every `FunctionDef` and `AsyncFunctionDef`. This is because the rewritten forward is `exec`'d outside its original class context, and decorators that depend on class state (e.g. transformers' `@auto_docstring`, which reads `cls.__mro__`) would crash.
+Before walking the AST, `convert()` strips `decorator_list` from **every** `FunctionDef` and `AsyncFunctionDef` it finds:
+
+```python
+for node in ast.walk(tree):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        node.decorator_list = []
+```
+
+This is unconditional — `ast.walk` visits every function definition, and *all* decorators are removed regardless of what they are. That includes `@staticmethod`, `@classmethod`, `@property`, `@torch.no_grad()`, and class-state-dependent decorators like transformers' `@auto_docstring`. Confirmed by direct AST inspection: every `decorator_list` becomes empty after `convert()`.
+
+**Why strip them at all?** The rewritten forward is `exec`'d outside its original class context. Decorators that depend on class state (e.g. `@auto_docstring`, which reads `cls.__mro__`) would crash. Stripping unconditionally is simpler than trying to detect which decorators are "safe" to keep.
+
+**Practical consequence — `@staticmethod` / `@classmethod` on a forward.** If a module's `forward` (or a nested function inside it) is declared with `@staticmethod` or `@classmethod`, the rewritten version loses that marker. In typical PyTorch modules this is **not** an issue — `forward` is always a regular instance method. The rewritten function expects the module as its first positional argument, which `SourceAccessor.__call__` provides (`source.py:459`).
+
+The edge case worth knowing: if `source` tracing is being applied to a non-module function that *did* depend on a method-descriptor decorator, the stripped version may not behave identically to the original. In practice this hasn't surfaced because `.source` is invoked on regular module forwards.
 
 #### Why the function-start filter (source.py:127)
 

@@ -207,7 +207,55 @@ async def main():
 asyncio.run(main())
 ```
 
-Behind the scenes: `VLLM.trace()` injects `AsyncVLLMBackend` (`async_backend.py:19`), which submits the request to `AsyncLLM.generate()` and returns an async generator that yields `RequestOutput` objects. On the **final** output, saves are pulled from workers via `collective_rpc("collect_nnsight", ...)` and attached as `output.saves`. (Saves on intermediate outputs are not currently collected in `__aiter__` — only on `output.finished`. See `async_backend.py:79`.)
+Behind the scenes: `VLLM.trace()` injects `AsyncVLLMBackend` (`async_backend.py:19`), which submits the request to `AsyncLLM.generate()` and returns an async generator that yields `RequestOutput` objects. Saves are collected **only when `output.finished == True`** — at that point NNsight pulls them from workers via `collective_rpc("collect_nnsight", ...)` and attaches them as `output.saves`. Intermediate (non-final) outputs do **not** trigger save collection. See `async_backend.py:77`.
+
+> If you need per-step saves at every yielded output, use `tracer.iter[:]` inside the trace block — they accumulate in your list and are returned together at the end. (A per-yield collection mode existed briefly during development and may return as an opt-in option in the future, but the current behavior is finished-only.)
+
+#### Awaiting a single result (no streaming)
+
+If you don't care about streaming and just want the final output, await the backend directly. `AsyncVLLMBackend.__await__` proxies the underlying generator (`async_backend.py:74`):
+
+```python
+async def main():
+    with model.trace("Hello", max_tokens=3) as tracer:
+        logits = model.logits.save()
+
+    final_output = await tracer.backend()
+    print(final_output.saves["logits"].shape)
+```
+
+For most use cases `async for` is more useful — it gives you per-step output. Use `await` when you only want the terminal `RequestOutput`.
+
+#### Multi-prompt async streaming
+
+Each `tracer.invoke(...)` is one vLLM request. With async, all requests are submitted at once and stream concurrently — vLLM's continuous batcher dynamically batches them on the GPU:
+
+```python
+prompts = ["The Eiffel Tower is in", "The Colosseum is in"]
+
+async def main():
+    with model.trace(max_tokens=5) as tracer:
+        out_ids = [list() for _ in range(len(prompts))].save()
+        for i, prompt in enumerate(prompts):
+            with tracer.invoke(prompt):
+                with tracer.all():
+                    out_ids[i].append(model.samples.item())
+
+    async for output in tracer.backend():
+        print(f"req={output.request_id} finished={output.finished}")
+
+asyncio.run(main())
+```
+
+Order of `output.request_id`s is **not** the order of your invokes — match by `request_id` if order matters.
+
+#### Async gotchas
+
+- `mode="async"` must be on the `VLLM(...)` constructor; it has no effect on `trace()`.
+- `remote=True` is incompatible with `mode="async"` — `VLLM.trace` skips async-backend injection if `remote` is passed (`vllm.py:449`). NDIF currently runs the sync vLLM path only.
+- The underlying generator is **single-shot**. Once iterated to completion, calling `tracer.backend()` again will not restart generation.
+- `output.saves` only contains values on the **finished** output (`output.finished == True`). Intermediate outputs have an empty / sparsely-populated saves dict.
+- Pipeline parallelism (`pipeline_parallel_size > 1`) is not supported.
 
 ### Ray distributed executor
 
@@ -286,7 +334,7 @@ Print `model` to see the actual tree for your model.
 - **Dispatching is automatic but takes a while.** First `.trace()` after `dispatch=False` triggers full vLLM engine init. Pass `dispatch=True` if you want that pause during construction.
 - **`gpu_memory_utilization` defaults to 0.9.** For small models or shared GPUs, lower it explicitly. The test suite uses `0.1`.
 - **CUDA graphs are not the only thing forbidden.** Speculative decoding, custom CUDA samplers, and certain attention backends may also break hooks. Stick with the default attention backend if interventions misbehave.
-- **Async streaming intermediate saves are not collected in `__aiter__`.** As of `async_backend.py:79`, only `output.finished == True` outputs trigger `collect_nnsight`. If you want per-step saves on the final output, use `tracer.iter[:]` inside the trace block (saves accumulate in your list, then are returned at the end).
+- **Async streaming saves are collected only when `output.finished == True`.** As of `async_backend.py:77`, `__aiter__` calls `collect_nnsight` on the final output only — intermediate yields don't trigger collection. If you want per-step saves, accumulate them inside `tracer.iter[:]` (saves end up on the final output's `.saves`).
 
 ## Future work (NOT yet supported)
 
@@ -308,6 +356,13 @@ If you need any of these, file an issue or read `IDEAS.md` for the design sketch
 
 ## Related
 
+### Demo repositories
+
+- [**nnsight-vllm-demos**](https://github.com/ndif-team/nnsight-vllm-demos) — runnable end-to-end demos including an async chat interface with SAE-based steering. Linked from the v0.6.0 release notes.
+- [**nnsight-vllm-lens-comparison**](https://github.com/ndif-team/nnsight-vllm-lens-comparison) — comparison of logit-lens / tuned-lens style probes running on the NNsight vLLM integration.
+
+### Docs and source
+
 - [docs/models/index.md](index.md) — pick the right wrapper
 - [docs/models/language-model.md](language-model.md) — text-only HF alternative
 - [docs/remote/](../remote/) — running traces on NDIF (an NDIF deployment may be vLLM-backed)
@@ -319,4 +374,4 @@ If you need any of these, file an issue or read `IDEAS.md` for the design sketch
 - `src/nnsight/modeling/vllm/sampling.py` — `NNsightSamplingParams`
 - `src/nnsight/modeling/vllm/async_backend.py` — `AsyncVLLMBackend`
 - `tests/test_vllm.py` — runnable examples covering inference, generation, sampling, interventions, batching, TP, async streaming
-- 0.6.0 release notes — vLLM is the headline feature of v0.6.0
+- [v0.6.0 release notes](../../0.6.0.md) — vLLM is the headline feature of v0.6.0

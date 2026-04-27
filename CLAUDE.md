@@ -24,8 +24,7 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 
 ### "I want multi-token / autoregressive generation"
 - [docs/usage/generate.md](docs/usage/generate.md) — `model.generate(input, max_new_tokens=N)`
-- [docs/usage/iter.md](docs/usage/iter.md) — step-by-step control with `tracer.iter[...]`
-- [docs/usage/all-and-next.md](docs/usage/all-and-next.md) — `tracer.all()`, `module.next()`
+- [docs/usage/iter-all-next.md](docs/usage/iter-all-next.md) — `tracer.iter[...]`, `tracer.all()`, `tracer.next()` / `module.next()`
 
 ### "I want to run multiple prompts at once"
 - [docs/usage/invoke-and-batching.md](docs/usage/invoke-and-batching.md) — `tracer.invoke(...)`, batched lists, empty invokes
@@ -137,7 +136,7 @@ Internalize these BEFORE writing nnsight code. Each links to the full doc.
 |---|---|
 | Always `.save()` what you want past the trace | Values are filtered out on trace exit unless `.save()` (or `nnsight.save(x)`) was called. → [save](docs/gotchas/save.md) |
 | Module access order matters within an invoke | Access modules in **forward-pass order** within a single invoke or you'll deadlock. To access "out of order" use a separate invoke. → [order-and-deadlocks](docs/gotchas/order-and-deadlocks.md) |
-| `tracer.iter[:]` swallows trailing code | Code after `for step in tracer.iter[:]:` never executes. Use a separate empty invoke or bounded `iter[:N]`. → [iteration](docs/gotchas/iteration.md) |
+| `tracer.iter[:]` blocks trailing module access | Pure-Python after `for step in tracer.iter[:]:` runs, but any module `.output`/`.input` access after the loop raises `OutOfOrderError` (the forward passes are done). Use a separate empty invoke or bounded `iter[:N]`. → [iteration](docs/gotchas/iteration.md) |
 | `model.trace()` needs input or invokes | Bare `model.trace()` with neither errors. Provide input to `.trace(...)` or use `tracer.invoke(...)`. → [order-and-deadlocks](docs/gotchas/order-and-deadlocks.md) |
 | Tuple outputs need careful handling | Many transformer blocks return tuples — use `[0]` indexing for in-place or replace the whole tuple. → [modification](docs/gotchas/modification.md) |
 | In-place `[:] =` ≠ replacement `=` | They have different semantics — pick deliberately. → [modification](docs/gotchas/modification.md) |
@@ -147,7 +146,7 @@ Internalize these BEFORE writing nnsight code. Each links to the full doc.
 | `.scan(...)` still requires `.save()` | Scan is a tracing context too — same exit-filter rules. → [save](docs/gotchas/save.md) |
 | Backward is a separate session | Get `.output` BEFORE `with tensor.backward():`; access `.grad` (on tensors, not modules) ONLY inside it. → [backward](docs/gotchas/backward.md) |
 | Remote: `.save()` is the transmission mechanism | Local lists `.append()`-ed outside a remote trace stay empty; create the list inside the trace. → [remote](docs/gotchas/remote.md) |
-| `LanguageModel` on a pre-loaded HF model needs `tokenizer=` | Otherwise you get `AttributeError: Tokenizer not found`. → [tokenizer-not-found](docs/errors/tokenizer-not-found.md) |
+| `LanguageModel` on a pre-loaded HF model needs `tokenizer=` | Otherwise you get `AttributeError: Tokenizer not found`. → [language-model](docs/models/language-model.md) |
 | Don't call `.source` on a module from inside another `.source` | Access the submodule directly: `model.transformer.h[0].attn.some_submodule.source`. → [integrations](docs/gotchas/integrations.md) |
 
 Full inventory at [docs/gotchas/index.md](docs/gotchas/index.md).
@@ -171,7 +170,23 @@ If the user asks how to use nnsight in Claude Code or via Skills, point them to 
 
 ## Versions
 
-These docs target nnsight 0.6+ on the `refactor/transform` branch (lazy hook execution, `eproperty` extension API, `SourceAccessor` cached on module, `Mediator` hook-tracking). Do **not** suggest deprecated v0.4 patterns: `nnsight.cond`, `nnsight.list`, `session.iter`, `nnsight.local`, the `nnsight.trace` decorator. Standard Python `if`/`for` work inside trace contexts since v0.5.
+These docs target nnsight 0.6+ on the `refactor/transform` branch (lazy hook execution, `eproperty` extension API, `SourceAccessor` cached on module, `Mediator` hook-tracking). Standard Python `if`/`for` work inside trace contexts since v0.5.
+
+### Deprecated APIs — do not suggest
+
+Agents must not propose any of the following patterns when writing new nnsight code:
+
+| Deprecated | Replacement | Notes |
+|---|---|---|
+| `model.trace(input, scan=True, validate=True)` | `with model.scan(input): ...` (separate context) | The `scan=`/`validate=` kwargs on `.trace()` were removed long before `refactor/transform`. The dedicated [`model.scan(...)`](docs/usage/scan.md) context is the canonical replacement. |
+| `model.transformer.h[-1].next()` (`module.next()`) | `tracer.next()` | Still works but emits `DeprecationWarning` (`src/nnsight/intervention/envoy.py:440`). See [docs/usage/iter-all-next.md](docs/usage/iter-all-next.md). |
+| `model.iter[...]` / `model.all()` | `tracer.iter[...]` / `tracer.all()` | `model`-level iteration helpers are deprecated; use the tracer-level equivalents. |
+| `nnsight.cond` | Plain Python `if` inside a trace | Removed in v0.5. Worker thread sees real tensors. |
+| `nnsight.list` / `nnsight.dict` / `nnsight.bool` etc. | Standard Python types + `.save()` / `nnsight.save(...)` | Removed in v0.5. |
+| `session.iter(...)` | Plain Python `for` inside `model.session()` | Removed in v0.5. |
+| `nnsight.local()` | (no replacement needed) | Removed in v0.5. |
+| `@nnsight.trace` decorator | `with model.trace(...):` | Removed in v0.5. |
+| `nnsight.apply(fn, ...)` | Call `fn(...)` directly inside the trace | The trace body is real Python — call functions directly. |
 
 ---
 

@@ -2,7 +2,7 @@
 title: Stop and Early Exit
 one_liner: Cut a forward pass short with `tracer.stop()`; raises `EarlyStopException`, swallowed by the interleaver.
 tags: [usage, control-flow, early-stop]
-related: [docs/usage/trace.md, docs/usage/iter.md, docs/usage/skip.md]
+related: [docs/usage/trace.md, docs/usage/iter-all-next.md, docs/usage/skip.md]
 sources: [src/nnsight/intervention/tracing/tracer.py:447, src/nnsight/intervention/interleaver.py:355, src/nnsight/intervention/interleaver.py:1264, src/nnsight/intervention/interleaver.py:589]
 ---
 
@@ -91,6 +91,6 @@ with model.trace("Hello") as tracer:
 ## Related
 
 - `docs/usage/trace.md`
-- `docs/usage/iter.md`
+- `docs/usage/iter-all-next.md`
 - `docs/usage/skip.md`
 - `docs/usage/save.md`

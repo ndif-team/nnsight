@@ -2,7 +2,7 @@
 title: Generate
 one_liner: Multi-token autoregressive generation under a tracing context (`model.generate(...)`).
 tags: [usage, tracing, generation]
-related: [docs/usage/trace.md, docs/usage/iter.md, docs/usage/all-and-next.md, docs/usage/invoke-and-batching.md]
+related: [docs/usage/trace.md, docs/usage/iter-all-next.md, docs/usage/invoke-and-batching.md]
 sources: [src/nnsight/modeling/language.py:140, src/nnsight/intervention/envoy.py:963, src/nnsight/intervention/tracing/iterator.py, src/nnsight/intervention/tracing/tracer.py:581]
 ---
 
@@ -68,7 +68,7 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
         logits_per_step.append(model.lm_head.output[0, -1].argmax(dim=-1))
 ```
 
-For details on `tracer.iter[...]`, `tracer.all()`, `module.next()`, and the unbounded-iterator footgun, see `docs/usage/iter.md` and `docs/usage/all-and-next.md`.
+For details on `tracer.iter[...]`, `tracer.all()`, `module.next()`, and the unbounded-iterator footgun, see `docs/usage/iter-all-next.md`.
 
 ## Difference vs `.trace()`
 
@@ -101,7 +101,6 @@ with model.generate("Hello", max_new_tokens=5, remote=True) as tracer:
 ## Related
 
 - `docs/usage/trace.md`
-- `docs/usage/iter.md`
-- `docs/usage/all-and-next.md`
+- `docs/usage/iter-all-next.md`
 - `docs/usage/invoke-and-batching.md`
 - `docs/usage/save.md`

@@ -116,7 +116,7 @@ Some research splits the residual into the attention contribution vs the MLP con
 
 ## Gotchas
 
-- `block.output` is usually a tuple (residual, present, attentions, ...). Index `[0]` for the residual stream. See `docs/usage/access-and-modify.md`.
+- `block.output` shape varies by transformers version. **In `transformers<5.0` it's a tuple** `(residual, present, attentions, ...)` and you index `[0]` to get the residual stream. **In `transformers>=5.0` block outputs are no longer tuples** — `block.output` *is* the residual tensor directly. If `block.output[0]` looks wrong on your model, check your transformers version and drop the `[0]`. See `docs/usage/access-and-modify.md`.
 - Calling `model.lm_head(...)` inside a trace runs `forward()`, not `__call__()`, which is what you want here. Calling it via something that triggers the interleaving system (e.g. `model.lm_head.output`) would mean "intercept the lm_head call that the model itself makes", which is a different operation.
 - Do not save inside a Python list and then expect `print(layer_top_tokens)` to show tensors after the trace if you forgot `.save()` on each element. Each tensor needs `.save()` (or wrap the list with `nnsight.save(...)`).
 

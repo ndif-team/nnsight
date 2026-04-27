@@ -75,6 +75,11 @@ class AsyncVLLMBackend(Backend):
         return self._generator.__await__()
 
     async def __aiter__(self):
+        # Saves are collected ONLY on the finished output (one per request).
+        # Intermediate (non-finished) outputs yield without `output.saves` populated.
+        # A per-yield streaming-saves mode existed briefly during development and
+        # may return as an opt-in option in the future, but the current behavior
+        # is finished-only.
         async for output in self._generator:
             if output.finished:
                 finished = [output.request_id]

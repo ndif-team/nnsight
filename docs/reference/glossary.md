@@ -67,7 +67,20 @@ A **one-shot** hook self-removes after firing once; nnsight uses these for `.out
 
 ## Persistent object (serialization)
 
-For remote execution, nnsight serializes intervention closures using `cloudpickle`. Local modules registered via `nnsight.register(module)` are serialized **by value** (their source code is shipped), as opposed to **by reference** (only the import path is shipped). Editable installs (`pip install -e`) are auto-detected and serialized by value. See [../developing/serialization.md](../developing/serialization.md).
+An object marked as **persistent** is **not pickled by value**. Instead, when nnsight's pickler hits it, only an opaque ID (a "stub" / key / string) is written into the byte stream. On the receiving side, the unpickler looks the ID up in a dict it was given at construction time and substitutes the **actual** object that lives in that process.
+
+The mechanism is built on Python's standard `pickle` `persistent_id` / `persistent_load` protocol:
+
+- **On the sender:** `CustomCloudPickler.persistent_id(obj)` (`src/nnsight/intervention/serialization.py:888`) returns `obj.__dict__["_persistent_id"]` if present. That string is written into the serialized stream in place of the object's contents.
+- **On the receiver:** `CustomCloudUnpickler` is constructed with a `persistent_objects: dict[str, Any]` mapping IDs to concrete objects (`serialization.py:946`). When `persistent_load(pid)` is called by pickle for a persistent reference, it looks up `pid` in that dict and returns the matching object. Unknown IDs raise `pickle.UnpicklingError`.
+
+So the meaning of "persistent" is: "I know this object already lives on the remote side and I want it swapped in for my ID — don't ship its bytes, just ship the ID."
+
+The main real-world use case is **NDIF**: the actual `nn.Module`s of the deployed model already exist on the NDIF server. When a user submits a trace, nnsight does not re-pickle the entire model into the request — it tags those modules as persistent, ships only their IDs, and NDIF's unpickler swaps in the live model modules on its end. The same pattern applies to anything else that "already exists" on the server: shared caches, buffers, registered helper objects.
+
+To mark an object as persistent, set `obj.__dict__["_persistent_id"] = "<some-id>"`. To resolve them on the other side, pass `loads(data, persistent_objects={"<some-id>": real_obj, ...})`.
+
+See [../developing/serialization.md](../developing/serialization.md) for the full pickling pipeline (also covers source-based function serialization for cross-Python-version compatibility, which is a separate but related topic).
 
 ## Pymount
 

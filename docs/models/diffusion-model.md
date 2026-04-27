@@ -177,6 +177,26 @@ with sd.generate("A cat", num_inference_steps=2, seed=42) as tracer:
 
 When multiple prompts are batched, each gets `seed + offset` to avoid identical noise (`diffusion.py:435`).
 
+### Accessing the underlying `DiffusionPipeline`
+
+For non-traced operations on the raw diffusers pipeline (saving, scheduler swaps, `pipeline.to(...)`, attention slicing, custom call paths, etc.), reach through `model._model` — that's the `Diffuser` wrapper — and grab its `.pipeline` attribute:
+
+```python
+pipeline = model._model.pipeline       # the raw diffusers DiffusionPipeline
+
+# Anything diffusers supports works directly on it
+pipeline.scheduler = SomeOtherScheduler.from_config(pipeline.scheduler.config)
+pipeline.enable_attention_slicing()
+pipeline.save_pretrained("./my-finetune")
+
+# You can also call it directly (bypasses NNsight entirely — same as the snippet below)
+output = pipeline("A cat", num_inference_steps=20)
+```
+
+Source: `src/nnsight/modeling/diffusion.py:193` (`Diffuser.__init__` stores `self.pipeline`) and `:218` (`Diffuser.forward` delegates `__call__` to `self.pipeline`).
+
+Once you've mutated the pipeline in place, the next `model.trace()` / `model.generate()` call uses the modified pipeline. NNsight only re-wraps the `nn.Module` components on construction, so swapping non-module components (like the scheduler) at any time is fine.
+
 ### Run without a tracing context
 
 ```python
@@ -196,7 +216,7 @@ This bypasses NNsight entirely — no interleaver, no envoys, just the underlyin
 | `model.tokenizer` | Pipeline's tokenizer. Loaded eagerly even in meta mode. | `_build_pipeline_from_config` at `diffusion.py:120` |
 | `model.config` | Pipeline `model_index.json` config dict. | `diffusion.py:285` |
 | `model.automodel` | The diffusers pipeline class used for loading. | `diffusion.py:270` |
-| `model._model` | The underlying `Diffuser` wrapper (which exposes `.pipeline` for the raw `DiffusionPipeline`). | `diffusion.py:277` |
+| `model._model` | The underlying `Diffuser` wrapper. Use `model._model.pipeline` to reach the raw diffusers `DiffusionPipeline` (for non-traced operations — see [Accessing the underlying DiffusionPipeline](#accessing-the-underlying-diffusionpipeline)). | `diffusion.py:277`, `diffusion.py:193` |
 | `tracer.result` (inside trace) | The final pipeline output (typically a dataclass with `.images`). |
 
 The pipeline's **scheduler** is **not** wrapped as an Envoy — only `nn.Module` and `PreTrainedTokenizerBase` components are (`diffusion.py:201`). To intervene on scheduler behavior you'd modify the pipeline directly.

@@ -134,7 +134,7 @@ See `tests/test_lm.py:691` and `tests/test_source.py` for tested examples of sou
 
 - The operation name can vary between transformer versions. Always `print(model.transformer.h[0].attn.source)` first to confirm what is available.
 - `.source` requires accessing it on the module that *calls* the operation. Do not chain `.source.foo.source` on a *submodule* - access that submodule directly. See `docs/usage/source.md`.
-- For Llama / Mistral / Qwen the path is typically `model.model.layers[i].self_attn.source....` instead of `model.transformer.h[i].attn.source...`.
+- For Llama / Mistral / Qwen the path is typically `model.model.layers[i].self_attn.source....` instead of `model.transformer.h[i].attn.source...`. The exact operation name (`attention_interface_0`, `eager_attention_forward_0`, etc.) varies by family. **There is no universal table — read the model's `forward` source code (or `print(model.<path>.source)`) to find the operation name.** This is the canonical way to discover op names per architecture.
 - `attn_implementation="flash_attention_2"` is the fastest at runtime but does not let you read attention weights. Pay the cost and use eager when you need patterns.
 - `[batch, n_heads, q_seq, k_seq]` can be very large for long contexts (`seq^2` per head per layer per batch element). For long-context analysis, save only the heads / layers you need.
 

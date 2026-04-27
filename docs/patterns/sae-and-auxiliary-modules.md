@@ -95,8 +95,10 @@ sae = SAE(model.config.n_embd, 4 * model.config.n_embd).to(model.device)
 # The Envoy tree will pick this up as model.transformer.h[LAYER].sae.
 model.transformer.h[LAYER]._module.add_module("sae", sae)
 
-# Re-trace to get the new submodule wrapped.
-# (If you mounted before any trace, this is automatic.)
+# NOTE: the exact mechanism for refreshing the Envoy tree after add_module
+# is currently under-documented — confirm with the maintainers if you hit
+# "module not in envoy tree" errors. As a workaround you can wrap the model
+# fresh (NNsight(...)) after mounting all SAEs, before any trace.
 
 prompt = "The Eiffel Tower is in the city of"
 
@@ -131,25 +133,68 @@ See `docs/usage/skip.md`.
 
 ## Pattern D: first-class hookable values via `eproperty`
 
-If the auxiliary module has a derived view you read often (e.g. `sae.encode(hs)` as "features"), define it as an `eproperty` on a custom Envoy subclass so it behaves like `.output`:
+If you want a derived view of an auxiliary module's value to behave like `.output` — including in-place edits propagating back into the running forward pass — define an `eproperty` on a custom Envoy subclass with `preprocess`/`postprocess`/`transform`. This is the same machinery that backs the per-head attention pattern (`docs/patterns/per-head-attention.md`).
+
+Worked example: split a module's output into a list (one tensor per head), let the user edit any head in-place, then recombine and feed the recombined value back. The `transform` callback is what makes the in-place edits propagate downstream.
 
 ```python
-from nnsight.intervention.envoy import Envoy, eproperty
+import torch
+from nnsight import NNsight
+from nnsight.intervention.envoy import eproperty
 from nnsight.intervention.hooks import requires_output
 
-class SAEEnvoy(Envoy):
+
+class HeadedAttn(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.n_heads = 8
+        self.head_dim = 6
+        self.attn = torch.nn.Linear(self.n_heads * self.head_dim,
+                                    self.n_heads * self.head_dim)
+
+    def forward(self, x):
+        return self.attn(x)
+
+
+class HeadsEnvoy(NNsight):
+    """Custom Envoy that exposes attention output split per head."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cached = None
+
     @eproperty(key="output")
     @requires_output
-    def features(self): ...
+    def heads(self):
+        # Stub — the decorator stack does the work; this body is never run.
+        ...
 
-    @features.preprocess
-    def features(self, value):
-        # value is the SAE's full output. Compute the feature codes and
-        # expose them as a clone so the user can edit without aliasing.
-        return self._module.encoder(self._module._last_input).clone()
+    @heads.preprocess
+    def heads(self, value):
+        # Returned to the user as a list of [batch, head_dim] tensors.
+        # The user can mutate any element in place.
+        self.cached = list(value.view(self.n_heads, value.shape[0], self.head_dim))
+        return self.cached
+
+    @heads.transform
+    def heads(self, value):
+        # Fired after the user is done editing. Recombine the (possibly mutated)
+        # heads and return the value that should be swapped into the model.
+        return torch.cat(value, dim=1).view(value[0].shape[0], -1)
+
+
+model = HeadsEnvoy(HeadedAttn())
+example = torch.randn(2, model.n_heads * model.head_dim)
+
+with model.trace(example):
+    heads = model.heads.save()       # list of per-head tensors
+    heads[0][:] = 0                  # ablate head 0 — propagates via transform
+    output = model.output.save()
 ```
 
-For the full mechanism (preprocess / postprocess / transform), see `docs/usage/extending.md` and the worked example in `tests/test_transform.py`.
+For the full mechanism (`preprocess` / `postprocess` / `transform` semantics), see `docs/usage/extending.md`. A second worked example with `tests/test_transform.py` shows the same pattern applied directly to a transformer attention output.
+
+> **Reference SAE checkpoints.** A worked example loading a public SAE checkpoint (e.g., Goodfire / EleutherAI / Anthropic releases) into nnsight is on the wishlist but not yet in the docs. PRs welcome.
 
 ## Interpretation tips
 

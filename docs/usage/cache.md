@@ -2,7 +2,7 @@
 title: Activation Cache
 one_liner: tracer.cache() records module outputs (and optionally inputs) into a dict-like object that survives generation steps.
 tags: [usage, cache, intervention]
-related: [docs/usage/access-and-modify.md, docs/usage/iter.md, docs/usage/save.md]
+related: [docs/usage/access-and-modify.md, docs/usage/iter-all-next.md, docs/usage/save.md]
 sources: [src/nnsight/intervention/tracing/tracer.py:28, src/nnsight/intervention/tracing/tracer.py:465, src/nnsight/intervention/hooks.py:356, src/nnsight/intervention/hooks.py:397]
 ---
 
@@ -84,6 +84,42 @@ with model.generate("Hello", max_new_tokens=5) as tracer:
 # (one per generation step) since each step hit the same path.
 ```
 
+### Entry vs list[Entry] dispatch
+
+`Cache.add` (`src/nnsight/intervention/tracing/tracer.py:228`) decides at runtime whether `cache[path]` stays a single `Cache.Entry` or gets promoted to a `list[Cache.Entry]`. The first hit on a path stores an `Entry`. The second hit on the same `key` (e.g. another `output` for the same module) replaces it with a list and appends from then on.
+
+That means the user-facing shape depends on how many times the module fired during the trace:
+
+```python
+# Single forward pass: cache[path] is a Cache.Entry
+with model.trace("Hello") as tracer:
+    cache = tracer.cache(modules=[model.transformer.h[-1]])
+
+entry = cache['model.transformer.h.11']
+print(type(entry))            # Cache.Entry
+print(entry.output[0].shape)  # works directly
+```
+
+```python
+# Multi-step generation: same path hit N times → list[Cache.Entry]
+with model.generate("Hello", max_new_tokens=5) as tracer:
+    cache = tracer.cache(modules=[model.transformer.h[-1]])
+
+entries = cache['model.transformer.h.11']
+print(type(entries))               # list
+print(len(entries))                # 5
+print(entries[0].output[0].shape)  # per-step access via indexing
+```
+
+Defensive read pattern when you don't know which case you're in:
+
+```python
+val = cache['model.transformer.h.11']
+outputs = [e.output for e in val] if isinstance(val, list) else [val.output]
+```
+
+The convenience accessors `cache.<path>.output` / `.input` / `.inputs` only unwrap a single `Cache.Entry`. For a list, index first: `cache['<path>'][0].output`.
+
 ### Cache + interventions
 
 Cache hooks run after intervention hooks (`mediator_idx=inf`), so caches see post-intervention values:
@@ -122,5 +158,5 @@ Returns a `Cache.CacheDict` (already wrapped in `.save()`). Hook handles live on
 ## Related
 
 - [access-and-modify](access-and-modify.md) — One-off `.output` / `.input` access.
-- [iter](iter.md) — Iteration semantics for generation.
+- [iter-all-next](iter-all-next.md) — Iteration semantics for generation.
 - [docs/concepts/interleaver-and-hooks.md](../concepts/interleaver-and-hooks.md) — Why cache hooks fire last.

@@ -17,7 +17,7 @@ This replaces the v0.4 proxy-based `nnsight.cond` / `session.iter` machinery —
 ## When to use / when not to use
 
 - Use `if`/`for` freely. There is no special control-flow API to learn.
-- Don't use `for` to loop over generation steps — use `tracer.iter[:]` for that. See `docs/usage/iter.md`.
+- Don't use `for` to loop over generation steps — use `tracer.iter[:]` for that. See `docs/usage/iter-all-next.md`.
 - Don't use `for` to access modules out of order within one invoke — modules in one invoke must be accessed in forward-pass order. Use multiple invokes instead. See `docs/usage/invoke-and-batching.md`.
 
 ## Canonical pattern
@@ -111,7 +111,7 @@ with model.trace("Hello"):
 ## Gotchas
 
 - `if`/`for` blocks are real Python — they execute in the worker thread. They do **not** create per-step branches in the model's forward pass; they just make decisions about the current activation values.
-- `for step in tracer.iter[:]:` is different — that loops over **generation steps**, not Python iterations. See `docs/usage/iter.md`.
+- `for step in tracer.iter[:]:` is different — that loops over **generation steps**, not Python iterations. See `docs/usage/iter-all-next.md`.
 - Python loops cannot reorder module access. The iteration order in your loop must match forward-pass order.
 - Inside a `model.session()` body but **outside** an inner trace, you are running plain Python — `module.output` is not accessible there (no interleaver active). Open a `model.trace(...)` first.
 - Tensor `__bool__` only returns a scalar bool for 0-d (or single-element) tensors. `if some_tensor:` on a multi-d tensor raises a `RuntimeError` exactly like in vanilla PyTorch — that's not nnsight's fault.
@@ -121,4 +121,4 @@ with model.trace("Hello"):
 - `docs/usage/trace.md`
 - `docs/usage/session.md`
 - `docs/usage/access-and-modify.md`
-- `docs/usage/iter.md`
+- `docs/usage/iter-all-next.md`

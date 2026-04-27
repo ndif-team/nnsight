@@ -49,12 +49,22 @@ class IEnvoy(Protocol):
     Attributes:
         interleaver: The :class:`Interleaver` managing execution flow.
         path: Optional provider path prefix used to build requester/provider
-            strings (e.g. ``"model.transformer.h.0"``).  If ``None`` or
-            absent, the eproperty key alone is used as the requester string.
+            strings (e.g. ``"model.transformer.h.0"``).  May be ``None`` or
+            empty — :meth:`eproperty._build_requester` falls back to the
+            eproperty key alone in that case.  This is how tracer-level
+            eproperties such as :attr:`InterleavingTracer.result` work
+            without a path prefix.
+
+    Notes:
+        Implementors that have no meaningful path (e.g. tracers) do **not**
+        need to declare a ``path`` attribute — :meth:`eproperty._build_requester`
+        uses ``getattr(obj, "path", "")`` so a missing attribute is treated
+        the same as ``None`` / ``""``. The attribute is declared
+        ``Optional[str]`` here for type clarity.
     """
 
     interleaver: "Interleaver"
-    path: str
+    path: Optional[str]
 
 
 class eproperty:

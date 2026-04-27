@@ -129,6 +129,8 @@ with model.trace(x):
 
 For HuggingFace GPT-2, the attention output module is the parent attention block (`GPT2Attention`); you can mount the `AttnHeadsEnvoy` on it via `envoys={GPT2Attention: AttnHeadsEnvoy}` and access `model.transformer.h[L].attn.heads`.
 
+**Where to get `n_heads`.** The example above reads `self._module.n_heads`, which works for custom modules where you control the attribute name. For real HF attention modules the attribute name varies across versions and architectures (`num_heads`, `nh`, `num_attention_heads`, etc.). Prefer pulling `n_heads` from the model's config (`model.config.n_head` for GPT-2, `model.config.num_attention_heads` for Llama-family) and pass it into your custom Envoy explicitly via `__init__`, rather than relying on a module attribute that may not exist.
+
 ### When you do need `transform`
 
 If you need to expose a *clone* (so users get a safe edit surface without aliasing surprises), or you need to change the *shape* of the value seen by users vs the model, use `eproperty.preprocess` to return the user-facing form and `eproperty.transform` to reshape it back before the model sees it:

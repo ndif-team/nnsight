@@ -69,9 +69,16 @@ The result is attached to each finished `RequestOutput` as `.saves`. Back in `VL
 `AsyncVLLMBackend` (`src/nnsight/modeling/vllm/async_backend.py:19`) handles streaming. It exists because vLLM exposes `AsyncLLM.generate()` as an async generator, and a normal `Backend` runs synchronously inside `Tracer.__exit__`. The dual-call pattern:
 
 1. **First call: `__call__(tracer)`** at `__exit__` time (`src/nnsight/modeling/vllm/async_backend.py:36`). Compiles the traced function via `Backend.__call__(self, tracer)`, runs it via `tracer._setup_interleaver(fn)` (which sets up mediators **without** triggering generation), then calls `self.model._serialize_mediators(...)` and submits the request via `vllm_entrypoint.generate(...)`. Stores the resulting async generator on `self._generator`.
-2. **Second call: `__aiter__`** (`src/nnsight/modeling/vllm/async_backend.py:77`). Iterates the stored generator. On each output, if `output.finished`, calls `collective_rpc("collect_nnsight", args=([output.request_id], [output.request_id]))` to get saves from the worker, decompresses the bytes, and attaches `output.saves`. The user does `async for output in tracer.backend()`.
+2. **Second call: `__aiter__`** (`src/nnsight/modeling/vllm/async_backend.py:77`). Iterates the stored generator. **Saves are collected only on the final, `finished == True` output for a request id** — not on every streamed output. When `output.finished` becomes true, `collective_rpc("collect_nnsight", args=([output.request_id], [output.request_id]))` runs on the workers to collect saves, the returned bytes are zstd-decompressed and pickled into `output.saves`. The user does `async for output in tracer.backend()` and only the final yielded `RequestOutput` for each request carries `saves`.
 
 This pattern requires that `VLLM.trace()` swap in the right tracer class. `VLLM.trace` (`src/nnsight/modeling/vllm/vllm.py:445`) checks `self._async_engine` and injects `AsyncVLLMBackend` plus `tracer_cls=AsyncInterleavingTracer`, bypassing `RemoteableMixin.trace` (which hard-codes `RemoteInterleavingTracer`).
+
+#### Demos and reference implementations
+
+Two external repos demonstrate the integration end-to-end:
+
+- [`nnsight-vllm-demos`](https://github.com/ndif-team/nnsight-vllm-demos) — async chat with SAE-based steering, plus other demo apps.
+- [`nnsight-vllm-lens-comparison`](https://github.com/ndif-team/nnsight-vllm-lens-comparison) — reference implementation comparing logit-lens variants on top of vLLM. Useful as a template for new lens-style applications.
 
 ### Cross-process serialization
 

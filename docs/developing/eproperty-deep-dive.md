@@ -8,6 +8,67 @@ sources: [src/nnsight/intervention/interleaver.py, src/nnsight/intervention/hook
 
 # eproperty Deep Dive
 
+## Two layers of API
+
+There are now **two layers** for defining hookable properties on Envoys. Most extensions should use the higher-level **sugar decorators** (`@hooked_output`, `@hooked_input`, plus their operation-level variants). The lower-level `@eproperty()` + `@requires_*` form remains valid and is used for advanced cases (custom `requires_*` implementations, externally-fed eproperties without a hook setup, etc.).
+
+| Layer | What you write | When to use |
+|-------|---------------|-------------|
+| **Sugar (recommended)** | `@hooked_output()` / `@hooked_input()` and operation-level variants | Default user-facing extension API. One decorator combines `eproperty` + the matching `requires_*` registration. |
+| **Lower-level** | `@eproperty()` + `@requires_output` / `@requires_input` / custom `requires_*` | Custom hook setup, no hook setup at all (externally-pushed eproperties like `InterleavingTracer.result` and `VLLM.logits`), or shared keys across multiple decorators. |
+
+The sugar layer returns the **same** `eproperty` descriptor, so `.preprocess`, `.postprocess`, and `.transform` continue to work unchanged.
+
+### Sugar layer — `@hooked_output` / `@hooked_input`
+
+Defined in `src/nnsight/intervention/hooks.py` (`_make_hooked` factory) and the two module-level instances `hooked_output` and `hooked_input`. `hooked_input` defaults `key="input"`, so a raw `(args, kwargs)` view and a single-arg convenience view via `.preprocess` can both be declared with the same decorator and share a single underlying provider.
+
+```python
+class MyEnvoy(Envoy):
+
+    @hooked_output()                        # equivalent to @eproperty() + @requires_output
+    def output(self): ...
+
+    @hooked_input()                         # default key="input"
+    def inputs(self): ...                   # raw (args, kwargs) view
+
+    @hooked_input()                         # also key="input" — same provider, different view
+    def input(self): ...                    # single-arg convenience view
+
+    @input.preprocess
+    def input(self, value):
+        return [*value[0], *value[1].values()][0]
+
+    @input.postprocess
+    def input(self, value):
+        inputs = self.inputs
+        return (value, *inputs[0][1:]), inputs[1]
+```
+
+Both `hooked_input` declarations default to `key="input"` so the two decorators drive a single underlying provider. The single forward-pass hook fires once and serves both descriptors via `current_provider` matching.
+
+Each sugar decorator accepts the same kwargs as `eproperty`:
+
+- `key` — provider-string suffix; defaults to the stub's name (or `"input"` for the input-flavored sugar).
+- `description` — short label shown in `Envoy.__repr__`.
+- `iterate` — whether to append `.iN` to the requester. Default `True`.
+
+### Operation-level sugar — `@hooked_operation_output` / `@hooked_operation_input`
+
+Same pattern at the operation level — combines `eproperty` with `requires_operation_*`. Use these when extending `OperationEnvoy` to expose new op-level views. `hooked_operation_input` likewise defaults `key="input"` so multiple input-flavored stubs share one provider.
+
+### When to drop down to the lower-level form
+
+Three scenarios still need the explicit `@eproperty()` + `@requires_*` decomposition:
+
+1. **No hook setup at all** — externally-pushed eproperties like `InterleavingTracer.result` (`src/nnsight/intervention/tracing/tracer.py:581`) and `VLLM.logits`. The stub is bare, no `requires_*` decorator is stacked, and the runtime calls `eproperty.provide(envoy, value)` to feed the value in.
+2. **Custom `requires_*` implementations** — a hook setup that doesn't fit `requires_output` / `requires_input` (e.g. a hook that registers on an operation accessor with custom args, or a hook that needs to pre-compute something based on the host envoy). Write a custom decorator following the `requires_*` pattern, then stack `@eproperty()` over it.
+3. **Sharing a key across an unusual mix of decorators** — most cases are covered by stacking multiple `hooked_input()` declarations already keying on `"input"`. If you need a more exotic key arrangement, the lower-level form is more explicit.
+
+For everything else, **prefer the sugar layer**. It's three lines, and the resulting descriptor is identical.
+
+---
+
 ## What this covers
 
 `eproperty` is the descriptor that powers every hookable value in nnsight: `Envoy.output`, `Envoy.input`, `Envoy.inputs`, `OperationEnvoy.output` / `.input` / `.inputs`, `InterleavingTracer.result`, vLLM's `model.logits` and `model.samples`, and any custom property a downstream consumer adds. It is the **formal extension API** for telling the interleaver "here is a new value users can read or write inside a trace."
@@ -30,10 +91,12 @@ This doc walks through:
 @runtime_checkable
 class IEnvoy(Protocol):
     interleaver: "Interleaver"
-    path: str
+    path: Optional[str]
 ```
 
-Defined at `src/nnsight/intervention/interleaver.py:42`. Any class that wants to host `eproperty` descriptors must satisfy this protocol — that is, expose `.interleaver` and `.path` attributes. Current implementors:
+Defined at `src/nnsight/intervention/interleaver.py:42`. Any class that wants to host `eproperty` descriptors must satisfy this protocol — that is, expose `.interleaver` and (optionally) `.path` attributes. `path` may be `None` or absent entirely; `_build_requester` uses `getattr(obj, "path", "")` so a missing attribute is treated the same as `None` / empty. Tracer-level hosts like `InterleavingTracer.result` don't have a meaningful path and rely on this fallback.
+
+Current implementors:
 
 - `Envoy` (`envoy.py:54`) — `path` like `"model.transformer.h.0"`.
 - `OperationEnvoy` (`source.py:571`) — `path` like `"model.transformer.h.0.attn.split_1"`.
@@ -66,7 +129,7 @@ Defined at `src/nnsight/intervention/interleaver.py:60`-`335`.
 
 ### The decorated stub idiom
 
-The defining shape of an eproperty:
+The lower-level shape of an eproperty (the sugar `@hooked_output()` is built on top of this):
 
 ```python
 class Envoy(Batchable):
@@ -76,6 +139,8 @@ class Envoy(Batchable):
         """Get the output of the module's forward pass."""
         # body is intentionally empty
 ```
+
+> **Modern equivalent (recommended):** `@hooked_output()` collapses these two decorators into one. See [Two layers of API](#two-layers-of-api) above.
 
 Three things happen at class-definition time:
 
@@ -294,7 +359,7 @@ When `iterate=False`, the requester is just `path.key` with no `.iN` suffix. The
 
 ### Multiple eproperties sharing a key
 
-`Envoy.input` and `Envoy.inputs` both use `key="input"`:
+`Envoy.input` and `Envoy.inputs` both use `key="input"`. Lower-level form:
 
 ```python
 @eproperty(key="input")
@@ -304,6 +369,22 @@ def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
 
 @eproperty(key="input")
 @requires_input
+def input(self) -> Object:
+    """Get the first input to the module's forward pass."""
+
+@input.preprocess
+def input(self, value):
+    return [*value[0], *value[1].values()][0]
+```
+
+Equivalent with the sugar layer (`hooked_input` defaults to `key="input"` precisely so multiple input-flavored stubs can be stacked and share a provider):
+
+```python
+@hooked_input()
+def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
+    """Get the inputs to the module's forward pass."""
+
+@hooked_input()
 def input(self) -> Object:
     """Get the first input to the module's forward pass."""
 
@@ -347,8 +428,13 @@ The class is a freestanding descriptor — it does *not* inherit from Python's b
 - `src/nnsight/intervention/interleaver.py:328` — `eproperty.provide`.
 - `src/nnsight/intervention/hooks.py:271` — `requires_output`. The most common pre-setup decorator.
 - `src/nnsight/intervention/hooks.py:314` — `requires_input`.
-- `src/nnsight/intervention/hooks.py:438` — `requires_operation_output`.
-- `src/nnsight/intervention/hooks.py:464` — `requires_operation_input`.
+- `src/nnsight/intervention/hooks.py:366` — `_make_hooked` factory; produces sugar decorators.
+- `src/nnsight/intervention/hooks.py` — `hooked_output` (sugar).
+- `src/nnsight/intervention/hooks.py` — `hooked_input` (sugar, default key `"input"`; stack multiple stubs to share a provider).
+- `src/nnsight/intervention/hooks.py` — `requires_operation_output`.
+- `src/nnsight/intervention/hooks.py` — `requires_operation_input`.
+- `src/nnsight/intervention/hooks.py` — `hooked_operation_output` (sugar).
+- `src/nnsight/intervention/hooks.py` — `hooked_operation_input` (sugar, default key `"input"`).
 - `src/nnsight/intervention/envoy.py:168` — `Envoy.output` (canonical eproperty example).
 - `src/nnsight/intervention/envoy.py:178` — `Envoy.inputs` (shared-key example).
 - `src/nnsight/intervention/envoy.py:191` — `Envoy.input` with `preprocess` and `postprocess`.
@@ -377,11 +463,11 @@ For `model.layer.output = some_tensor` (replacement, not mutation):
 
 ## Extension points
 
-- **A new property on `Envoy`.** Subclass `Envoy` and add an `@eproperty()` with `@requires_output` or `@requires_input` (or write a custom `requires_*` decorator that registers a different kind of hook). Optionally add `preprocess`, `postprocess`, `transform`, `description`.
+- **A new property on `Envoy`.** Subclass `Envoy` and add a `@hooked_output()` (preferred) or `@hooked_input()`. The lower-level `@eproperty() + @requires_*` form is still valid and is required for custom `requires_*` implementations. Optionally add `preprocess`, `postprocess`, `transform`, `description`.
 - **A new property on a custom IEnvoy host.** Implement the protocol (`interleaver`, `path`) and add eproperties. The vLLM `VLLM` class (`src/nnsight/modeling/vllm/vllm.py`) does this for `logits` and `samples`, which are runtime-side pushes via `eproperty.provide`.
 - **Custom transform semantics.** `transform` is currently one-shot (cleared after firing). If you wanted persistent transforms (e.g. always reshape every output) you would not use `transform`; you would build a custom Envoy method. The `transform` mechanism is specifically for "I gave you a view, now please reshape my mutations back."
-- **Bare eproperty for runtime values.** No `requires_*` decorator. The runtime is responsible for calling `eproperty.provide(envoy, value)` (or directly calling `interleaver.handle(requester, value)`) at the right moment.
-- **Sharing a key.** When two views must back the same hook, give them the same `key=`. Both `requires_*` invocations will short-circuit if the hook is already installed.
+- **Bare eproperty for runtime values.** Use `@eproperty()` directly with no `requires_*` decorator (the sugar isn't applicable here because there is no hook to install). The runtime is responsible for calling `eproperty.provide(envoy, value)` (or directly calling `interleaver.handle(requester, value)`) at the right moment.
+- **Sharing a key.** When two views must back the same hook, give them the same `key=`. Stacking multiple `hooked_input()` declarations already does this — they all default to `"input"`. The second and subsequent `requires_input` invocations short-circuit because the hook is already installed.
 
 ## Related
 

@@ -33,8 +33,7 @@ One-liner per feature. Click through for the canonical pattern, variations, and 
 
 ## Generation control
 
-- [iter](iter.md) — `tracer.iter[slice|int|list]`: target specific generation steps.
-- [all-and-next](all-and-next.md) — `tracer.all()` / `tracer.next()` / `module.next()`: blanket and manual stepping.
+- [iter-all-next](iter-all-next.md) — `tracer.iter[slice|int|list]`, `tracer.all()`, `tracer.next()` / `module.next()`: per-step targeting, blanket recursion, and manual stepping.
 - [stop-and-early-exit](stop-and-early-exit.md) — `tracer.stop()` to abort the forward pass early.
 - [skip](skip.md) — `module.skip(replacement)`: bypass a module's compute entirely.
 

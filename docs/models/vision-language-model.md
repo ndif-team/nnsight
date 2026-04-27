@@ -141,6 +141,85 @@ with model.trace("Hello world"):                   # no images, no processor cal
     hidden = model.model.language_model.layers[-1].output.save()
 ```
 
+### Chat-template inputs
+
+Modern VLMs (LLaVA, Qwen2-VL, Llama-3.2-Vision, etc.) ship a chat template inside their `AutoProcessor`. Use `model.processor.apply_chat_template(...)` to render the prompt string in the format the model expects. NNsight does not call this for you — you build the templated string yourself and pass it as the trace input.
+
+#### Text-only chat template
+
+```python
+messages = [
+    {"role": "user", "content": [{"type": "text", "text": "Who wrote 'Beloved'?"}]},
+]
+
+prompt = model.processor.apply_chat_template(
+    messages,
+    add_generation_prompt=True,
+)
+
+with model.trace(prompt):
+    hidden = model.model.language_model.layers[-1].output.save()
+```
+
+No `images=` kwarg, so `_prepare_input` (`vlm.py:160`) takes the text-only fallback through the parent `LanguageModel` path.
+
+#### Multi-modal chat template
+
+For prompts with images, include `{"type": "image"}` content entries; `apply_chat_template` returns a string with the model's `<image>` placeholder tokens already inserted. Pair that string with the matching `images=[PIL.Image, ...]` list when calling `model.trace(...)`:
+
+```python
+from PIL import Image
+
+img = Image.open("photo.jpg")
+
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image"},
+            {"type": "text", "text": "Describe this image in one sentence."},
+        ],
+    },
+]
+
+prompt = model.processor.apply_chat_template(
+    messages,
+    add_generation_prompt=True,
+)
+
+with model.trace(prompt, images=[img]):
+    hidden = model.model.language_model.layers[-1].output.save()
+```
+
+For generation, the same pattern applies:
+
+```python
+with model.generate(prompt, images=[img], max_new_tokens=50) as tracer:
+    output = tracer.result.save()
+
+print(model.tokenizer.decode(output[0], skip_special_tokens=True))
+```
+
+Multiple images per turn — supply them in order matching the `{"type": "image"}` entries, then pass the same list as `images=`:
+
+```python
+messages = [
+    {"role": "user", "content": [
+        {"type": "image"}, {"type": "image"},
+        {"type": "text", "text": "Compare these two images."},
+    ]},
+]
+prompt = model.processor.apply_chat_template(messages, add_generation_prompt=True)
+
+with model.trace(prompt, images=[img_a, img_b]):
+    out = model.lm_head.output[:, -1].save()
+```
+
+Notes:
+- The exact image-placeholder token (e.g. `<image>` for LLaVA, `<|image_pad|>` for Qwen2-VL) is filled in by the chat template — you don't need to know it.
+- `add_generation_prompt=True` appends the assistant turn header so the next token is the model's reply.
+- If you need to feed an already-tokenized dict, you can call `model.processor(text=..., images=...)` yourself and pass the resulting dict to `model.trace(...)` — see the "Special properties" section.
+
 ### Modifying activations
 
 ```python
@@ -166,7 +245,7 @@ Note that LLaVA's underlying Qwen2 decoder layers return a tensor directly (not 
 - **Processor must accept `text=` and `images=` kwargs.** This is the standard HF `AutoProcessor` interface. If your model has a custom processor with a different signature, override `_prepare_input` or pass already-preprocessed inputs as a dict.
 - **One image set per invoke.** Pass either a single PIL image or a list of PIL images. Token-ID inputs go through the parent `LanguageModel` path and `images` is handled separately via the `**kwargs` dict.
 - **Batching of mixed image/no-image invokes.** `_batch` concatenates image tensors along dim 0. Mixing invokes with and without images in the same trace can produce shape mismatches if the model's processor expects all-or-nothing.
-- **Chat-template prompts.** If your VLM uses a structured chat template (Qwen2-VL, Llama-3.2-Vision, etc.), build the prompt with `processor.apply_chat_template(...)` before passing it in, or pass an already-tokenized dict.
+- **Chat-template prompts.** If your VLM uses a structured chat template (Qwen2-VL, Llama-3.2-Vision, etc.), build the prompt with `processor.apply_chat_template(...)` before passing it in, or pass an already-tokenized dict. See [Chat-template inputs](#chat-template-inputs) above for both the text-only and multi-modal patterns.
 
 ## Gotchas
 

@@ -109,12 +109,15 @@ model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
 ref_prompts = ["The capital of France is", "Paris is in", "Berlin lies in", "London hosts the"]
 
 # Pass 1: collect mean MLP activations at LAYER, last position.
+# Two patterns work for accumulating into a list — pick one:
+# (1) Define `acts` OUTSIDE the trace and append in-place — no .save() on each element needed.
+# (2) Define `acts = list().save()` INSIDE the trace and append normally.
 LAYER = 9
-acts = []
+acts = []                                    # pattern (1): list lives in caller frame
 with model.trace() as tracer:
     for p in ref_prompts:
         with tracer.invoke(p):
-            acts.append(model.transformer.h[LAYER].mlp.output[:, -1, :].save())
+            acts.append(model.transformer.h[LAYER].mlp.output[:, -1, :])  # no .save() needed
 
 mean_act = torch.stack([a for a in acts], dim=0).mean(dim=0)  # [1, hidden]
 
@@ -174,7 +177,8 @@ Empty invokes are separate threads on the full batch and are useful when you wan
 ## Gotchas
 
 - `[:] = 0` is in-place. The same tensor reference downstream sees zeros. If you also need the pre-ablation value, `.clone().save()` it first.
-- Submodule output shapes vary: `.attn.output` is usually a tuple, `.mlp.output` is usually a tensor. See `docs/usage/access-and-modify.md`.
+- Submodule output shapes vary: `.attn.output` is usually a tuple in `transformers<5.0` and a tensor in `transformers>=5.0`; `.mlp.output` is usually a tensor across versions. Adjust `[0]` indexing and tuple-replacement (`(new,) + out[1:]`) accordingly. See `docs/usage/access-and-modify.md`.
+- Accumulating activations into a Python list: either define the list **outside** the trace and append normally (in-place mutation flows to the caller frame), or define the list **inside** the trace and `.save()` it. Don't `.save()` every element individually — it's not needed.
 - Module names differ across architectures. Use `print(model)` to inspect.
 - If two invokes both read or write the same module's output, you need a `tracer.barrier(n)`. See `docs/usage/barrier.md`.
 

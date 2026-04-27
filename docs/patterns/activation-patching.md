@@ -132,9 +132,9 @@ Some setups go the other way: start from a clean run and *inject* a corrupt acti
 
 ## Gotchas
 
-- Both invokes touch `transformer.h[L].output` - you **must** use `tracer.barrier(2)`. Without it, `clean_hs` is undefined when invoke 2 runs. See `docs/usage/barrier.md`.
+- **You need the barrier specifically because invoke 2 *uses* `clean_hs` from invoke 1.** Without it, you get a `NameError` — `clean_hs` doesn't exist yet when invoke 2 runs. If both invokes only *read* their own activations independently (no value flowing between them), no barrier is needed. The barrier rule is: "both invokes touch the same module *and* one passes a value to the other".
 - Inside one invoke, modules must be accessed in forward-pass order. You cannot capture `h[5]` after `h[10]` in the same invoke.
-- `block.output[0]` is the residual stream; `block.output` is the full tuple.
+- `block.output[0]` is the residual stream in `transformers<5.0`; in `transformers>=5.0` block outputs are no longer tuples — `block.output` *is* the tensor. Adjust `[0]` indexing accordingly.
 - Patching modifies the running tensor in place. Save a `.clone()` first if you also want the unmodified post-patch state.
 - See `docs/usage/access-and-modify.md` for in-place vs replacement semantics on tuple outputs.
 

@@ -73,9 +73,9 @@ with model.trace("Hello", remote=True, blocking=False) as tracer:
 
 `remote='local'` runs against `LocalSimulationBackend` for client-side debugging of remote serialization paths.
 
-## Scan and validate (kwargs)
+## Shape inspection
 
-These kwargs are accepted but the dedicated `model.scan(...)` context is preferred — see `docs/usage/scan.md`. Pre-flight validation under `FakeTensorMode` is achieved by entering a scan context before the real trace.
+For shape-dependent validation (slicing, reshapes, intervention indexing), use the dedicated `model.scan(input)` context, not `.trace()`. See `docs/usage/scan.md`.
 
 ## Tracer object
 

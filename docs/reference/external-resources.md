@@ -34,17 +34,18 @@ tags: [reference, links]
 
 ## Tutorials at nnsight.net
 
-The documentation site hosts a curated set of interpretability tutorials built on nnsight. Common ones:
+The documentation site hosts a curated set of interpretability tutorials built on nnsight. Direct deep links to the most-referenced ones:
 
 | Tutorial | URL | What it shows |
 |----------|-----|----------------|
-| Logit lens | [nnsight.net](https://nnsight.net) (Tutorials section) | Decoding hidden states from intermediate layers via the unembedding. |
-| Activation patching | [nnsight.net](https://nnsight.net) (Tutorials section) | Causal tracing — copy a clean run's activation into a corrupted run. |
-| Attribution patching | [nnsight.net](https://nnsight.net) (Tutorials section) | Linearized activation patching using gradients (`tensor.backward()`). |
-| Dictionary learning / SAEs | [nnsight.net](https://nnsight.net) (Tutorials section) | Training and applying sparse autoencoders inside a trace; using `hook=True` on aux modules. |
-| Steering | [nnsight.net](https://nnsight.net) (Tutorials section) | Adding precomputed direction vectors to residual stream activations. |
+| Walkthrough | [nnsight.net/notebooks/tutorials/walkthrough/](https://nnsight.net/notebooks/tutorials/walkthrough/) | End-to-end intro — tracing, generation, batching, gradients, sessions, remote. |
+| Logit lens | [nnsight.net/notebooks/tutorials/logit_lens/](https://nnsight.net/notebooks/tutorials/logit_lens/) | Decoding hidden states from intermediate layers via the unembedding. |
+| Activation patching | [nnsight.net/notebooks/tutorials/activation_patching/](https://nnsight.net/notebooks/tutorials/activation_patching/) | Causal tracing — copy a clean run's activation into a corrupted run. |
+| Attribution patching | [nnsight.net/notebooks/tutorials/attribution_patching/](https://nnsight.net/notebooks/tutorials/attribution_patching/) | Linearized activation patching using gradients (`tensor.backward()`). |
+| Dictionary learning / SAEs | [nnsight.net/notebooks/tutorials/dictionary_learning/](https://nnsight.net/notebooks/tutorials/dictionary_learning/) | Training and applying sparse autoencoders inside a trace; using `hook=True` on aux modules. |
+| Circuit finding | [nnsight.net/notebooks/tutorials/circuit_finding/](https://nnsight.net/notebooks/tutorials/circuit_finding/) | Identifying minimal subgraphs of a model that implement a specific behavior. |
 
-(Tutorial URLs change occasionally; the canonical entry point is the Tutorials section of [nnsight.net](https://nnsight.net).)
+If a specific link 404s, fall back to the canonical Tutorials section at [nnsight.net](https://nnsight.net) — paths can be reorganized between releases.
 
 ## Internal docs (in this repo)
 
@@ -63,4 +64,5 @@ The documentation site hosts a curated set of interpretability tutorials built o
 | NDIF skills marketplace | [https://github.com/ndif-team/skills](https://github.com/ndif-team/skills) | Claude Code / Codex plugin with nnsight skills. |
 | nnterp | [https://github.com/ndif-team/nnterp](https://github.com/ndif-team/nnterp) | nnsight-based library standardizing transformer interfaces across model families. |
 | nnsight-vllm-demos | [https://github.com/ndif-team/nnsight-vllm-demos](https://github.com/ndif-team/nnsight-vllm-demos) | Demo apps including async chat with SAE-based steering. |
+| nnsight-vllm-lens-comparison | [https://github.com/ndif-team/nnsight-vllm-lens-comparison](https://github.com/ndif-team/nnsight-vllm-lens-comparison) | Reference implementation comparing logit-lens variants on top of vLLM. |
 | DeepWiki page | [https://deepwiki.com/ndif-team/nnsight](https://deepwiki.com/ndif-team/nnsight) | Auto-generated wiki explorer for the nnsight codebase. |
