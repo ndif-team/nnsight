@@ -103,7 +103,7 @@ class MetaMixin(LoadableMixin):
         """
 
         if not self.dispatched and not isinstance(
-            self._interleaver.tracer, ScanningTracer
+            self.interleaver.tracer, ScanningTracer
         ):
             self.dispatch()
 

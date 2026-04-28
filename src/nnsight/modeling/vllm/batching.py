@@ -2,6 +2,7 @@ from typing import Any, Union
 import torch
 from ...intervention.batching import Batcher, apply
 from ...intervention.envoy import Envoy
+from ...intervention.hooks import add_ordered_hook
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -99,16 +100,26 @@ class VLLMBatcher(Batcher):
 
             return output
 
+        # Mark the hooks with mediator_idx so they sort correctly when
+        # add_ordered_hook rebuilds the hook dict for intervention hooks:
+        #
+        # - pre_* hooks use -inf so they fire BEFORE any mediator hook
+        #   (they set up the batcher state that narrow/gather depend on).
+        # - post_* hooks use +inf so they fire AFTER every mediator hook
+        #   (they clean up after all interventions have read/modified
+        #   the potentially-gathered values, and split the tensors
+        #   back to their sharded form before vLLM resumes).
+        pre_input_hook.mediator_idx = float("-inf")
+        post_input_hook.mediator_idx = float("inf")
+        pre_output_hook.mediator_idx = float("-inf")
+        post_output_hook.mediator_idx = float("inf")
+
         for module in model.modules():
             if isinstance(module._module, (RowParallelLinear, ColumnParallelLinear)):
-                module._module.register_forward_pre_hook(
-                    pre_input_hook, prepend=True, with_kwargs=True
-                )
-                module._module.register_forward_pre_hook(
-                    post_input_hook, prepend=False, with_kwargs=True
-                )
-                module._module.register_forward_hook(pre_output_hook, prepend=True)
-                module._module.register_forward_hook(post_output_hook, prepend=False)
+                add_ordered_hook(module._module, pre_input_hook, "input")
+                add_ordered_hook(module._module, post_input_hook, "input")
+                add_ordered_hook(module._module, pre_output_hook, "output")
+                add_ordered_hook(module._module, post_output_hook, "output")
 
     def check_gathered(self):
 

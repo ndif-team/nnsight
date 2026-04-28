@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tasks import list_all_tasks, get_tasks_by_difficulty
-from tasks.registry import Difficulty
+from tasks.registry import Difficulty, TaskKind
 from runner import run_task, extract_code_from_response
 
 
@@ -53,18 +53,28 @@ def run_interactive_session(
     for i, task in enumerate(tasks, 1):
         print(f"\n{'='*60}")
         print(f"TASK {i}/{len(tasks)}: {task.name}")
-        print(f"ID: {task.id} | Difficulty: {task.difficulty.value}")
+        print(f"ID: {task.id} | Kind: {task.kind.value} | Difficulty: {task.difficulty.value}")
         print("=" * 60)
-        
+
         print("\n--- PROMPT TO GIVE AGENT ---\n")
-        print(task.prompt.strip())
-        print("\n--- SETUP CODE (for reference) ---")
-        print(task.setup_code.strip())
+        if task.kind == TaskKind.MCQ:
+            print(task.question.strip())
+            print()
+            for j, choice in enumerate(task.choices):
+                letter = chr(ord("A") + j)
+                print(f"{letter}. {choice}")
+        else:
+            print(task.prompt.strip())
+            print("\n--- SETUP CODE (for reference) ---")
+            print(task.setup_code.strip())
         print("\n--- END PROMPT ---\n")
-        
-        print("Paste the agent's code response (end with blank line + 'END'):")
-        print("(or type 'skip' to skip, 'quit' to exit)")
-        
+
+        if task.kind == TaskKind.MCQ:
+            print("Paste the agent's response (a letter). 'skip' or 'quit' also accepted.")
+        else:
+            print("Paste the agent's code response (end with blank line + 'END'):")
+            print("(or type 'skip' to skip, 'quit' to exit)")
+
         # Collect multi-line input
         lines = []
         while True:
@@ -72,7 +82,7 @@ def run_interactive_session(
                 line = input()
             except EOFError:
                 break
-            
+
             if line.strip().lower() == 'end':
                 break
             if line.strip().lower() == 'skip':
@@ -82,24 +92,34 @@ def run_interactive_session(
                 print("\nExiting early...")
                 break
             lines.append(line)
-        
+            # MCQ: stop after the first non-empty line.
+            if task.kind == TaskKind.MCQ and line.strip():
+                break
+
         if line.strip().lower() == 'quit':
             break
-        
+
         if not lines or line.strip().lower() == 'skip':
             print(f"  Skipped task {task.id}")
-            responses[task.id] = {"code": "", "skipped": True}
+            if task.kind == TaskKind.MCQ:
+                responses[task.id] = {"answer": "", "skipped": True}
+            else:
+                responses[task.id] = {"code": "", "skipped": True}
             continue
-        
+
         # Process the response
         response_text = "\n".join(lines)
-        code = extract_code_from_response(response_text)
-        
-        responses[task.id] = {"code": code, "skipped": False}
+
+        if task.kind == TaskKind.MCQ:
+            responses[task.id] = {"answer": response_text.strip(), "skipped": False}
+            code_or_answer = response_text.strip()
+        else:
+            code_or_answer = extract_code_from_response(response_text)
+            responses[task.id] = {"code": code_or_answer, "skipped": False}
         
         print("\n--- EXECUTING ---")
         try:
-            result = run_task(task, code)
+            result = run_task(task, code_or_answer)
             
             if result.success:
                 passed += 1

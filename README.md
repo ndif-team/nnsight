@@ -364,7 +364,7 @@ with model.trace("Hello", temperature=0.0, max_tokens=5) as tracer:
     logits = list().save()
     
     for step in tracer.iter[:]:
-        logits.append(model.logits.output)
+        logits.append(model.logits)
 ```
 
 

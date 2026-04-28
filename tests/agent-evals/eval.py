@@ -22,24 +22,33 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 from tasks import TASKS, get_task, get_tasks_by_difficulty, list_all_tasks
-from tasks.registry import Difficulty
+from tasks.registry import Difficulty, TaskKind
 from runner import run_task, extract_code_from_response, TaskResult
 from agent import AgentConfig, create_agent
+from doc_bundles import (
+    DOC_BUNDLES,
+    BROWSE_BUNDLES,
+    build_documentation,
+    build_browse_config,
+    list_doc_bundles,
+)
 
 
 @dataclass
 class EvalResult:
     """Overall evaluation result."""
-    
+
     timestamp: str
     provider: str
     model: str
+    doc_bundle: str
+    mode: str  # "static" or "browse"
     total_tasks: int
     passed_tasks: int
     failed_tasks: int
     pass_rate: float
     task_results: list[dict] = field(default_factory=list)
-    
+
     # Breakdown by difficulty
     basic_passed: int = 0
     basic_total: int = 0
@@ -47,12 +56,20 @@ class EvalResult:
     intermediate_total: int = 0
     advanced_passed: int = 0
     advanced_total: int = 0
-    
+
+    # Breakdown by kind
+    code_passed: int = 0
+    code_total: int = 0
+    mcq_passed: int = 0
+    mcq_total: int = 0
+
     def to_dict(self) -> dict:
         return {
             "timestamp": self.timestamp,
             "provider": self.provider,
             "model": self.model,
+            "doc_bundle": self.doc_bundle,
+            "mode": self.mode,
             "summary": {
                 "total_tasks": self.total_tasks,
                 "passed_tasks": self.passed_tasks,
@@ -64,44 +81,30 @@ class EvalResult:
                 "intermediate": {"passed": self.intermediate_passed, "total": self.intermediate_total},
                 "advanced": {"passed": self.advanced_passed, "total": self.advanced_total},
             },
+            "by_kind": {
+                "code": {"passed": self.code_passed, "total": self.code_total},
+                "mcq": {"passed": self.mcq_passed, "total": self.mcq_total},
+            },
             "task_results": self.task_results,
         }
 
 
-def load_documentation(nnsight_path: str) -> str:
-    """Load all documentation files from the nnsight library."""
-    docs = []
-    
-    doc_files = [
-        "CLAUDE.md",
-        "README.md",
-    ]
-    
-    for doc_file in doc_files:
-        doc_path = Path(nnsight_path) / doc_file
-        if doc_path.exists():
-            with open(doc_path, "r") as f:
-                content = f.read()
-                docs.append(f"# {doc_file}\n\n{content}")
-    
-    # NNsight.md is very large, we'll include just the beginning
-    nnsight_md = Path(nnsight_path) / "NNsight.md"
-    if nnsight_md.exists():
-        with open(nnsight_md, "r") as f:
-            content = f.read()
-            # Include first 50k chars to stay within context limits
-            if len(content) > 50000:
-                content = content[:50000] + "\n\n[... truncated for length ...]"
-            docs.append(f"# NNsight.md (Technical Details)\n\n{content}")
-    
-    return "\n\n---\n\n".join(docs)
+def load_documentation(nnsight_path: str, bundle: str = "router") -> str:
+    """Load nnsight documentation according to the chosen bundle.
+
+    See ``doc_bundles.py`` for what each bundle includes.
+    """
+    return build_documentation(nnsight_path, bundle)
 
 
 def run_evaluation(
     config: AgentConfig,
     documentation: str,
+    doc_bundle: str = "router",
+    mode: str = "static",
     task_ids: Optional[list[str]] = None,
     difficulty: Optional[str] = None,
+    kind: Optional[str] = None,
     verbose: bool = False,
 ) -> EvalResult:
     """
@@ -126,50 +129,64 @@ def run_evaluation(
         tasks = get_tasks_by_difficulty(Difficulty(difficulty))
     else:
         tasks = list_all_tasks()
-    
+
+    # Optional kind filter (code / mcq).
+    if kind:
+        tasks = [t for t in tasks if t.kind.value == kind]
+
     if not tasks:
         raise ValueError("No tasks to run")
-    
+
     results = []
     passed = 0
-    
+
     # Track by difficulty
     difficulty_stats = {
         Difficulty.BASIC: {"passed": 0, "total": 0},
         Difficulty.INTERMEDIATE: {"passed": 0, "total": 0},
         Difficulty.ADVANCED: {"passed": 0, "total": 0},
     }
-    
+    kind_stats = {
+        TaskKind.CODE: {"passed": 0, "total": 0},
+        TaskKind.MCQ: {"passed": 0, "total": 0},
+    }
+
     for i, task in enumerate(tasks):
         if verbose:
-            print(f"\n[{i+1}/{len(tasks)}] Running task: {task.name} ({task.id})")
-        
+            kind_label = task.kind.value.upper()
+            print(f"\n[{i+1}/{len(tasks)}] Running {kind_label}: {task.name} ({task.id})")
+
         difficulty_stats[task.difficulty]["total"] += 1
-        
+        kind_stats[task.kind]["total"] += 1
+
         try:
-            # Generate code from agent
-            if verbose:
-                print("  Generating code...")
-            response = agent.generate_code(task.prompt, documentation)
-            code = extract_code_from_response(response)
-            
-            if verbose:
-                print("  Executing code...")
-            
-            # Run the task
-            result = run_task(task, code)
-            
+            if task.kind == TaskKind.MCQ:
+                if verbose:
+                    print("  Asking agent...")
+                response = agent.answer_mcq(task.question, task.choices, documentation)
+                # MCQs go through run_task as-is; runner parses the choice.
+                result = run_task(task, response)
+            else:
+                if verbose:
+                    print("  Generating code...")
+                response = agent.generate_code(task.prompt, documentation)
+                code = extract_code_from_response(response)
+                if verbose:
+                    print("  Executing code...")
+                result = run_task(task, code)
+
             if result.success:
                 passed += 1
                 difficulty_stats[task.difficulty]["passed"] += 1
+                kind_stats[task.kind]["passed"] += 1
                 if verbose:
                     print(f"  ✓ PASSED")
             else:
                 if verbose:
                     print(f"  ✗ FAILED: {result.error_message}")
-            
+
             results.append(result.to_dict())
-            
+
         except Exception as e:
             if verbose:
                 print(f"  ✗ ERROR: {str(e)}")
@@ -179,11 +196,13 @@ def run_evaluation(
                 "error_message": f"Agent error: {str(e)}",
                 "verification_passed": False,
             })
-    
+
     return EvalResult(
         timestamp=datetime.now().isoformat(),
         provider=config.provider,
         model=config.model,
+        doc_bundle=doc_bundle,
+        mode=mode,
         total_tasks=len(tasks),
         passed_tasks=passed,
         failed_tasks=len(tasks) - passed,
@@ -195,6 +214,10 @@ def run_evaluation(
         intermediate_total=difficulty_stats[Difficulty.INTERMEDIATE]["total"],
         advanced_passed=difficulty_stats[Difficulty.ADVANCED]["passed"],
         advanced_total=difficulty_stats[Difficulty.ADVANCED]["total"],
+        code_passed=kind_stats[TaskKind.CODE]["passed"],
+        code_total=kind_stats[TaskKind.CODE]["total"],
+        mcq_passed=kind_stats[TaskKind.MCQ]["passed"],
+        mcq_total=kind_stats[TaskKind.MCQ]["total"],
     )
 
 
@@ -205,12 +228,19 @@ def print_summary(result: EvalResult):
     print("=" * 60)
     print(f"Provider: {result.provider}")
     print(f"Model: {result.model}")
+    print(f"Doc bundle: {result.doc_bundle}")
     print(f"Timestamp: {result.timestamp}")
     print("-" * 60)
     print(f"Total Tasks: {result.total_tasks}")
     print(f"Passed: {result.passed_tasks}")
     print(f"Failed: {result.failed_tasks}")
     print(f"Pass Rate: {result.pass_rate:.1%}")
+    print("-" * 60)
+    print("By Kind:")
+    if result.code_total > 0:
+        print(f"  Code: {result.code_passed}/{result.code_total} ({result.code_passed/result.code_total:.1%})")
+    if result.mcq_total > 0:
+        print(f"  MCQ:  {result.mcq_passed}/{result.mcq_total} ({result.mcq_passed/result.mcq_total:.1%})")
     print("-" * 60)
     print("By Difficulty:")
     if result.basic_total > 0:
@@ -235,14 +265,23 @@ def main():
     )
     parser.add_argument(
         "--provider",
-        choices=["anthropic", "openai"],
+        choices=["anthropic", "openai", "claude-code"],
         default="anthropic",
-        help="LLM provider to use"
+        help=(
+            "LLM provider. 'anthropic'/'openai' use the API "
+            "(requires *_API_KEY env var). 'claude-code' shells out to the "
+            "local `claude` CLI — useful with a Max subscription instead of "
+            "API billing. Run `claude /login` once before using."
+        ),
     )
     parser.add_argument(
         "--model",
-        default="claude-sonnet-4-20250514",
-        help="Model name to use"
+        default="claude-sonnet-4-6",
+        help=(
+            "Model name to use. Examples: claude-sonnet-4-6, "
+            "claude-opus-4-7, gpt-4o. For --provider claude-code aliases "
+            "like 'sonnet' or 'opus' also work."
+        ),
     )
     parser.add_argument(
         "--temperature",
@@ -262,9 +301,36 @@ def main():
         help="Run all tasks of a specific difficulty"
     )
     parser.add_argument(
+        "--kind",
+        choices=["code", "mcq"],
+        help="Run only code-generation or only multiple-choice tasks"
+    )
+    parser.add_argument(
+        "--doc-bundle",
+        choices=sorted(set(list(DOC_BUNDLES.keys()) + list(BROWSE_BUNDLES.keys()))),
+        default="router",
+        help=(
+            "Which documentation bundle to use. In static mode the bundle is "
+            "concatenated into the system prompt; in browse mode the bundle "
+            "controls which directories the agent's Read tool can access."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["static", "browse"],
+        default="static",
+        help=(
+            "static: load the full bundle into the system prompt up front. "
+            "browse: only put CLAUDE.md (the router) in the system prompt; "
+            "give the agent a Read tool scoped to the bundle's directories so "
+            "it navigates the docs as designed. browse mode requires "
+            "--provider claude-code."
+        ),
+    )
+    parser.add_argument(
         "--nnsight-path",
-        default="../nnsight",
-        help="Path to nnsight library (for loading documentation)"
+        default="../..",
+        help="Path to nnsight repo root (for loading documentation)"
     )
     parser.add_argument(
         "--output",
@@ -291,27 +357,52 @@ def main():
         for task in list_all_tasks():
             print(f"  {task.id}")
             print(f"    Name: {task.name}")
+            print(f"    Kind: {task.kind.value}")
             print(f"    Difficulty: {task.difficulty.value}")
             print(f"    Tags: {', '.join(task.tags)}")
             print()
         return 0
-    
+
     # Load documentation
-    nnsight_path = Path(args.nnsight_path)
+    nnsight_path = Path(args.nnsight_path).resolve()
     if not nnsight_path.exists():
-        # Try relative to script location
+        # Fallback: assume the script lives in tests/agent-evals/ and the
+        # repo root is two levels up.
         script_dir = Path(__file__).parent
-        nnsight_path = script_dir.parent / "nnsight"
-    
+        nnsight_path = (script_dir / ".." / "..").resolve()
+
     if not nnsight_path.exists():
         print(f"Error: nnsight path not found: {nnsight_path}", file=sys.stderr)
         print("Please specify --nnsight-path", file=sys.stderr)
         return 1
-    
+
     if args.verbose:
         print(f"Loading documentation from: {nnsight_path}")
-    
-    documentation = load_documentation(str(nnsight_path))
+        print(f"Doc bundle: {args.doc_bundle}  (mode: {args.mode})")
+
+    add_dirs: list[str] = []
+    if args.mode == "browse":
+        if args.provider != "claude-code":
+            print(
+                "Error: browse mode requires --provider claude-code "
+                "(other providers don't support tool use through this suite).",
+                file=sys.stderr,
+            )
+            return 1
+        if args.doc_bundle not in BROWSE_BUNDLES:
+            print(
+                f"Error: bundle {args.doc_bundle!r} is not defined for browse mode. "
+                f"Available browse bundles: {list(BROWSE_BUNDLES.keys())}",
+                file=sys.stderr,
+            )
+            return 1
+        sys_prompt, browse_dirs = build_browse_config(str(nnsight_path), args.doc_bundle)
+        documentation = sys_prompt
+        add_dirs = [str(d) for d in browse_dirs]
+        if args.verbose:
+            print(f"Browse-mode add-dirs: {add_dirs}")
+    else:
+        documentation = load_documentation(str(nnsight_path), bundle=args.doc_bundle)
     
     if args.verbose:
         print(f"Loaded {len(documentation)} characters of documentation")
@@ -321,14 +412,19 @@ def main():
         provider=args.provider,
         model=args.model,
         temperature=args.temperature,
+        mode=args.mode,
+        add_dirs=add_dirs,
     )
-    
+
     # Run evaluation
     result = run_evaluation(
         config=config,
         documentation=documentation,
+        doc_bundle=args.doc_bundle,
+        mode=args.mode,
         task_ids=args.task_id,
         difficulty=args.difficulty,
+        kind=args.kind,
         verbose=args.verbose,
     )
     

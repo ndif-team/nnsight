@@ -25,7 +25,7 @@ class AppConfigModel(BaseModel):
 
     REMOTE_LOGGING: bool = True
     PYMOUNT: bool = True
-    DEBUG: bool = True
+    DEBUG: bool = False
     CACHE_DIR: str = "~/.cache/nnsight/"
     CROSS_INVOKER: bool = True
     TRACE_CACHING: bool = False

@@ -147,15 +147,15 @@ class LanguageModel(TransformersModel):
 
         max_new_tokens = kwargs.get("max_new_tokens", None)
 
-        if max_new_tokens is not None and self._interleaver is not None:
-            self._interleaver.default_all = max_new_tokens
+        if max_new_tokens is not None and self.interleaver is not None:
+            self.interleaver.default_all = max_new_tokens
 
         streamer = kwargs.pop("streamer", self.generator.streamer._module)
 
         output = self._model.generate(*args, streamer=streamer, **kwargs)
 
-        if self._interleaver is not None:
-            self._interleaver.default_all = None
+        if self.interleaver is not None:
+            self.interleaver.default_all = None
 
         output = self.generator(output, hook=True)
 
@@ -326,7 +326,9 @@ class LanguageModel(TransformersModel):
 
         batched_labels = batched_inputs["labels"]
 
-        attention_mask = batched_inputs.get("attention_mask", torch.ones_like(batched_inputs["input_ids"]))
+        attention_mask = batched_inputs.get(
+            "attention_mask", torch.ones_like(batched_inputs["input_ids"])
+        )
 
         batched_ids = [
             {"input_ids": ids}
@@ -352,9 +354,13 @@ class LanguageModel(TransformersModel):
         for row_start, mask in [(0, attention_mask), (n_old, new_attention_mask)]:
             if mask is not None:
                 if left:
-                    combined_mask[row_start : row_start + mask.shape[0], -mask.shape[1] :] = mask
+                    combined_mask[
+                        row_start : row_start + mask.shape[0], -mask.shape[1] :
+                    ] = mask
                 else:
-                    combined_mask[row_start : row_start + mask.shape[0], : mask.shape[1]] = mask
+                    combined_mask[
+                        row_start : row_start + mask.shape[0], : mask.shape[1]
+                    ] = mask
 
         new_batched_inputs["attention_mask"] = combined_mask
 

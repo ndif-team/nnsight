@@ -1,6 +1,11 @@
 import pickle
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import torch
+import zstandard as _zstd
+
+_ZSTD_COMPRESSOR = _zstd.ZstdCompressor(level=1)
+
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -116,8 +121,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 ctx = self.trace_contexts[trace_id]
 
-                model._interleaver.mediators.append(mediator)
-                mediator.start(model._interleaver)
+                mediator.idx = len(model.interleaver.mediators)
+                model.interleaver.mediators.append(mediator)
+                mediator.start(model.interleaver)
 
                 self.mediators[new_req.req_id] = mediator
                 ctx["pending_req_ids"].add(new_req.req_id)
@@ -135,7 +141,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             """
 
             batch_start = 0
-            mediator_set = {id(m) for m in model._interleaver.mediators}
+            mediator_set = {id(m) for m in model.interleaver.mediators}
 
             for req_id in self._batch_req_ids:
                 if self._num_scheduled_tokens.get(req_id) is None:
@@ -151,7 +157,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 mediator.batch_group = [batch_start, 1]
                 batch_start += 1
-                model._interleaver.batcher.last_batch_group = mediator.batch_group
+                model.interleaver.batcher.last_batch_group = mediator.batch_group
 
         def process_batch_groups(
             self,
@@ -159,6 +165,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
             batch_req_ids: List[str],
             model: VLLM,
         ) -> None:
+
+            # Clear batch_group for all registered mediators first. Persistent
+            # cache hooks read mediator.batch_group live on each forward pass,
+            # so a mediator whose request isn't scheduled in this step must
+            # report "None" rather than the stale value from an earlier step
+            # (which would point out-of-range in the smaller current batch).
+            for m in self.mediators.values():
+                m.batch_group = None
 
             batch_start = 0
 
@@ -187,11 +201,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 batch_start += num_tokens
 
             if mediators:
-                model._interleaver.batcher.last_batch_group = mediators[-1].batch_group
+                model.interleaver.batcher.last_batch_group = mediators[-1].batch_group
             else:
-                model._interleaver.batcher.last_batch_group = None
+                model.interleaver.batcher.last_batch_group = None
 
-            model._interleaver.mediators = mediators
+            model.interleaver.mediators = mediators
 
         def match_req_ids(self, req_id_set: set) -> List[tuple]:
             """Match engine-reported request IDs to stored mediators.
@@ -227,12 +241,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 Globals.enter()
                 if mediator.alive:
-                    model._interleaver.mediators = [mediator]
+                    model.interleaver.mediators = [mediator]
                     mediator.batch_group = None
-                    with model._interleaver:
-                        model._interleaver.handle("result", [base_id])
+                    with model.interleaver:
+                        model.interleaver.handle("result", [base_id])
                         mediator.cancel()
-                        model._interleaver.handle()
+                        model.interleaver.handle()
+                # Always remove persistent cache hooks when the request
+                # finishes — even if the mediator thread died early (e.g.
+                # intervention code was just tracer.cache(); nns.save(c)
+                # with no blocking access). Otherwise hooks pile up on the
+                # module and keep firing with stale batch_groups from dead
+                # mediators.
+                mediator.remove_hooks()
                 Globals.exit()
 
             return finished_internal_keys
@@ -323,9 +344,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 
-        self.nnsight_model._interleaver.mediators = []
+        self.nnsight_model.interleaver.mediators = []
 
-        self.nnsight_model._interleaver.batcher = VLLMBatcher()
+        self.nnsight_model.interleaver.batcher = VLLMBatcher()
 
         # Only wrap when TP > 1: registers hooks that handle
         # gather/split of sharded tensors and CUDA synchronization
@@ -333,7 +354,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # so wrapping is pure overhead.
 
         if get_tp_group().world_size > 1:
-            self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
+            self.nnsight_model.interleaver.batcher.wrap(self.nnsight_model)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
@@ -347,7 +368,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # condense()/reorder, not the scheduler dict order.
         # Store these for unflatten() which needs the same ordering.
         self.nnsight_request_helper._batch_req_ids = list(self.input_batch.req_ids)
-        self.nnsight_request_helper._num_scheduled_tokens = dict(scheduler_output.num_scheduled_tokens)
+        self.nnsight_request_helper._num_scheduled_tokens = dict(
+            scheduler_output.num_scheduled_tokens
+        )
 
         self.nnsight_request_helper.process_batch_groups(
             scheduler_output.num_scheduled_tokens,
@@ -355,8 +378,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
             self.nnsight_model,
         )
 
-        self.nnsight_model._interleaver.batcher.needs_batching = (
-            len(self.nnsight_model._interleaver.mediators) > 1
+        self.nnsight_model.interleaver.batcher.needs_batching = (
+            len(self.nnsight_model.interleaver.mediators) > 1
         )
 
     def execute_model(
@@ -366,16 +389,28 @@ class NNsightGPUModelRunner(GPUModelRunner):
     ):
 
         Globals.enter()
-        with self.nnsight_model._interleaver:
+        with self.nnsight_model.interleaver:
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
 
+        Globals.exit()
+
+        return return_value
+
+    def sample_tokens(self, *args, **kwargs):
+
+        Globals.enter()
+
+        with self.nnsight_model.interleaver:
+
+            # Provide logits from execute_model state before sampling.
             if self.execute_model_state is not None:
 
-                logits = self.nnsight_model.logits(
-                    self.execute_model_state.logits, hook=True
+                logits = type(self.nnsight_model).logits.provide(
+                    self.nnsight_model,
+                    self.execute_model_state.logits,
                 )
 
                 state = self.execute_model_state
@@ -386,18 +421,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.exit()
 
-        return return_value
+        return super().sample_tokens(*args, **kwargs)
 
     def _sample(self, *args, **kwargs):
 
         Globals.enter()
 
-        with self.nnsight_model._interleaver:
+        with self.nnsight_model.interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
 
-            sampler_output.sampled_token_ids = self.model.samples(
-                sampler_output.sampled_token_ids, hook=True
+            sampler_output.sampled_token_ids = type(self.nnsight_model).samples.provide(
+                self.nnsight_model,
+                sampler_output.sampled_token_ids,
             )
 
         Globals.exit()
@@ -439,4 +475,5 @@ class NNsightGPUModelRunner(GPUModelRunner):
         saves, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
 
-        return pickle.dumps(saves)
+        torch.cuda.synchronize()
+        return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves))

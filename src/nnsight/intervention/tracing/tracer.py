@@ -1,6 +1,6 @@
 import copy
 import inspect
-import re
+
 from dataclasses import dataclass
 
 
@@ -13,7 +13,7 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from ... import util
 from ..backends.base import Backend
 from ..batching import Batcher
-from ..interleaver import Events, Mediator
+from ..interleaver import Events, Interleaver, Mediator, eproperty
 from .base import ExitTracingException, Tracer
 from .globals import Object
 from .invoker import Invoker
@@ -26,15 +26,19 @@ else:
 
 
 class Cache:
-    """
-    A cache for storing and transforming tensor values during tracing.
+    """A cache for storing module activations during tracing.
 
-    This class provides functionality to store tensor values with optional
-    transformations such as detaching from computation graph, moving to a
-    specific device, or converting to a specific dtype.
-    """
+    Persistent cache hooks (registered via :func:`hooks.cache_output_hook` and
+    :func:`hooks.cache_input_hook`) fire on every forward pass and call
+    :meth:`add` to record values.  Hooks are registered by
+    :meth:`InterleavingTracer.cache` when the user creates a cache, and
+    removed automatically when the interleaver exits.
 
-    CACHE_PROVIDER_RE = re.compile(r"^(.+)\.([^.]+)\.i(\d+)$")
+    The cache applies optional transformations (detach, device, dtype) to
+    values before storing them. Hook handles live on the owning
+    :class:`Mediator` (in ``mediator.hooks``) and are drained by
+    :meth:`Mediator.remove_hooks`, not on the cache itself.
+    """
 
     @dataclass
     class Entry:
@@ -179,6 +183,12 @@ class Cache:
                     f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute."
                 )
 
+        def __getstate__(self):
+            return self.__dict__.copy()
+
+        def __setstate__(self, state):
+            self.__dict__.update(state)
+
     def __init__(
         self,
         modules: Optional[List[Union[Envoy, str]]] = None,
@@ -190,15 +200,18 @@ class Cache:
         rename: Optional[Dict[str, str]] = None,
         alias: Optional[Dict[str, str]] = None,
     ):
-        """
-        Initialize a Cache with optional transformation parameters.
+        """Initialize a Cache with optional transformation parameters.
 
         Args:
-            device: Optional device to move tensors to
-            dtype: Optional dtype to convert tensors to
-            detach: Whether to detach tensors from computation graph
-            include_output: Whether to include output in the cached activations
-            include_inputs: Whether to include inputs in the cached activations
+            modules: Optional list of modules (Envoy objects or path strings)
+                to cache.  If ``None``, all modules are cached.
+            device: Device to move cached tensors to (default: CPU).
+            dtype: Optional dtype to convert cached tensors to.
+            detach: Whether to detach tensors from the computation graph.
+            include_output: Whether to cache module outputs.
+            include_inputs: Whether to cache module inputs.
+            rename: Rename mapping for alias path resolution.
+            alias: Alias mapping for ``CacheDict`` attribute access.
         """
         self.device = device
         self.dtype = dtype
@@ -212,79 +225,46 @@ class Cache:
 
         self.cache = Cache.CacheDict({}, rename=rename, alias=alias).save()
 
-    def add(self, provider: str, value: Any):
-        """
-        Add a value to the cache with optional transformations.
+    def add(self, module_path: str, key: str, value: Any):
+        """Add a value to the cache with optional transformations.
+
+        Called by persistent cache hooks registered via
+        :func:`hooks.cache_output_hook` and :func:`hooks.cache_input_hook`.
 
         Args:
-            provider: The key to store the value under
-            value: The tensor value to store
+            module_path: The module's envoy path (e.g. ``"model.transformer.h.0"``).
+            key: ``"output"`` or ``"inputs"``.
+            value: The tensor value to store.
         """
-
-        # Match pattern like "x.y.z.key.i1" into groups
-        match = Cache.CACHE_PROVIDER_RE.match(provider)
-
-        if match is None:
-            return
-
-        module_path, key, iteration = match.groups()
-
-        if key not in ("input", "output"):
-            return
-
-        key = "inputs" if key == "input" else key
-
-        if ".source." in module_path:
-            return
-
-        if self.modules is not None:
-            if module_path not in self.modules:
-                return
-
-        if (key == "output" and not self.include_output) or (
-            key == "inputs" and not self.include_inputs
-        ):
-            return
 
         if self.detach:
             value = util.apply(value, lambda x: x.detach(), torch.Tensor)
 
-        if self.device is not None:
-            value = util.apply(value, lambda x: x.to(self.device), torch.Tensor)
-
-        if self.dtype is not None:
-            value = util.apply(value, lambda x: x.to(self.dtype), torch.Tensor)
+        if self.device is not None or self.dtype is not None:
+            _device = self.device
+            _dtype = self.dtype
+            value = util.apply(
+                value,
+                lambda x: x.to(device=_device, dtype=_dtype, non_blocking=True),
+                torch.Tensor,
+            )
 
         if module_path not in self.cache:
             self.cache[module_path] = Cache.Entry(**{key: value})
             self.cache._add_alias_path(module_path)
         else:
+            entry = self.cache[module_path]
 
-            if isinstance(self.cache[module_path], Cache.Entry):
-
-                if key == "output":
-                    if self.cache[module_path].output is None:
-                        self.cache[module_path].output = value
-                    else:
-                        self.cache[module_path] = [
-                            self.cache[module_path],
-                            Cache.Entry(output=value),
-                        ]
+            if isinstance(entry, Cache.Entry):
+                if getattr(entry, key) is None:
+                    setattr(entry, key, value)
                 else:
-                    # if the entry exists and the key is input always create a new entry
-                    self.cache[module_path] = [
-                        self.cache[module_path],
-                        Cache.Entry(inputs=value),
-                    ]
+                    self.cache[module_path] = [entry, Cache.Entry(**{key: value})]
             else:
-                if key == "output":
-                    if self.cache[module_path][-1].output is None:
-                        self.cache[module_path][-1].output = value
-                    else:
-                        self.cache[module_path].append(Cache.Entry(output=value))
+                if getattr(entry[-1], key) is None:
+                    setattr(entry[-1], key, value)
                 else:
-                    self.cache[module_path].append(Cache.Entry(inputs=value))
-
+                    entry.append(Cache.Entry(**{key: value}))
 
 class InterleavingTracer(Tracer):
     """
@@ -322,6 +302,10 @@ class InterleavingTracer(Tracer):
         self._frame = None
 
         super().__init__(*args, **kwargs, backend=backend)
+
+    @property
+    def interleaver(self) -> "Interleaver":
+        return self.model.interleaver
 
     def __exit__(self, exc_type, exc_value, traceback):
         result = super().__exit__(exc_type, exc_value, traceback)
@@ -420,7 +404,7 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
-        interleaver = self.model._interleaver
+        interleaver = self.model.interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher)
 
         return args, kwargs
@@ -464,17 +448,17 @@ class InterleavingTracer(Tracer):
         """
         Raise an EarlyStopException to stop the execution of the model.
         """
-        self.model._interleaver.current.stop()
+        self.model.interleaver.current.stop()
 
     @property
     def iter(self):
-        return IteratorProxy(self.model._interleaver)
+        return IteratorProxy(self.model.interleaver, self.model)
 
     def all(self):
         return self.iter[:]
 
     def next(self, step: int = 1):
-        self.model._interleaver.current.iteration += step
+        self.model.interleaver.current.iteration += step
 
         return self
 
@@ -487,19 +471,26 @@ class InterleavingTracer(Tracer):
         include_output: bool = True,
         include_inputs: bool = False,
     ) -> Union[Dict, Object]:
-        """
-        Get or create a cache for storing intermediate values during tracing.
+        """Create a cache that records module activations during execution.
+
+        Registers persistent hooks on the target modules (all modules if
+        ``modules`` is ``None``, otherwise only the specified subset).  The
+        hooks fire after any intervention hooks (``mediator_idx=inf``) so
+        they capture post-intervention values.  Hooks persist across
+        generation steps and are automatically removed when the interleaver
+        exits.
 
         Args:
-            modules: Optional list of modules to cache, defaults to all modules
-            device: Optional device to move tensors to, defaults to cpu
-            dtype: Optional dtype to convert tensors to, defaults to None
-            detach: Whether to detach tensors from computation graph, defaults to True
-            include_output: Whether to include output in the cached activations
-            include_inputs: Whether to include inputs in the cached activations
+            modules: Modules to cache — Envoy objects or path strings.
+                If ``None``, caches all modules in the model.
+            device: Device to move cached tensors to (default: CPU).
+            dtype: Optional dtype to convert cached tensors to.
+            detach: Whether to detach tensors from the computation graph.
+            include_output: Whether to cache module outputs.
+            include_inputs: Whether to cache module inputs.
 
         Returns:
-            A dictionary containing the cached values
+            A :class:`Cache.CacheDict` that is populated during execution.
         """
 
         rename_dict = (
@@ -510,20 +501,52 @@ class InterleavingTracer(Tracer):
         if not self.model.interleaving:
             raise ValueError("Cannot create a cache outside an invoker.")
 
-        self.model._interleaver.current.set_user_cache(
-            Cache(
-                modules,
-                device,
-                dtype,
-                detach,
-                include_output,
-                include_inputs,
-                rename_dict,
-                alias_dict,
-            )
+        from ..hooks import cache_output_hook, cache_input_hook
+
+        cache_obj = Cache(
+            modules,
+            device,
+            dtype,
+            detach,
+            include_output,
+            include_inputs,
+            rename_dict,
+            alias_dict,
         )
 
-        return self.model._interleaver.current.user_cache[-1].cache
+        mediator = self.model.interleaver.current
+        batcher = self.model.interleaver.batcher
+
+        # Resolve target modules to Envoy objects
+        if modules is None:
+            targets = list(self.model.modules())
+        else:
+            targets = []
+            string_paths = set()
+            for m in modules:
+                if isinstance(m, str):
+                    string_paths.add(m)
+                else:
+                    targets.append(m)
+            if string_paths:
+                for envoy in self.model.modules():
+                    if envoy.path in string_paths:
+                        targets.append(envoy)
+
+        # Register persistent cache hooks on each target module
+        for envoy in targets:
+            if include_output:
+                cache_output_hook(
+                    cache_obj, envoy._module, envoy.path, batcher, mediator
+                )
+            if include_inputs:
+                cache_input_hook(
+                    cache_obj, envoy._module, envoy.path, batcher, mediator
+                )
+
+        mediator.set_user_cache(cache_obj)
+
+        return cache_obj.cache
 
     def barrier(self, n_participants: int):
         """
@@ -555,28 +578,9 @@ class InterleavingTracer(Tracer):
 
         return Barrier(self.model, n_participants)
 
-    @property
+    @eproperty(iterate=False)
     def result(self) -> Object:
-        """
-        Get the result of the method being traced.
-
-        This property allows access to the return values produced by the method being traced.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.generate("Hello World") as tracer:
-            ...     result = tracer.result.save()
-            >>> print(result)
-
-        Returns:
-            The result of the method being traced
-        """
-
-        if self.model.interleaving:
-
-            return self.model._interleaver.current.request("result")
-        else:
-            raise ValueError("Cannot return result of Envoy that is not interleaving.")
+        """The return value of the method being traced."""
 
     ### Serialization ###
 
@@ -611,9 +615,7 @@ class ScanningTracer(InterleavingTracer):
     A tracer that runs the model in fake tensor mode to validate operations and inspect tensor shapes.
 
     This tracer uses PyTorch's FakeTensorMode to run the model without actual computation,
-    allowing for shape validation and operation checking. It populates the _fake_inputs and
-    _fake_output attributes on each Envoy to store the shapes and types of tensors that would
-    flow through the model during a real forward pass.
+    allowing for shape validation and operation checking.
     """
 
     def execute(self, fn: Callable):
@@ -621,34 +623,12 @@ class ScanningTracer(InterleavingTracer):
         Execute the model in fake tensor mode.
 
         This method:
-        1. Registers forward hooks on all modules to capture fake input/output
-        2. Runs the model in fake tensor mode to validate operations
-        3. Stores the fake inputs/outputs on each Envoy for later inspection
+        1. Runs the model in fake tensor mode to validate operations
+        2. Allows intervention code inside the scan context to access fake tensor shapes
 
         Args:
             fn: The function to execute (typically the model's forward pass)
         """
-        # Get all Envoys in the model
-        envoys = self.model.modules()
-
-        hooks = []
-
-        # Register hooks on each module to capture shapes
-        for envoy in envoys:
-
-            def _hook(
-                module: torch.nn.Module,
-                input: Any,
-                input_kwargs: Dict,
-                output: Any,
-                envoy=envoy,
-            ):
-                # Store the shapes/types of inputs and outputs on the Envoy
-                envoy._fake_inputs = (input, input_kwargs)
-                envoy._fake_output = output
-
-            hooks.append(envoy._module.register_forward_hook(_hook, with_kwargs=True))
-
         # Run the model in fake tensor mode
         with FakeTensorMode(
             allow_non_fake_inputs=True,  # Allow real tensors as input
@@ -662,10 +642,6 @@ class ScanningTracer(InterleavingTracer):
                 # Execute the model in fake mode
                 super().execute(fn)
 
-        # Clean up hooks
-        for hook in hooks:
-            hook.remove()
-
 
 class Barrier:
 
@@ -677,7 +653,7 @@ class Barrier:
 
     def __call__(self):
 
-        mediator = self.model._interleaver.current
+        mediator = self.model.interleaver.current
 
         self.participants.add(mediator.name)
 

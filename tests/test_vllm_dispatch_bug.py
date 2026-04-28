@@ -23,7 +23,7 @@ def test_trace_without_dispatch(vllm_gpt2_no_dispatch):
     assert model.vllm_entrypoint is None, "vllm_entrypoint should be None initially"
 
     with model.trace("The Eiffel Tower is located in the city of", temperature=0.0, top_p=1):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     assert model.dispatched, "Model should be dispatched after trace"
     assert model.vllm_entrypoint is not None, "vllm_entrypoint should exist after trace"

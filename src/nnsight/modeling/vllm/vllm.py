@@ -1,6 +1,5 @@
 import atexit
 import uuid
-import vllm
 
 import torch
 
@@ -16,22 +15,25 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.entrypoints.llm import LLM
 
-from ...intervention.envoy import Envoy
+from ...intervention.envoy import eproperty
 from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.tracer import ScanningTracer
 from ...intervention.tracing.util import push_variables
-from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
 from ...intervention.serialization import save as serialize
 from ... import save
+from ... import CONFIG
 from .engines.engine import NNsightLLMEngine
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
+
+CONFIG.APP.CROSS_INVOKER = False
 if TYPE_CHECKING:
     from torch.nn import Module
 
@@ -40,12 +42,12 @@ if TYPE_CHECKING:
 
 class VLLM(RemoteableMixin):
     """NNsight wrapper to conduct interventions on a vLLM inference engine.\
-    
+
     Attributes:
         - vllm_entrypoint (vllm.LLM): vLLM language model.
         - tokenizer (vllm.transformers_utils.tokenizer.AnyTokenizer): tokenizer.
-        - logits (nnsight.WrapperModule): logits.
-        - samples (nnsight.WrapperModule): sampled tokens.
+        - logits (eproperty): logit tensor.
+        - samples (eproperty): sampled token ids.
 
     .. code-block:: python
         from nnsight.models.VLLM import VLLM
@@ -67,9 +69,7 @@ class VLLM(RemoteableMixin):
 
         mode = kwargs.pop("mode", "sync")
         if mode not in ("sync", "async"):
-            raise ValueError(
-                f"Invalid mode {mode!r}. Must be 'sync' or 'async'."
-            )
+            raise ValueError(f"Invalid mode {mode!r}. Must be 'sync' or 'async'.")
         self._async_engine: bool = mode == "async"
 
         self.vllm_entrypoint: LLM = None
@@ -95,18 +95,31 @@ class VLLM(RemoteableMixin):
                 backend="gloo",
             )
 
-            with set_current_vllm_config(VllmConfig()):
-                initialize_model_parallel(
-                    tensor_model_parallel_size=1, pipeline_model_parallel_size=1
-                )
-
         atexit.register(VLLM._cleanup_distributed)
 
         super().__init__(*args, **kwargs)
 
-        self.logits: Envoy = WrapperModule()
-        self.samples: Envoy = WrapperModule()
-        self.generator: Envoy = WrapperModule()
+    @eproperty(description="Logits", iterate=True)
+    def logits(self):
+        """The logit tensor produced by the model before sampling.
+
+        Access during a trace to observe or modify logits::
+
+            with model.trace("Hello", temperature=0.0, top_p=1):
+                logits = model.logits.save()
+        """
+
+    @eproperty(description="Sampled token ids", iterate=True)
+    def samples(self):
+        """The sampled token IDs produced by the sampler after logits.
+
+        Access during a trace to observe or modify sampled tokens::
+
+            with model.trace("Hello", temperature=0.8, top_p=0.95, max_tokens=3) as tracer:
+                tokens = list().save()
+                for step in tracer.iter[:]:
+                    tokens.append(model.samples.item())
+        """
 
     @staticmethod
     def _cleanup_distributed():
@@ -136,9 +149,16 @@ class VLLM(RemoteableMixin):
 
         vllm_config.load_config.device = "meta"
 
-        loader = DummyModelLoader(vllm_config.load_config)
-        loader.load_weights = lambda *args, **kwargs: None
-        model = loader.load_model(vllm_config, vllm_config.model_config)
+        # vLLM requires config context for model parallel init and model loading
+        with set_current_vllm_config(vllm_config):
+
+            initialize_model_parallel(
+                tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+            )
+
+            loader = DummyModelLoader(vllm_config.load_config)
+            loader.load_weights = lambda *args, **kwargs: None
+            model = loader.load_model(vllm_config, vllm_config.model_config)
 
         _ROPE_DICT.clear()
 
@@ -159,6 +179,7 @@ class VLLM(RemoteableMixin):
         _uses_ray = kwargs.get("distributed_executor_backend") == "ray"
         if _uses_ray:
             from .executors.ray_workaround import NNsightRayExecutor
+
             kwargs["distributed_executor_backend"] = NNsightRayExecutor
 
         if self._async_engine:
@@ -168,6 +189,7 @@ class VLLM(RemoteableMixin):
             # cluster is available before the subprocess starts.
             if _uses_ray:
                 import ray
+
                 if not ray.is_initialized():
                     ray.init()
             from vllm.engine.arg_utils import AsyncEngineArgs
@@ -224,7 +246,9 @@ class VLLM(RemoteableMixin):
             # --- HuggingFace tokenizer dict (e.g. tokenizer("hello")) ---
             if type(arg) is dict:
                 keys = set(arg.keys())
-                if "input_ids" in keys and keys.issubset({"input_ids", "attention_mask"}):
+                if "input_ids" in keys and keys.issubset(
+                    {"input_ids", "attention_mask"}
+                ):
                     prompt = self._parse_hf_tokenizer_dict(arg)
                     prompts.append(prompt)
                     params.append(NNsightSamplingParams(**kwargs))
@@ -290,12 +314,16 @@ class VLLM(RemoteableMixin):
             )
 
         input_ids = batch_input_ids[0]
-        attention_mask = batch_attention_mask[0] if batch_attention_mask is not None else None
+        attention_mask = (
+            batch_attention_mask[0] if batch_attention_mask is not None else None
+        )
 
         # Filter out masked tokens if attention mask is provided
         if attention_mask is not None:
             return TokensPrompt(
-                prompt_token_ids=[t for t, m in zip(input_ids, attention_mask) if m != 0]
+                prompt_token_ids=[
+                    t for t, m in zip(input_ids, attention_mask) if m != 0
+                ]
             )
         return TokensPrompt(prompt_token_ids=input_ids)
 
@@ -340,7 +368,7 @@ class VLLM(RemoteableMixin):
 
         # Collect all input mediators (those with batch_group, i.e. not empty invokes)
         input_mediators = []
-        for mediator in self._interleaver.mediators:
+        for mediator in self.interleaver.mediators:
             if mediator.batch_group is not None:
                 mediator.intervention.__source__ = "".join(mediator.info.source)
                 input_mediators.append(mediator)
@@ -352,8 +380,7 @@ class VLLM(RemoteableMixin):
         if input_mediators:
             frame_globals = input_mediators[0].intervention.__globals__
             saved_names = [
-                name for name, val in frame_globals.items()
-                if id(val) in Globals.saves
+                name for name, val in frame_globals.items() if id(val) in Globals.saves
             ]
 
         trace_id = str(uuid.uuid4())
@@ -391,10 +418,14 @@ class VLLM(RemoteableMixin):
         Each mediator maps to exactly one prompt/param (1:1).
         """
 
-        prompts, params, lora_requests = self._serialize_mediators(prompts, params, lora_requests, **kwargs)
+        prompts, params, lora_requests = self._serialize_mediators(
+            prompts, params, lora_requests, **kwargs
+        )
 
         # Do VLLM generation with NNsight
-        outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_requests)
+        outputs = self.vllm_entrypoint.generate(
+            prompts, sampling_params=params, lora_request=lora_requests
+        )
 
         saves = {}
 
@@ -409,26 +440,31 @@ class VLLM(RemoteableMixin):
             save(value)
 
         # Push the variables to the interleaver frame
-        push_variables(self._interleaver.mediators[0].info.frame, saves)
+        push_variables(self.interleaver.mediators[0].info.frame, saves)
 
     def trace(self, *inputs, **kwargs):
-        if self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
+        if (
+            self._async_engine
+            and kwargs.get("backend") is None
+            and not kwargs.get("remote")
+        ):
             from .async_backend import AsyncVLLMBackend
-            kwargs['backend'] = AsyncVLLMBackend(self)
+
+            kwargs["backend"] = AsyncVLLMBackend(self)
         return super().trace(*inputs, **kwargs)
 
     def interleave(self, fn: Callable, *args, **kwargs):
         """Execute the traced function with vLLM, dispatching the engine if needed."""
         if not self.dispatched and not isinstance(
-            self._interleaver.tracer, ScanningTracer
+            self.interleaver.tracer, ScanningTracer
         ):
             self.dispatch()
 
         try:
             fn(*args, **kwargs)
         finally:
-            self._interleaver.check_cache_full()
-            self._interleaver.cancel()
+            self.interleaver.check_cache_full()
+            self.interleaver.cancel()
 
     def _remoteable_persistent_objects(self) -> dict:
         persistent_objects = super()._remoteable_persistent_objects()
