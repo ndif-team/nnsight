@@ -6,6 +6,7 @@ import torch
 
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+from contextlib import contextmanager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.inputs import TokensPrompt
 
@@ -31,11 +32,67 @@ from ...intervention.serialization import save as serialize
 from ... import save
 from .engines.engine import NNsightLLMEngine
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+from vllm.model_executor.model_loader import utils as model_loader_utils
 
 if TYPE_CHECKING:
     from torch.nn import Module
 
     from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+
+@contextmanager
+def _meta_loading_patches():
+    """Context manager that patches vLLM internals to support meta device loading.
+
+    This patches:
+    1. torch.nn.Module.to() - becomes a no-op when source tensors are on meta device
+    2. process_weights_after_loading - skipped entirely for meta device
+    3. current_platform.current_device() - returns 'meta' instead of cuda device
+
+    These patches are needed because some vLLM model implementations (e.g., Kimi-K2.5)
+    explicitly call .to(device=cuda) during __init__, which fails for meta tensors.
+    """
+    from vllm import platforms
+
+    # Store original functions
+    original_module_to = torch.nn.Module.to
+    original_process_weights = model_loader_utils.process_weights_after_loading
+    original_current_device = platforms.current_platform.current_device
+
+    def patched_module_to(self, *args, **kwargs):
+        """Patched Module.to() that skips moving meta tensors."""
+        # Check if any parameter is on meta device
+        try:
+            params = list(self.parameters())
+            if params and params[0].device.type == 'meta':
+                # Return self without moving - can't move meta tensors
+                return self
+        except (StopIteration, AttributeError):
+            pass
+        return original_module_to(self, *args, **kwargs)
+
+    def patched_process_weights(model, model_config, target_device):
+        """Patched process_weights_after_loading that skips for meta device."""
+        if target_device.type == 'meta':
+            return
+        return original_process_weights(model, model_config, target_device)
+
+    def patched_current_device():
+        """Return 'meta' as current device during meta loading."""
+        return 'meta'
+
+    # Apply patches
+    torch.nn.Module.to = patched_module_to
+    model_loader_utils.process_weights_after_loading = patched_process_weights
+    platforms.current_platform.current_device = patched_current_device
+
+    try:
+        yield
+    finally:
+        # Restore original functions
+        torch.nn.Module.to = original_module_to
+        model_loader_utils.process_weights_after_loading = original_process_weights
+        platforms.current_platform.current_device = original_current_device
 
 
 class VLLM(RemoteableMixin):
@@ -138,7 +195,10 @@ class VLLM(RemoteableMixin):
 
         loader = DummyModelLoader(vllm_config.load_config)
         loader.load_weights = lambda *args, **kwargs: None
-        model = loader.load_model(vllm_config, vllm_config.model_config)
+
+        # Use meta loading patches to handle models that call .to(cuda) during __init__
+        with _meta_loading_patches():
+            model = loader.load_model(vllm_config, vllm_config.model_config)
 
         _ROPE_DICT.clear()
 
