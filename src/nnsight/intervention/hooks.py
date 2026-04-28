@@ -43,25 +43,26 @@ Module contents
 """
 
 from functools import partial, wraps
-from typing import Any, Callable, List, Optional, TYPE_CHECKING
-from .interleaver import Mediator
+from typing import Any, Callable, List, Optional, TYPE_CHECKING, TypeVar
+from .interleaver import Mediator, eproperty
 import torch
 from torch.utils.hooks import RemovableHandle
 from ..util import apply
 
 if TYPE_CHECKING:
     from nnsight.intervention.envoy import Envoy
-    from nnsight.intervention.envoy import OperationEnvoy
+    from nnsight.intervention.source import OperationAccessor, OperationEnvoy
 else:
     Envoy = Any
     OperationEnvoy = Any
+    OperationAccessor = Any
 
 
 class OperationHookHandle:
     """A ``RemovableHandle``-shaped handle for operation-level hooks.
 
-    Operation hooks live on plain lists (``op_envoy.pre_hooks``,
-    ``op_envoy.post_hooks``, ``op_envoy.fn_hooks``) rather than PyTorch's
+    Operation hooks live on plain lists (``op_accessor.pre_hooks``,
+    ``op_accessor.post_hooks``, ``op_accessor.fn_hooks``) rather than PyTorch's
     module hook dicts, so PyTorch's :class:`~torch.utils.hooks.RemovableHandle`
     doesn't apply. This handle lets callers treat them uniformly with module
     handles: store in ``mediator.hooks`` and call ``.remove()`` at cancel.
@@ -164,7 +165,7 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     On each forward call, the hook checks whether the tracker has
     advanced to the target iteration.  The tracker is **not** maintained
     by this hook — it is bumped by the persistent iter hooks registered
-    by :class:`IteratorTracer` (see :func:`_register_iter_hooks` in
+    by :class:`IteratorTracer` (see :func:`register_iter_hooks` in
     ``iterator.py``) after each forward pass.  This means the hook only
     needs to compare; it doesn't count.
 
@@ -348,6 +349,126 @@ def requires_input(fn):
 
 
 # ---------------------------------------------------------------------------
+# Sugar decorators: @hooked_output / @hooked_input
+# ---------------------------------------------------------------------------
+#
+# These combine the lower-level pair (``@eproperty(...)`` + ``@requires_*``)
+# into a single decorator. The lower-level forms remain valid for advanced
+# cases (e.g. custom requires_* implementations, externally-fed eproperties
+# without a hook setup like ``InterleavingTracer.result`` /
+# ``VLLM.logits``).
+#
+# The returned object is the same :class:`eproperty` descriptor, so
+# ``.preprocess`` / ``.postprocess`` / ``.transform`` continue to work for
+# subclasses like :class:`Envoy.input` that need a single-arg view.
+
+T = TypeVar("T")
+
+
+def _make_hooked(requires_decorator: Callable, *, default_key: Optional[str] = None):
+    """Build a sugar decorator that combines ``eproperty`` with ``requires_*``.
+
+    The returned factory mirrors :class:`eproperty`'s call signature
+    (``key=None, description=None, iterate=True``) and produces a decorator
+    that wraps a stub method with the supplied ``requires_decorator`` before
+    feeding it through :class:`eproperty`.
+
+    Args:
+        requires_decorator: One of the ``requires_*`` functions in this
+            module (or a custom equivalent). It is applied to the stub
+            before the resulting :class:`eproperty` is constructed.
+        default_key: Optional key to use when the caller does not pass one.
+            For ``hooked_input`` this is forced to ``"input"`` so both the
+            ``(args, kwargs)`` view and a single-arg view (via ``.preprocess``)
+            can share the same provider key. ``None`` means "fall back to
+            the stub's function name" (matches the default behavior of
+            :class:`eproperty`).
+    """
+
+    def factory(
+        key: Optional[str] = None,
+        description: Optional[str] = None,
+        iterate: bool = True,
+    ):
+        resolved_key = key if key is not None else default_key
+
+        def decorator(fn: Callable[..., T]) -> T:
+            return eproperty(
+                key=resolved_key, description=description, iterate=iterate
+            )(requires_decorator(fn))
+
+        return decorator
+
+    return factory
+
+
+hooked_output = _make_hooked(requires_output)
+"""Sugar for ``@eproperty()`` + ``@requires_output``.
+
+Use this when defining a module-level ``output`` eproperty that should
+register a one-shot forward hook on the underlying module on access.
+
+Example::
+
+    class MyEnvoy(Envoy):
+        @hooked_output()
+        def output(self): ...
+
+Equivalent to::
+
+    @eproperty()
+    @requires_output
+    def output(self): ...
+
+Accepts the same kwargs as :class:`eproperty` — ``key``, ``description``,
+``iterate``. The default ``key`` is the stub's function name.
+"""
+
+
+hooked_input = _make_hooked(requires_input, default_key="input")
+"""Sugar for ``@eproperty(key="input")`` + ``@requires_input``.
+
+Default ``key`` is ``"input"``. Use for any input-flavored eproperty —
+both the raw ``(args, kwargs)`` view and a single-arg convenience view
+(via ``.preprocess`` / ``.postprocess``). Multiple eproperties keyed on
+``"input"`` share a single underlying provider, so the same hook fires
+for both.
+
+Example — raw inputs::
+
+    class MyEnvoy(Envoy):
+        @hooked_input()
+        def inputs(self): ...                # returns (args, kwargs)
+
+Example — convenience first-arg view, sharing the same provider::
+
+    class MyEnvoy(Envoy):
+        @hooked_input()
+        def input(self): ...                 # returns first positional/kwarg
+
+        @input.preprocess
+        def input(self, value):
+            return [*value[0], *value[1].values()][0]
+
+        @input.postprocess
+        def input(self, value):
+            inputs = self.inputs
+            return (value, *inputs[0][1:]), inputs[1]
+
+Equivalent to::
+
+    @eproperty(key="input")
+    @requires_input
+    def input(self): ...
+"""
+
+
+# Operation-level variants (``hooked_operation_output`` /
+# ``hooked_operation_input``) are defined further down, after
+# :func:`requires_operation_output` and :func:`requires_operation_input`.
+
+
+# ---------------------------------------------------------------------------
 # Persistent cache hooks
 # ---------------------------------------------------------------------------
 
@@ -439,7 +560,7 @@ def requires_operation_output(fn):
 
     Equivalent to :func:`requires_output` but registers an operation-level
     hook via :func:`operation_output_hook` on the OperationEnvoy's
-    ``post_hooks`` list.
+    underlying :class:`OperationAccessor`'s ``post_hooks`` list.
     """
 
     @wraps(fn)
@@ -453,7 +574,7 @@ def requires_operation_output(fn):
         requester = f"{self.path}.output.i{iteration}"
 
         if self.interleaver.batcher.current_provider != requester:
-            operation_output_hook(mediator, self)
+            operation_output_hook(mediator, self.accessor)
 
         return fn(self, *args, **kwargs)
 
@@ -465,7 +586,7 @@ def requires_operation_input(fn):
 
     Equivalent to :func:`requires_input` but registers an operation-level
     hook via :func:`operation_input_hook` on the OperationEnvoy's
-    ``pre_hooks`` list.
+    underlying :class:`OperationAccessor`'s ``pre_hooks`` list.
     """
 
     @wraps(fn)
@@ -479,11 +600,31 @@ def requires_operation_input(fn):
         requester = f"{self.path}.input.i{iteration}"
 
         if self.interleaver.batcher.current_provider != requester:
-            operation_input_hook(mediator, self)
+            operation_input_hook(mediator, self.accessor)
 
         return fn(self, *args, **kwargs)
 
     return wrapper
+
+
+# Operation-level sugar decorators — analogues of ``hooked_*`` for source
+# tracing on :class:`OperationEnvoy`.
+
+hooked_operation_output = _make_hooked(requires_operation_output)
+"""Sugar for ``@eproperty()`` + ``@requires_operation_output``.
+
+Use on :class:`OperationEnvoy` stubs that intercept an operation's return
+value (post-hook on the underlying :class:`OperationAccessor`).
+"""
+
+hooked_operation_input = _make_hooked(requires_operation_input, default_key="input")
+"""Sugar for ``@eproperty(key="input")`` + ``@requires_operation_input``.
+
+Use on :class:`OperationEnvoy` stubs that intercept an operation's inputs.
+Multiple stubs keyed on ``"input"`` share a single underlying provider, so
+both the raw ``(args, kwargs)`` view and a convenience first-arg view via
+``.preprocess`` / ``.postprocess`` see the same hook firing.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -491,15 +632,15 @@ def requires_operation_input(fn):
 # ---------------------------------------------------------------------------
 
 
-def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
-    """Register a one-shot output hook on an :class:`OperationEnvoy`.
+def operation_output_hook(mediator: Mediator, op_accessor: OperationAccessor):
+    """Register a one-shot output hook on an :class:`OperationAccessor`.
 
-    Appends a hook to ``op_envoy.post_hooks`` and returns an
+    Appends a hook to ``op_accessor.post_hooks`` and returns an
     :class:`OperationHookHandle` which is also tracked on
     ``mediator.hooks`` for unified cleanup in :meth:`Mediator.remove_hooks`.
-    When the operation's wrapper (created by
-    :meth:`Interleaver.wrap_operation`) runs, it iterates ``post_hooks``
-    and calls each with the operation's output value.
+    When the operation's wrapper (created by :func:`wrap_operation`) runs,
+    it iterates ``post_hooks`` and calls each with the operation's output
+    value.
 
     The iteration-matching protocol mirrors the module-level
     :func:`output_hook`: target iteration is captured at registration
@@ -514,13 +655,13 @@ def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
 
     Args:
         mediator: The mediator requesting the value.
-        op_envoy: The :class:`OperationEnvoy` to hook.
+        op_accessor: The :class:`OperationAccessor` to hook.
 
     Returns:
         An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
-        from ``op_envoy.post_hooks``.
+        from ``op_accessor.post_hooks``.
     """
-    path = f"{op_envoy.path}.output"
+    path = f"{op_accessor.path}.output"
     iteration = (
         mediator.iteration
         if mediator.iteration is not None
@@ -539,28 +680,28 @@ def operation_output_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         handle.remove()
         return mediator.handle(f"{path}.i{iteration}", value)
 
-    op_envoy.post_hooks.append(hook)
-    handle = OperationHookHandle(op_envoy.post_hooks, hook)
+    op_accessor.post_hooks.append(hook)
+    handle = OperationHookHandle(op_accessor.post_hooks, hook)
     mediator.hooks.append(handle)
     return handle
 
 
-def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
-    """Register a one-shot input hook on an :class:`OperationEnvoy`.
+def operation_input_hook(mediator: Mediator, op_accessor: OperationAccessor):
+    """Register a one-shot input hook on an :class:`OperationAccessor`.
 
     Like :func:`operation_output_hook` but appended to
-    ``op_envoy.pre_hooks``.  The wrapper calls pre-hooks with the
+    ``op_accessor.pre_hooks``.  The wrapper calls pre-hooks with the
     operation's ``(args, kwargs)`` tuple before invoking the function.
 
     Args:
         mediator: The mediator requesting the value.
-        op_envoy: The :class:`OperationEnvoy` to hook.
+        op_accessor: The :class:`OperationAccessor` to hook.
 
     Returns:
         An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
-        from ``op_envoy.pre_hooks``.
+        from ``op_accessor.pre_hooks``.
     """
-    path = f"{op_envoy.path}.input"
+    path = f"{op_accessor.path}.input"
     iteration = (
         mediator.iteration
         if mediator.iteration is not None
@@ -579,16 +720,16 @@ def operation_input_hook(mediator: Mediator, op_envoy: OperationEnvoy):
         handle.remove()
         return mediator.handle(f"{path}.i{iteration}", inputs)
 
-    op_envoy.pre_hooks.append(hook)
-    handle = OperationHookHandle(op_envoy.pre_hooks, hook)
+    op_accessor.pre_hooks.append(hook)
+    handle = OperationHookHandle(op_accessor.pre_hooks, hook)
     mediator.hooks.append(handle)
     return handle
 
 
-def operation_fn_hook(mediator: Mediator, op_envoy: OperationEnvoy):
+def operation_fn_hook(mediator: Mediator, op_accessor: OperationAccessor):
     """Register a one-shot fn hook for recursive source tracing.
 
-    Appended to ``op_envoy.fn_hooks``.  Unlike input/output hooks,
+    Appended to ``op_accessor.fn_hooks``.  Unlike input/output hooks,
     fn hooks are **not** iteration-aware — they fire on the first call
     to the operation wrapper after registration, deliver the function to
     the worker thread (which injects it with nested ``wrap`` calls), and
@@ -596,27 +737,28 @@ def operation_fn_hook(mediator: Mediator, op_envoy: OperationEnvoy):
     the same :meth:`Mediator.handle` call.  The hook returns the injected
     function so the wrapper uses it for the actual invocation.
 
-    After firing, the injected function is also stored persistently on
-    ``op_envoy.fn_replacement`` by :meth:`OperationEnvoy.source`, so
-    subsequent forward passes use the injected version directly without
-    re-firing this hook.
+    After firing, the injected function is installed (one-shot) as
+    ``op_accessor.fn_replacement`` by :attr:`OperationEnvoy.source` and
+    cleared again by :func:`wrap_operation` once it executes — re-accessing
+    ``.source`` on an OperationEnvoy reinstalls it from the cached nested
+    accessor.
 
     Args:
         mediator: The mediator requesting the function.
-        op_envoy: The :class:`OperationEnvoy` to hook.
+        op_accessor: The :class:`OperationAccessor` to hook.
 
     Returns:
         An :class:`OperationHookHandle` whose ``.remove()`` pops the hook
-        from ``op_envoy.fn_hooks``.
+        from ``op_accessor.fn_hooks``.
     """
 
     handle = None
 
     def hook(fn: Callable) -> Callable:
         handle.remove()
-        return mediator.handle(f"{op_envoy.path}.fn", fn)
+        return mediator.handle(f"{op_accessor.path}.fn", fn)
 
-    op_envoy.fn_hooks.append(hook)
-    handle = OperationHookHandle(op_envoy.fn_hooks, hook)
+    op_accessor.fn_hooks.append(hook)
+    handle = OperationHookHandle(op_accessor.fn_hooks, hook)
     mediator.hooks.append(handle)
     return handle

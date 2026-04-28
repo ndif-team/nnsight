@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 
 from tasks import list_all_tasks, get_tasks_by_difficulty
-from tasks.registry import Difficulty
+from tasks.registry import Difficulty, TaskKind
 
 
 AGENT_INSTRUCTIONS = """
@@ -76,33 +76,51 @@ def generate_prompts(
         with open(task_file, "w") as f:
             f.write(f"# Task {i}: {task.name}\n\n")
             f.write(f"**ID:** `{task.id}`\n")
+            f.write(f"**Kind:** {task.kind.value}\n")
             f.write(f"**Difficulty:** {task.difficulty.value}\n")
             f.write(f"**Tags:** {', '.join(task.tags)}\n\n")
-            f.write("## Setup Code (already provided)\n\n")
-            f.write("```python\n")
-            f.write(task.setup_code.strip())
-            f.write("\n```\n\n")
-            f.write("## Your Task\n\n")
-            f.write(task.prompt.strip())
-            f.write("\n\n")
-            f.write(f"**Expected Output:** {task.expected_output_description}\n\n")
-            f.write("## Your Code\n\n")
-            f.write("Write your solution below:\n\n")
-            f.write("```python\n")
-            f.write("# Your code here\n")
-            f.write("```\n")
-    
-    # Generate response template JSON
+
+            if task.kind == TaskKind.MCQ:
+                f.write("## Question\n\n")
+                f.write(task.question.strip())
+                f.write("\n\n")
+                f.write("## Choices\n\n")
+                for j, choice in enumerate(task.choices):
+                    letter = chr(ord("A") + j)
+                    f.write(f"- **{letter}.** {choice}\n")
+                f.write("\n## Your Answer\n\n")
+                f.write("Respond with **only the letter** (e.g., `A`).\n\n")
+                f.write("```\n")
+                f.write("# Your answer letter here\n")
+                f.write("```\n")
+            else:
+                f.write("## Setup Code (already provided)\n\n")
+                f.write("```python\n")
+                f.write(task.setup_code.strip())
+                f.write("\n```\n\n")
+                f.write("## Your Task\n\n")
+                f.write(task.prompt.strip())
+                f.write("\n\n")
+                f.write(f"**Expected Output:** {task.expected_output_description}\n\n")
+                f.write("## Your Code\n\n")
+                f.write("Write your solution below:\n\n")
+                f.write("```python\n")
+                f.write("# Your code here\n")
+                f.write("```\n")
+
+    # Generate response template JSON. Each entry uses ``code`` for code tasks
+    # and ``answer`` for MCQs.
     response_template = {
         "agent_name": "claude_code",
         "timestamp": "",
         "responses": {
-            task.id: {
-                "code": "",
-                "notes": ""
-            }
+            task.id: (
+                {"answer": "", "notes": ""}
+                if task.kind == TaskKind.MCQ
+                else {"code": "", "notes": ""}
+            )
             for task in tasks
-        }
+        },
     }
     
     template_file = output_path / "responses_template.json"

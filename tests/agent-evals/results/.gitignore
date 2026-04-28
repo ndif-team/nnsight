@@ -1,0 +1,5 @@
+# Bundle-study run artifacts. Each run produces fresh JSONs and per-task
+# logs; we only commit the plots and the report. Re-run the suite locally
+# to regenerate the data.
+*.json
+*.log

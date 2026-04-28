@@ -124,3 +124,142 @@ class TestSourceErrors:
         with pytest.raises(AttributeError):
             with gpt2.trace("_"):
                 gpt2.transformer.h[0].attn.source.does_not_exist_xyz.output.save()
+
+
+class TestSourceIter:
+    """`.source` combined with ``tracer.iter[...]`` — operation-level
+    intervention across multi-step generation.
+
+    These tests exercise the per-mediator iteration tracker for
+    operation paths, which the persistent iter hook in
+    :func:`_register_iter_hooks` keeps in sync with the parent module's
+    tracker by walking the module's ``SourceAccessor`` after each forward
+    pass (recursing into nested accessors for recursive ``.source``).
+    """
+
+    @torch.no_grad()
+    def test_iter_source_output_all_steps(self, gpt2: nnsight.LanguageModel):
+        """Save an op output on every generation step via ``iter[:]``."""
+        # Touch .source before iter to keep this a Phase-1 case (the
+        # mid-loop-first-access edge case is a known limitation).
+        gpt2.transformer.h[0].attn.source
+
+        with gpt2.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+            outs = list().save()
+            for step in tracer.iter[:]:
+                outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
+
+        assert len(outs) == 3
+        for out in outs:
+            assert isinstance(out, tuple)
+
+    @torch.no_grad()
+    def test_iter_source_input_all_steps(self, gpt2: nnsight.LanguageModel):
+        """Save an op input on every generation step via ``iter[:]``."""
+        gpt2.transformer.h[0].attn.source
+
+        with gpt2.generate("Hello", max_new_tokens=3) as tracer:
+            inputs = list().save()
+            for step in tracer.iter[:]:
+                inputs.append(
+                    gpt2.transformer.h[0].attn.source.attention_interface_0.inputs
+                )
+
+        assert len(inputs) == 3
+        for inp in inputs:
+            assert isinstance(inp, tuple)
+
+    @torch.no_grad()
+    def test_iter_source_specific_step(self, gpt2: nnsight.LanguageModel):
+        """``iter[N]`` should fire op hooks only on step N."""
+        gpt2.transformer.h[0].attn.source
+
+        with gpt2.generate("Hello", max_new_tokens=3) as tracer:
+            outs = list().save()
+            for step in tracer.iter[1]:
+                outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
+
+        assert len(outs) == 1
+
+    @torch.no_grad()
+    def test_iter_source_slice(self, gpt2: nnsight.LanguageModel):
+        """``iter[a:b]`` should fire op hooks only on the requested range."""
+        gpt2.transformer.h[0].attn.source
+
+        with gpt2.generate("Hello", max_new_tokens=4) as tracer:
+            outs = list().save()
+            for step in tracer.iter[1:3]:
+                outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
+
+        assert len(outs) == 2
+
+    @torch.no_grad()
+    def test_iter_source_intervention(self, gpt2: nnsight.LanguageModel):
+        """Modifying an op output every step should change generation.
+
+        Zeroes ``attention_interface_0`` (the main attention computation)
+        on every layer at every generation step. This is heavy enough to
+        flip at least one sampled token vs. the unperturbed baseline.
+        """
+        for i in range(len(gpt2.transformer.h)):
+            gpt2.transformer.h[i].attn.source
+
+        with gpt2.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+            base = tracer.result.save()
+
+        with gpt2.generate("The Eiffel Tower is in", max_new_tokens=3) as tracer:
+            for step in tracer.iter[:]:
+                for i in range(len(gpt2.transformer.h)):
+                    attn_out = (
+                        gpt2.transformer.h[i].attn.source.attention_interface_0.output
+                    )
+                    gpt2.transformer.h[i].attn.source.attention_interface_0.output = (
+                        torch.zeros_like(attn_out[0]),
+                    ) + attn_out[1:]
+            patched = tracer.result.save()
+
+        assert not torch.equal(base, patched)
+
+    @torch.no_grad()
+    def test_iter_recursive_source(self, gpt2: nnsight.LanguageModel):
+        """Recursive ``.source`` (op-of-op) under ``iter[:]``.
+
+        This exercises the recursive op-path tracker bumping in
+        :func:`_bump_source_paths` — ``...attn.attention_interface_0`` and
+        its nested ``...scaled_dot_product_attention_0`` paths must both
+        advance in lockstep with the parent module each step.
+        """
+        gpt2.transformer.h[0].attn.source
+
+        with gpt2.generate("Hello", max_new_tokens=3) as tracer:
+            outs = list().save()
+            for step in tracer.iter[:]:
+                outs.append(
+                    gpt2.transformer.h[
+                        0
+                    ].attn.source.attention_interface_0.source.torch_nn_functional_scaled_dot_product_attention_0.output
+                )
+
+        assert len(outs) == 3
+        for out in outs:
+            assert isinstance(out, torch.Tensor)
+
+    @torch.no_grad()
+    def test_iter_source_sparse(self, gpt2: nnsight.LanguageModel):
+        """Skipping op access on some steps should still work on later steps.
+
+        The persistent iter hook bumps op-path trackers every forward
+        pass regardless of whether the user registered an op hook for
+        that step, so a step-N hook still finds its tracker at N.
+        """
+        gpt2.transformer.h[0].attn.source
+
+        with gpt2.generate("Hello", max_new_tokens=4) as tracer:
+            outs = list().save()
+            for step in tracer.iter[:]:
+                if step in (0, 2):
+                    outs.append(gpt2.transformer.h[0].attn.source.split_1.output)
+
+        assert len(outs) == 2
+        for out in outs:
+            assert isinstance(out, tuple)

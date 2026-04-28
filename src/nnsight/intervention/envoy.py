@@ -24,7 +24,11 @@ from .. import CONFIG, util
 from ..util import apply
 
 from .batching import Batchable
-from .inject import convert as inject
+from .source import (
+    SourceEnvoy,
+    resolve_true_forward,
+    get_or_create_source_accessor,
+)
 from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.globals import Object
@@ -32,10 +36,9 @@ from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
 from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
 from .hooks import (
-    requires_output,
+    hooked_input,
+    hooked_output,
     requires_input,
-    requires_operation_output,
-    requires_operation_input,
 )
 
 
@@ -166,8 +169,7 @@ class Envoy(Batchable):
 
     #### Properties ####
 
-    @eproperty()
-    @requires_output
+    @hooked_output()
     def output(self) -> Object:
         """Get the output of the module's forward pass.
 
@@ -176,8 +178,7 @@ class Envoy(Batchable):
             ...     attn = model.transformer.h[0].attn.output[0].save()
         """
 
-    @eproperty(key="input")
-    @requires_input
+    @hooked_input()
     def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
         """Get the inputs to the module's forward pass.
 
@@ -189,8 +190,7 @@ class Envoy(Batchable):
             ...     args, kwargs = model.transformer.h[0].attn.inputs
         """
 
-    @eproperty(key="input")
-    @requires_input
+    @hooked_input()
     def input(self) -> Object:
         """Get the first input to the module's forward pass.
 
@@ -213,148 +213,28 @@ class Envoy(Batchable):
         return (value, *inputs[0][1:]), inputs[1]
 
     @property
-    def source(self) -> EnvoySource:
-        """
-        Get the source code representation of the module.
+    def source(self) -> SourceEnvoy:
+        """Get the source code representation of the module.
 
-        This property provides access to the module's source code with operations
-        highlighted, allowing for inspection and intervention at specific points.
+        Lazily resolves to a :class:`SourceEnvoy` over the module's global
+        :class:`SourceAccessor`. The accessor — and its per-call-site
+        :class:`OperationAccessor` instances — are created once per module
+        and shared across all Envoys / Interleavers / Mediators that touch
+        it. This Envoy keeps a per-instance :class:`SourceEnvoy` so each
+        Envoy has its own user-facing wrapper.
 
         Examples:
             >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-
-            >>> # We can print to see the formward method of the module and names associated with the operations within.
             >>> print(model.transformer.h[0].attn.source)
-
-                                                   60
-                                                   61     if using_eager and self.reorder_and_upcast_attn:
-              self__upcast_and_reordered_attn_0 -> 62         attn_output, attn_weights = self._upcast_and_reordered_attn(
-                                                   63             query_states, key_states, value_states, attention_mask, head_mask
-                                                   64         )
-                                                   65     else:
-              attention_interface_0             -> 66         attn_output, attn_weights = attention_interface(
-                                                   67             self,
-                                                   68             query_states,
-                                                   69             key_states,
-                                                   70             value_states,
-                                                   71             attention_mask,
-                                                   72             head_mask=head_mask,
-                                                   73             dropout=self.attn_dropout.p if self.training else 0.0,
-                                                   74             is_causal=is_causal,
-                                                   75             **kwargs,
-                                                   76         )
-                                                   77
-              attn_output_reshape_0             -> 78     attn_output = attn_output.reshape(*attn_output.shape[:-2], -1).contiguous()
-              contiguous_0                      ->  +     ...
-              self_c_proj_0                     -> 79     attn_output = self.c_proj(attn_output)
-              self_resid_dropout_0              -> 80     attn_output = self.resid_dropout(attn_output)
-                                                   81
-                                                   82     return attn_output, attn_weights
-                                                   83
-
-            >>> # We can print out one of these to see the only the operation and a few operations before and after.
-            >>> print(model.transformer.h[0].attn.source.attention_interface_0)
-
-            .transformer.h.0.attn.attention_interface_0:
-
-                 ....
-
-                     if using_eager and self.reorder_and_upcast_attn:
-                         attn_output, attn_weights = self._upcast_and_reordered_attn(
-                             query_states, key_states, value_states, attention_mask, head_mask
-                         )
-                     else:
-                 -->     attn_output, attn_weights = attention_interface( <--
-                             self,
-                             query_states,
-                             key_states,
-                             value_states,
-                             attention_mask,
-                             head_mask=head_mask,
-                 ....
-
             >>> with model.trace("Hello World"):
-            ...     # Now we can access it like we would any other Envoy with .input or .output to grab the intermediate value.
             ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
 
-            >>> print(attn)
-
-
         Returns:
-            An EnvoySource object containing the module's source code and operations
+            A :class:`SourceEnvoy` exposing operation-level access.
         """
         if self._source is None:
-
-            # ``_source_ref`` is a one-element list used as a forward
-            # reference to the EnvoySource — the ``wrap`` closure below is
-            # baked into the rewritten forward method at inject time, but
-            # the EnvoySource (and its OperationEnvoys) are only created
-            # after inject completes.  We fill in _source_ref[0] after
-            # EnvoySource construction so the wrap closure can look up the
-            # appropriate OperationEnvoy at runtime.
-            _source_ref = [None]
-
-            def wrap(fn: Callable, **kwargs):
-                """Runtime wrapper invoked for each operation in the module.
-
-                This is installed into the module's rewritten forward by
-                :func:`inject`.  On every forward pass, ``wrap`` is called
-                with the original function and its operation name.  It has
-                two jobs:
-
-                1. Fast path — if no OperationEnvoy for this operation has
-                   any pending hooks, return ``fn`` unchanged.  This is the
-                   zero-overhead path for untouched operations.
-                2. Lazy path — look up the OperationEnvoy and hand it to
-                   :meth:`Interleaver.wrap_operation`, which builds a
-                   wrapper that processes ``pre_hooks``, ``post_hooks``,
-                   ``fn_hooks``, and ``fn_replacement``.
-                """
-
-                name = kwargs["name"]
-
-                bound_obj = (
-                    fn.__self__
-                    if inspect.ismethod(fn) and fn.__name__ != "forward"
-                    else None
-                )
-
-                if not self.interleaving:
-                    return fn
-
-                source_obj = _source_ref[0]
-                if source_obj is None:
-                    return fn
-
-                op_envoy = source_obj._get_operation(name)
-                if op_envoy is None or not op_envoy._has_hooks():
-                    return fn
-
-                return self.interleaver.wrap_operation(
-                    fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
-                )
-
-            source, line_numbers, forward = inject(
-                type(self._module).forward, wrap, self.path
-            )
-
-            if hasattr(self._module, "_old_forward"):
-                # Accelerate's new_forward calls module._old_forward(*args, **kwargs)
-                self._module._old_forward = MethodType(forward, self._module)
-            elif hasattr(self._module, "__nnsight_forward__"):
-                # nnsight_forward calls m.__nnsight_forward__(m, *args, **kwargs)
-                self._module.__nnsight_forward__ = forward
-            else:
-                self._module.forward = MethodType(forward, self._module)
-
-            self._source = EnvoySource(
-                self.path,
-                source,
-                line_numbers,
-                interleaver=self.interleaver,
-            )
-            _source_ref[0] = self._source
-
+            accessor = get_or_create_source_accessor(self._module)
+            self._source = SourceEnvoy(accessor, interleaver=self.interleaver)
         return self._source
 
     def __call__(self, *args, hook: bool = False, **kwargs):
@@ -787,10 +667,8 @@ class Envoy(Batchable):
         key_parts = key.split(".")
         if len(key_parts) > len(path_parts):
             return False
-        tail = path_parts[-len(key_parts):]
-        return all(
-            self._component_matches(pc, kc) for pc, kc in zip(tail, key_parts)
-        )
+        tail = path_parts[-len(key_parts) :]
+        return all(self._component_matches(pc, kc) for pc, kc in zip(tail, key_parts))
 
     def _component_matches(self, path_component: str, key_component: str) -> bool:
         """Whether ``key_component`` is a valid name for ``path_component``.
@@ -932,46 +810,22 @@ class Envoy(Batchable):
             else:
                 setattr(module, name, existing_child)
 
+        # Capture the existing SourceAccessor (if any) before the old module
+        # is dropped — its OperationAccessors carry hook state and any
+        # nested SourceAccessors for recursive source tracing.
+        old_accessor = getattr(self._module, "__source_accessor__", None)
+
         self._module = module
         self._module.__path__ = self.path
         self.interleaver.wrap_module(module)
 
-        if self._source is not None:
-
-            _source_ref = self._source
-
-            def wrap(fn: Callable, **kwargs):
-
-                name = kwargs["name"]
-
-                bound_obj = (
-                    fn.__self__
-                    if inspect.ismethod(fn) and fn.__name__ != "forward"
-                    else None
-                )
-
-                if not self.interleaving:
-                    return fn
-
-                op_envoy = _source_ref._get_operation(name)
-                if op_envoy is None or not op_envoy._has_hooks():
-                    return fn
-
-                return self.interleaver.wrap_operation(
-                    fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
-                )
-
-            source, line_numbers, forward = inject(
-                type(self._module).forward, wrap, self._module.__path__
-            )
-
-            if hasattr(self._module, "_old_forward"):
-                self._module._old_forward = MethodType(forward, self._module)
-            elif hasattr(self._module, "__nnsight_forward__"):
-                # nnsight_forward calls m.__nnsight_forward__(m, *args, **kwargs)
-                self._module.__nnsight_forward__ = forward
-            else:
-                self._module.forward = MethodType(forward, self._module)
+        # Transfer the SourceAccessor onto the new module, rebinding its
+        # injected forward against the new module's true fn.
+        # OperationAccessors are kept intact so any pre-existing
+        # OperationEnvoy / SourceEnvoy references remain valid after dispatch.
+        if old_accessor is not None:
+            old_accessor.rebind(resolve_true_forward(module))
+            module.__source_accessor__ = old_accessor
 
     def _update_alias(self, alias: Dict[str, str]):
         """
@@ -1200,332 +1054,6 @@ class Envoy(Batchable):
         self.__dict__.update(state)
 
         self._source = None
-
-
-# TODO extend Envoy
-class OperationEnvoy:
-    """Proxy for a single call-site inside a module's forward pass.
-
-    Created by :class:`EnvoySource` for every function/method call found
-    by the AST walker in :mod:`nnsight.intervention.inject`.  Implements
-    :class:`IEnvoy` so it can back ``eproperty`` descriptors for
-    ``.output``, ``.input``, ``.inputs``, and ``.source`` (for recursive
-    source tracing).
-
-    Lazy hook state
-    ---------------
-
-    Unlike module-level hooks, operations aren't PyTorch modules and
-    can't use ``register_forward_hook``.  Instead, the rewritten
-    forward method calls ``wrap(fn, name=...)`` at every operation
-    site, which reads this envoy's hook lists and builds a wrapper
-    that processes them:
-
-    - ``pre_hooks`` — list of one-shot input callables registered by
-      :func:`operation_input_hook`, each called with ``(args, kwargs)``.
-    - ``post_hooks`` — list of one-shot output callables registered by
-      :func:`operation_output_hook`, each called with the return value.
-    - ``fn_hooks`` — list of one-shot callables registered by
-      :func:`operation_fn_hook` for recursive source tracing.  Each
-      receives the current function and returns a (possibly replaced)
-      function.
-    - ``fn_replacement`` — a persistent function replacement installed
-      by :meth:`source` after the first recursive ``inject``.  When
-      set, it's used in place of the original function on every call
-      until the interleaving session ends.
-
-    :meth:`_has_hooks` returns ``True`` if any of these are non-empty,
-    which is how the ``wrap`` closure decides whether to build a
-    wrapper or take the zero-overhead fast path.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        source: str,
-        line_number: int,
-        interleaver: Optional[Interleaver] = None,
-    ):
-        """Initialize an OperationEnvoy.
-
-        Args:
-            name: The fully qualified path of the operation (e.g.
-                ``"model.transformer.h.0.attn.split_1"``).  Stored as
-                ``self.path`` to satisfy the :class:`IEnvoy` protocol.
-            source: The source code of the module containing the operation.
-            line_number: The line number of the operation in the source.
-            interleaver: The interleaver managing execution flow.
-        """
-        self.path = name
-        self.source_code = source
-        self.line_number = line_number
-
-        self.interleaver = interleaver
-
-        self._source: EnvoySource = None
-        self._fn: Callable = None
-
-        # Hook lists populated by operation_*_hook() in hooks.py when
-        # mediators access this operation's values.  Hooks are one-shot
-        # and self-remove after firing.  See the class docstring for
-        # details.
-        self.pre_hooks: list = []
-        self.post_hooks: list = []
-        self.fn_hooks: list = []
-        self.fn_replacement: Callable = None
-
-    def _has_hooks(self) -> bool:
-        """Return True if any hooks or a fn replacement are installed.
-
-        Used by the ``wrap`` closure in :attr:`Envoy.source` (and the
-        nested one in :attr:`OperationEnvoy.source`) to decide whether
-        an operation needs wrapping or can be called directly.
-        """
-        return bool(
-            self.pre_hooks or self.post_hooks or self.fn_hooks or self.fn_replacement
-        )
-
-    def __str__(self):
-        """
-        String representation showing the operation in context.
-
-        This method returns a formatted string showing the operation's source code
-        with surrounding context lines and highlighting the operation line.
-
-        Returns:
-            A formatted string showing the operation's source code with context
-        """
-        source_lines = self.source_code.split("\n")
-        start_idx = max(0, self.line_number - 5)
-        end_idx = min(len(source_lines) - 1, self.line_number + 8)
-
-        highlighted_lines = [self.path + ":\n"]
-
-        if start_idx != 0:
-            highlighted_lines.append("    ....")
-
-        for i in range(start_idx, end_idx):
-            line = source_lines[i]
-            if i == self.line_number + 1:
-                highlighted_lines.append(f"    --> {line[4:]} <--")
-            else:
-                highlighted_lines.append("    " + line)
-
-        if end_idx != len(source_lines) - 1:
-            highlighted_lines.append("    ....")
-
-        return "\n".join(highlighted_lines)
-
-    @eproperty()
-    @requires_operation_output
-    def output(self) -> Union[Any, torch.Tensor]:
-        """Get the output of this operation."""
-
-    @eproperty(key="input")
-    @requires_operation_input
-    def inputs(
-        self,
-    ) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
-        """Get the inputs to this operation."""
-
-    @eproperty(key="input")
-    @requires_operation_input
-    def input(self) -> Union[Any, torch.Tensor]:
-        """Get the first input to the operation."""
-
-    @input.preprocess
-    def input(self, value):
-        return [*value[0], *value[1].values()][0]
-
-    @input.postprocess
-    def input(self, value):
-        inputs = self.inputs
-        return (value, *inputs[0][1:]), inputs[1]
-
-    @property
-    def source(self) -> EnvoySource:
-        """Get the source code of the operation for recursive source tracing.
-
-        On first access, registers a fn-hook to intercept the operation's
-        function, injects it with ``wrap`` calls for nested operations, and
-        swaps the injected version back.  The injected function is stored
-        as ``fn_replacement`` on this OperationEnvoy so it's used on all
-        subsequent forward passes.
-        """
-        from .hooks import operation_fn_hook
-
-        if self._source is None:
-            # Register fn-hook and request the function
-            operation_fn_hook(self.interleaver.current, self)
-            fn = self.interleaver.current.request(f"{self.path}.fn")
-
-            if isinstance(fn, torch.nn.Module):
-                msg = (
-                    f"Don't call .source on a module ({getattr(fn, '__path__', '')}) "
-                    f"from within another .source. Call it directly with: "
-                    f"{getattr(fn, '__path__', '')}.source"
-                )
-                raise ValueError(msg)
-
-            def wrap(fn: Callable, **kwargs):
-                name = kwargs["name"]
-                bound_obj = (
-                    fn.__self__
-                    if getattr(fn, "__name__", None) != "forward"
-                    and inspect.ismethod(fn)
-                    else None
-                )
-
-                # Look up the OperationEnvoy for this nested operation
-                op_envoy = self._source._get_operation(name)
-                if op_envoy is None or not op_envoy._has_hooks():
-                    return fn
-
-                return self.interleaver.wrap_operation(
-                    fn, name=name, bound_obj=bound_obj, op_envoy=op_envoy
-                )
-
-            source, line_numbers, fn = inject(fn, wrap, self.path)
-
-            self._source = EnvoySource(
-                self.path, source, line_numbers, interleaver=self.interleaver
-            )
-            self._fn = fn
-
-            # Swap the function with the injected version (processed in the
-            # fn-hook's mediator.handle call) and store persistently.
-            self.interleaver.current.swap(f"{self.path}.fn", self._fn)
-            self.fn_replacement = self._fn
-        else:
-            # Already injected — ensure fn_replacement is set
-            if self.fn_replacement is None:
-                self.fn_replacement = self._fn
-
-        return self._source
-
-
-class EnvoySource:
-    """
-    Represents the source code of a module with operations highlighted.
-
-    This class provides access to the individual operations within a module's
-    source code, allowing for inspection and intervention at specific points
-    in the code. It serves as a bridge between the source code representation
-    and the runtime execution of operations.
-    """
-
-    def __init__(
-        self,
-        path: str,
-        source: str,
-        line_numbers: dict,
-        interleaver: Optional[Interleaver] = None,
-    ):
-        """
-        Initialize an EnvoySource.
-
-        Args:
-            name: The fully qualified name of the module or operation
-            source: The source code string
-            line_numbers: A dictionary mapping operation names to line numbers
-            interleaver: Optional interleaver for managing execution flow
-        """
-        self.path = path
-        self.source = source
-        self.line_numbers = line_numbers
-
-        self.operations: List[OperationEnvoy] = []
-        self._operations_by_name: Dict[str, OperationEnvoy] = {}
-
-        for _name, line_number in line_numbers.items():
-            full_name = f"{path}.{_name}"
-            operation = OperationEnvoy(
-                full_name, source, line_number, interleaver=interleaver
-            )
-            setattr(self, _name, operation)
-            self.operations.append(operation)
-            self._operations_by_name[full_name] = operation
-
-    def _get_operation(self, name: str) -> Optional[OperationEnvoy]:
-        """Look up an OperationEnvoy by its fully qualified name."""
-        return self._operations_by_name.get(name)
-
-    def __str__(self):
-        """
-        String representation showing the source code with operations highlighted.
-
-        This method returns a formatted string showing the source code with
-        operation names and line numbers, making it easy to identify intervention points.
-
-        Returns:
-            A formatted string showing the source code with operation names and line numbers
-        """
-        # Find the longest name for proper alignment
-        max_name_length = (
-            max(len(name) for name in self.line_numbers.keys())
-            if self.line_numbers
-            else 0
-        )
-
-        source_lines = self.source.split("\n")
-        formatted_lines = [
-            " " * (max_name_length + 6) + "* " + source_lines[0]
-        ]  # Keep the function definition unchanged
-
-        # Group operations by line number
-        operations_by_line = {}
-        for name, line_number in self.line_numbers.items():
-            if line_number not in operations_by_line:
-                operations_by_line[line_number] = []
-            operations_by_line[line_number].append(name)
-
-        for i, line in enumerate(source_lines[1:]):
-            line_number = i
-
-            # Check if this line has operations
-            if line_number in operations_by_line:
-                # Handle multiple operations on the same line
-                operations = operations_by_line[line_number]
-
-                # First operation gets the line number
-                first_op = operations[0]
-                line_prefix = f" {first_op:{max_name_length}} ->{line_number:3d} "
-                formatted_lines.append(f"{line_prefix}{line}")
-
-                # For nested operations, unwrap them onto separate lines
-                if len(operations) > 1:
-                    for op in operations[1:]:
-                        continuation_prefix = f" {op:{max_name_length}} ->  + "
-                        # Instead of just showing a vertical line, show the operation on its own line
-                        formatted_lines.append(
-                            f"{continuation_prefix}{' ' * (len(line) - len(line.lstrip()))}..."
-                        )
-            else:
-                # Regular line with no operations
-                line_prefix = " " * (max_name_length + 4) + f"{line_number:3d} "
-                formatted_lines.append(f"{line_prefix}{line}")
-
-        source = "\n".join(formatted_lines)
-
-        return source
-
-    def __iter__(self):
-        """
-        An iterator over the submodules in the source code (i.e. submodules that can be accessed after `.source`)
-        """
-        submodules = []
-        processed_lines = []
-
-        for name, line_number in self.line_numbers.items():
-            if line_number not in processed_lines:
-                processed_lines.append(line_number)
-                submodules.append(name)
-
-        return iter(submodules)
-
-    def __getattribute__(self, name: str) -> Union[OperationEnvoy]:
-
-        return object.__getattribute__(self, name)
 
 
 class Aliaser:

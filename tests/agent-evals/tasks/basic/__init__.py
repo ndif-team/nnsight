@@ -263,3 +263,108 @@ register_task(Task(
     expected_output_description="before has original values, after is all zeros",
     tags=["trace", "clone", "intervention"],
 ))
+
+
+# =============================================================================
+# Task 6: Cache With Explicit Module List
+# =============================================================================
+
+TASK_06_PROMPT = """
+Write nnsight code that:
+1. Creates a trace with input "Caching test"
+2. Calls tracer.cache(modules=[...]) with an explicit list containing
+   model.transformer.h[2] and model.transformer.h[7] (only those two envoys).
+3. After the trace exits, reads the cached output for layer 2 into `cached_h2`
+   and the cached output for layer 7 into `cached_h7`.
+
+Use dict-style access on the cache, e.g. cache['model.transformer.h.2'].output.
+The variable `model` is already loaded.
+"""
+
+TASK_06_SETUP = """
+from nnsight import LanguageModel
+model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+"""
+
+
+def verify_task_06(result: dict) -> bool:
+    """Verify: both cached tensors exist with hidden_dim 768."""
+    if "cached_h2" not in result or "cached_h7" not in result:
+        return False
+
+    for name in ("cached_h2", "cached_h7"):
+        val = result[name]
+        # Tolerate tuple-or-tensor; transformers 5+ gives a tensor.
+        if isinstance(val, tuple):
+            val = val[0]
+        if not hasattr(val, "shape"):
+            return False
+        if val.shape[-1] != 768:
+            return False
+
+    return True
+
+
+register_task(Task(
+    id="basic_06_cache_explicit_modules",
+    name="Cache With Explicit Module List",
+    difficulty=Difficulty.BASIC,
+    prompt=TASK_06_PROMPT,
+    setup_code=TASK_06_SETUP,
+    verify=verify_task_06,
+    expected_output_description="cached_h2 and cached_h7 tensors with hidden_dim 768",
+    tags=["cache", "trace"],
+))
+
+
+# =============================================================================
+# Task 7: Modify .input (not .output)
+# =============================================================================
+
+TASK_07_PROMPT = """
+Write nnsight code that:
+1. Creates a trace with input "Hello world"
+2. Replaces the INPUT to layer 3 (model.transformer.h[3].input) with an all-zeros
+   tensor of the same shape and dtype/device. Use direct assignment
+   (`model.transformer.h[3].input = ...`), not slice assignment.
+3. Saves the resulting layer 3 output as `layer3_output`.
+
+Hint: capture the original input first via `.clone()`, then build a `torch.zeros_like(...)`
+tensor of the same shape/device and assign it to `.input`.
+
+The variable `model` is already loaded.
+"""
+
+TASK_07_SETUP = """
+from nnsight import LanguageModel
+import torch
+model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+"""
+
+
+def verify_task_07(result: dict) -> bool:
+    """Verify: layer3_output exists with expected hidden_dim and is non-trivial."""
+    if "layer3_output" not in result:
+        return False
+
+    out = result["layer3_output"]
+    if isinstance(out, tuple):
+        out = out[0]
+    if not hasattr(out, "shape"):
+        return False
+    if out.shape[-1] != 768:
+        return False
+
+    return True
+
+
+register_task(Task(
+    id="basic_07_modify_input",
+    name="Modify Module Input via Assignment",
+    difficulty=Difficulty.BASIC,
+    prompt=TASK_07_PROMPT,
+    setup_code=TASK_07_SETUP,
+    verify=verify_task_07,
+    expected_output_description="layer3_output tensor with hidden_dim 768",
+    tags=["trace", "input", "intervention"],
+))

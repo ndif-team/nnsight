@@ -26,6 +26,7 @@ import _thread
 import torch
 
 from .. import CONFIG
+from ..util import applyn
 from functools import partial
 from .batching import Batcher
 from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
@@ -49,12 +50,22 @@ class IEnvoy(Protocol):
     Attributes:
         interleaver: The :class:`Interleaver` managing execution flow.
         path: Optional provider path prefix used to build requester/provider
-            strings (e.g. ``"model.transformer.h.0"``).  If ``None`` or
-            absent, the eproperty key alone is used as the requester string.
+            strings (e.g. ``"model.transformer.h.0"``).  May be ``None`` or
+            empty — :meth:`eproperty._build_requester` falls back to the
+            eproperty key alone in that case.  This is how tracer-level
+            eproperties such as :attr:`InterleavingTracer.result` work
+            without a path prefix.
+
+    Notes:
+        Implementors that have no meaningful path (e.g. tracers) do **not**
+        need to declare a ``path`` attribute — :meth:`eproperty._build_requester`
+        uses ``getattr(obj, "path", "")`` so a missing attribute is treated
+        the same as ``None`` / ``""``. The attribute is declared
+        ``Optional[str]`` here for type clarity.
     """
 
     interleaver: "Interleaver"
-    path: str
+    path: Optional[str]
 
 
 class eproperty:
@@ -455,7 +466,7 @@ class Interleaver:
           context, or a one-shot hook has just cleared it after matching),
           fall back to ``mediator.iteration_tracker[requester]``.  The
           tracker is maintained by persistent hooks registered by
-          :class:`IteratorTracer` (see :func:`_register_iter_hooks`), which
+          :class:`IteratorTracer` (see :func:`register_iter_hooks`), which
           increment it after every forward pass for each module path.
 
         This dual-mode behavior lets the same requester syntax work both
@@ -529,7 +540,35 @@ class Interleaver:
             def nnsight_forward(*args, **kwargs):
                 m = module_ref()
                 if "__nnsight_skip__" in kwargs:
-                    return kwargs.pop("__nnsight_skip__")
+                    entries = kwargs.pop("__nnsight_skip__")
+                    if len(entries) == 1:
+                        return entries[0][1]
+                    # Multi-invoke skip: each mediator's hook contributed its
+                    # narrow value. Sort by batch start and concat along dim 0
+                    # so the splice matches the model's expected batch order.
+                    entries.sort(
+                        key=lambda e: e[0][0] if e[0] is not None else -1
+                    )
+                    values = [v for _, v in entries]
+                    return applyn(
+                        values, lambda *t: torch.cat(t, dim=0), torch.Tensor
+                    )
+                source_accessor = getattr(m, "__source_accessor__", None)
+
+                # Once a SourceAccessor exists for this module (built on the
+                # first ``.source`` access by anyone), route through it so the
+                # injected forward fires the per-op ``wrap`` lookups. The
+                # injected forward has its own fast path — ``wrap`` returns
+                # ``fn`` unchanged for unhooked operations — so the per-call
+                # cost is just a dict lookup + bool check per call site.
+                #
+                # We deliberately do *not* gate on ``source_accessor.hooked``
+                # here: hooks may be registered mid-forward (e.g. an op-level
+                # hook registered after the worker resumes from an upstream
+                # module hook), and an entry-time check would have already
+                # taken the un-injected path by then.
+                if source_accessor is not None:
+                    return source_accessor(m, *args, **kwargs)
                 return m.__nnsight_forward__(m, *args, **kwargs)
 
             module.forward = nnsight_forward
@@ -537,59 +576,6 @@ class Interleaver:
             # Sentinel hook — keeps PyTorch in the hook dispatch path so
             # dynamically registered one-shot hooks fire correctly.
             module.register_forward_hook(lambda _, __, output: output)
-
-    def wrap_operation(
-        self,
-        fn: Callable,
-        name: str,
-        bound_obj: Optional[Any] = None,
-        op_envoy: Optional[Any] = None,
-    ):
-        """Create a wrapper for an operation that processes hooks from an OperationEnvoy.
-
-        Called by the ``wrap`` closure inside ``Envoy.source`` when the
-        OperationEnvoy has pending hooks.  The wrapper reads hook lists from
-        the ``op_envoy`` at call time, so hooks registered after wrapper
-        creation are still seen.
-
-        Args:
-            fn: The original operation function.
-            name: The fully qualified name of the operation.
-            bound_obj: The object ``fn`` is bound to, if it is a method.
-            op_envoy: The :class:`OperationEnvoy` holding the hook lists.
-
-        Returns:
-            A wrapped version of the function that processes registered hooks.
-        """
-
-        @wraps(fn)
-        def inner(*args, **kwargs):
-
-            actual_fn = (
-                op_envoy.fn_replacement if op_envoy.fn_replacement is not None else fn
-            )
-
-            for hook in list(op_envoy.fn_hooks):
-                actual_fn = hook(actual_fn)
-
-            for hook in list(op_envoy.pre_hooks):
-                result = hook((args, kwargs))
-                if result is not None:
-                    args, kwargs = result
-
-            if not inspect.ismethod(actual_fn) and bound_obj is not None:
-                value = actual_fn(bound_obj, *args, **kwargs)
-            else:
-                value = actual_fn(*args, **kwargs)
-
-            for hook in list(op_envoy.post_hooks):
-                result = hook(value)
-                if result is not None:
-                    value = result
-
-            return value
-
-        return inner
 
     @property
     def interleaving(self) -> bool:
@@ -771,7 +757,7 @@ class Mediator:
         worker (Thread): The thread that runs the intervention function
         history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
         iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
-            :func:`IteratorTracer._register_iter_hooks` (and by
+            :func:`IteratorTracer.register_iter_hooks` (and by
             :meth:`Interleaver.handle` for provided values).  One-shot
             intervention hooks read this to know which generation step
             is currently firing.  Defaults to 0 for any path that has
@@ -1189,13 +1175,15 @@ class Mediator:
         return False
 
     def handle_skip_event(self, provider: Any, requester: Any, value: Any):
-        """Handle a skip event by injecting the replacement value into kwargs.
+        """Handle a skip event by appending the replacement value into kwargs.
 
         Instead of raising a ``SkipException`` (as in the old permanent-hook
-        approach), the replacement value is placed into ``kwargs`` under the
-        ``__nnsight_skip__`` key.  The ``nnsight_forward`` wrapper installed
-        by :meth:`Interleaver.wrap_module` checks for this key and returns
-        the value directly, bypassing the module's original forward method.
+        approach), each mediator's replacement value is appended to a list
+        under ``kwargs["__nnsight_skip__"]`` along with that mediator's
+        ``batch_group``.  The ``nnsight_forward`` wrapper installed by
+        :meth:`Interleaver.wrap_module` consumes the list, sorts by batch
+        start, and concats along dim 0 so multi-invoke skips produce a
+        full-batch tensor that downstream modules can consume.
 
         This approach works with the one-shot hook system because the input
         hook has access to ``(args, kwargs)`` via the batcher and can
@@ -1206,7 +1194,8 @@ class Mediator:
 
             _, kwargs = self.interleaver.batcher.current_value
 
-            kwargs["__nnsight_skip__"] = value
+            entries = kwargs.setdefault("__nnsight_skip__", [])
+            entries.append((self.batch_group, value))
 
             self.respond()
 

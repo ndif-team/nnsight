@@ -82,13 +82,13 @@ vllm/
 
 **`async_backend.py`** — `AsyncVLLMBackend` extends `Backend` with a dual-call pattern:
 - `__call__(tracer)`: Called from `__exit__`, compiles and executes the traced function to prepare generation data.
-- `__call__()`: Called by user code, returns an async generator that streams `RequestOutput` objects from `AsyncLLM`. On each streamed output, calls `collect_nnsight` via `collective_rpc` to retrieve current saves from the worker. Saves are attached as `output.saves` on every output (not just the final one).
+- `__call__()`: Called by user code, returns an async generator that streams `RequestOutput` objects from `AsyncLLM`. When an output reports `output.finished == True`, calls `collect_nnsight` via `collective_rpc` to retrieve final saves from the worker and attaches them as `output.saves`. Intermediate (non-finished) outputs are forwarded as-is without `.saves`. (Streaming intermediate saves on every output is a planned future option.)
 
 **`sampling.py`** — `NNsightSamplingParams` is a thin subclass of vLLM's `SamplingParams` used for type identification in `_prepare_input`. Mediator data is transported via the built-in `extra_args` dict field on `SamplingParams`, not on a custom field.
 
 **`batching.py`** — `VLLMBatcher` extends NNsight's base `Batcher` to handle tensor parallelism. Registers pre/post hooks on all modules to track which module is currently executing and whether its tensors are sharded. When intervention code requests a value, the batcher transparently gathers sharded tensors; when intervention code returns a modified value, the batcher re-shards before passing back to vLLM.
 
-**`engines/engine.py`** — `NNsightLLMEngine` extends vLLM's `LLMEngine`. Used by the sync path only. After each engine step, checks for finished requests and calls `collect_nnsight()` on the model executor to collect saved intervention results.
+**`engines/engine.py`** — `NNsightLLMEngine` extends vLLM's `LLMEngine`. Used by the sync path only. After each engine step, checks for finished requests and calls `collect_nnsight()` on the model executor to collect saved intervention results. The async path mirrors this finished-only behavior: `AsyncVLLMBackend` only calls `collect_nnsight` when `output.finished == True`.
 
 **`workers/GPUWorker.py`** — `NNsightGPUWorker` extends vLLM's `Worker`. Its only job is to monkey-patch `GPUModelRunner` with `NNsightGPUModelRunner` before vLLM's init runs, and to expose `collect_nnsight()`.
 
@@ -131,9 +131,9 @@ The `VLLM.trace()` override bypasses `RemoteableMixin.trace()` (which hard-codes
 
 Backend with a dual-call pattern:
 - **First call** `__call__(tracer)`: Invoked by `Tracer.__exit__`. Compiles the user's intervention code and calls `tracer.execute(fn)` to set up mediators and prepare generation data.
-- **Second call** `__call__()`: Invoked by user code via `tracer.backend()`. Returns an async generator (`_stream()`) that submits to `AsyncLLM.generate()` and yields `RequestOutput` objects with saves attached.
+- **Second call** `__call__()`: Invoked by user code via `tracer.backend()`. Returns an async generator (`_stream()`) that submits to `AsyncLLM.generate()` and yields `RequestOutput` objects. On the final output (`output.finished == True`), saves are attached as `output.saves`.
 
-On every streamed output, `_stream()` calls `collect_nnsight` via `collective_rpc` to retrieve the current saves from the worker. When the request finishes, the worker also finalizes the mediator (runs result handler, cancels, cleans up).
+`_stream()` only calls `collect_nnsight` via `collective_rpc` when an output is finished. The worker then finalizes the mediator (runs result handler, cancels, cleans up) and returns the saves. Intermediate outputs are passed through unchanged. (Streaming intermediate saves on every output is a planned future option — see "Streaming Saves" below.)
 
 ### NNsightSamplingParams (sampling.py)
 
@@ -159,7 +159,7 @@ Key methods:
 - `_update_states(scheduler_output)` — Processes new/finished requests, updates batch groups
 - `execute_model(scheduler_output, ...)` — Runs the forward pass inside an interleaver context, wraps logits
 - `_sample()` — Runs sampling inside an interleaver context, wraps sampled tokens
-- `collect_nnsight(req_ids, finished_req_ids)` — Collects saves from mediators. Called on every streamed output (async) or on finished requests (sync). Delegates to `NNsightRequestHelper` helper methods:
+- `collect_nnsight(req_ids, finished_req_ids)` — Collects saves from mediators. Called on finished requests in both sync (`NNsightLLMEngine.step()`) and async (`AsyncVLLMBackend._stream()`) paths. Delegates to `NNsightRequestHelper` helper methods:
   - `match_req_ids()` — matches engine-reported IDs to stored mediators (handles vLLM's hash suffix via `rsplit`)
   - `finalize_mediators()` — runs result handler and cancels finished mediators
   - `collect_saves()` — gathers per-invoke saves from frame locals and trace-shared saves from canonical globals
@@ -167,7 +167,7 @@ Key methods:
 
 ### NNsightLLMEngine (engines/engine.py)
 
-Thin extension of vLLM's engine. Used by the sync path only. After each `step()`, checks for finished requests and delegates to `collect_nnsight()` on the executor to gather saved results. In the async path, `collect_nnsight` is called directly by the `AsyncVLLMBackend` via `collective_rpc` on every streamed output.
+Thin extension of vLLM's engine. Used by the sync path only. After each `step()`, checks for finished requests and delegates to `collect_nnsight()` on the executor to gather saved results. In the async path, `collect_nnsight` is called directly by the `AsyncVLLMBackend` via `collective_rpc` when an output reports `finished == True` — matching the finished-only behavior of the sync path.
 
 ### NNsightGPUWorker (workers/GPUWorker.py)
 
@@ -276,11 +276,12 @@ NNsight captures, parses, and compiles the intervention code into a `Mediator`.
 - Model runner finalizes mediators (result handler, cancel), extracts saved values, cleans up
 - Returns saves dict (pickled to bytes so it survives msgpack transport in multiprocessing mode), which gets attached to the `RequestOutput`
 
-**8. On every streamed output (async path):**
-- `AsyncVLLMBackend._stream()` calls `collect_nnsight(req_ids, finished_req_ids)` via `collective_rpc` on every output
-- When `finished_req_ids` is `None` (intermediate outputs): saves are collected but mediators are not finalized
-- When `finished_req_ids` contains the request ID (final output): mediators are also finalized and cleaned up
-- Saves are attached as `output.saves` on every `RequestOutput`
+**8. On the final streamed output (async path):**
+- `AsyncVLLMBackend._stream()` checks `output.finished` for each yielded `RequestOutput`
+- When `finished == True`, calls `collect_nnsight(req_ids, finished_req_ids)` via `collective_rpc`; the request ID appears in both `req_ids` and `finished_req_ids`, so mediators are finalized and cleaned up on the worker
+- Saves are attached as `output.saves` on the finished `RequestOutput`
+- Intermediate (non-finished) outputs are forwarded unchanged with no `.saves` attribute
+- (Streaming intermediate saves on every output is a planned future option — see "Streaming Saves" below.)
 
 **9. Back in user process (sync):**
 - `VLLM.__call__()` receives the `RequestOutput` with attached saves
@@ -421,7 +422,7 @@ A separate interleaver context wraps `super()._sample()`. After sampling, the sa
 
 ### Phase 4: Collect (`collect_nnsight`)
 
-When requests complete (sync) or on every streamed output (async), `collect_nnsight` is called. For finished requests, the interleaver handles the `"result"` provider, letting mediators interact with the final generation output. Saved values are extracted from mediator frames and trace-shared globals. The method delegates to helper methods on `NNsightRequestHelper` for matching, finalizing, collecting, and cleanup.
+When requests complete, `collect_nnsight` is called — by `NNsightLLMEngine.step()` in the sync path, and by `AsyncVLLMBackend._stream()` (gated on `output.finished == True`) in the async path. The interleaver handles the `"result"` provider, letting mediators interact with the final generation output. Saved values are extracted from mediator frames and trace-shared globals. The method delegates to helper methods on `NNsightRequestHelper` for matching, finalizing, collecting, and cleanup.
 
 ### Shared Mediator Threads
 
@@ -473,7 +474,7 @@ vLLM uses continuous batching: new requests can join and finished requests can l
 1. **Per-invoke saves**: Variables `.save()`-ed inside an invoke are collected from each mediator's `info.frame.f_locals`.
 2. **Trace-shared saves**: Variables `.save()`-ed at trace scope are collected from the canonical `__globals__` only after ALL mediators for the trace have been received and completed (`received_count == expected_count` and `pending_req_ids` is empty).
 
-The deferred cleanup prevents premature collection when the scheduler completes one request before another is even scheduled. In the sync path, `NNsightLLMEngine.step()` attaches saves to all finished request outputs. In the async path, saves are collected on every streamed output — intermediate outputs collect saves without finalizing mediators, while the final output also runs finalization and cleanup.
+The deferred cleanup prevents premature collection when the scheduler completes one request before another is even scheduled. In the sync path, `NNsightLLMEngine.step()` attaches saves to all finished request outputs. In the async path, `AsyncVLLMBackend._stream()` checks `output.finished` and only invokes `collect_nnsight` on finished outputs, matching the sync path's finished-only behavior. (A future option may stream intermediate saves on every output for real-time monitoring; see "Streaming Saves" below.)
 
 ---
 
@@ -595,20 +596,21 @@ The async path introduces three new components that work together to defer gener
 | Tracer | `RemoteInterleavingTracer` | `AsyncInterleavingTracer` |
 | Backend | Default (runs `model.interleave()`) | `AsyncVLLMBackend` |
 | Generation trigger | `VLLM.__call__()` via `model.interleave()` | `AsyncLLM.generate()` via `tracer.backend()` |
-| Save collection | On finished requests only (`NNsightLLMEngine.step()`) | On every streamed output via `collective_rpc` |
+| Save collection | On finished requests only (`NNsightLLMEngine.step()`) | On finished requests only (`AsyncVLLMBackend._stream()` gates on `output.finished`) via `collective_rpc` |
 | Engine patching | `NNsightLLMEngine` replaces engine class | No engine patching (async path uses `collective_rpc` directly) |
 | Result delivery | Saves pushed to user's local variables | Saves attached as `output.saves` on each `RequestOutput` |
 | Ray support | Yes (executor swap in `_load()`) | Yes (executor swap + pre-`ray.init()` in `_load()`) |
 
 ### Streaming Saves
 
-A key design choice: saves are collected on **every** streamed output, not just when the request finishes. This enables real-time monitoring of intervention state during generation.
+The async path currently collects saves only on the **final** streamed output (when `output.finished == True`). `AsyncVLLMBackend._stream()` checks `output.finished` and skips the `collective_rpc("collect_nnsight", ...)` call for intermediate outputs. This matches the sync path's behavior — saves are delivered once per request, after generation completes.
 
-The `collect_nnsight` method on the worker accepts two parameters:
+Streaming intermediate saves on every output (for real-time monitoring of intervention state during generation) is a planned future option. The worker-side `collect_nnsight` already supports both modes via its parameters:
+
 - `req_ids`: All request IDs to collect current saves from
 - `finished_req_ids`: Subset that are finished and should be finalized
 
-For intermediate outputs (not finished), `finished_req_ids` is `None` — saves are collected from frame locals but the mediator is not finalized and its saves are not removed from `Globals.saves` (so they can be re-collected on the next step). For the final output, the mediator is finalized (result handler + cancel) and cleaned up.
+If `finished_req_ids` is empty / does not contain the request ID, saves are collected from frame locals but the mediator is not finalized and its saves are not removed from `Globals.saves` (so they can be re-collected on the next step). When the request ID is in `finished_req_ids`, the mediator is finalized (result handler + cancel) and cleaned up. Re-enabling intermediate-output collection is therefore a backend-side change in `AsyncVLLMBackend._stream()` — drop the `output.finished` gate and pass `[]` (or `None`-equivalent) for `finished_req_ids` on intermediate outputs.
 
 ### Why AsyncInterleavingTracer Bypasses RemoteableMixin
 
