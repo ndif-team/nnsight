@@ -26,6 +26,7 @@ import _thread
 import torch
 
 from .. import CONFIG
+from ..util import applyn
 from functools import partial
 from .batching import Batcher
 from .tracing.util import get_non_nnsight_frame, push_variables, wrap_exception
@@ -539,7 +540,19 @@ class Interleaver:
             def nnsight_forward(*args, **kwargs):
                 m = module_ref()
                 if "__nnsight_skip__" in kwargs:
-                    return kwargs.pop("__nnsight_skip__")
+                    entries = kwargs.pop("__nnsight_skip__")
+                    if len(entries) == 1:
+                        return entries[0][1]
+                    # Multi-invoke skip: each mediator's hook contributed its
+                    # narrow value. Sort by batch start and concat along dim 0
+                    # so the splice matches the model's expected batch order.
+                    entries.sort(
+                        key=lambda e: e[0][0] if e[0] is not None else -1
+                    )
+                    values = [v for _, v in entries]
+                    return applyn(
+                        values, lambda *t: torch.cat(t, dim=0), torch.Tensor
+                    )
                 source_accessor = getattr(m, "__source_accessor__", None)
 
                 # Once a SourceAccessor exists for this module (built on the
@@ -1162,13 +1175,15 @@ class Mediator:
         return False
 
     def handle_skip_event(self, provider: Any, requester: Any, value: Any):
-        """Handle a skip event by injecting the replacement value into kwargs.
+        """Handle a skip event by appending the replacement value into kwargs.
 
         Instead of raising a ``SkipException`` (as in the old permanent-hook
-        approach), the replacement value is placed into ``kwargs`` under the
-        ``__nnsight_skip__`` key.  The ``nnsight_forward`` wrapper installed
-        by :meth:`Interleaver.wrap_module` checks for this key and returns
-        the value directly, bypassing the module's original forward method.
+        approach), each mediator's replacement value is appended to a list
+        under ``kwargs["__nnsight_skip__"]`` along with that mediator's
+        ``batch_group``.  The ``nnsight_forward`` wrapper installed by
+        :meth:`Interleaver.wrap_module` consumes the list, sorts by batch
+        start, and concats along dim 0 so multi-invoke skips produce a
+        full-batch tensor that downstream modules can consume.
 
         This approach works with the one-shot hook system because the input
         hook has access to ``(args, kwargs)`` via the batcher and can
@@ -1179,7 +1194,8 @@ class Mediator:
 
             _, kwargs = self.interleaver.batcher.current_value
 
-            kwargs["__nnsight_skip__"] = value
+            entries = kwargs.setdefault("__nnsight_skip__", [])
+            entries.append((self.batch_group, value))
 
             self.respond()
 

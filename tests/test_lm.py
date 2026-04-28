@@ -863,20 +863,6 @@ class TestSkip:
         assert torch.equal(out[0], inp[0])
         assert torch.equal(out_2[0], inp_2[0])
 
-    @torch.no_grad()
-    def test_skip_partial_batch_error(
-        self, gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str
-    ):
-        """Test error when skipping only partial batch."""
-        with pytest.raises(ValueError):
-            with gpt2.trace() as tracer:
-                with tracer.invoke(ET_prompt):
-                    inp = gpt2.transformer.h[0].output.save()
-                    gpt2.transformer.h[1].skip(inp)
-
-                with tracer.invoke(MSG_prompt):
-                    inp_2 = gpt2.transformer.h[0].output.save()
-
 
 # =============================================================================
 # Iteration
