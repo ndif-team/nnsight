@@ -1,29 +1,36 @@
 """Documentation bundles for the eval suite.
 
 The whole point of the suite is to **benchmark the documentation**: how well
-do different doc subsets help an agent succeed at nnsight tasks? This module
-defines the named bundles that ``eval.py --doc-bundle`` selects from.
+do different doc subsets help an agent succeed at nnsight tasks?
 
-Usage::
+There are two evaluation modes:
 
-    from doc_bundles import build_documentation
-    docs = build_documentation("/path/to/nnsight", bundle="full")
+- ``static``  — the chosen bundle is concatenated into the agent's system
+  prompt up-front. The agent sees everything at once. Useful as a baseline
+  ("what would the agent do given perfect doc recall?") but does not test
+  the routing model.
+- ``browse``  — the agent's system prompt is just the router (``CLAUDE.md``).
+  The agent has a ``Read`` tool scoped to a list of allowed directories
+  (the bundle's contents) and is expected to navigate via the router's
+  links. This tests **the docs as designed**: thin router + lazy fetch.
 
-To compare bundles, run the eval with each bundle name and compare pass
-rates. Coarse-grained on purpose: the goal is to measure section-level
-contribution, not surgical doc edits.
+Static-mode bundles (``DOC_BUNDLES``):
 
-Bundles (all entries are paths relative to ``nnsight_path``):
-
-- ``minimal`` — only ``CLAUDE.md``. The agent gets the router; we measure
-  whether its inline cheat-sheet is enough on its own.
+- ``minimal`` — only ``CLAUDE.md``.
 - ``router`` (default) — ``CLAUDE.md`` + ``docs/concepts/`` + ``docs/gotchas/``
-  + ``docs/errors/`` + ``docs/reference/``. The "essentials" subset.
-- ``full`` — ``CLAUDE.md`` + entire ``docs/`` tree (all subfolders) +
-  ``README.md`` + ``0.6.0.md``. The big bundle — measures the docs
-  investment as a whole.
-- ``legacy`` — ``CLAUDE.md`` + truncated ``NNsight.md`` (the old eval
-  loader behavior). Kept so we can compare current vs. pre-docs state.
+  + ``docs/errors/`` + ``docs/reference/``.
+- ``full`` — ``CLAUDE.md`` + entire ``docs/`` tree + ``README.md`` +
+  ``0.6.0.md``. (At ~870KB this exceeds the 200K standard context window;
+  use it only with extended-context models or in browse mode.)
+- ``legacy`` — ``CLAUDE.md`` + truncated ``NNsight.md`` (pre-``docs/``
+  baseline).
+
+Browse-mode bundles (``BROWSE_BUNDLES``):
+
+- ``minimal`` — no ``Read``-able paths. The agent sees only the router.
+- ``router`` — ``Read`` is scoped to ``docs/concepts/``, ``docs/gotchas/``,
+  ``docs/errors/``, ``docs/reference/``.
+- ``full`` — ``Read`` is scoped to the whole ``docs/`` tree.
 """
 
 from __future__ import annotations
@@ -73,9 +80,73 @@ EXCLUDE_FILES = {"questions.md", "followup.md", "followup-1.md"}
 LEGACY_NNSIGHT_MD_BUDGET = 50_000
 
 
-def list_doc_bundles() -> list[str]:
-    """Return the list of available bundle names."""
+# Browse-mode bundles. Selectors are all directory paths relative to
+# ``nnsight_path``. The agent's system prompt is always ``CLAUDE.md`` (the
+# router); these selectors become ``--add-dir`` flags on ``claude -p`` so
+# the agent's ``Read`` tool can resolve files within them and only those.
+BROWSE_BUNDLES: dict[str, list[str]] = {
+    "minimal": [],  # no add-dirs — Read tool disabled; just the router
+    "router": [
+        "docs/concepts",
+        "docs/gotchas",
+        "docs/errors",
+        "docs/reference",
+    ],
+    "full": [
+        "docs",
+    ],
+    # ``legacy`` doesn't make sense in browse mode — there was no docs/ tree
+    # to navigate before the migration. Use static mode if you want to
+    # benchmark against the pre-docs baseline.
+}
+
+
+def list_doc_bundles(mode: str = "static") -> list[str]:
+    """Return the list of available bundle names for the given mode."""
+    if mode == "browse":
+        return list(BROWSE_BUNDLES.keys())
     return list(DOC_BUNDLES.keys())
+
+
+def build_browse_config(
+    nnsight_path: str | Path,
+    bundle: str,
+) -> tuple[str, list[Path]]:
+    """Return ``(system_prompt, add_dirs)`` for browse mode.
+
+    The system prompt is always the router (``CLAUDE.md``); the agent navigates
+    from there via its ``Read`` tool. ``add_dirs`` is the list of absolute
+    directory paths to pass as ``--add-dir`` flags on the ``claude -p``
+    invocation; these scope where the ``Read`` tool can resolve files.
+
+    Args:
+        nnsight_path: Path to the nnsight repo root.
+        bundle: One of ``BROWSE_BUNDLES`` keys.
+
+    Returns:
+        Tuple of (system prompt text, list of add-dir paths).
+    """
+    if bundle not in BROWSE_BUNDLES:
+        raise ValueError(
+            f"Unknown browse bundle {bundle!r}. "
+            f"Choose from: {list(BROWSE_BUNDLES.keys())}"
+        )
+
+    nnsight_path = Path(nnsight_path).resolve()
+    if not nnsight_path.exists():
+        raise FileNotFoundError(f"nnsight path not found: {nnsight_path}")
+
+    claude_md = nnsight_path / "CLAUDE.md"
+    if not claude_md.exists():
+        raise FileNotFoundError(f"CLAUDE.md missing at {claude_md}")
+    sys_prompt = claude_md.read_text()
+
+    add_dirs: list[Path] = []
+    for sel in BROWSE_BUNDLES[bundle]:
+        target = nnsight_path / sel
+        if target.exists() and target.is_dir():
+            add_dirs.append(target)
+    return sys_prompt, add_dirs
 
 
 def _expand_selector(nnsight_path: Path, selector: str) -> list[Path]:

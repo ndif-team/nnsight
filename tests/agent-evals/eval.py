@@ -27,7 +27,9 @@ from runner import run_task, extract_code_from_response, TaskResult
 from agent import AgentConfig, create_agent
 from doc_bundles import (
     DOC_BUNDLES,
+    BROWSE_BUNDLES,
     build_documentation,
+    build_browse_config,
     list_doc_bundles,
 )
 
@@ -40,6 +42,7 @@ class EvalResult:
     provider: str
     model: str
     doc_bundle: str
+    mode: str  # "static" or "browse"
     total_tasks: int
     passed_tasks: int
     failed_tasks: int
@@ -66,6 +69,7 @@ class EvalResult:
             "provider": self.provider,
             "model": self.model,
             "doc_bundle": self.doc_bundle,
+            "mode": self.mode,
             "summary": {
                 "total_tasks": self.total_tasks,
                 "passed_tasks": self.passed_tasks,
@@ -97,6 +101,7 @@ def run_evaluation(
     config: AgentConfig,
     documentation: str,
     doc_bundle: str = "router",
+    mode: str = "static",
     task_ids: Optional[list[str]] = None,
     difficulty: Optional[str] = None,
     kind: Optional[str] = None,
@@ -197,6 +202,7 @@ def run_evaluation(
         provider=config.provider,
         model=config.model,
         doc_bundle=doc_bundle,
+        mode=mode,
         total_tasks=len(tasks),
         passed_tasks=passed,
         failed_tasks=len(tasks) - passed,
@@ -301,12 +307,24 @@ def main():
     )
     parser.add_argument(
         "--doc-bundle",
-        choices=list(DOC_BUNDLES.keys()),
+        choices=sorted(set(list(DOC_BUNDLES.keys()) + list(BROWSE_BUNDLES.keys()))),
         default="router",
         help=(
-            "Which documentation to load for the agent. Use this to benchmark "
-            "different doc subsets and measure each section's contribution. "
-            f"Available: {', '.join(DOC_BUNDLES.keys())}"
+            "Which documentation bundle to use. In static mode the bundle is "
+            "concatenated into the system prompt; in browse mode the bundle "
+            "controls which directories the agent's Read tool can access."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["static", "browse"],
+        default="static",
+        help=(
+            "static: load the full bundle into the system prompt up front. "
+            "browse: only put CLAUDE.md (the router) in the system prompt; "
+            "give the agent a Read tool scoped to the bundle's directories so "
+            "it navigates the docs as designed. browse mode requires "
+            "--provider claude-code."
         ),
     )
     parser.add_argument(
@@ -360,9 +378,31 @@ def main():
 
     if args.verbose:
         print(f"Loading documentation from: {nnsight_path}")
-        print(f"Doc bundle: {args.doc_bundle}")
+        print(f"Doc bundle: {args.doc_bundle}  (mode: {args.mode})")
 
-    documentation = load_documentation(str(nnsight_path), bundle=args.doc_bundle)
+    add_dirs: list[str] = []
+    if args.mode == "browse":
+        if args.provider != "claude-code":
+            print(
+                "Error: browse mode requires --provider claude-code "
+                "(other providers don't support tool use through this suite).",
+                file=sys.stderr,
+            )
+            return 1
+        if args.doc_bundle not in BROWSE_BUNDLES:
+            print(
+                f"Error: bundle {args.doc_bundle!r} is not defined for browse mode. "
+                f"Available browse bundles: {list(BROWSE_BUNDLES.keys())}",
+                file=sys.stderr,
+            )
+            return 1
+        sys_prompt, browse_dirs = build_browse_config(str(nnsight_path), args.doc_bundle)
+        documentation = sys_prompt
+        add_dirs = [str(d) for d in browse_dirs]
+        if args.verbose:
+            print(f"Browse-mode add-dirs: {add_dirs}")
+    else:
+        documentation = load_documentation(str(nnsight_path), bundle=args.doc_bundle)
     
     if args.verbose:
         print(f"Loaded {len(documentation)} characters of documentation")
@@ -372,13 +412,16 @@ def main():
         provider=args.provider,
         model=args.model,
         temperature=args.temperature,
+        mode=args.mode,
+        add_dirs=add_dirs,
     )
-    
+
     # Run evaluation
     result = run_evaluation(
         config=config,
         documentation=documentation,
         doc_bundle=args.doc_bundle,
+        mode=args.mode,
         task_ids=args.task_id,
         difficulty=args.difficulty,
         kind=args.kind,
