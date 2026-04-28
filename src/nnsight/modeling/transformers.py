@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from typing import Type
 from transformers.models.auto import modeling_auto
 from transformers import AutoModel
+import warnings
 
 
 class TransformersModel(HuggingFaceModel):
@@ -89,8 +90,12 @@ class TransformersModel(HuggingFaceModel):
         self.config = model.config
 
         if self.peft is not None:
-            peft_model = PeftModel.from_pretrained(model, self.peft)
-            model = peft_model.get_base_model()
+
+            warnings.filterwarnings("ignore", category=UserWarning)
+
+            model = PeftModel.from_pretrained(model, self.peft)
+
+            warnings.filterwarnings("default", category=UserWarning)
 
         return model
 
@@ -108,7 +113,10 @@ class TransformersModel(HuggingFaceModel):
         self.config = model.config
 
         if self.peft is not None:
-            peft_model = PeftModel.from_pretrained(model, self.peft)
-            model = peft_model.get_base_model()
+            warnings.filterwarnings("ignore", category=UserWarning)
+
+            model = PeftModel.from_pretrained(model, self.peft)
+
+            warnings.filterwarnings("default", category=UserWarning)
 
         return model
