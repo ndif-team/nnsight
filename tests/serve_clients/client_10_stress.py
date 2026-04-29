@@ -45,7 +45,7 @@ for i, prompt in enumerate(prompts):
     t0 = time.perf_counter()
     try:
         with model.trace(prompt, temperature=0.0, top_p=1, serve=URL):
-            logits = model.logits.output.save()
+            logits = model.logits.save()
         token = model.tokenizer.decode(logits.argmax(dim=-1)).strip()
         elapsed = time.perf_counter() - t0
         times.append(elapsed)

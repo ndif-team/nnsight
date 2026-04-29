@@ -16,11 +16,11 @@ patch_layer = 24
 t0 = time.perf_counter()
 with model.trace(source_prompt, temperature=0.0, top_p=1, serve=URL):
     source_hs = model.model.layers[patch_layer].output[0].save()
-    source_logits = model.logits.output.save()
+    source_logits = model.logits.save()
 
 # Clean target
 with model.trace(target_prompt, temperature=0.0, top_p=1, serve=URL):
-    clean_logits = model.logits.output.save()
+    clean_logits = model.logits.save()
 
 elapsed = time.perf_counter() - t0
 

@@ -16,13 +16,13 @@ prompts = [
 
 # Warmup
 with model.trace(prompts[0], serve=URL):
-    model.logits.output.save()
+    model.logits.save()
 
 # Sequential baseline
 t0 = time.perf_counter()
 for p in prompts:
     with model.trace(p, temperature=0.0, top_p=1, serve=URL):
-        model.logits.output.save()
+        model.logits.save()
 seq_time = time.perf_counter() - t0
 
 # Non-blocking concurrent
@@ -30,13 +30,13 @@ tracers = []
 t0 = time.perf_counter()
 
 with model.trace(prompts[0], temperature=0.0, top_p=1, serve=URL, blocking=False) as t1:
-    l1 = model.logits.output.save()
+    l1 = model.logits.save()
 with model.trace(prompts[1], temperature=0.0, top_p=1, serve=URL, blocking=False) as t2:
-    l2 = model.logits.output.save()
+    l2 = model.logits.save()
 with model.trace(prompts[2], temperature=0.0, top_p=1, serve=URL, blocking=False) as t3:
-    l3 = model.logits.output.save()
+    l3 = model.logits.save()
 with model.trace(prompts[3], temperature=0.0, top_p=1, serve=URL, blocking=False) as t4:
-    l4 = model.logits.output.save()
+    l4 = model.logits.save()
 
 saves = [t.collect(timeout=60) for t in [t1, t2, t3, t4]]
 conc_time = time.perf_counter() - t0

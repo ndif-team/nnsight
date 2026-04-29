@@ -13,7 +13,7 @@ prompt = "The Eiffel Tower is located in the city of"
 # Clean run
 t0 = time.perf_counter()
 with model.trace(prompt, temperature=0.0, top_p=1, serve=URL):
-    clean_logits = model.logits.output.save()
+    clean_logits = model.logits.save()
 clean_time = time.perf_counter() - t0
 clean_token = model.tokenizer.decode(clean_logits.argmax(dim=-1))
 
@@ -22,7 +22,7 @@ t0 = time.perf_counter()
 with model.trace(prompt, temperature=0.0, top_p=1, serve=URL):
     for layer_idx in range(40, 48):
         model.model.layers[layer_idx].output[0][:] = 0
-    corrupted_logits = model.logits.output.save()
+    corrupted_logits = model.logits.save()
 corrupt_time = time.perf_counter() - t0
 corrupted_token = model.tokenizer.decode(corrupted_logits.argmax(dim=-1))
 

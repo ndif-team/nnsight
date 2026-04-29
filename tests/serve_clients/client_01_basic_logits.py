@@ -16,7 +16,7 @@ prompts = [
 for prompt in prompts:
     t0 = time.perf_counter()
     with model.trace(prompt, temperature=0.0, top_p=1, serve=URL):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
     elapsed = time.perf_counter() - t0
 
     token = model.tokenizer.decode(logits.argmax(dim=-1))

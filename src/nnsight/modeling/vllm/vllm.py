@@ -95,6 +95,16 @@ class VLLM(RemoteableMixin):
                 backend="gloo",
             )
 
+            # Run model-parallel init under a default VllmConfig and OUTSIDE
+            # the ``init_empty_weights`` context that ``MetaMixin.__init__``
+            # opens for ``_load_meta``. vLLM 0.19+ creates rank tensors
+            # during this call; if torch is in meta-device mode, a later
+            # ``.tolist()`` raises "Cannot copy out of meta tensor".
+            with set_current_vllm_config(VllmConfig()):
+                initialize_model_parallel(
+                    tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+                )
+
         atexit.register(VLLM._cleanup_distributed)
 
         super().__init__(*args, **kwargs)
@@ -149,13 +159,9 @@ class VLLM(RemoteableMixin):
 
         vllm_config.load_config.device = "meta"
 
-        # vLLM requires config context for model parallel init and model loading
+        # Load the meta-device weights under the vllm_config. Model-parallel
+        # init was already done in VLLM.__init__ outside the meta context.
         with set_current_vllm_config(vllm_config):
-
-            initialize_model_parallel(
-                tensor_model_parallel_size=1, pipeline_model_parallel_size=1
-            )
-
             loader = DummyModelLoader(vllm_config.load_config)
             loader.load_weights = lambda *args, **kwargs: None
             model = loader.load_model(vllm_config, vllm_config.model_config)

@@ -16,11 +16,11 @@ prompts = [
 t0 = time.perf_counter()
 with model.trace(temperature=0.0, top_p=1, serve=URL) as tracer:
     with tracer.invoke(prompts[0]):
-        logits_0 = model.logits.output.save()
+        logits_0 = model.logits.save()
     with tracer.invoke(prompts[1]):
-        logits_1 = model.logits.output.save()
+        logits_1 = model.logits.save()
     with tracer.invoke(prompts[2]):
-        logits_2 = model.logits.output.save()
+        logits_2 = model.logits.save()
 elapsed = time.perf_counter() - t0
 
 print(f"[{elapsed:.3f}s] {len(prompts)} prompts in one trace:")

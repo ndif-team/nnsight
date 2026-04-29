@@ -19,7 +19,7 @@ with model.trace(temperature=0.0, top_p=1, serve=URL) as tracer:
     tokens = [None for _ in prompts].save()
     for i, prompt in enumerate(prompts):
         with tracer.invoke(prompt):
-            tokens[i] = model.logits.output.argmax(dim=-1)
+            tokens[i] = model.logits.argmax(dim=-1)
 elapsed = time.perf_counter() - t0
 
 print(f"[{elapsed:.3f}s] Shared list across {len(prompts)} invokes:")

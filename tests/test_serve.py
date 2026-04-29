@@ -105,7 +105,7 @@ class TestBasicInference:
     def test_logit_prediction(self, model):
         """Verify next-token prediction via logits."""
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         _assert_not_dispatched(model)
         next_token = model.tokenizer.decode(logits.argmax(dim=-1))
@@ -135,14 +135,14 @@ class TestInterventions:
         """Zero out an MLP output and verify the prediction changes."""
         # Get clean prediction first
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
-            clean_logits = model.logits.output.save()
+            clean_logits = model.logits.save()
         clean_token = model.tokenizer.decode(clean_logits.argmax(dim=-1))
         assert "Paris" in clean_token
 
         # Zero out MLP and check prediction changed
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
             model.model.layers[-2].mlp.output[:] = 0
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         _assert_not_dispatched(model)
         next_token = model.tokenizer.decode(logits.argmax(dim=-1))
@@ -154,7 +154,7 @@ class TestInterventions:
             model.model.layers[-2].mlp.output = torch.zeros_like(
                 model.model.layers[-2].mlp.output
             )
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         _assert_not_dispatched(model)
         next_token = model.tokenizer.decode(logits.argmax(dim=-1))
@@ -172,11 +172,11 @@ class TestBatching:
         """Run clean and corrupted versions of the same prompt in one trace."""
         with model.trace(temperature=0.0, top_p=1, serve=SERVE_URL) as tracer:
             with tracer.invoke(ET_PROMPT):
-                clean_logits = model.logits.output.save()
+                clean_logits = model.logits.save()
 
             with tracer.invoke(ET_PROMPT):
                 model.model.layers[-2].mlp.output[:] = 0
-                corrupted_logits = model.logits.output.save()
+                corrupted_logits = model.logits.save()
 
         _assert_not_dispatched(model)
 
@@ -189,9 +189,9 @@ class TestBatching:
         """Capture logits from two different prompts in one trace."""
         with model.trace(temperature=0.0, top_p=1, serve=SERVE_URL) as tracer:
             with tracer.invoke(ET_PROMPT):
-                et_logits = model.logits.output.save()
+                et_logits = model.logits.save()
             with tracer.invoke(MSG_PROMPT):
-                msg_logits = model.logits.output.save()
+                msg_logits = model.logits.save()
 
         _assert_not_dispatched(model)
         et_token = model.tokenizer.decode(et_logits.argmax(dim=-1))
@@ -215,7 +215,7 @@ class TestCrossInvokeSharedState:
             out_ids = [list() for _ in range(len(prompts))].save()
             for i, prompt in enumerate(prompts):
                 with tracer.invoke(prompt):
-                    out_ids[i].append(model.logits.output.argmax(dim=-1))
+                    out_ids[i].append(model.logits.argmax(dim=-1))
 
         _assert_not_dispatched(model)
         assert len(out_ids) == 2
@@ -240,7 +240,7 @@ class TestTokenInputs:
         token_ids = model.tokenizer.encode(ET_PROMPT)
 
         with model.trace(token_ids, temperature=0.0, top_p=1, serve=SERVE_URL):
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         _assert_not_dispatched(model)
         next_token = model.tokenizer.decode(logits.argmax(dim=-1))
@@ -251,7 +251,7 @@ class TestTokenInputs:
         hf_output = model.tokenizer(ET_PROMPT, return_tensors="pt")
 
         with model.trace(dict(hf_output), temperature=0.0, top_p=1, serve=SERVE_URL):
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         _assert_not_dispatched(model)
         next_token = model.tokenizer.decode(logits.argmax(dim=-1))
@@ -263,7 +263,7 @@ class TestTokenInputs:
 
         with model.trace(temperature=0.0, top_p=1, serve=SERVE_URL) as tracer:
             with tracer.invoke(token_ids):
-                logits = model.logits.output.save()
+                logits = model.logits.save()
 
         _assert_not_dispatched(model)
         next_token = model.tokenizer.decode(logits.argmax(dim=-1))
@@ -280,7 +280,7 @@ class TestNonBlocking:
     def test_single_nonblocking(self, model):
         """Single non-blocking request returns saves via .collect()."""
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t:
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         _assert_not_dispatched(model)
         saves = t.collect()
@@ -293,9 +293,9 @@ class TestNonBlocking:
         import time
 
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t1:
-            logits1 = model.logits.output.save()
+            logits1 = model.logits.save()
         with model.trace(MSG_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t2:
-            logits2 = model.logits.output.save()
+            logits2 = model.logits.save()
 
         _assert_not_dispatched(model)
 
@@ -341,10 +341,10 @@ class TestNumericalMatch:
     def test_logits_match(self, model, local_model):
         """Logits from serve and local should be bitwise identical."""
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
-            serve_logits = model.logits.output.save()
+            serve_logits = model.logits.save()
 
         with local_model.trace(ET_PROMPT, temperature=0.0, top_p=1):
-            local_logits = local_model.logits.output.save()
+            local_logits = local_model.logits.save()
 
         _assert_not_dispatched(model)
         assert torch.equal(serve_logits.cpu(), local_logits.cpu()), (
@@ -358,7 +358,7 @@ class TestNumericalMatch:
                 m.model.layers[-2].mlp.output = torch.zeros_like(
                     m.model.layers[-2].mlp.output
                 )
-                logits = m.logits.output.save()
+                logits = m.logits.save()
             return logits
 
         serve_logits = run_trace(model, serve=SERVE_URL)

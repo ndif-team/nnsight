@@ -416,6 +416,11 @@ class Interleaver:
 
         self._interleaving = False
 
+        # Set by the vLLM model runner around ``execute_model`` so that
+        # exceptions raised inside the worker are stored on each
+        # mediator instead of bubbling up and killing the engine.
+        self._defer_exceptions = False
+
     def initialize(
         self,
         mediators: List[Mediator],
@@ -619,6 +624,12 @@ class Interleaver:
 
         # Ignore EarlyStopException errors.
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
+            return True
+
+        # In defer mode (vLLM model runner), don't raise here — exceptions
+        # are stored per-mediator and surfaced to the client.  Raising from
+        # __exit__ would kill the vLLM engine process.
+        if self._defer_exceptions:
             return True
 
     def handle(
@@ -859,6 +870,12 @@ class Mediator:
         self.cross_invoker = None
 
         self.original_globals = {}
+
+        # Set by ``handle_exception_event`` when the interleaver is in
+        # defer mode (vLLM); collected by the model runner from each
+        # mediator and shipped back to the client as
+        # ``saves["__nnsight_exceptions__"][base_id]``.
+        self._deferred_exception = None
 
         self._prev = None
 
@@ -1138,6 +1155,15 @@ class Mediator:
 
             # because of the defered execution of NNsight, we need to rebuild where the execption was in the original user code instead of this execption.
             exception = wrap_exception(exception, self.info)
+
+            # In vLLM mode, defer the exception so the engine stays
+            # alive.  The mediator is already cancelled (above), so
+            # subsequent hooks will skip it.  Other mediators keep
+            # running and the model runner ships this exception back to
+            # the client alongside any saves that were already collected.
+            if self.interleaver._defer_exceptions:
+                self._deferred_exception = exception
+                return False
 
             raise exception
 
@@ -1426,3 +1452,4 @@ class Mediator:
         self.args = list()
         self.original_globals = {}
         self.cross_invoker = None
+        self._deferred_exception = None

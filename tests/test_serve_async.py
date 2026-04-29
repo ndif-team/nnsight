@@ -60,12 +60,12 @@ class TestTimingOverlap:
         """
         # Warmup
         with model.trace(ET_PROMPT, serve=SERVE_URL):
-            model.logits.output.save()
+            model.logits.save()
 
         # Measure single request time
         t0 = time.perf_counter()
         with model.trace(ET_PROMPT, serve=SERVE_URL):
-            model.logits.output.save()
+            model.logits.save()
         single_time = time.perf_counter() - t0
 
         # Fire 4 non-blocking requests concurrently.
@@ -73,13 +73,13 @@ class TestTimingOverlap:
         t0 = time.perf_counter()
 
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t1:
-            model.logits.output.save()
+            model.logits.save()
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t2:
-            model.logits.output.save()
+            model.logits.save()
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t3:
-            model.logits.output.save()
+            model.logits.save()
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t4:
-            model.logits.output.save()
+            model.logits.save()
 
         # Wait for all to complete
         t1.collect(timeout=60)
@@ -111,10 +111,10 @@ class TestResultIsolation:
     def test_same_varname_different_prompts(self, model):
         """Two traces both save as 'logits' — each should get its own result."""
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t1:
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         with model.trace(MSG_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t2:
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         saves1 = t1.collect(timeout=30)
         saves2 = t2.collect(timeout=30)
@@ -138,10 +138,10 @@ class TestResultIsolation:
     def test_same_varname_same_prompt(self, model):
         """Two traces, same prompt, same varname — results should be identical."""
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t1:
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t2:
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         saves1 = t1.collect(timeout=30)
         saves2 = t2.collect(timeout=30)
@@ -184,7 +184,7 @@ def _worker_fn(prompt, serve_url, model_name, result_queue):
         from nnsight.modeling.vllm import VLLM
         m = VLLM(model_name)
         with m.trace(prompt, temperature=0.0, top_p=1, serve=serve_url):
-            logits = m.logits.output.save()
+            logits = m.logits.save()
         token = m.tokenizer.decode(logits.argmax(dim=-1))
         result_queue.put(("ok", token))
     except Exception as e:
@@ -239,12 +239,12 @@ class TestErrorHandling:
         """serve= pointing to wrong port should raise ConnectionError."""
         with pytest.raises((ConnectionError, httpx.ConnectError)):
             with model.trace(ET_PROMPT, serve="http://127.0.0.1:9999"):
-                model.logits.output.save()
+                model.logits.save()
 
     def test_nonblocking_collect_before_fire(self, model):
         """Calling collect() on a blocking trace should raise AttributeError."""
         with model.trace(ET_PROMPT, serve=SERVE_URL) as t:
-            model.logits.output.save()
+            model.logits.save()
 
         with pytest.raises(AttributeError, match="no pending serve request"):
             t.collect()
@@ -252,7 +252,7 @@ class TestErrorHandling:
     def test_nonblocking_double_collect(self, model):
         """Calling collect() twice should work (future.result() is idempotent)."""
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t:
-            logits = model.logits.output.save()
+            logits = model.logits.save()
 
         saves1 = t.collect(timeout=30)
         saves2 = t.collect(timeout=30)  # Should not raise

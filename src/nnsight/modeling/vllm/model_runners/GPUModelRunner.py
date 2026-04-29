@@ -389,11 +389,30 @@ class NNsightGPUModelRunner(GPUModelRunner):
     ):
 
         Globals.enter()
-        with self.nnsight_model.interleaver:
+
+        return_value = None
+        interleaver = self.nnsight_model.interleaver
+        interleaver._defer_exceptions = True
+
+        with interleaver:
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
+
+        interleaver._defer_exceptions = False
+
+        # Safety net: if ``__enter__`` raised or the forward pass was
+        # interrupted before ``return_value`` was assigned, ship back a
+        # minimal valid ``ModelRunnerOutput`` so vLLM does not segfault.
+        if return_value is None:
+            from vllm.v1.outputs import ModelRunnerOutput
+
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            return_value = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            )
 
         Globals.exit()
 
@@ -403,7 +422,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.enter()
 
-        with self.nnsight_model.interleaver:
+        interleaver = self.nnsight_model.interleaver
+        interleaver._defer_exceptions = True
+
+        with interleaver:
 
             # Provide logits from execute_model state before sampling.
             if self.execute_model_state is not None:
@@ -419,6 +441,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     **{**state._asdict(), "logits": logits}
                 )
 
+        interleaver._defer_exceptions = False
+
         Globals.exit()
 
         return super().sample_tokens(*args, **kwargs)
@@ -427,7 +451,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         Globals.enter()
 
-        with self.nnsight_model.interleaver:
+        sampler_output = None
+        interleaver = self.nnsight_model.interleaver
+        interleaver._defer_exceptions = True
+
+        with interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
 
@@ -435,6 +463,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 self.nnsight_model,
                 sampler_output.sampled_token_ids,
             )
+
+        interleaver._defer_exceptions = False
 
         Globals.exit()
 
@@ -474,6 +504,28 @@ class NNsightGPUModelRunner(GPUModelRunner):
         )
         saves, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
+
+        # Collect deferred exceptions from mediators in this request.
+        # The wrapped exception type is dynamic (NNsightException
+        # subclass) and not picklable on the client; ship a
+        # serialisable summary (originating exception type name +
+        # message) keyed by mediator name.
+        exceptions = {}
+        for _base_id, mediator, _internal_key in matched:
+            if mediator._deferred_exception is not None:
+                exc = mediator._deferred_exception
+                exc_bases = getattr(type(exc), "__bases__", ())
+                exc_type_name = (
+                    exc_bases[0].__name__ if exc_bases else type(exc).__name__
+                )
+                exceptions[mediator.name] = {
+                    "type": exc_type_name,
+                    "message": str(exc),
+                }
+                mediator._deferred_exception = None
+
+        if exceptions:
+            saves["__nnsight_exceptions__"] = exceptions
 
         torch.cuda.synchronize()
         return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves))
