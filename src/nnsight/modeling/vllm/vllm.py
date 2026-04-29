@@ -71,6 +71,7 @@ class VLLM(RemoteableMixin):
         if mode not in ("sync", "async"):
             raise ValueError(f"Invalid mode {mode!r}. Must be 'sync' or 'async'.")
         self._async_engine: bool = mode == "async"
+        self._compat: bool = kwargs.pop("compat", True)
 
         self.vllm_entrypoint: LLM = None
         self.tokenizer: "AnyTokenizer" = None

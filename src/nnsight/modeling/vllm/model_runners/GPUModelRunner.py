@@ -11,7 +11,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.distributed.parallel_state import get_tp_group
-from nnsight.intervention.tracing.globals import Globals
+from nnsight.intervention.tracing.globals import Globals, _saves_var
 
 from ....intervention.serialization import load
 from ..batching import VLLMBatcher
@@ -96,15 +96,22 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 if trace_id not in self.trace_contexts:
                     canonical_globals = mediator.intervention.__globals__
 
-                    # Register saved vars in worker-side Globals.saves
-                    # (.save() was called on the client with a different id).
+                    # Per-trace saves set: isolates save tracking
+                    # between concurrent traces and survives the
+                    # ``Globals.enter()`` reset across
+                    # execute_model/sample boundaries. Worker-side
+                    # ``.save()`` calls add to this set instead of the
+                    # contextvar-default set, which would be a
+                    # different object per worker thread.
+                    trace_saves = set()
                     for name in saved_names:
                         if name in canonical_globals:
-                            Globals.saves.add(id(canonical_globals[name]))
+                            trace_saves.add(id(canonical_globals[name]))
 
                     self.trace_contexts[trace_id] = {
                         "saved_names": saved_names,
                         "canonical_globals": canonical_globals,
+                        "saves": trace_saves,
                         "expected_count": extra_args.get("nnsight_expected_count", 1),
                         "received_count": 0,
                         "pending_req_ids": set(),
@@ -120,6 +127,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
                             med_globals[name] = canonical[name]
 
                 ctx = self.trace_contexts[trace_id]
+
+                # Point ``_saves_var`` at this trace's set so the
+                # worker thread (via ``copy_context()`` in
+                # :meth:`Mediator.start`) captures the right
+                # reference. Worker ``.save()`` calls will add IDs to
+                # this trace's set, not the contextvar's default set
+                # which ``Globals.enter()`` may reset between
+                # execute_model and sample.
+                mediator._trace_saves = ctx["saves"]
+                _saves_var.set(ctx["saves"])
 
                 mediator.idx = len(model.interleaver.mediators)
                 model.interleaver.mediators.append(mediator)
@@ -263,6 +280,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             Gathers per-invoke saves from frame locals and trace-shared
             saves from canonical globals (only when a trace is fully done).
+            Reads from each mediator's per-trace ``_trace_saves`` set
+            (pinned by ``process_new_reqs_serialized``) instead of the
+            global contextvar-backed ``Globals.saves`` — that set lives
+            in whichever context the worker thread happened to run in
+            and is not visible cross-thread.
 
             Returns:
                 ``(saves_by_req, removals)`` —
@@ -271,11 +293,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 variable name (``logits``, ``x``, …) don't collide at
                 the outer flat-dict layer.  The caller (engine / server)
                 routes each sub-dict to the matching request output.
-                ``removals`` is the set of ``id()`` values to discard
-                from ``Globals.saves`` after collection.
+                ``removals`` is a list of ``(id, trace_saves_ref)``
+                tuples to discard after collection.
             """
             saves_by_req: dict = {}
-            removals = set()
+            removals = []
 
             # Map internal_key -> base_id so trace-shared saves from a
             # finished internal_key can be attached to the right bucket.
@@ -283,12 +305,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             for base_id, mediator, internal_key in matched:
                 per_req = saves_by_req.setdefault(base_id, {})
+                trace_saves = mediator._trace_saves
+                if trace_saves is None:
+                    continue
                 frame = mediator.info.frame
                 for key, value in frame.f_locals.items():
-                    if id(value) in Globals.saves:
+                    if id(value) in trace_saves:
                         per_req[key] = value
                         if internal_key in finished_internal_keys:
-                            removals.add(id(value))
+                            removals.append((id(value), trace_saves))
 
             # Trace-shared saves: collect when ALL mediators for a trace
             # have been received AND completed.  Attach to the base_id
@@ -303,26 +328,27 @@ class NNsightGPUModelRunner(GPUModelRunner):
                             and ctx["received_count"] == ctx["expected_count"]
                         )
                         if trace_fully_done:
+                            trace_saves = ctx["saves"]
                             canonical = ctx["canonical_globals"]
                             per_req = saves_by_req.setdefault(owning_base, {})
                             for name in ctx["saved_names"]:
                                 if name in canonical:
                                     value = canonical[name]
-                                    if id(value) in Globals.saves:
+                                    if id(value) in trace_saves:
                                         per_req[name] = value
-                                        removals.add(id(value))
+                                        removals.append((id(value), trace_saves))
                         break
 
             return saves_by_req, removals
 
-        def cleanup_finished(self, finished_internal_keys: set, removals: set) -> None:
+        def cleanup_finished(self, finished_internal_keys: set, removals: list) -> None:
             """Clean up state for finished requests.
 
-            Removes entries from ``Globals.saves``, deletes completed
-            trace contexts, and drops mediator entries.
+            Discards collected IDs from their per-trace saves sets,
+            deletes completed trace contexts, and drops mediator entries.
             """
-            for _id in removals:
-                Globals.saves.discard(_id)
+            for _id, trace_saves in removals:
+                trace_saves.discard(_id)
 
             done_traces = [
                 tid

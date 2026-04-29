@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import inspect
 import types
 import warnings
@@ -877,6 +878,14 @@ class Mediator:
         # ``saves["__nnsight_exceptions__"][base_id]``.
         self._deferred_exception = None
 
+        # Per-trace saves set, pinned by the vLLM model runner just
+        # before this mediator's worker thread starts. ``collect_saves``
+        # reads from this directly instead of ``Globals.saves`` so
+        # cross-thread / cross-context reads work even when ``.save()``
+        # ran in a worker context that the main thread never sees.
+        # ``None`` for all non-vLLM-runner paths.
+        self._trace_saves = None
+
         self._prev = None
 
         # One-shot transform callback for the next value event. Set by
@@ -950,9 +959,18 @@ class Mediator:
                 torch.cuda.set_stream(_caller_stream)
             _intervention(*_args)
 
-        # Start the worker thread.
+        # Start the worker thread. Copy the current context so the
+        # worker inherits ``Globals.stack`` / ``Globals.saves`` from
+        # the caller — required when the caller runs inside a FastAPI
+        # handler coroutine (nnsight-serve) where contextvars isolate
+        # state across concurrent requests, and required by the vLLM
+        # model runner so the worker captures the right per-trace
+        # saves set pinned by ``_saves_var.set(ctx["saves"])``.
+        ctx = contextvars.copy_context()
+
         self.worker = Thread(
-            target=_worker_target,
+            target=ctx.run,
+            args=(_worker_target,),
             daemon=True,
             name=self.name,
         )
@@ -1453,3 +1471,4 @@ class Mediator:
         self.original_globals = {}
         self.cross_invoker = None
         self._deferred_exception = None
+        self._trace_saves = None
