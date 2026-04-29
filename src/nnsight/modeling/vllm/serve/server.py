@@ -143,13 +143,13 @@ async def generate(request: Request):
         ):
             last_output = output
 
-        # Collect saves from workers. Dev's worker ``collect_nnsight``
-        # returns a flat ``{var_name: value}`` dict per request (the RPC
-        # is already scoped to one request_id), so we just merge across
-        # ranks. NOTE: concurrent independent traces sharing variable
-        # names (``logits`` etc.) can collide here — see commit
-        # ``b0e56be`` on the original branch for the namespacing fix
-        # that needs re-porting once basic flow is validated.
+        # Collect saves from workers.  Each rank returns per-request
+        # ``{base_id: {var_name: value}}``; we extract THIS request's
+        # sub-dict rather than flat-merging across ranks.  collective_rpc
+        # is already scoped to one request_id here, but we still unwrap
+        # the outer layer so concurrent traces with overlapping variable
+        # names don't entangle (see commit b0e56be on vllm-serve-combined
+        # for the original motivation).
         finished = [request_id]
         results = await engine.collective_rpc(
             "collect_nnsight",
@@ -159,8 +159,9 @@ async def generate(request: Request):
         for r in results:
             if r is not None:
                 rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
-                if rank_saves:
-                    saves.update(rank_saves)
+                per_req = rank_saves.get(request_id) if rank_saves else None
+                if per_req:
+                    saves.update(per_req)
 
         gen_output = {}
         if last_output is not None:

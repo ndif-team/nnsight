@@ -242,11 +242,11 @@ class TestErrorHandling:
                 model.logits.save()
 
     def test_nonblocking_collect_before_fire(self, model):
-        """Calling collect() on a blocking trace should raise AttributeError."""
+        """Calling collect() on a blocking trace should raise RuntimeError."""
         with model.trace(ET_PROMPT, serve=SERVE_URL) as t:
             model.logits.save()
 
-        with pytest.raises(AttributeError, match="no pending serve request"):
+        with pytest.raises(RuntimeError, match="no pending serve request"):
             t.collect()
 
     def test_nonblocking_double_collect(self, model):
