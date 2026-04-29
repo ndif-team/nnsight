@@ -443,14 +443,30 @@ class VLLM(RemoteableMixin):
         push_variables(self.interleaver.mediators[0].info.frame, saves)
 
     def trace(self, *inputs, **kwargs):
-        if (
-            self._async_engine
-            and kwargs.get("backend") is None
-            and not kwargs.get("remote")
-        ):
-            from .async_backend import AsyncVLLMBackend
+        serve = kwargs.pop("serve", None)
+        if serve is not None and kwargs.get("backend") is None:
+            from ...intervention.backends.local_serve import LocalServeBackend
+            from .serve_tracer import ServeInterleavingTracer
 
-            kwargs["backend"] = AsyncVLLMBackend(self)
+            blocking = kwargs.pop("blocking", True)
+            api_key = kwargs.pop("api_key", None)
+            kwargs["backend"] = LocalServeBackend(
+                self, host=serve, blocking=blocking, api_key=api_key
+            )
+            kwargs.setdefault("tracer_cls", ServeInterleavingTracer)
+        else:
+            if "api_key" in kwargs:
+                raise ValueError(
+                    "api_key= requires serve= to specify the server URL"
+                )
+            if (
+                self._async_engine
+                and kwargs.get("backend") is None
+                and not kwargs.get("remote")
+            ):
+                from .async_backend import AsyncVLLMBackend
+
+                kwargs["backend"] = AsyncVLLMBackend(self)
         return super().trace(*inputs, **kwargs)
 
     def interleave(self, fn: Callable, *args, **kwargs):
