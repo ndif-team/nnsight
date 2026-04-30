@@ -249,6 +249,7 @@ class Envoy(Batchable):
     def trace(
         self,
         *args,
+        trace: bool = True,
         fn: Optional[Callable] = None,
         tracer_cls: Type[InterleavingTracer] = InterleavingTracer,
         **kwargs,
@@ -287,7 +288,7 @@ class Envoy(Batchable):
         # prepared input. Mirrors the WithBlockNotFoundError fallback in
         # __getattr__ so users get the same one-shot semantics whether
         # they call ``model.method(...)`` (no with) or ``model.trace(..., trace=False)``.
-        if kwargs.pop("trace", True) is False:
+        if not trace:
             args, kwargs, _ = self._prepare_input(*args, **kwargs)
             return fn(*args, **kwargs)
 
