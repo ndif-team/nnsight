@@ -1190,6 +1190,16 @@ class Mediator:
     def handle_barrier_event(self, provider: Any, participants: Set[str]):
         """
         Handle a barrier event by setting a barrier.
+
+        Propagates each participant's nested handle return value back
+        into ``batcher.current_value``.  Without this, a SWAP fired in
+        a participant's body during the barrier walk produces a new
+        tensor (concat path) that ``Mediator.handle``'s ``prev_value``
+        restore immediately discards — making cross-invoke transfers
+        of swapped values silently no-op.  The nested handle's return
+        value is the post-restore value (captured before the restore
+        runs in :meth:`Mediator.handle`), so re-assigning it here
+        carries the swap forward to the outer handle context.
         """
 
         if participants is not None:
@@ -1204,7 +1214,11 @@ class Mediator:
 
                     mediator.respond()
 
-                    mediator.handle(provider, self.interleaver.batcher.current_value)
+                    result = mediator.handle(
+                        provider, self.interleaver.batcher.current_value
+                    )
+
+                    self.interleaver.batcher.current_value = result
 
             self.interleaver.current = prev_current
 
