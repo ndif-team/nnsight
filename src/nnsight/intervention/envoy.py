@@ -269,14 +269,27 @@ class Envoy(Batchable):
 
         Args:
             *args: Arguments to pass to the tracer
+            trace: If False, bypass tracing entirely — run the underlying
+                module on the prepared input and return its output.
+                Useful for one-shot forward passes that don't need
+                intervention. Defaults to True.
             **kwargs: Keyword arguments to pass to the tracer
 
         Returns:
-            An InterleavingTracer for this module
+            An InterleavingTracer for this module, or — when ``trace=False``
+            — the module's output value directly.
         """
 
         if fn is None:
             fn = self.__call__
+
+        # ``trace=False``: bypass tracing, run the module directly on the
+        # prepared input. Mirrors the WithBlockNotFoundError fallback in
+        # __getattr__ so users get the same one-shot semantics whether
+        # they call ``model.method(...)`` (no with) or ``model.trace(..., trace=False)``.
+        if kwargs.pop("trace", True) is False:
+            args, kwargs, _ = self._prepare_input(*args, **kwargs)
+            return fn(*args, **kwargs)
 
         return tracer_cls(fn, self, *args, **kwargs)
 
@@ -996,6 +1009,8 @@ class Envoy(Batchable):
                 def trace(*args, **kwargs):
                     try:
                         tracer = self.trace(*args, fn=value, **kwargs)
+                        if not isinstance(tracer, InterleavingTracer):
+                            return tracer
                         tracer.capture()
                         return tracer
                     except WithBlockNotFoundError as e:
