@@ -744,6 +744,27 @@ class TestDiffusionSource:
 
         assert not np.array_equal(clean_arr, modified_arr)
 
+    @torch.no_grad()
+    def test_recursive_source(self, tiny_sd, sd_prompt):
+        """Recursive .source — chain ``.source.<op>.source.<inner_op>`` inside a trace."""
+        attn = tiny_sd.unet.down_blocks[1].attentions[0]
+
+        with tiny_sd.trace(sd_prompt) as tracer:
+            inner_out = (
+                attn.source.self__get_output_for_continuous_inputs_0
+                .source.self_proj_out_0.output.save()
+            )
+
+        assert isinstance(inner_out, torch.Tensor)
+        assert inner_out.ndim == 4
+
+    @torch.no_grad()
+    def test_recursive_source_outside_trace_raises(self, tiny_sd):
+        """Recursive ``.source`` outside a trace raises a clear error."""
+        attn = tiny_sd.unet.down_blocks[1].attentions[0]
+        with pytest.raises(ValueError, match="Must be within a trace"):
+            _ = attn.source.self__get_output_for_continuous_inputs_0.source
+
 
 # =============================================================================
 # Skip Tests
