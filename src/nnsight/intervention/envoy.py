@@ -1007,17 +1007,17 @@ class Envoy(Batchable):
                 # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
                 value = getattr(self, f"__nnsight_{name}__", value)
 
-                def trace(*args, **kwargs):
+                def trace(*args, trace: bool = True, **kwargs):
+
+                    if not trace:
+                        args, kwargs, _ = self._prepare_input(*args, **kwargs)
+                        return value(*args, **kwargs)
+
                     try:
                         tracer = self.trace(*args, fn=value, **kwargs)
-                        if not isinstance(tracer, InterleavingTracer):
-                            return tracer
                         tracer.capture()
                         return tracer
                     except WithBlockNotFoundError as e:
-
-                        args, kwargs, _ = self._prepare_input(*args, **kwargs)
-
                         return value(*args, **kwargs)
 
                 return trace
