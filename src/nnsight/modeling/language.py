@@ -109,8 +109,7 @@ class LanguageModel(TransformersModel):
         if model_type and model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
             raise ValueError(
                 f"{repo_id!r} ({model_type}) is registered with "
-                f"AutoModelForImageTextToText — it's a multimodal model whose "
-                f"text-side fields are nested under config.text_config, so "
+                f"AutoModelForImageTextToText — it's a multimodal model so "
                 f"LanguageModel(...) can't load it. Use VisionLanguageModel "
                 f"instead:\n\n"
                 f"    from nnsight import VisionLanguageModel\n"
