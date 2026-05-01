@@ -4209,7 +4209,7 @@ Each `with model.trace(...)` block triggers a pipeline of operations before and 
 | `inspect.getsourcelines()` | ~0.07ms | Reads source code of the calling function (cached after first call) |
 | AST parsing (`ast.generic_visit`) | ~0.13ms | Walks AST to find `with` block boundaries (cached after first call) |
 | `builtins.compile()` | ~0.05ms | Compiles extracted source into Python code object (cached after first call) |
-| `get_non_nnsight_frame()` | ~0.02ms | Walks call stack to find user frame |
+| `get_entered_frame()` / `get_non_nnsight_frame()` | ~0.02ms | Find the user's frame. From `Tracer.__enter__` we walk past any `__enter__` chain (subclasses calling `super().__enter__()`, user-defined context-manager wrappers) via `get_entered_frame`. The two direct callers of `capture()` (`Tensor.backward` patcher, `Envoy.__getattr__` speculative fallback) fall back to `get_non_nnsight_frame`, which walks until the next frame's module name isn't `nnsight*` (replaces the older path-substring heuristic that broke when the user's env directory was itself named `nnsight` — #606). |
 | `push_variables()` | ~0.02ms | Injects variables into generated code frame via `ctypes` |
 
 **Source extraction, AST parsing, and code compilation** are all cached after the first call for a given trace site. Subsequent calls to the same `with model.trace(...)` at the same source location skip these entirely. The cache key is `(filename, line_number, function_name, tracer_type)`, so traces in a loop are compiled once. This means the trace setup phase drops from ~0.35ms (first call) to ~0.15ms (subsequent calls).

@@ -383,11 +383,11 @@ class InterleavingTracer(Tracer):
         del self.fn
         return result
 
-    def capture(self):
+    def capture(self, frame=None):
         """
         Capture the code block within the 'with' statement.
         """
-        super().capture()
+        super().capture(frame)
 
         if not hasattr(self, "obj_var_name"):
             try:

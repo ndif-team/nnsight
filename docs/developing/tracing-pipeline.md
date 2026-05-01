@@ -41,7 +41,7 @@ exec into namespace]
 run compiled fn]
 ```
 
-Steps A–C run during `Tracer.__init__` for `EditingTracer`, but for the standard `InterleavingTracer` they run on `__enter__` (the tracer is constructed earlier when the user wrote `model.trace(...)` but capture only fires when the with statement enters).
+Steps A–C run on `Tracer.__enter__` — the tracer is constructed earlier when the user wrote `model.trace(...)`, but capture only fires when the `with` statement actually enters. The two direct callers of `Tracer.capture()` outside `__enter__` are the `Tensor.backward` patcher (`src/nnsight/__init__.py`) and the speculative-trace fallback in `Envoy.__getattr__` (`src/nnsight/intervention/envoy.py`); both call `tracer.capture()` with no frame argument and let `capture` walk the stack via `get_non_nnsight_frame`.
 
 ### Tracer.Info
 
@@ -85,6 +85,16 @@ Notes:
 `Globals.cache.clear()` flushes both. The `TRACE_CACHING` config flag mentioned in older versions is deprecated — caching is unconditional in `refactor/transform`.
 
 `Globals.stack` and `Globals.saves` are unrelated to the trace cache; they track nested-trace depth and the set of objects whose ids should survive `tracer.push()` filtering. See `docs/developing/eproperty-deep-dive.md` for how `nnsight.save()` populates `Globals.saves`.
+
+### Finding the user's frame
+
+Capture needs the frame whose source code contains the user's `with model.trace(...)` line. Two helpers in `src/nnsight/intervention/tracing/util.py` cover the two call shapes:
+
+- **`get_entered_frame()`** — used by `Tracer.__enter__`. `inspect.currentframe().f_back` is normally the user's frame, but ``__enter__`` may be called from inside another `__enter__` — either a subclass calling `super().__enter__()` (e.g. `EditingTracer`) or a user-defined context-manager wrapper class whose `__enter__` opens the inner `with` block. The helper walks past every `co_name == "__enter__"` ancestor and returns the first non-`__enter__` frame above. The wrapping behavior means class-based CM wrappers around `model.trace()` / `model.session()` no longer hang on capture (they fail with a clear "outside of interleaving" error from the value access instead — same root cause but observable at the user's site rather than in nnsight's worker thread).
+
+- **`get_non_nnsight_frame()`** — used as the fallback inside `capture(frame=None)` and by the two direct-capture call sites mentioned above. Walks the stack until the next frame's `__name__` is not `nnsight` or a `nnsight.<sub>` submodule. This replaces the older path-substring heuristic that broke when the user's environment directory was named `nnsight` (#606).
+
+`capture(frame=...)` accepts an explicit frame so unusual call sites (or a custom context-manager wrapper that wants to point the parser at a specific outer frame) can override the auto-walk.
 
 ### Source extraction (capture step)
 
