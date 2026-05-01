@@ -239,7 +239,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 finished_internal_keys.add(internal_key)
 
-                Globals.enter()
                 if mediator.alive:
                     model.interleaver.mediators = [mediator]
                     mediator.batch_group = None
@@ -254,7 +253,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # module and keep firing with stale batch_groups from dead
                 # mediators.
                 mediator.remove_hooks()
-                Globals.exit()
 
             return finished_internal_keys
 
@@ -388,20 +386,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ):
 
-        Globals.enter()
         with self.nnsight_model.interleaver:
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
 
-        Globals.exit()
-
         return return_value
 
     def sample_tokens(self, *args, **kwargs):
-
-        Globals.enter()
 
         with self.nnsight_model.interleaver:
 
@@ -419,13 +412,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     **{**state._asdict(), "logits": logits}
                 )
 
-        Globals.exit()
-
         return super().sample_tokens(*args, **kwargs)
 
     def _sample(self, *args, **kwargs):
-
-        Globals.enter()
 
         with self.nnsight_model.interleaver:
 
@@ -435,8 +424,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 self.nnsight_model,
                 sampler_output.sampled_token_ids,
             )
-
-        Globals.exit()
 
         return sampler_output
 

@@ -9,7 +9,6 @@ to non-server modules during deserialization.
 import sys
 from typing import Any
 
-from ..tracing.globals import Globals
 from ..tracing.util import wrap_exception
 from .base import Backend
 from .remote import pull_env
@@ -76,12 +75,9 @@ class LocalSimulationBackend(Backend):
 
         # Step 4: Execute the restored function
         try:
-            Globals.enter()
             return tracer.execute(restored.interventions)
         except Exception as e:
             raise wrap_exception(e, tracer.info) from None
-        finally:
-            Globals.exit()
 
     def _block_user_modules(self):
         """Block non-server modules from sys.modules and sys.path."""
