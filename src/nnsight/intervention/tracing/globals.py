@@ -96,6 +96,8 @@ class Globals:
 
     cache = TracingCache()
 
+    converted_fn_files = {}
+
     _mounted = False
 
     @staticmethod
@@ -114,4 +116,5 @@ class Globals:
     def clear():
         Globals.saves.clear()
         Globals.cache.clear()
+        Globals.converted_fn_files.clear()
         Globals.stack = 0
