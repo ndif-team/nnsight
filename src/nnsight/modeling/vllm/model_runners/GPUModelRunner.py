@@ -358,6 +358,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model.interleaver.batcher = VLLMBatcher()
 
+        self.nnsight_model.interleaver.defer_exceptions = True
+
         # Only wrap when TP > 1: registers hooks that handle
         # gather/split of sharded tensors and CUDA synchronization
         # for TP-parallel modules.  With TP == 1 nothing is sharded
@@ -400,15 +402,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         return_value = None
         interleaver = self.nnsight_model.interleaver
-        interleaver._defer_exceptions = True
 
         with interleaver:
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
-
-        interleaver._defer_exceptions = False
 
         # Safety net: if ``__enter__`` raised or the forward pass was
         # interrupted before ``return_value`` was assigned, ship back a
@@ -427,7 +426,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
     def sample_tokens(self, *args, **kwargs):
 
         interleaver = self.nnsight_model.interleaver
-        interleaver._defer_exceptions = True
 
         with interleaver:
 
@@ -445,15 +443,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     **{**state._asdict(), "logits": logits}
                 )
 
-        interleaver._defer_exceptions = False
-
         return super().sample_tokens(*args, **kwargs)
 
     def _sample(self, *args, **kwargs):
 
         sampler_output = None
         interleaver = self.nnsight_model.interleaver
-        interleaver._defer_exceptions = True
 
         with interleaver:
 
@@ -463,8 +458,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 self.nnsight_model,
                 sampler_output.sampled_token_ids,
             )
-
-        interleaver._defer_exceptions = False
 
         return sampler_output
 
