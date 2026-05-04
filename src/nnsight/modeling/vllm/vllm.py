@@ -71,6 +71,7 @@ class VLLM(RemoteableMixin):
         if mode not in ("sync", "async"):
             raise ValueError(f"Invalid mode {mode!r}. Must be 'sync' or 'async'.")
         self._async_engine: bool = mode == "async"
+        self._compat: bool = kwargs.pop("compat", True)
 
         self.vllm_entrypoint: LLM = None
         self.tokenizer: "AnyTokenizer" = None
@@ -94,6 +95,16 @@ class VLLM(RemoteableMixin):
                 0,
                 backend="gloo",
             )
+
+            # Run model-parallel init under a default VllmConfig and OUTSIDE
+            # the ``init_empty_weights`` context that ``MetaMixin.__init__``
+            # opens for ``_load_meta``. vLLM 0.19+ creates rank tensors
+            # during this call; if torch is in meta-device mode, a later
+            # ``.tolist()`` raises "Cannot copy out of meta tensor".
+            with set_current_vllm_config(VllmConfig()):
+                initialize_model_parallel(
+                    tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+                )
 
         atexit.register(VLLM._cleanup_distributed)
 
@@ -149,13 +160,9 @@ class VLLM(RemoteableMixin):
 
         vllm_config.load_config.device = "meta"
 
-        # vLLM requires config context for model parallel init and model loading
+        # Load the meta-device weights under the vllm_config. Model-parallel
+        # init was already done in VLLM.__init__ outside the meta context.
         with set_current_vllm_config(vllm_config):
-
-            initialize_model_parallel(
-                tensor_model_parallel_size=1, pipeline_model_parallel_size=1
-            )
-
             loader = DummyModelLoader(vllm_config.load_config)
             loader.load_weights = lambda *args, **kwargs: None
             model = loader.load_model(vllm_config, vllm_config.model_config)
@@ -443,14 +450,30 @@ class VLLM(RemoteableMixin):
         push_variables(self.interleaver.mediators[0].info.frame, saves)
 
     def trace(self, *inputs, **kwargs):
-        if (
-            self._async_engine
-            and kwargs.get("backend") is None
-            and not kwargs.get("remote")
-        ):
-            from .async_backend import AsyncVLLMBackend
+        serve = kwargs.pop("serve", None)
+        if serve is not None and kwargs.get("backend") is None:
+            from ...intervention.backends.local_serve import LocalServeBackend
+            from .serve_tracer import ServeInterleavingTracer
 
-            kwargs["backend"] = AsyncVLLMBackend(self)
+            blocking = kwargs.pop("blocking", True)
+            api_key = kwargs.pop("api_key", None)
+            kwargs["backend"] = LocalServeBackend(
+                self, host=serve, blocking=blocking, api_key=api_key
+            )
+            kwargs.setdefault("tracer_cls", ServeInterleavingTracer)
+        else:
+            if "api_key" in kwargs:
+                raise ValueError(
+                    "api_key= requires serve= to specify the server URL"
+                )
+            if (
+                self._async_engine
+                and kwargs.get("backend") is None
+                and not kwargs.get("remote")
+            ):
+                from .async_backend import AsyncVLLMBackend
+
+                kwargs["backend"] = AsyncVLLMBackend(self)
         return super().trace(*inputs, **kwargs)
 
     def generate(self, *inputs, **kwargs):
