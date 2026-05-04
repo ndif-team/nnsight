@@ -119,11 +119,3 @@ class Globals:
     def clear():
         Globals.saves.clear()
         Globals.cache.clear()
-
-
-# Eager one-time mount: `.save()` is dispatched via this C-level mount so any
-# object can carry the method, and the user calls `.save()` directly inside
-# trace bodies — meaning the mount must already be in place by the time user
-# code runs. No tracer-entry hook is available before the user types
-# `attn.output.save()`, so we mount at import.
-_ensure_mounted()
