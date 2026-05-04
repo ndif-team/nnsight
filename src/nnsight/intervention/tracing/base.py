@@ -520,7 +520,10 @@ class Tracer:
         during tracing to persist and affect the original execution environment.
 
         The method handles variable filtering to only push non-nnsight variables,
-        and includes special logic for nested tracing contexts using Globals.stack.
+        and includes special logic for nested tracing contexts: the
+        target frame's locals tell us whether we're an inner trace
+        (target is another tracer's compiled body — push everything) or
+        the root trace (target is user code — push only saved values).
 
         Args:
             state: Dictionary of variable names and values to push to the frame.
@@ -549,16 +552,21 @@ class Tracer:
             k: v for k, v in state.items() if not k.startswith("__nnsight")
         }
 
-        # Special handling for nested tracing contexts
-        # When stack == 1, only push variables that were explicitly saved
-        if Globals.stack == 1:
+        target_frame = self.info.frame
+
+        # Root tracer: target frame is user code (no parent compiled body
+        # in scope), so only saved values should propagate out. Inner
+        # tracers push into another tracer's compiled body, which carries
+        # ``__nnsight_tracing_info__`` in its locals — those propagate
+        # everything up to their parent.
+        is_root = target_frame is not None and (
+            "__nnsight_tracing_info__" not in target_frame.f_locals
+        )
+        if is_root:
             filtered_state = {
                 k: v for k, v in filtered_state.items() if id(v) in Globals.saves
             }
             Globals.saves.clear()
-
-        # Get the original frame where the tracer was created
-        target_frame = self.info.frame
 
         if target_frame is not None:
             # Push the filtered variables back to the original frame
