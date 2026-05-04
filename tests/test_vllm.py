@@ -126,6 +126,34 @@ class TestGeneration:
 
         assert len(logits) == 10
 
+    @torch.no_grad()
+    def test_generate_alias(self, vllm_gpt2, MSG_prompt: str):
+        """``VLLM.generate`` is an alias for ``VLLM.trace`` (matches LanguageModel API)."""
+        with vllm_gpt2.generate(
+            MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3
+        ) as tracer:
+            logits = list().save()
+            with tracer.iter[0:3]:
+                logits.append(vllm_gpt2.logits)
+
+        assert vllm_gpt2.tokenizer.batch_decode(
+            [logit.argmax(dim=-1) for logit in logits]
+        ) == [" New", " York", " City"]
+
+    @torch.no_grad()
+    def test_generate_max_new_tokens_kwarg(self, vllm_gpt2, MSG_prompt: str):
+        """``max_new_tokens`` kwarg is rewritten to ``max_tokens`` for cross-API portability."""
+        with vllm_gpt2.generate(
+            MSG_prompt, temperature=0.0, top_p=1.0, max_new_tokens=3
+        ) as tracer:
+            logits = list().save()
+            with tracer.iter[0:3]:
+                logits.append(vllm_gpt2.logits)
+
+        assert vllm_gpt2.tokenizer.batch_decode(
+            [logit.argmax(dim=-1) for logit in logits]
+        ) == [" New", " York", " City"]
+
 
 # =============================================================================
 # Sampling

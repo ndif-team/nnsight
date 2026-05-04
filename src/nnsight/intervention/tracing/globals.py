@@ -1,5 +1,4 @@
-import contextvars
-from typing import Any, Callable, Tuple, Union
+from typing import Any, Tuple
 
 import torch
 from typing_extensions import Self
@@ -7,33 +6,24 @@ from ..._c.py_mount import mount
 from ... import CONFIG
 
 
-# Per-context state: each async task / thread gets its own stack and
-# saves set. This is what makes nnsight-serve's FastAPI handlers safe
-# under async concurrency — without it, two coroutines hitting
-# ``Globals.enter()/exit()`` on the same event loop would clobber each
-# other's stack depth and saves set. The metaclass below routes
-# ``Globals.stack`` / ``Globals.saves`` through these contextvars while
-# preserving the public attribute API; local execution and NDIF code
-# paths see no behavior change.
-_stack_var: contextvars.ContextVar[int] = contextvars.ContextVar(
-    "nnsight_stack", default=0
-)
-_saves_var: contextvars.ContextVar[set] = contextvars.ContextVar(
-    "nnsight_saves", default=None
-)
+_mounted = False
 
 
-def _get_saves() -> set:
-    s = _saves_var.get()
-    if s is None:
-        s = set()
-        _saves_var.set(s)
-    return s
+def _ensure_mounted():
+    """Mount Object.save as the universal `.save` method.
+
+    Lazy one-time setup. Called from .save() / nnsight.save() so we only
+    pay the C-level mount cost once, on first use.
+    """
+    global _mounted
+    if CONFIG.APP.PYMOUNT and not _mounted:
+        mount(Object.save, "save")
+        _mounted = True
 
 
 def save(object: Any):
 
-    _get_saves().add(id(object))
+    Globals.saves.add(id(object))
 
     return object
 
@@ -51,12 +41,6 @@ class Object(torch.Tensor):
         ...     attn_0 = model.transformer.h[0].attn.output.save()
         >>> print(attn_0)
         """
-
-        if _stack_var.get() == 0:
-            raise RuntimeError(
-                ".save() called outside of a trace context. "
-                "Use .save() only inside a `with model.trace(...)` block."
-            )
 
         save(self)
 
@@ -113,55 +97,25 @@ class TracingCache:
         self.code_cache.clear()
 
 
-class _GlobalsMeta(type):
-    """Metaclass that routes ``Globals.stack`` and ``Globals.saves`` to
-    contextvars. Preserves the existing public attribute API so callers
-    that read or write ``Globals.stack`` / ``Globals.saves`` keep
-    working — they just route through per-context state now.
+class Globals:
+    """Process-wide tracing state.
+
+    Holds two pieces of true global state:
+    - ``saves``: set of ``id()`` for objects marked via ``.save()``.
+      The root tracer's ``push()`` filters its frame locals against this
+      set so only saved values propagate out of the trace.
+    - ``cache``: source/AST/code-object memoization across traces.
+
+    Root-vs-inner detection lives on the tracer itself — see
+    ``Tracer.push`` — by checking whether the target frame is an
+    nnsight-generated frame (i.e., another trace's compiled body).
     """
 
-    @property
-    def stack(cls) -> int:
-        return _stack_var.get()
+    saves = set()
 
-    @stack.setter
-    def stack(cls, value: int):
-        _stack_var.set(value)
-
-    @property
-    def saves(cls) -> set:
-        return _get_saves()
-
-    @saves.setter
-    def saves(cls, value: set):
-        _saves_var.set(value)
-
-
-class Globals(metaclass=_GlobalsMeta):
-
-    # ``cache`` and ``_mounted`` are process-wide (shared across all
-    # tasks); only ``stack`` and ``saves`` are per-context.
     cache = TracingCache()
-    _mounted = False
-
-    @staticmethod
-    def enter():
-
-        if CONFIG.APP.PYMOUNT and not Globals._mounted:
-            mount(Object.save, "save")
-            Globals._mounted = True
-        cur = _stack_var.get()
-        if cur == 0:
-            # New trace context — start with a fresh saves set.
-            _saves_var.set(set())
-        _stack_var.set(cur + 1)
-
-    @staticmethod
-    def exit():
-        _stack_var.set(_stack_var.get() - 1)
 
     @staticmethod
     def clear():
-        _get_saves().clear()
+        Globals.saves.clear()
         Globals.cache.clear()
-        _stack_var.set(0)

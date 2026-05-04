@@ -91,7 +91,17 @@ class Cache:
             self._rename = rename
             self._alias_paths = alias_paths
 
-            super().__init__(data)
+            # Copy underlying storage directly, bypassing any CacheDict
+            # overrides (``__getitem__``, ``__iter__``, ``keys``) on
+            # ``data``. Overriding ``__iter__`` forces CPython's
+            # ``dict.__init__`` slow path to call ``data.__getitem__``,
+            # which would apply alias translation and break the copy
+            # (e.g. translating root key ``"model"`` → ``"transformer"``,
+            # which is not in storage).
+            super().__init__()
+            if data:
+                for k in dict.__iter__(data):
+                    dict.__setitem__(self, k, dict.__getitem__(data, k))
 
         @property
         def output(self):
@@ -114,11 +124,64 @@ class Cache:
             """
             return dict.__getitem__(self, self._path).input
 
+        def _scoped_iter(self):
+            """Iterate keys visible at the current ``_path`` scope.
+
+            For the root view (``_path == ""``) this is every key. For a
+            sub-view, this is the path itself (if cached) plus keys nested
+            below it. Methods that surface dict contents to outside callers
+            (iteration, ``keys``, ``__repr__``, IPython pretty-printing)
+            route through here so they don't leak the parent's full storage.
+            """
+            if self._path == "":
+                yield from dict.__iter__(self)
+                return
+            prefix = self._path + "."
+            for k in dict.__iter__(self):
+                if k == self._path or k.startswith(prefix):
+                    yield k
+
+        def __iter__(self):
+            return self._scoped_iter()
+
+        def __len__(self):
+            if self._path == "":
+                return dict.__len__(self)
+            return sum(1 for _ in self._scoped_iter())
+
+        def __contains__(self, key):
+            if not isinstance(key, str):
+                return False
+            if dict.__contains__(self, key):
+                if self._path == "":
+                    return True
+                return key == self._path or key.startswith(self._path + ".")
+            if self._path != "":
+                return dict.__contains__(self, self._path + "." + key)
+            return False
+
         def keys(self, alias: bool = False):
             if alias:
                 return self._alias_paths.keys()
 
-            return super().keys()
+            if self._path == "":
+                return super().keys()
+
+            return list(self._scoped_iter())
+
+        def values(self):
+            return [dict.__getitem__(self, k) for k in self._scoped_iter()]
+
+        def items(self):
+            return [(k, dict.__getitem__(self, k)) for k in self._scoped_iter()]
+
+        def __repr__(self):
+            if self._path == "":
+                return super().__repr__()
+            body = ", ".join(
+                f"{k!r}: {dict.__getitem__(self, k)!r}" for k in self._scoped_iter()
+            )
+            return f"{{{body}}}"
 
         def _add_alias_path(self, module_path):
             if self._rename:
@@ -136,6 +199,13 @@ class Cache:
 
             if isinstance(name, str):
                 name = self._alias_paths.get(name, name)
+
+                # Absolute key: already a full path present in the underlying
+                # storage. Return it directly so IPython pretty-printers (which
+                # call ``obj[k]`` for each ``k`` in ``keys()``) don't get a
+                # double-prefixed key like ``"model.transformer.h.0.model.transformer.h.0"``.
+                if dict.__contains__(self, name):
+                    return dict.__getitem__(self, name)
 
                 path = self._path + "." + name if self._path != "" else name
                 return dict.__getitem__(self, path)
@@ -313,11 +383,11 @@ class InterleavingTracer(Tracer):
         del self.fn
         return result
 
-    def capture(self):
+    def capture(self, frame=None):
         """
         Capture the code block within the 'with' statement.
         """
-        super().capture()
+        super().capture(frame)
 
         if not hasattr(self, "obj_var_name"):
             try:

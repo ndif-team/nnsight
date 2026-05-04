@@ -54,6 +54,7 @@ except PackageNotFoundError:
     except ImportError:
         __version__ = "unknown version"
 
+from .intervention.tracing.globals import save
 from .ndif import *
 
 from IPython import get_ipython
@@ -70,12 +71,12 @@ from .intervention.envoy import Envoy
 from .modeling.base import NNsight
 from .modeling.language import LanguageModel
 from .modeling.vlm import VisionLanguageModel
+
 try:
     from .modeling.diffusion import DiffusionModel
 except ImportError:
     pass
 from .intervention.tracing.base import Tracer
-from .intervention.tracing.globals import save
 from .intervention.tracing.util import ExceptionWrapper
 
 # Custom exception hook to show clean tracebacks for NNsight exceptions

@@ -476,6 +476,18 @@ class VLLM(RemoteableMixin):
                 kwargs["backend"] = AsyncVLLMBackend(self)
         return super().trace(*inputs, **kwargs)
 
+    def generate(self, *inputs, **kwargs):
+        """Alias for :meth:`trace` to match the :class:`LanguageModel` API.
+
+        vLLM tracing is inherently multi-token (driven by ``max_tokens``),
+        so there's no separate generate vs forward distinction like there
+        is for HuggingFace causal LMs. ``max_new_tokens`` is accepted for
+        cross-API portability and rewritten to ``max_tokens``.
+        """
+        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
+            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
+        return self.trace(*inputs, **kwargs)
+
     def interleave(self, fn: Callable, *args, **kwargs):
         """Execute the traced function with vLLM, dispatching the engine if needed."""
         if not self.dispatched and not isinstance(

@@ -53,9 +53,9 @@ import torch
 import zstandard as zstd
 from tqdm.auto import tqdm
 
-from ... import __IPYTHON__, CONFIG, __version__
+from ... import __IPYTHON__, CONFIG, __version__, save
 from ..._c.py_mount import mount, unmount
-from ...intervention.serialization import load, save
+from ...intervention.serialization import load, dumps
 from ...schema.request import RequestModel
 from ...schema.response import RESULT, ResponseModel
 from ..tracing.tracer import Tracer
@@ -638,9 +638,7 @@ class RemoteBackend(Backend):
         self.job_id = response_model.id
         return response_model
 
-    def submit_request(
-        self, data: bytes, headers: Dict[str, Any]
-    ) -> ResponseModel:
+    def submit_request(self, data: bytes, headers: Dict[str, Any]) -> ResponseModel:
         """Submit the serialized request to the remote server via HTTP POST.
 
         Returns the initial :class:`ResponseModel` (with the assigned job id
@@ -772,6 +770,9 @@ class RemoteBackend(Backend):
         # Deserialize with torch.load (handles tensors and pickled objects)
         result = torch.load(result_bytes, map_location="cpu", weights_only=False)
         result_bytes.close()
+
+        for value in result.values():
+            save(value)
 
         return result
 
@@ -980,7 +981,7 @@ class RemoteBackend(Backend):
             values: Dictionary of values to send (keyed by intervention ID).
             sio: The active WebSocket client connection.
         """
-        data = save(values)
+        data = dumps(values)
 
         sio.emit(
             "stream_upload",

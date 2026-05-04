@@ -31,7 +31,6 @@ from fastapi import FastAPI, HTTPException, Request, Response
 _ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
 
 from ....intervention.backends.base import Backend
-from ....intervention.tracing.globals import Globals
 from ....schema.request import RequestModel
 
 if TYPE_CHECKING:
@@ -103,8 +102,6 @@ async def generate(request: Request):
     tracer = request_model.tracer
 
     try:
-        Globals.enter()
-
         # Set up mediators from the compiled intervention function.
         # Under dev's lazy-hook architecture, hooks are mediator-owned and
         # registered on demand from the worker thread, so calling
@@ -126,8 +123,6 @@ async def generate(request: Request):
     except Exception as e:
         logger.exception("Failed to compile trace")
         raise HTTPException(status_code=400, detail=f"Trace compilation failed: {e}")
-    finally:
-        Globals.exit()
 
     # Submit all invokes concurrently and collect saves.
     engine = _model.vllm_entrypoint

@@ -11,12 +11,17 @@ import inspect
 
 import sys
 from types import FrameType
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 from ..backends.base import Backend
 from ..backends.execution import ExecutionBackend
 from .globals import Globals
-from .util import get_non_nnsight_frame, push_variables, suppress_all_output
+from .util import (
+    get_entered_frame,
+    get_non_nnsight_frame,
+    push_variables,
+    suppress_all_output,
+)
 from ...util import Patch, Patcher
 from ... import CONFIG
 
@@ -201,7 +206,7 @@ class Tracer:
 
     # === Core Tracing Methods ===
 
-    def capture(self):
+    def capture(self, frame: Optional[FrameType] = None):
         """
         Capture the code block within the 'with' statement.
 
@@ -217,11 +222,23 @@ class Tracer:
         4. Calls parse() to identify the exact with block boundaries
         5. Stores all metadata in a Tracer.Info object
 
+        Args:
+            frame: Optional explicit frame to capture from. When ``None``
+                (the default) the call stack is walked via
+                ``get_non_nnsight_frame()`` to find the user's frame. Pass
+                an explicit frame when wrapping ``model.trace()`` /
+                ``model.session()`` in a custom context manager so the AST
+                parser sees the right ``with`` block (the auto-walk gets
+                confused by the wrapping layer's frames).
+
         Raises:
             ValueError: If no source code can be found for the current context
         """
-        # Find the frame outside of nnsight by walking up the call stack
-        frame = get_non_nnsight_frame()
+        # Find the frame outside of nnsight by walking up the call stack,
+        # unless the caller supplied an explicit frame to capture from
+        # (e.g. a custom context manager wrapping ``model.trace()``).
+        if frame is None:
+            frame = get_non_nnsight_frame()
 
         # Get the line number where the tracer was created
         start_line = frame.f_lineno
@@ -503,7 +520,10 @@ class Tracer:
         during tracing to persist and affect the original execution environment.
 
         The method handles variable filtering to only push non-nnsight variables,
-        and includes special logic for nested tracing contexts using Globals.stack.
+        and includes special logic for nested tracing contexts: the
+        target frame's locals tell us whether we're an inner trace
+        (target is another tracer's compiled body — push everything) or
+        the root trace (target is user code — push only saved values).
 
         Args:
             state: Dictionary of variable names and values to push to the frame.
@@ -532,16 +552,21 @@ class Tracer:
             k: v for k, v in state.items() if not k.startswith("__nnsight")
         }
 
-        # Special handling for nested tracing contexts
-        # When stack == 1, only push variables that were explicitly saved
-        if Globals.stack == 1:
+        target_frame = self.info.frame
+
+        # Root tracer: target frame is user code (no parent compiled body
+        # in scope), so only saved values should propagate out. Inner
+        # tracers push into another tracer's compiled body, which carries
+        # ``__nnsight_tracing_info__`` in its locals — those propagate
+        # everything up to their parent.
+        is_root = target_frame is not None and (
+            "__nnsight_tracing_info__" not in target_frame.f_locals
+        )
+        if is_root:
             filtered_state = {
                 k: v for k, v in filtered_state.items() if id(v) in Globals.saves
             }
             Globals.saves.clear()
-
-        # Get the original frame where the tracer was created
-        target_frame = self.info.frame
 
         if target_frame is not None:
             # Push the filtered variables back to the original frame
@@ -608,9 +633,11 @@ class Tracer:
             The Tracer instance for use in the 'with' statement
         """
 
-        # Capture the code block if it hasn't been done yet
+        # Capture the code block if it hasn't been done yet. The user's
+        # frame is the one that ran the ``with`` statement — see
+        # :func:`get_entered_frame` for the walk that finds it.
         if self.info is None:
-            self.capture()
+            self.capture(frame=get_entered_frame())
 
         # Handle empty code blocks (containing only 'pass' statements)
         # These don't need special tracing, just return normally
