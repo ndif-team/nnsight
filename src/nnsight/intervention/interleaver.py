@@ -419,7 +419,7 @@ class Interleaver:
         # Set by the vLLM model runner around ``execute_model`` so that
         # exceptions raised inside the worker are stored on each
         # mediator instead of bubbling up and killing the engine.
-        self._defer_exceptions = False
+        self.defer_exceptions = False
 
     def initialize(
         self,
@@ -551,13 +551,9 @@ class Interleaver:
                     # Multi-invoke skip: each mediator's hook contributed its
                     # narrow value. Sort by batch start and concat along dim 0
                     # so the splice matches the model's expected batch order.
-                    entries.sort(
-                        key=lambda e: e[0][0] if e[0] is not None else -1
-                    )
+                    entries.sort(key=lambda e: e[0][0] if e[0] is not None else -1)
                     values = [v for _, v in entries]
-                    return applyn(
-                        values, lambda *t: torch.cat(t, dim=0), torch.Tensor
-                    )
+                    return applyn(values, lambda *t: torch.cat(t, dim=0), torch.Tensor)
                 source_accessor = getattr(m, "__source_accessor__", None)
 
                 # Once a SourceAccessor exists for this module (built on the
@@ -624,12 +620,6 @@ class Interleaver:
 
         # Ignore EarlyStopException errors.
         if exc_type is not None and issubclass(exc_type, EarlyStopException):
-            return True
-
-        # In defer mode (vLLM model runner), don't raise here — exceptions
-        # are stored per-mediator and surfaced to the client.  Raising from
-        # __exit__ would kill the vLLM engine process.
-        if self._defer_exceptions:
             return True
 
     def handle(
@@ -875,7 +865,7 @@ class Mediator:
         # defer mode (vLLM); collected by the model runner from each
         # mediator and shipped back to the client as
         # ``saves["__nnsight_exceptions__"][base_id]``.
-        self._deferred_exception = None
+        self.deferred_exception = None
 
         self._prev = None
 
@@ -1161,8 +1151,9 @@ class Mediator:
             # subsequent hooks will skip it.  Other mediators keep
             # running and the model runner ships this exception back to
             # the client alongside any saves that were already collected.
-            if self.interleaver._defer_exceptions:
-                self._deferred_exception = exception
+            if self.interleaver.defer_exceptions:
+                self.cancel()
+                self.deferred_exception = exception
                 return False
 
             raise exception
@@ -1466,4 +1457,4 @@ class Mediator:
         self.args = list()
         self.original_globals = {}
         self.cross_invoker = None
-        self._deferred_exception = None
+        self.deferred_exception = None

@@ -510,8 +510,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # exception can't be pickled (dynamic class), so ship type +
         # message strings instead.
         for base_id, mediator, _internal_key in matched:
-            if mediator._deferred_exception is not None:
-                exc = mediator._deferred_exception
+            if mediator.deferred_exception is not None:
+                exc = mediator.deferred_exception
                 exc_bases = getattr(type(exc), "__bases__", ())
                 exc_type_name = (
                     exc_bases[0].__name__ if exc_bases else type(exc).__name__
@@ -523,7 +523,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         "message": str(exc),
                     }
                 }
-                mediator._deferred_exception = None
+                mediator.deferred_exception = None
 
         torch.cuda.synchronize()
         return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves_by_req))
