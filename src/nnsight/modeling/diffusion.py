@@ -342,8 +342,6 @@ class DiffusionModel(HuggingFaceModel):
         """
         self._load_config(repo_id, revision=revision)
 
-        device_map = "balanced" if device_map == "auto" or device_map is None else device_map
-
         model = Diffuser(
             self.automodel, repo_id, revision=revision, device_map=device_map, config=self.config, **kwargs
         )
