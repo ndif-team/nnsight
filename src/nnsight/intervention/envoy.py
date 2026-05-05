@@ -1042,6 +1042,10 @@ class Envoy(Batchable):
         If the value is a PyTorch module, it will be wrapped in an Envoy to enable
         intervention during execution.
 
+        Otherwise the write is mirrored to both the Envoy and the wrapped module
+        when applicable, so that reads via ``__dict__`` short-circuit and reads via
+        ``__getattr__`` (which falls through to ``_module``) stay consistent.
+
         Args:
             key: The attribute name
             value: The attribute value
@@ -1049,11 +1053,18 @@ class Envoy(Batchable):
 
         if key != "_module" and isinstance(value, torch.nn.Module):
             self._add_envoy(value, key)
-        else:
-            if "_module" in self.__dict__ and hasattr(self._module, key):
-                return setattr(self._module, key, value)
-            else:
-                super().__setattr__(key, value)
+            return
+
+        on_module = "_module" in self.__dict__ and hasattr(self._module, key)
+
+        # Set on the Envoy if it already owns the key, or if there's no _module
+        # to fall through to.
+        if key in self.__dict__ or not on_module:
+            super().__setattr__(key, value)
+
+        # Mirror to _module so the wrapped model stays in sync with the wrapper.
+        if on_module:
+            setattr(self._module, key, value)
 
     def __getstate__(self):
 

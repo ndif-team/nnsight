@@ -66,10 +66,10 @@ class RemoteableMixin(MetaMixin):
             backend = RemoteBackend(
                 self.to_model_key(), host=backend, blocking=blocking
             )
+        kwargs.setdefault("tracer_cls", RemoteInterleavingTracer)
         return super().trace(
             *inputs,
             backend=backend,
-            tracer_cls=RemoteInterleavingTracer,
             **kwargs,
         )
 
@@ -102,10 +102,10 @@ class RemoteableMixin(MetaMixin):
             backend = RemoteBackend(
                 self.to_model_key(), host=backend, blocking=blocking
             )
+        kwargs.setdefault("tracer_cls", RemoteTracer)
         return super().session(
             *inputs,
             backend=backend,
-            tracer_cls=RemoteTracer,
             **kwargs,
         )
 

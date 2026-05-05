@@ -11,9 +11,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.distributed.parallel_state import get_tp_group
-from nnsight.intervention.tracing.globals import Globals
 
 from ....intervention.serialization import load
+from ....intervention.tracing.globals import Globals
 from ..batching import VLLMBatcher
 
 if TYPE_CHECKING:
@@ -96,8 +96,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 if trace_id not in self.trace_contexts:
                     canonical_globals = mediator.intervention.__globals__
 
-                    # Register saved vars in worker-side Globals.saves
-                    # (.save() was called on the client with a different id).
                     for name in saved_names:
                         if name in canonical_globals:
                             Globals.saves.add(id(canonical_globals[name]))
@@ -257,29 +255,42 @@ class NNsightGPUModelRunner(GPUModelRunner):
             return finished_internal_keys
 
         def collect_saves(self, matched, finished_internal_keys: set) -> tuple:
-            """Collect saved values from mediator frames.
+            """Collect saved values from mediator frames, namespaced per request.
 
             Gathers per-invoke saves from frame locals and trace-shared
             saves from canonical globals (only when a trace is fully done).
 
             Returns:
-                ``(saves, removals)`` — the saves dict and set of
-                ``id()`` values to discard from ``Globals.saves``.
+                ``(saves_by_req, removals)`` —
+                ``saves_by_req`` is ``{base_id: {var_name: value}}`` so
+                concurrent requests whose user code uses the same
+                variable name (``logits``, ``x``, …) don't collide at
+                the outer flat-dict layer.  The caller (engine / server)
+                routes each sub-dict to the matching request output.
+                ``removals`` is a list of ``id`` values to discard from
+                ``Globals.saves`` after collection.
             """
-            saves = {}
-            removals = set()
+            saves_by_req: dict = {}
+            removals = []
+
+            # Map internal_key -> base_id so trace-shared saves from a
+            # finished internal_key can be attached to the right bucket.
+            base_by_internal = {ik: b for b, _, ik in matched}
 
             for base_id, mediator, internal_key in matched:
+                per_req = saves_by_req.setdefault(base_id, {})
                 frame = mediator.info.frame
                 for key, value in frame.f_locals.items():
                     if id(value) in Globals.saves:
-                        saves[key] = value
+                        per_req[key] = value
                         if internal_key in finished_internal_keys:
-                            removals.add(id(value))
+                            removals.append(id(value))
 
             # Trace-shared saves: collect when ALL mediators for a trace
-            # have been received AND completed.
+            # have been received AND completed.  Attach to the base_id
+            # whose finishing triggered the trace completion.
             for internal_key in finished_internal_keys:
+                owning_base = base_by_internal.get(internal_key, internal_key)
                 for _, ctx in self.trace_contexts.items():
                     if internal_key in ctx["pending_req_ids"]:
                         ctx["pending_req_ids"].discard(internal_key)
@@ -289,21 +300,22 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         )
                         if trace_fully_done:
                             canonical = ctx["canonical_globals"]
+                            per_req = saves_by_req.setdefault(owning_base, {})
                             for name in ctx["saved_names"]:
                                 if name in canonical:
                                     value = canonical[name]
                                     if id(value) in Globals.saves:
-                                        saves[name] = value
-                                        removals.add(id(value))
+                                        per_req[name] = value
+                                        removals.append(id(value))
                         break
 
-            return saves, removals
+            return saves_by_req, removals
 
-        def cleanup_finished(self, finished_internal_keys: set, removals: set) -> None:
+        def cleanup_finished(self, finished_internal_keys: set, removals: list) -> None:
             """Clean up state for finished requests.
 
-            Removes entries from ``Globals.saves``, deletes completed
-            trace contexts, and drops mediator entries.
+            Discards collected IDs from ``Globals.saves``, deletes
+            completed trace contexts, and drops mediator entries.
             """
             for _id in removals:
                 Globals.saves.discard(_id)
@@ -346,6 +358,18 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model.interleaver.batcher = VLLMBatcher()
 
+        self.nnsight_model.interleaver.defer_exceptions = True
+
+        # Mount ``Object.save`` in the worker subprocess. The driver
+        # process gets its mount via ``Tracer.__init__``/``__setstate__``
+        # (the client constructs Tracers, the serve handler unpickles
+        # them), but vLLM workers receive only deserialized Mediators —
+        # they never touch a Tracer. Without this call, user code's
+        # ``tensor.save()`` AttributeErrors inside the worker thread.
+        from ....intervention.tracing.globals import _ensure_mounted
+
+        _ensure_mounted()
+
         # Only wrap when TP > 1: registers hooks that handle
         # gather/split of sharded tensors and CUDA synchronization
         # for TP-parallel modules.  With TP == 1 nothing is sharded
@@ -386,17 +410,34 @@ class NNsightGPUModelRunner(GPUModelRunner):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ):
 
-        with self.nnsight_model.interleaver:
+        return_value = None
+        interleaver = self.nnsight_model.interleaver
+
+        with interleaver:
 
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
 
+        # Safety net: if ``__enter__`` raised or the forward pass was
+        # interrupted before ``return_value`` was assigned, ship back a
+        # minimal valid ``ModelRunnerOutput`` so vLLM does not segfault.
+        if return_value is None:
+            from vllm.v1.outputs import ModelRunnerOutput
+
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            return_value = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            )
+
         return return_value
 
     def sample_tokens(self, *args, **kwargs):
 
-        with self.nnsight_model.interleaver:
+        interleaver = self.nnsight_model.interleaver
+
+        with interleaver:
 
             # Provide logits from execute_model state before sampling.
             if self.execute_model_state is not None:
@@ -416,7 +457,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
     def _sample(self, *args, **kwargs):
 
-        with self.nnsight_model.interleaver:
+        sampler_output = None
+        interleaver = self.nnsight_model.interleaver
+
+        with interleaver:
 
             sampler_output = super()._sample(*args, **kwargs)
 
@@ -459,8 +503,27 @@ class NNsightGPUModelRunner(GPUModelRunner):
         finished_keys = helper.finalize_mediators(
             matched, finished_req_id_set, self.nnsight_model
         )
-        saves, removals = helper.collect_saves(matched, finished_keys)
+        saves_by_req, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
 
+        # Collect deferred exceptions.  Each mediator has its own —
+        # nest the typed envelope inside THAT request's sub-dict under
+        # ``__nnsight_exceptions__`` in the ``{base_id: DeferredError}``
+        # shape the client's ``surface_server_errors`` understands.
+        # The dynamic NNsightException subclass can't be pickled, so the
+        # helper ships plain strings (type_name, message, traceback,
+        # is_control_flow).
+        from ....intervention.errors import capture_deferred
+
+        for base_id, mediator, _internal_key in matched:
+            entry = capture_deferred(mediator, req_id=base_id)
+            if entry is not None:
+                per_req = saves_by_req.setdefault(base_id, {})
+                per_req["__nnsight_exceptions__"] = {base_id: entry}
+                mediator.deferred_exception = None
+                mediator._deferred_type_name = None
+                mediator._deferred_traceback = None
+                mediator._deferred_is_control_flow = False
+
         torch.cuda.synchronize()
-        return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves))
+        return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves_by_req))

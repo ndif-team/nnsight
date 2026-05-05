@@ -160,16 +160,16 @@ class TestDiffusionBatching:
         ) as tracer:
 
             with tracer.invoke(cat_prompt):
-                encoder_out_1 = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_1 = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
             with tracer.invoke([panda_prompt, birthday_cake_prompt]):
-                encoder_out_2 = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_2 = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
             with tracer.invoke(wave_prompt):
-                encoder_out_3 = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_3 = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
             with tracer.invoke():
-                encoder_out_all = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_all = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
         assert encoder_out_all.shape[0] == encoder_out_1.shape[0] + encoder_out_2.shape[0] + encoder_out_3.shape[0]
         assert encoder_out_1.shape[0] == 1
@@ -300,7 +300,7 @@ class TestDiffusionBatching:
         birthday_cake_prompt,
         wave_prompt
     ):
-        module = tiny_sd.text_encoder.text_model.encoder.layers[-1]
+        module = tiny_sd.text_encoder.encoder.layers[-1]
 
         with tiny_sd.generate(
             num_inference_steps=20,
