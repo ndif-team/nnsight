@@ -466,6 +466,16 @@ class InterleavingTracer(Tracer):
         Returns:
             (args, kwargs): The batched positional and keyword arguments.
         """
+        # Process-global one-shot: install ``Object.save`` on every type so
+        # outer-body code (``out_ids = [...].save()`` etc.) resolves before
+        # ``fn(...)`` runs. ``_setup_interleaver`` is the chokepoint for
+        # outer-body execution — every executor (ExecutionBackend,
+        # AsyncVLLMBackend, vLLM serve ``server.py``, LocalSimulationBackend)
+        # routes through here in whatever process runs the tracer.
+        from .globals import _ensure_mounted
+
+        _ensure_mounted()
+
         fn(self.info, self)
 
         args = self.batcher.batched_args

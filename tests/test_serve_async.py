@@ -258,3 +258,59 @@ class TestErrorHandling:
         saves2 = t.collect(timeout=30)  # Should not raise
 
         assert saves1.keys() == saves2.keys()
+
+    # =====================================================================
+    # Failing-intervention surfacing — pin the typed-envelope contract.
+    # =====================================================================
+
+    def test_failing_intervention_raises_runtime_error(self, model):
+        """An intervention that errors on the worker must raise RuntimeError
+        at the trace boundary on the client, not be smuggled inside saves
+        as ``__nnsight_exceptions__``.
+        """
+        with pytest.raises(RuntimeError, match="Inplace update to inference tensor"):
+            with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
+                model.model.layers[-2].mlp.output[:] = 0
+                model.logits.save()
+
+    def test_failing_intervention_traceback_preserved(self, model):
+        """The raised RuntimeError carries the original exception type,
+        the offending source line, the request id, and the [vLLM serve]
+        context tag — enough to debug a worker-side failure without
+        server-side log access.
+        """
+        with pytest.raises(RuntimeError) as exc_info:
+            with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
+                model.model.layers[-2].mlp.output[:] = 0
+                model.logits.save()
+
+        msg = str(exc_info.value)
+        assert "[vLLM serve]" in msg                # context prefix
+        assert "RuntimeError" in msg                # original type name
+        assert "Inplace update" in msg              # original message
+        assert "req_id=" in msg                     # per-request attribution
+        assert "Intervention traceback" in msg      # full traceback section
+        assert "mlp.output[:] = 0" in msg           # the offending source line
+
+    def test_failing_intervention_isolation(self, model):
+        """A failing trace must not corrupt a concurrent clean trace's
+        result. The clean one returns its saves; the failing one raises.
+        """
+        # Fire both as non-blocking so they hit the engine concurrently.
+        with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t_clean:
+            logits = model.logits.save()
+
+        with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL, blocking=False) as t_fail:
+            model.model.layers[-2].mlp.output[:] = 0
+            logits = model.logits.save()
+
+        # Failing trace surfaces its error.
+        with pytest.raises(RuntimeError, match="Inplace update"):
+            t_fail.collect(timeout=30)
+
+        # Clean trace still returns its saves — engine survived,
+        # per-request defer kept the failure isolated.
+        saves_clean = t_clean.collect(timeout=30)
+        assert "logits" in saves_clean
+        et_token = model.tokenizer.decode(saves_clean["logits"].argmax(dim=-1))
+        assert "Paris" in et_token

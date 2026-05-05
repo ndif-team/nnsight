@@ -380,6 +380,32 @@ class SkipException(Exception):
         self.value = value
 
 
+def _store_deferred_exception(mediator: Any, exception: Exception) -> None:
+    """Capture a deferred exception + metadata on the mediator.
+
+    Populates ``deferred_exception`` alongside three serialization-friendly
+    fields read by ``intervention.errors.capture_deferred``:
+
+    - ``_deferred_type_name``: original exception class name, captured BEFORE
+      any ``wrap_exception`` call that would replace the class with a dynamic
+      ``NNsightException`` subclass.
+    - ``_deferred_traceback``: formatted traceback string of the original
+      exception, for debugging across the server boundary where the user
+      cannot inspect the live frames.
+    - ``_deferred_is_control_flow``: True for ``EarlyStopException`` (raised
+      by ``tracer.stop()``), so server paths can filter intentional control
+      flow out of error responses without name compares.
+    """
+    import traceback as _tb
+
+    mediator._deferred_type_name = type(exception).__name__
+    mediator._deferred_traceback = "".join(
+        _tb.format_exception(type(exception), exception, exception.__traceback__)
+    )
+    mediator._deferred_is_control_flow = isinstance(exception, EarlyStopException)
+    mediator.deferred_exception = exception
+
+
 NNSIGHT_PREFIX = "__nnsight"
 
 
@@ -618,8 +644,14 @@ class Interleaver:
         # Clear the mediators that are no longer alive.
         self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
-        # Ignore EarlyStopException errors.
-        if exc_type is not None and issubclass(exc_type, EarlyStopException):
+        # Swallow internal control-flow exceptions so they don't escape the
+        # ``with self.interleaver:`` block in server worker paths and kill
+        # the engine. ``EarlyStopException`` is ``tracer.stop()`` control
+        # flow; ``Cancelation`` is internal mediator bookkeeping (raised
+        # when ``mediator.cancel()`` is called during cleanup).
+        if exc_type is not None and issubclass(
+            exc_type, (EarlyStopException, Cancelation)
+        ):
             return True
 
     def handle(
@@ -866,6 +898,11 @@ class Mediator:
         # mediator and shipped back to the client as
         # ``saves["__nnsight_exceptions__"][base_id]``.
         self.deferred_exception = None
+        # Metadata captured at deferral time for server-side serialization.
+        # See ``_store_deferred_exception`` and ``intervention.errors``.
+        self._deferred_type_name: Optional[str] = None
+        self._deferred_traceback: Optional[str] = None
+        self._deferred_is_control_flow: bool = False
 
         self._prev = None
 
@@ -1143,14 +1180,26 @@ class Mediator:
         # Cancelation is okay
         if not isinstance(exception, Cancelation):
 
-            # because of the defered execution of NNsight, we need to rebuild where the execption was in the original user code instead of this execption.
-            exception = wrap_exception(exception, self.info)
-
             # In vLLM mode, defer the exception so the engine stays
             # alive.  The mediator is already cancelled (above), so
             # subsequent hooks will skip it.  Other mediators keep
             # running and the model runner ships this exception back to
             # the client alongside any saves that were already collected.
+            #
+            # Capture metadata BEFORE ``wrap_exception`` rewrites the type
+            # and traceback — the dynamic ``NNsightException`` subclass and
+            # rebuilt traceback are useful for the local-raise path but
+            # lose information across the server boundary, where the
+            # client only sees what we serialize.  ``_store_deferred_exception``
+            # also records ``deferred_exception`` itself, so the assignment
+            # below the wrap_exception call replaces it with the wrapped
+            # form for any downstream consumer that wants the rich type.
+            if self.interleaver.defer_exceptions:
+                _store_deferred_exception(self, exception)
+
+            # because of the defered execution of NNsight, we need to rebuild where the execption was in the original user code instead of this execption.
+            exception = wrap_exception(exception, self.info)
+
             if self.interleaver.defer_exceptions:
                 self.cancel()
                 self.deferred_exception = exception
@@ -1458,3 +1507,6 @@ class Mediator:
         self.original_globals = {}
         self.cross_invoker = None
         self.deferred_exception = None
+        self._deferred_type_name = None
+        self._deferred_traceback = None
+        self._deferred_is_control_flow = False
