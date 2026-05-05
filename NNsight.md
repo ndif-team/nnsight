@@ -662,8 +662,8 @@ def __init__(self, module, interleaver=None, path="model", rename=None):
     self._module = module
     self._module.__path__ = path  # Store path on module for hooks
     
-    self._interleaver = interleaver if interleaver else Interleaver()
-    self._interleaver.wrap_module(module)  # Install skippable forward + sentinel hook
+    self.interleaver = interleaver if interleaver else Interleaver()
+    self.interleaver.wrap_module(module)  # Install skippable forward + sentinel hook
     
     # Eagerly create Envoys for all children
     for name, child_module in self._module.named_children():
@@ -687,7 +687,7 @@ def _add_envoy(self, module, name):
     envoy = envoy_cls(
         module,
         path=module_path,
-        interleaver=self._interleaver,
+        interleaver=self.interleaver,
         rename=self._alias.rename if self._alias else None,
         envoys=self._envoys,
     )
@@ -975,34 +975,18 @@ model.transformer.h[0].output
 When you access `.source`, NNsight:
 
 1. **Parses** the module's forward method using AST
-2. **Wraps** every function/method call with `interleaver.wrap_operation()`
-3. **Replaces** the module's forward with the instrumented version
-4. **Creates** an `EnvoySource` with `OperationEnvoy` objects for each operation
+2. **Wraps** every function/method call with a per-call-site dispatcher
+3. **Caches** the rewritten forward + per-operation hook state on the module itself, as `module.__source_accessor__` (so the rewrite survives `torch.compile`, accelerate dispatch swaps, and meta-tensor weight loading)
+4. **Returns** a per-Envoy `SourceEnvoy` wrapping that accessor, with one `OperationEnvoy` per call site
 
-```python
-@property
-def source(self):
-    if self._source is None:
-        # inject() parses forward method and wraps operations
-        source, line_numbers, forward = inject(
-            self._module.forward, 
-            wrap_function,  # Wraps each operation
-            self._module.__path__
-        )
-        
-        # Replace forward with instrumented version
-        self._module.forward = MethodType(forward, self._module)
-        
-        # Create EnvoySource with all operations
-        self._source = EnvoySource(
-            self._module.__path__,
-            source,
-            line_numbers,
-            interleaver=self._interleaver,
-        )
-    
-    return self._source
-```
+The implementation splits into a global accessor and a per-Envoy wrapper as of 0.7:
+
+| Layer | Global (per-module) | Per-Envoy wrapper |
+|-------|---------------------|-------------------|
+| Module forward | `SourceAccessor` | `SourceEnvoy` |
+| Single call site | `OperationAccessor` | `OperationEnvoy` |
+
+The accessors own the AST-rewritten forward and the hook lists (`pre_hooks` / `post_hooks` / `fn_hooks` / `fn_replacement`); the Envoys are the user-facing API. Multiple Envoys / Interleavers wrapping the same module **share** the underlying accessors. `nnsight_forward` (installed by `Interleaver.wrap_module`) checks `module.__source_accessor__` on each call and only routes through the rewritten forward when at least one operation has an active hook — modules nobody source-traces stay on the original forward.
 
 #### Using Source Tracing
 
@@ -1241,7 +1225,7 @@ def _update(self, module):
     self._module.__path__ = self.path
     
     # Re-wrap with hooks
-    self._interleaver.wrap_module(module)
+    self.interleaver.wrap_module(module)
     
     # Re-inject source if it was accessed
     if self._source is not None:
@@ -1465,7 +1449,7 @@ static PyObject* mount_function(PyObject* self, PyObject* args) {
 
 This modifies `PyBaseObject_Type->tp_dict` — the dictionary of Python's base `object` class — at the C level. Since every Python type inherits from `object`, this makes `.save()` available on every object in the interpreter.
 
-**Lifecycle:** The method is only mounted while a trace is active. `Globals.enter()` calls `mount(Object.save, "save")` when the first trace starts, and `Globals.exit()` calls `unmount("save")` when the last trace exits. A `stack` counter handles nesting, so the method stays mounted through nested traces and is only removed when all traces have exited.
+**Lifecycle:** The method is mounted **lazily on first use** (the first time `.save()` is called) and stays mounted for the lifetime of the process. The earlier per-trace mount/unmount lifecycle was removed in 0.6 (it triggered `PyType_Modified` on every trace enter/exit, invalidating the interpreter's type caches); 0.7 then dropped the `Globals.stack` nesting counter that backed it. Root-vs-inner-trace detection now lives on `Tracer.push` and is decided by inspecting the target frame's locals — see the "frame-based root-trace detection" change in [`0.7.0.md`](https://github.com/ndif-team/nnsight/blob/main/0.7.0.md).
 
 **Limitations of pymount:**
 
@@ -2551,7 +2535,7 @@ with model.generate("A landscape", num_inference_steps=30) as tracer:
 
 ### 6.5 vLLM
 
-vLLM integration provides high-performance inference with NNsight interventions. This is one of the most complex integrations due to vLLM's optimized architecture. Both synchronous (`LLM`) and asynchronous (`AsyncLLM`) engines are supported.
+vLLM integration provides high-performance inference with NNsight interventions. This is one of the most complex integrations due to vLLM's optimized architecture. Both synchronous (`LLM`) and asynchronous (`AsyncLLM`) engines are supported. As of 0.7, you can also run vLLM as a long-lived intervention-capable HTTP server via `nnsight-serve` and connect to it from a meta-model client with `model.trace(..., serve="http://host:port")`; see [`src/nnsight/modeling/vllm/serve/README.md`](src/nnsight/modeling/vllm/serve/README.md) for the full guide.
 
 #### High-Level Architecture
 
@@ -2681,8 +2665,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
         self.nnsight_model = VLLM(self.model)
 
         # Use vLLM-specific batcher with tensor parallelism hooks
-        self.nnsight_model._interleaver.batcher = VLLMBatcher()
-        self.nnsight_model._interleaver.batcher.wrap(self.nnsight_model)
+        self.nnsight_model.interleaver.batcher = VLLMBatcher()
+        self.nnsight_model.interleaver.batcher.wrap(self.nnsight_model)
 ```
 
 The `VLLMBatcher.wrap()` adds hooks to all modules specifically for handling tensor parallelism (explained below).
@@ -2768,12 +2752,12 @@ class NNsightRequestHelper:
             # Batch group is [start_token, num_tokens] during forward
             mediator.batch_group = [batch_start, num_tokens]
             batch_start += num_tokens
-        model._interleaver.mediators = mediators
+        model.interleaver.mediators = mediators
 
     def unflatten(self, model):
         # After forward, switch to [start_prompt, 1] (one prompt per mediator)
         batch_start = 0
-        for mediator in model._interleaver.mediators:
+        for mediator in model.interleaver.mediators:
             mediator.batch_group = [batch_start, 1]
             batch_start += 1
 ```
@@ -2790,35 +2774,31 @@ vLLM separates execution into distinct phases. NNsight interleaves at each:
 
 ```python
 def execute_model(self, scheduler_output, intermediate_tensors=None):
-    Globals.enter()
-    with self.nnsight_model._interleaver:
+    with self.nnsight_model.interleaver:
         # Phase 1: Model forward pass
         return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
         # Switch batch groups from tokens to prompts
         self.nnsight_request_helper.unflatten(self.nnsight_model)
 
-        # Phase 2: Logits (hooked separately)
+        # Phase 2: Logits — push into the eproperty so `model.logits` resolves
         if self.execute_model_state is not None:
-            logits = self.nnsight_model.logits(
-                self.execute_model_state.logits, hook=True
+            type(self.nnsight_model).logits.provide(
+                self.nnsight_model, self.execute_model_state.logits
             )
-    Globals.exit()
 
 def _sample(self, *args, **kwargs):
-    Globals.enter()
-    with self.nnsight_model._interleaver:
+    with self.nnsight_model.interleaver:
         # Phase 3: Sampling
         sampler_output = super()._sample(*args, **kwargs)
-        sampler_output.sampled_token_ids = self.model.samples(
-            sampler_output.sampled_token_ids, hook=True
-        )
-    Globals.exit()
+        type(self.model).samples.provide(self.model, sampler_output.sampled_token_ids)
 ```
 
-**Wrapper Modules:**
+(The `Globals.enter()` / `Globals.exit()` bookkeeping these blocks used to wrap is gone in 0.7 — root detection moved onto frame inspection inside `Tracer.push`.)
 
-Like `Generator` in LanguageModel, VLLM has wrapper modules for key outputs:
+**Eproperties for vLLM-specific values:**
+
+`logits` and `samples` are now `eproperty`s defined directly on the `VLLM` class — pushed in from the model runner via `eproperty.provide(...)` rather than flowing through a `WrapperModule`. (The 0.6 API was `model.logits.output.save()` / `model.samples.output.save()`; in 0.7 it is `model.logits.save()` / `model.samples.save()`. The `model.generator` `WrapperModule` was removed; final outputs flow through `tracer.result`.)
 
 | eproperty | Access | Description |
 |-----------|--------|-------------|
@@ -3247,15 +3227,13 @@ When the trace exits and execution begins:
 class ExecutionBackend(Backend):
     def __call__(self, tracer: Tracer):
         fn = super().__call__(tracer)
-        
         try:
-            Globals.enter()
             return tracer.execute(fn)
         except Exception as e:
             raise wrap_exception(e, tracer.info) from None
-        finally:
-            Globals.exit()
 ```
+
+(The `Globals.enter()` / `Globals.exit()` calls that previously bracketed `tracer.execute` were removed in 0.7 along with the rest of the `Globals.stack` machinery.)
 
 This catches exceptions from the top-level trace.
 
