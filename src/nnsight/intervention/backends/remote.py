@@ -53,9 +53,9 @@ import torch
 import zstandard as zstd
 from tqdm.auto import tqdm
 
-from ... import __IPYTHON__, CONFIG, __version__
+from ... import __IPYTHON__, CONFIG, __version__, save
 from ..._c.py_mount import mount, unmount
-from ...intervention.serialization import load, save
+from ...intervention.serialization import load, dumps
 from ...schema.request import RequestModel
 from ...schema.response import RESULT, ResponseModel
 from ..tracing.tracer import Tracer
@@ -617,10 +617,34 @@ class RemoteBackend(Backend):
 
             local_tracer.execute(fn)
 
-    def submit_request(
-        self, data: bytes, headers: Dict[str, Any]
-    ) -> Optional[ResponseModel]:
+    def _parse_submit_response(self, response: httpx.Response) -> ResponseModel:
+        """Parse an HTTP POST /request response into a ResponseModel.
+
+        Records ``self.job_id`` for subsequent status checks. Does not call
+        :meth:`handle_response` — callers decide when to dispatch status
+        updates so that async / streaming paths can yield the initial
+        response before any side effects run.
+        """
+        from ...schema.response import ResponseModel
+
+        if response.status_code != 200:
+            try:
+                msg = response.json()["detail"]
+            except Exception:
+                msg = response.reason_phrase
+            raise ConnectionError(msg)
+
+        response_model = ResponseModel(**response.json())
+        self.job_id = response_model.id
+        return response_model
+
+    def submit_request(self, data: bytes, headers: Dict[str, Any]) -> ResponseModel:
         """Submit the serialized request to the remote server via HTTP POST.
+
+        Returns the initial :class:`ResponseModel` (with the assigned job id
+        stored on ``self.job_id``). The returned response has *not* been
+        passed through :meth:`handle_response`; the caller is responsible
+        for dispatching it when ready.
 
         Args:
             data: Serialized request payload (potentially compressed).
@@ -633,10 +657,7 @@ class RemoteBackend(Backend):
             ConnectionError: If the server returns a non-200 status code.
             httpx.TimeoutException: If the request times out.
         """
-        from ...schema.response import ResponseModel
-
         headers["Content-Type"] = "application/octet-stream"
-
         timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
 
         with httpx.Client(timeout=timeout) as client:
@@ -646,22 +667,29 @@ class RemoteBackend(Backend):
                 headers=headers,
             )
 
-        if response.status_code == 200:
-            response_model = ResponseModel(**response.json())
+        return self._parse_submit_response(response)
 
-            # Store job ID for subsequent status checks
-            self.job_id = response_model.id
+    async def async_submit_request(
+        self, data: bytes, headers: Dict[str, Any]
+    ) -> ResponseModel:
+        """Async version of :meth:`submit_request`.
 
-            self.handle_response(response_model)
+        Uses :class:`httpx.AsyncClient` so that callers inside an event loop
+        don't block the thread.  See :meth:`submit_request` for the return
+        contract — the caller is responsible for invoking
+        :meth:`handle_response` on the returned model.
+        """
+        headers["Content-Type"] = "application/octet-stream"
+        timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
 
-            return response_model
-        else:
-            # Extract error message from response
-            try:
-                msg = response.json()["detail"]
-            except Exception:
-                msg = response.reason_phrase
-            raise ConnectionError(msg)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{self.address}/request",
+                content=data,
+                headers=headers,
+            )
+
+        return self._parse_submit_response(response)
 
     def get_response(self) -> Optional[RESULT]:
         """Poll the server for the current job status (non-blocking mode).
@@ -682,6 +710,24 @@ class RemoteBackend(Backend):
 
         with httpx.Client(timeout=timeout) as client:
             response = client.get(
+                f"{self.address}/response/{self.job_id}",
+                headers={"ndif-api-key": self.api_key},
+            )
+
+        if response.status_code == 200:
+            response_model = ResponseModel(**response.json())
+            return self.handle_response(response_model)
+        else:
+            raise Exception(response.reason_phrase)
+
+    async def async_get_response(self) -> Optional[RESULT]:
+        """Async version of :meth:`get_response`."""
+        from ...schema.response import ResponseModel
+
+        timeout = httpx.Timeout(self.CONNECT_TIMEOUT, read=self.READ_TIMEOUT)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
                 f"{self.address}/response/{self.job_id}",
                 headers={"ndif-api-key": self.api_key},
             )
@@ -724,6 +770,9 @@ class RemoteBackend(Backend):
         # Deserialize with torch.load (handles tensors and pickled objects)
         result = torch.load(result_bytes, map_location="cpu", weights_only=False)
         result_bytes.close()
+
+        for value in result.values():
+            save(value)
 
         return result
 
@@ -846,7 +895,8 @@ class RemoteBackend(Backend):
             # Prepare and submit the request
             data, headers = self.request(tracer)
             headers["ndif-session_id"] = sio.sid  # Link WebSocket to this request
-            self.submit_request(data, headers)
+            initial = self.submit_request(data, headers)
+            self.handle_response(initial)
 
             try:
                 # Register callback for streaming values back to server
@@ -891,7 +941,8 @@ class RemoteBackend(Backend):
 
             data, headers = self.request(tracer)
             headers["ndif-session_id"] = sio.sid
-            self.submit_request(data, headers)
+            initial = await self.async_submit_request(data, headers)
+            self.handle_response(initial)
 
             try:
                 LocalTracer.register(lambda data: self.stream_send(data, sio))
@@ -930,7 +981,7 @@ class RemoteBackend(Backend):
             values: Dictionary of values to send (keyed by intervention ID).
             sio: The active WebSocket client connection.
         """
-        data = save(values)
+        data = dumps(values)
 
         sio.emit(
             "stream_upload",
@@ -956,7 +1007,8 @@ class RemoteBackend(Backend):
         if self.job_id is None:
             # First call: submit the job
             data, headers = self.request(tracer)
-            self.submit_request(data, headers)
+            initial = self.submit_request(data, headers)
+            self.handle_response(initial)
             # job_id is set by submit_request
         else:
             # Subsequent calls: poll for result

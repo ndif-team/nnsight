@@ -39,8 +39,13 @@ def wrap_grad(interleaver: Interleaver):
 
             return grad
 
-        # Register the hook
+        # Register the hook and track it on the owning mediator so
+        # Interleaver.cancel can clean it up if the worker thread dies
+        # before the hook fires.
         hook = tensor.register_hook(inner)
+        mediator = interleaver.current
+        if mediator is not None:
+            mediator.hooks.append(hook)
 
     def getter(tensor: torch.Tensor):
 

@@ -135,6 +135,7 @@ class Batcher:
         self.needs_batching = False
 
         self.current_value: Optional[Any] = None
+        self.current_provider: Optional[str] = None
 
     @property
     def total_batch_size(self):
@@ -249,13 +250,15 @@ class Batcher:
             return
 
         self.current_value = applyn(
-            [self.current_value, swap_value], 
-            partial(self._swap, batch_group), 
-            torch.Tensor
+            [self.current_value, swap_value],
+            partial(self._swap, batch_group),
+            torch.Tensor,
         )
 
-    def _narrow(self, batch_group: Optional[List[int]], acts: torch.Tensor) -> torch.Tensor:
-        '''
+    def _narrow(
+        self, batch_group: Optional[List[int]], acts: torch.Tensor
+    ) -> torch.Tensor:
+        """
         Narrow a tensor to a specific batch group.
 
         Args:
@@ -265,7 +268,7 @@ class Batcher:
 
         Returns:
             torch.Tensor: The narrowed tensor containing only the specified batch group.
-        '''
+        """
         batch_start, batch_size = batch_group
 
         if acts.shape[0] == self.total_batch_size:
@@ -273,8 +276,13 @@ class Batcher:
 
         return acts
 
-    def _swap(self, batch_group: Optional[List[int]], current_value: torch.Tensor, swap_value: torch.Tensor) -> torch.Tensor:
-        '''
+    def _swap(
+        self,
+        batch_group: Optional[List[int]],
+        current_value: torch.Tensor,
+        swap_value: torch.Tensor,
+    ) -> torch.Tensor:
+        """
         Swap a tensor with a new value in a specific batch group.
 
         Args:
@@ -285,7 +293,7 @@ class Batcher:
         Returns:
             torch.Tensor: The modified tensor with swapped values. May be a new tensor
                 (concatenation) or the modified input tensor (in-place assignment).
-        '''
+        """
         batch_start, batch_size = batch_group
 
         if current_value.shape[0] == self.total_batch_size:
@@ -293,6 +301,14 @@ class Batcher:
             needs_concat = (
                 current_value.requires_grad and current_value.is_leaf
             ) or current_value._base is not None
+
+            # When ``swap_value`` is itself a view of ``current_value``
+            # (e.g. user read a narrow slice from the batcher and assigned
+            # it back), in-place assignment ``current_value[start:end] =
+            # swap_value`` creates a self-referential autograd graph and
+            # segfaults during backward.  Force the concat path instead.
+            if not needs_concat and swap_value._base is current_value:
+                needs_concat = True
 
             if needs_concat:
                 pre = current_value.narrow(0, 0, batch_start)
@@ -324,7 +340,7 @@ class DiffusionBatcher(Batcher):
 
     The DiffusionBatcher handles three main tensor batch size scenarios:
     1. Regular batch size (total_batch_size)
-    2. Image batch size (total_batch_size * num_images_per_prompt)  
+    2. Image batch size (total_batch_size * num_images_per_prompt)
     3. Guided diffusion batch size (total_batch_size * num_images_per_prompt * 2)
 
     Attributes:
@@ -345,7 +361,9 @@ class DiffusionBatcher(Batcher):
     def image_batch_groups(self) -> Dict[int, Tuple[int, int]]:
         return self._image_batch_groups
 
-    def batch(self, batchable: Batchable, *args, **kwargs) -> Tuple[Tuple[Any, Any], Optional[List[int]]]:
+    def batch(
+        self, batchable: Batchable, *args, **kwargs
+    ) -> Tuple[Tuple[Any, Any], Optional[List[int]]]:
         """
         Batch inputs for diffusion models, accounting for multiple images per prompt.
 
@@ -362,23 +380,28 @@ class DiffusionBatcher(Batcher):
             Tuple[Tuple[Any, Any], Union[int, None]]: A tuple containing:
                 - A tuple of (batched_args, batched_kwargs)
                 - The batch group index (int) or None if no batching was needed
-        """     
+        """
         input_args, batch_group = super().batch(batchable, *args, **kwargs)
 
         if batch_group is not None:
             batch_start, batch_size = batch_group
 
             if not self.needs_batching:
-                image_batch_group = (0, batch_size*self.num_images_per_prompt)
+                image_batch_group = (0, batch_size * self.num_images_per_prompt)
             else:
-                image_batch_group = (sum(self.last_image_batch_group), batch_size*self.num_images_per_prompt)
+                image_batch_group = (
+                    sum(self.last_image_batch_group),
+                    batch_size * self.num_images_per_prompt,
+                )
 
             self.image_batch_groups[batch_start] = image_batch_group
             self.last_image_batch_group = image_batch_group
 
         return input_args, batch_group
 
-    def _narrow(self, batch_group: Optional[List[int]], acts: torch.Tensor) -> torch.Tensor:
+    def _narrow(
+        self, batch_group: Optional[List[int]], acts: torch.Tensor
+    ) -> torch.Tensor:
         """
         Extract a specific batch group from a tensor, handling diffusion model batch scenarios.
 
@@ -392,9 +415,9 @@ class DiffusionBatcher(Batcher):
                 For guided diffusion (2x batch size), returns concatenated unconditional
                 and conditional parts. For other cases, returns the appropriate slice.
         """
-        if (acts.shape[0] == self.total_batch_size):
+        if acts.shape[0] == self.total_batch_size:
             batch_start, batch_size = batch_group
-            
+
             return acts.narrow(0, batch_start, batch_size)
 
         elif acts.shape[0] == self.total_batch_size * self.num_images_per_prompt:
@@ -402,18 +425,26 @@ class DiffusionBatcher(Batcher):
 
             return acts.narrow(0, batch_start, batch_size)
 
-        elif acts.shape[0] == self.total_batch_size * self.num_images_per_prompt * 2: # with guidance
+        elif (
+            acts.shape[0] == self.total_batch_size * self.num_images_per_prompt * 2
+        ):  # with guidance
             batch_start, batch_size = self.image_batch_groups[batch_group[0]]
 
             uncond_batch = acts.narrow(0, batch_start, batch_size)
 
-            cond_batch = acts.narrow(0, batch_start + self.total_batch_size * self.num_images_per_prompt, batch_size)
+            cond_batch = acts.narrow(
+                0,
+                batch_start + self.total_batch_size * self.num_images_per_prompt,
+                batch_size,
+            )
 
             return torch.cat([uncond_batch, cond_batch], dim=0)
-        
+
         return acts
 
-    def _swap(self, batch_group: int, current_value: torch.Tensor, swap_value: torch.Tensor) -> torch.Tensor:
+    def _swap(
+        self, batch_group: int, current_value: torch.Tensor, swap_value: torch.Tensor
+    ) -> torch.Tensor:
         """
         Replace values in a specific batch group with new values, handling diffusion model scenarios.
 
@@ -430,35 +461,75 @@ class DiffusionBatcher(Batcher):
             torch.Tensor: The modified tensor with swapped values. May be a new tensor
                 (concatenation) or the modified input tensor (in-place assignment).
         """
-        needs_concat = (current_value.requires_grad and current_value.is_leaf) or current_value._base is not None
-            
-        if current_value.shape[0] == self.total_batch_size or current_value.shape[0] == self.total_batch_size * self.num_images_per_prompt:
-            batch_start, batch_size = batch_group if current_value.shape[0] == self.total_batch_size else self.image_batch_groups[batch_group[0]]
-        
+        needs_concat = (
+            current_value.requires_grad and current_value.is_leaf
+        ) or current_value._base is not None
+
+        if (
+            current_value.shape[0] == self.total_batch_size
+            or current_value.shape[0]
+            == self.total_batch_size * self.num_images_per_prompt
+        ):
+            batch_start, batch_size = (
+                batch_group
+                if current_value.shape[0] == self.total_batch_size
+                else self.image_batch_groups[batch_group[0]]
+            )
+
             if needs_concat:
                 pre = current_value.narrow(0, 0, batch_start)
 
-                post = current_value.narrow(0, batch_start+batch_size, current_value.shape[0] - batch_start - batch_size) if self.total_batch_size == current_value.shape[0] else current_value
-                
-                return torch.cat([pre, swap_value, post], dim=0)
-            
-            else:
-                current_value[batch_start:batch_start+batch_size] = swap_value
+                post = (
+                    current_value.narrow(
+                        0,
+                        batch_start + batch_size,
+                        current_value.shape[0] - batch_start - batch_size,
+                    )
+                    if self.total_batch_size == current_value.shape[0]
+                    else current_value
+                )
 
-        elif current_value.shape[0] == self.total_batch_size * self.num_images_per_prompt * 2: # with guidance
+                return torch.cat([pre, swap_value, post], dim=0)
+
+            else:
+                current_value[batch_start : batch_start + batch_size] = swap_value
+
+        elif (
+            current_value.shape[0]
+            == self.total_batch_size * self.num_images_per_prompt * 2
+        ):  # with guidance
             batch_start, batch_size = self.image_batch_groups[batch_group[0]]
 
             uncond_swap, cond_swap = swap_value.chunk(2, dim=0)
 
             if needs_concat:
                 pre_uncond = current_value.narrow(0, 0, batch_start)
-                pre_cond = current_value.narrow(0, batch_start+batch_size, self.total_batch_size*self.num_images_per_prompt - batch_start - batch_size)
-                post = current_value.narrow(0, batch_start+self.total_batch_size*self.num_images_per_prompt+batch_size, -1)
-                
-                return torch.cat([pre_uncond, uncond_swap, pre_cond, cond_swap, post], dim=0)
-            
+                pre_cond = current_value.narrow(
+                    0,
+                    batch_start + batch_size,
+                    self.total_batch_size * self.num_images_per_prompt
+                    - batch_start
+                    - batch_size,
+                )
+                post = current_value.narrow(
+                    0,
+                    batch_start
+                    + self.total_batch_size * self.num_images_per_prompt
+                    + batch_size,
+                    -1,
+                )
+
+                return torch.cat(
+                    [pre_uncond, uncond_swap, pre_cond, cond_swap, post], dim=0
+                )
+
             else:
-                current_value[batch_start:batch_start+batch_size] = uncond_swap
-                current_value[batch_start + self.total_batch_size*self.num_images_per_prompt:batch_start+self.total_batch_size*self.num_images_per_prompt+batch_size] = cond_swap
-                
+                current_value[batch_start : batch_start + batch_size] = uncond_swap
+                current_value[
+                    batch_start
+                    + self.total_batch_size * self.num_images_per_prompt : batch_start
+                    + self.total_batch_size * self.num_images_per_prompt
+                    + batch_size
+                ] = cond_swap
+
         return current_value

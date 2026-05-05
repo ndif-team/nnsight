@@ -2,8 +2,11 @@ import pickle
 import uuid
 from typing import TYPE_CHECKING, Any
 
+import zstandard as _zstd
+
+_ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
+
 from ...intervention.backends.base import Backend
-from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.util import wrap_exception
 
 if TYPE_CHECKING:
@@ -17,31 +20,31 @@ class AsyncVLLMBackend(Backend):
 
     Usage pattern:
     - ``__call__(tracer)``: Called from ``__exit__``. Compiles the traced
-      code, sets up mediators via ``_setup_interleaver()``, serializes them
-      into sampling params, and stores the prepared data on this backend.
+      code, sets up mediators, serializes them into sampling params, and
+      immediately submits the request to the async engine via ``.generate()``.
     - ``__call__()``: Called by user via ``tracer.backend()``. Returns an
-      async generator that streams ``RequestOutput`` objects from ``AsyncLLM``.
+      async generator that streams ``RequestOutput`` from the already-submitted
+      request.
     """
 
     def __init__(self, model: "VLLM"):
         self.model = model
-        self._prompts = None
-        self._params = None
-        self._kwargs = None
-        self._lora_requests = None
+        self._generator = None
+        self._request_id = None
 
-    def _compile_and_execute(self, tracer):
-        """Compile traced code, set up mediators, and serialize them.
+    def __call__(self, tracer):
+        """Compile traced code, set up mediators, serialize, and submit.
 
         Uses ``tracer._setup_interleaver()`` directly instead of going
         through ``tracer.execute()`` / ``model.interleave()``, since the
         async path only needs to serialize mediators — not run the model.
+
+        Submits the request to the async engine immediately so vLLM can
+        start processing it via dynamic batching before the user awaits.
         """
         fn = Backend.__call__(self, tracer)
 
         try:
-            Globals.enter()
-
             # Set up mediators and collect batched args (shared with sync path).
             args, kwargs = tracer._setup_interleaver(fn)
 
@@ -52,53 +55,43 @@ class AsyncVLLMBackend(Backend):
             prompts, params, lora_requests = self.model._serialize_mediators(
                 *args, **kwargs
             )
-            self._prompts = prompts
-            self._params = params
-            self._lora_requests = lora_requests
-            self._kwargs = kwargs
+
+            # Submit the request to the engine immediately.
+            self._request_id = str(uuid.uuid4())
+            self._generator = self.model.vllm_entrypoint.generate(
+                prompts[0], params[0], self._request_id, lora_request=lora_requests[0]
+            )
 
             tracer.mediators.clear()
         except Exception as e:
             raise wrap_exception(e, tracer.info) from None
-        finally:
-            Globals.exit()
 
-    def __call__(self, tracer=None):
-        if tracer is not None:
-            self._compile_and_execute(tracer)
-            return
+    def __await__(self):
+        return self._generator.__await__()
 
-        # No tracer: return async generator for streaming.
-        return self._stream()
-
-    async def _stream(self):
-        """Async generator that submits to AsyncLLM and streams results.
-
-        On every output, collects current saves from the worker via
-        ``collect_nnsight``.  When the request finishes, the mediator
-        is also finalized and cleaned up.
-        """
-        if self._prompts is None:
-            raise RuntimeError(
-                "No prepared data. Ensure model.trace() context has exited "
-                "before calling tracer.backend()."
-            )
-
-        request_id = str(uuid.uuid4())
-        prompt = self._prompts[0]
-        param = self._params[0]
-        lora_request = self._lora_requests[0]
-
-        async for output in self.model.vllm_entrypoint.generate(
-            prompt, param, request_id, lora_request=lora_request
-        ):
-            finished = [output.request_id] if output.finished else None
-            results = await self.model.vllm_entrypoint.collective_rpc(
-                "collect_nnsight",
-                args=([output.request_id], finished),
-            )
-            saves_bytes = next((r for r in results if r is not None), None)
-            if saves_bytes:
-                saves = pickle.loads(saves_bytes)
-                output.saves = saves
+    async def __aiter__(self):
+        # Saves are collected ONLY on the finished output (one per request).
+        # Intermediate (non-finished) outputs yield without `output.saves` populated.
+        # A per-yield streaming-saves mode existed briefly during development and
+        # may return as an opt-in option in the future, but the current behavior
+        # is finished-only.
+        async for output in self._generator:
+            if output.finished:
+                finished = [output.request_id]
+                results = await self.model.vllm_entrypoint.collective_rpc(
+                    "collect_nnsight",
+                    args=([output.request_id], finished),
+                )
+                saves_bytes = next((r for r in results if r is not None), None)
+                if saves_bytes:
+                    # Worker returns ``{base_id: {var_name: value}}``.
+                    # Pull THIS request's sub-dict — the outer layer
+                    # exists to keep concurrent independent traces from
+                    # colliding at shared variable names.
+                    saves_by_req = pickle.loads(
+                        _ZSTD_DECOMPRESSOR.decompress(saves_bytes)
+                    )
+                    per_req = saves_by_req.get(output.request_id)
+                    if per_req:
+                        output.saves = per_req
             yield output

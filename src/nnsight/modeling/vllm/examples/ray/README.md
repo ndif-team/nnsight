@@ -116,7 +116,7 @@ model = VLLM(
 )
 
 with model.trace("The capital of France is", temperature=0.0, max_tokens=10):
-    logits = model.logits.output.save()
+    logits = model.logits.save()
     hidden = model.model.layers[15].output[0].save()
 
 print(model.tokenizer.decode(logits.argmax(dim=-1)))

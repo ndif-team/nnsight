@@ -85,7 +85,12 @@ class MetaMixin(LoadableMixin):
         Calls :meth:`_load` with the saved constructor arguments and
         updates the Envoy tree to reflect the newly loaded module.
         After this call, :attr:`dispatched` is ``True``.
+
+        No-op if the model is already dispatched.
         """
+
+        if self.dispatched:
+            return
 
         model = self._load(*self.args, **self.kwargs)
         self._update(model)
@@ -103,7 +108,7 @@ class MetaMixin(LoadableMixin):
         """
 
         if not self.dispatched and not isinstance(
-            self._interleaver.tracer, ScanningTracer
+            self.interleaver.tracer, ScanningTracer
         ):
             self.dispatch()
 

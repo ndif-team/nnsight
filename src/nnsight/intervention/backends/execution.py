@@ -1,8 +1,8 @@
 from typing import TYPE_CHECKING, Any
 
-from ..tracing.globals import Globals
 from ..tracing.util import wrap_exception
 from .base import Backend
+
 
 if TYPE_CHECKING:
     from ..tracing.tracer import Tracer
@@ -17,10 +17,12 @@ class ExecutionBackend(Backend):
         fn = super().__call__(tracer)
 
         try:
-            Globals.enter()
+            # ``Object.save`` mount is installed in
+            # ``InterleavingTracer._setup_interleaver`` — the chokepoint
+            # that every executor (this backend, AsyncVLLMBackend, vLLM
+            # serve ``server.py``, LocalSimulationBackend) routes through
+            # before running the outer trace body.
             return tracer.execute(fn)
         except Exception as e:
 
             raise wrap_exception(e, tracer.info) from None
-        finally:
-            Globals.exit()

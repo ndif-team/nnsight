@@ -475,3 +475,300 @@ register_task(
         tags=["stop", "early_termination", "trace"],
     )
 )
+
+
+# =============================================================================
+# Task 10: Logit Lens at Specific Layers (subset)
+# =============================================================================
+
+TASK_10_PROMPT = """
+Write nnsight code implementing logit lens at a SPECIFIC subset of layers (not the
+first N):
+
+1. Open a trace with input "The Eiffel Tower is in".
+2. For each layer index in [3, 6, 9, 11], pull the residual hidden state from
+   `model.transformer.h[L].output`, project it through
+   `model.lm_head(model.transformer.ln_f(hs))`, take the argmax of the last token
+   position, and append that argmax to a saved list.
+3. Store the resulting list as `subset_predictions`.
+
+After the trace, `subset_predictions` must be a list of length 4 (one prediction
+per chosen layer, in [3, 6, 9, 11] order).
+
+The variable `model` is already loaded.
+"""
+
+TASK_10_SETUP = """
+from nnsight import LanguageModel
+model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+"""
+
+
+def verify_task_10(result: dict) -> bool:
+    """Verify: subset_predictions is a list of length 4."""
+    if "subset_predictions" not in result:
+        return False
+
+    preds = result["subset_predictions"]
+    if not isinstance(preds, list):
+        return False
+    if len(preds) != 4:
+        return False
+
+    return True
+
+
+register_task(
+    Task(
+        id="advanced_10_logit_lens_subset",
+        name="Logit Lens at Subset of Layers",
+        difficulty=Difficulty.ADVANCED,
+        prompt=TASK_10_PROMPT,
+        setup_code=TASK_10_SETUP,
+        verify=verify_task_10,
+        expected_output_description="subset_predictions list with 4 token ids",
+        tags=["logit_lens", "analysis", "intermediate_layers"],
+    )
+)
+
+
+# =============================================================================
+# Task 11: Steering During Generation
+# =============================================================================
+
+TASK_11_PROMPT = """
+Write nnsight code that applies a steering vector at every step of a multi-token
+generation:
+
+1. Build a precomputed direction tensor of shape (768,) (e.g. via `torch.randn(768)`).
+2. Open `with model.generate("I think that", max_new_tokens=4) as tracer:`.
+3. Inside the generate body (NOT inside any iter loop) add the direction (scaled
+   by 0.1) to layer 6's output at the LAST token position. Because the body re-runs
+   on every generation step, this fires once per step.
+4. Save the generation result as `gen_result`.
+
+Make sure the direction is on the same device as the layer's output. Hint:
+`direction.to(model.transformer.h[6].output.device)` works inside the trace.
+
+The variable `model` is already loaded.
+"""
+
+TASK_11_SETUP = """
+from nnsight import LanguageModel
+import torch
+model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+"""
+
+
+def verify_task_11(result: dict) -> bool:
+    """Verify: gen_result is a tensor with at least 4 new tokens worth of output."""
+    if "gen_result" not in result:
+        return False
+
+    out = result["gen_result"]
+    if not hasattr(out, "shape"):
+        return False
+    if out.numel() < 4:
+        return False
+
+    return True
+
+
+register_task(
+    Task(
+        id="advanced_11_steering_during_generation",
+        name="Steering During Generation",
+        difficulty=Difficulty.ADVANCED,
+        prompt=TASK_11_PROMPT,
+        setup_code=TASK_11_SETUP,
+        verify=verify_task_11,
+        expected_output_description="gen_result tensor with steering applied each step",
+        tags=["steering", "generate", "intervention"],
+    )
+)
+
+
+# =============================================================================
+# Task 12: Custom Envoy Subclass via envoys= kwarg
+# =============================================================================
+
+TASK_12_PROMPT = """
+Write nnsight code that defines a custom Envoy subclass and attaches it to all
+torch.nn.Linear modules of a small custom torch model.
+
+1. Define `class DoubledEnvoy(Envoy):` with:
+   - An `eproperty(key="output")` named `doubled` decorated with `@requires_output`
+     (the body is a stub: `...`).
+   - A `@doubled.preprocess` method that returns `value * 2`.
+2. Build a small torch.nn.Sequential of two torch.nn.Linear layers (5 -> 10 -> 2).
+3. Wrap it via `model = NNsight(net, envoys={torch.nn.Linear: DoubledEnvoy})`.
+4. In a trace with input `torch.rand(1, 5)`:
+   - Save `raw = model[0].output.save()` (the layer-0 raw output).
+   - Save `dbl = model[0].doubled.save()` (the doubled view via the new eproperty).
+
+After the trace, `dbl` must equal `raw * 2` element-wise.
+
+Imports you'll need: `from nnsight import NNsight`,
+`from nnsight.intervention.envoy import Envoy`,
+`from nnsight.intervention.interleaver import eproperty`,
+`from nnsight.intervention.hooks import requires_output`.
+"""
+
+TASK_12_SETUP = """
+import torch
+"""
+
+
+def verify_task_12(result: dict) -> bool:
+    """Verify: dbl exists and equals raw * 2."""
+    if "raw" not in result or "dbl" not in result:
+        return False
+
+    raw = result["raw"]
+    dbl = result["dbl"]
+
+    if not hasattr(raw, "shape") or not hasattr(dbl, "shape"):
+        return False
+    if raw.shape != dbl.shape:
+        return False
+
+    import torch
+    if not torch.allclose(dbl, raw * 2, atol=1e-5):
+        return False
+
+    return True
+
+
+register_task(
+    Task(
+        id="advanced_12_custom_envoy",
+        name="Custom Envoy Subclass via envoys=",
+        difficulty=Difficulty.ADVANCED,
+        prompt=TASK_12_PROMPT,
+        setup_code=TASK_12_SETUP,
+        verify=verify_task_12,
+        expected_output_description="raw tensor and dbl tensor where dbl = raw * 2",
+        tags=["envoy", "extending", "eproperty"],
+    )
+)
+
+
+# =============================================================================
+# Task 13: Persistent In-Place Edit + clear_edits
+# =============================================================================
+
+TASK_13_PROMPT = """
+Write nnsight code that demonstrates persistent in-place edits:
+
+1. Use `with model.edit(inplace=True):` to install a persistent edit that zeros out
+   layer 2's output (`model.transformer.h[2].output[:] = 0`).
+2. Run a regular trace with input "Hello" and save layer 2's output as `edited_out`.
+3. Call `model.clear_edits()` to remove the edit.
+4. Run another trace with input "Hello" and save layer 2's output as `cleared_out`.
+
+After this, `edited_out` should be all zeros and `cleared_out` should NOT be all zeros
+(the edit has been removed).
+
+The variable `model` is already loaded.
+"""
+
+TASK_13_SETUP = """
+from nnsight import LanguageModel
+model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+"""
+
+
+def verify_task_13(result: dict) -> bool:
+    """Verify: edited_out is all zeros, cleared_out has nonzero values."""
+    if "edited_out" not in result or "cleared_out" not in result:
+        return False
+
+    edited = result["edited_out"]
+    cleared = result["cleared_out"]
+
+    if isinstance(edited, tuple):
+        edited = edited[0]
+    if isinstance(cleared, tuple):
+        cleared = cleared[0]
+
+    if not hasattr(edited, "shape") or not hasattr(cleared, "shape"):
+        return False
+
+    if not torch.all(edited == 0):
+        return False
+    if torch.all(cleared == 0):
+        return False
+
+    return True
+
+
+register_task(
+    Task(
+        id="advanced_13_inplace_edit_clear",
+        name="Persistent In-Place Edit + Clear",
+        difficulty=Difficulty.ADVANCED,
+        prompt=TASK_13_PROMPT,
+        setup_code=TASK_13_SETUP,
+        verify=verify_task_13,
+        expected_output_description="edited_out all zeros; cleared_out non-zero after clear_edits",
+        tags=["edit", "inplace", "clear_edits", "persistent"],
+    )
+)
+
+
+# =============================================================================
+# Task 14: Conditional Intervention with Python `if`
+# =============================================================================
+
+TASK_14_PROMPT = """
+Write nnsight code that uses a normal Python `if` statement (v0.5+ feature) to
+conditionally modify an activation based on a value read from the model:
+
+1. Create a trace with input "Hello world".
+2. Read layer 0's output into a variable (e.g. `hs0 = model.transformer.h[0].output`).
+3. Use a regular Python `if torch.all(hs0 < 10000):` (the condition is true for any
+   reasonable forward pass) to gate an intervention that zeros layer 5's output:
+   `model.transformer.h[5].output[:] = 0`.
+4. Save layer 5's output as `gated_output`.
+
+Because the condition is always true on a normal forward pass, `gated_output` must
+be all zeros.
+
+The variable `model` is already loaded.
+"""
+
+TASK_14_SETUP = """
+from nnsight import LanguageModel
+import torch
+model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+"""
+
+
+def verify_task_14(result: dict) -> bool:
+    """Verify: gated_output is all zeros."""
+    if "gated_output" not in result:
+        return False
+
+    out = result["gated_output"]
+    if isinstance(out, tuple):
+        out = out[0]
+    if not hasattr(out, "shape"):
+        return False
+    if not torch.all(out == 0):
+        return False
+
+    return True
+
+
+register_task(
+    Task(
+        id="advanced_14_python_conditional",
+        name="Python Conditional Intervention",
+        difficulty=Difficulty.ADVANCED,
+        prompt=TASK_14_PROMPT,
+        setup_code=TASK_14_SETUP,
+        verify=verify_task_14,
+        expected_output_description="gated_output tensor of all zeros (condition True)",
+        tags=["conditional", "intervention", "python_control_flow"],
+    )
+)

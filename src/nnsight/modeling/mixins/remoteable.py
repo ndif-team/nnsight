@@ -66,10 +66,10 @@ class RemoteableMixin(MetaMixin):
             backend = RemoteBackend(
                 self.to_model_key(), host=backend, blocking=blocking
             )
+        kwargs.setdefault("tracer_cls", RemoteInterleavingTracer)
         return super().trace(
             *inputs,
             backend=backend,
-            tracer_cls=RemoteInterleavingTracer,
             **kwargs,
         )
 
@@ -102,17 +102,17 @@ class RemoteableMixin(MetaMixin):
             backend = RemoteBackend(
                 self.to_model_key(), host=backend, blocking=blocking
             )
+        kwargs.setdefault("tracer_cls", RemoteTracer)
         return super().session(
             *inputs,
             backend=backend,
-            tracer_cls=RemoteTracer,
             **kwargs,
         )
 
     def _remoteable_persistent_objects(self) -> dict:
         """Return objects that must persist across serialization for remote execution."""
 
-        persistent_objects = {"Interleaver": self._interleaver}
+        persistent_objects = {"Interleaver": self.interleaver}
 
         for envoy in self.modules():
             persistent_objects[f"Module:{envoy.path}"] = envoy._module

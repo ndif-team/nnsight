@@ -24,7 +24,7 @@ class TestOutOfOrderErrors:
 
     def test_out_of_order_basic(self, tiny_model: NNsight, tiny_input: torch.Tensor):
         """Access layer2 before layer1 - should raise OutOfOrderError."""
-        with pytest.raises(Mediator.OutOfOrderError) as exc_info:
+        with pytest.raises(Mediator.MissedProviderError) as exc_info:
             with tiny_model.trace(tiny_input):
                 # WRONG: layer2 runs after layer1, but we access layer2 first
                 out2 = tiny_model.layer2.output.save()
@@ -49,7 +49,7 @@ class TestOutOfOrderErrors:
             with tiny_model.trace(tiny_input):
                 out2 = tiny_model.layer2.output.save()
                 out1 = tiny_model.layer1.output.save()
-        except Mediator.OutOfOrderError:
+        except Mediator.MissedProviderError:
             caught_correct_type = True
 
         assert caught_correct_type, "Should be able to catch OutOfOrderError by type"
@@ -227,7 +227,7 @@ class TestOutOfOrderInInvokes:
         self, tiny_model: NNsight, tiny_input: torch.Tensor
     ):
         """Out of order within a single invoke."""
-        with pytest.raises(Mediator.OutOfOrderError) as exc_info:
+        with pytest.raises(Mediator.MissedProviderError) as exc_info:
             with tiny_model.trace() as tracer:
                 with tracer.invoke(tiny_input):
                     out2 = tiny_model.layer2.output.save()
@@ -267,7 +267,7 @@ class TestExceptionMessages:
         self, tiny_model: NNsight, tiny_input: torch.Tensor
     ):
         """Examine the OutOfOrderError message for helpful info."""
-        with pytest.raises(Mediator.OutOfOrderError) as exc_info:
+        with pytest.raises(Mediator.MissedProviderError) as exc_info:
             with tiny_model.trace(tiny_input):
                 out2 = tiny_model.layer2.output.save()
                 out1 = tiny_model.layer1.output.save()
@@ -396,7 +396,7 @@ class TestMultipleErrorScenarios:
 
     def test_loop_error(self, tiny_model: NNsight, tiny_input: torch.Tensor):
         """Error inside a loop."""
-        with pytest.raises(Mediator.OutOfOrderError) as exc_info:
+        with pytest.raises(Mediator.MissedProviderError) as exc_info:
             with tiny_model.trace(tiny_input):
                 results = []
                 # Loop that accesses layers in wrong order
@@ -438,9 +438,7 @@ class TestBackwardTracerRestrictions:
         print("")
         print("CORRECT pattern:")
         print("  with model.trace('Hello'):")
-        print(
-            "      hs = model.transformer.h[-1].output  # Get tensor BEFORE backward"
-        )
+        print("      hs = model.transformer.h[-1].output  # Get tensor BEFORE backward")
         print("      loss = model.lm_head.output.sum()")
         print("      with loss.backward():")
         print("          grad = hs.grad.save()  # Access .grad INSIDE backward")
@@ -500,7 +498,9 @@ class TestIteratorFootgun:
         print("      final = model.lm_head.output.save()")
         print("  print(final)  # NameError: 'final' is not defined")
         print("")
-        print("SOLUTION: Use a separate empty invoker (pass input to first invoke, not generate()):")
+        print(
+            "SOLUTION: Use a separate empty invoker (pass input to first invoke, not generate()):"
+        )
         print("  with model.generate(max_new_tokens=3) as tracer:")
         print("      with tracer.invoke('Hello'):  # First invoker - pass input here")
         print("          with tracer.iter[:]:")

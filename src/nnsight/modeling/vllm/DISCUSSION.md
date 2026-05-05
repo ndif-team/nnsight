@@ -38,8 +38,8 @@ with model.trace("The Eiffel Tower is in", temperature=0.0) as tracer:
     model.model.layers[10].mlp.output[-1, :] = 0
 
     # Access logits and sampling
-    logits = model.logits.output.save()
-    sampled = model.samples.output.save()
+    logits = model.logits.save()
+    sampled = model.samples.save()
 ```
 
 This is not a constrained API with predefined operations. It's arbitrary Python running inside the forward pass. You can call `torch.svd()`, run a learned probe, apply an SAE you trained yourself, or do anything else you'd do in a research notebook — but it executes on vLLM workers with PagedAttention and TP sharding handled transparently.
@@ -113,7 +113,7 @@ with model.trace(prompt, temperature=0.0) as tracer:
         model.model.layers[10].output[0][:, -1, :] += safety_vector
 
     # 3. Log everything
-    logits = model.logits.output.save()
+    logits = model.logits.save()
     score = toxicity_score.save()
 ```
 

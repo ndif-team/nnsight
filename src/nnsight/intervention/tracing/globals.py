@@ -1,9 +1,24 @@
-from typing import Any, Callable, Tuple, Union
+from typing import Any, Tuple
 
 import torch
 from typing_extensions import Self
 from ..._c.py_mount import mount
 from ... import CONFIG
+
+
+_mounted = False
+
+
+def _ensure_mounted():
+    """Mount Object.save as the universal `.save` method.
+
+    Lazy one-time setup. Called from .save() / nnsight.save() so we only
+    pay the C-level mount cost once, on first use.
+    """
+    global _mounted
+    if CONFIG.APP.PYMOUNT and not _mounted:
+        mount(Object.save, "save")
+        _mounted = True
 
 
 def save(object: Any):
@@ -26,12 +41,6 @@ class Object(torch.Tensor):
         ...     attn_0 = model.transformer.h[0].attn.output.save()
         >>> print(attn_0)
         """
-
-        if Globals.stack == 0:
-            raise RuntimeError(
-                ".save() called outside of a trace context. "
-                "Use .save() only inside a `with model.trace(...)` block."
-            )
 
         save(self)
 
@@ -89,29 +98,24 @@ class TracingCache:
 
 
 class Globals:
+    """Process-wide tracing state.
 
-    stack = 0
+    Holds two pieces of true global state:
+    - ``saves``: set of ``id()`` for objects marked via ``.save()``.
+      The root tracer's ``push()`` filters its frame locals against this
+      set so only saved values propagate out of the trace.
+    - ``cache``: source/AST/code-object memoization across traces.
+
+    Root-vs-inner detection lives on the tracer itself — see
+    ``Tracer.push`` — by checking whether the target frame is an
+    nnsight-generated frame (i.e., another trace's compiled body).
+    """
 
     saves = set()
 
     cache = TracingCache()
 
-    _mounted = False
-
-    @staticmethod
-    def enter():
-
-        if CONFIG.APP.PYMOUNT and not Globals._mounted:
-            mount(Object.save, "save")
-            Globals._mounted = True
-        Globals.stack += 1
-
-    @staticmethod
-    def exit():
-        Globals.stack -= 1
-
     @staticmethod
     def clear():
         Globals.saves.clear()
         Globals.cache.clear()
-        Globals.stack = 0

@@ -18,14 +18,14 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 from tasks import TASKS, get_task, list_all_tasks
-from tasks.registry import Difficulty
+from tasks.registry import Difficulty, TaskKind
 from runner import run_task, TaskResult
 
 
 @dataclass
 class EvalResult:
     """Overall evaluation result."""
-    
+
     timestamp: str
     agent_name: str
     total_tasks: int
@@ -33,14 +33,19 @@ class EvalResult:
     failed_tasks: int
     pass_rate: float
     task_results: list[dict] = field(default_factory=list)
-    
+
     basic_passed: int = 0
     basic_total: int = 0
     intermediate_passed: int = 0
     intermediate_total: int = 0
     advanced_passed: int = 0
     advanced_total: int = 0
-    
+
+    code_passed: int = 0
+    code_total: int = 0
+    mcq_passed: int = 0
+    mcq_total: int = 0
+
     def to_dict(self) -> dict:
         return {
             "timestamp": self.timestamp,
@@ -55,6 +60,10 @@ class EvalResult:
                 "basic": {"passed": self.basic_passed, "total": self.basic_total},
                 "intermediate": {"passed": self.intermediate_passed, "total": self.intermediate_total},
                 "advanced": {"passed": self.advanced_passed, "total": self.advanced_total},
+            },
+            "by_kind": {
+                "code": {"passed": self.code_passed, "total": self.code_total},
+                "mcq": {"passed": self.mcq_passed, "total": self.mcq_total},
             },
             "task_results": self.task_results,
         }
@@ -80,36 +89,55 @@ def evaluate_responses(responses_data: dict, verbose: bool = False) -> EvalResul
         Difficulty.ADVANCED: {"passed": 0, "total": 0},
     }
     
-    # Get all tasks that have responses
+    # Get all tasks that have responses. Each entry can be a code response
+    # (key "code") or an MCQ pick (key "answer"; a letter or 0-based index).
     tasks_to_run = []
     for task_id, response in responses.items():
         task = get_task(task_id)
-        if task and response.get("code", "").strip():
-            tasks_to_run.append((task, response["code"]))
-        elif task:
-            if verbose:
+        if not task:
+            continue
+        if task.kind == TaskKind.MCQ:
+            answer = response.get("answer", "")
+            if not isinstance(answer, str):
+                answer = str(answer)
+            if answer.strip():
+                tasks_to_run.append((task, answer))
+            elif verbose:
+                print(f"Skipping {task_id}: no answer provided")
+        else:
+            if response.get("code", "").strip():
+                tasks_to_run.append((task, response["code"]))
+            elif verbose:
                 print(f"Skipping {task_id}: no code provided")
     
-    for i, (task, code) in enumerate(tasks_to_run):
+    kind_stats = {
+        TaskKind.CODE: {"passed": 0, "total": 0},
+        TaskKind.MCQ: {"passed": 0, "total": 0},
+    }
+
+    for i, (task, response_text) in enumerate(tasks_to_run):
         if verbose:
-            print(f"\n[{i+1}/{len(tasks_to_run)}] Evaluating: {task.name} ({task.id})")
-        
+            kind_label = task.kind.value.upper()
+            print(f"\n[{i+1}/{len(tasks_to_run)}] Evaluating {kind_label}: {task.name} ({task.id})")
+
         difficulty_stats[task.difficulty]["total"] += 1
-        
+        kind_stats[task.kind]["total"] += 1
+
         try:
-            result = run_task(task, code)
-            
+            result = run_task(task, response_text)
+
             if result.success:
                 passed += 1
                 difficulty_stats[task.difficulty]["passed"] += 1
+                kind_stats[task.kind]["passed"] += 1
                 if verbose:
                     print(f"  ✓ PASSED")
             else:
                 if verbose:
                     print(f"  ✗ FAILED: {result.error_message}")
-            
+
             results.append(result.to_dict())
-            
+
         except Exception as e:
             if verbose:
                 print(f"  ✗ ERROR: {str(e)}")
@@ -118,9 +146,9 @@ def evaluate_responses(responses_data: dict, verbose: bool = False) -> EvalResul
                 "success": False,
                 "error_message": f"Execution error: {str(e)}",
                 "verification_passed": False,
-                "code_executed": code,
+                "code_executed": response_text,
             })
-    
+
     total = len(tasks_to_run)
     return EvalResult(
         timestamp=datetime.now().isoformat(),
@@ -136,6 +164,10 @@ def evaluate_responses(responses_data: dict, verbose: bool = False) -> EvalResul
         intermediate_total=difficulty_stats[Difficulty.INTERMEDIATE]["total"],
         advanced_passed=difficulty_stats[Difficulty.ADVANCED]["passed"],
         advanced_total=difficulty_stats[Difficulty.ADVANCED]["total"],
+        code_passed=kind_stats[TaskKind.CODE]["passed"],
+        code_total=kind_stats[TaskKind.CODE]["total"],
+        mcq_passed=kind_stats[TaskKind.MCQ]["passed"],
+        mcq_total=kind_stats[TaskKind.MCQ]["total"],
     )
 
 
@@ -151,6 +183,14 @@ def print_summary(result: EvalResult):
     print(f"Passed: {result.passed_tasks}")
     print(f"Failed: {result.failed_tasks}")
     print(f"Pass Rate: {result.pass_rate:.1%}")
+    print("-" * 60)
+    print("By Kind:")
+    if result.code_total > 0:
+        rate = result.code_passed / result.code_total
+        print(f"  Code: {result.code_passed}/{result.code_total} ({rate:.1%})")
+    if result.mcq_total > 0:
+        rate = result.mcq_passed / result.mcq_total
+        print(f"  MCQ:  {result.mcq_passed}/{result.mcq_total} ({rate:.1%})")
     print("-" * 60)
     print("By Difficulty:")
     if result.basic_total > 0:

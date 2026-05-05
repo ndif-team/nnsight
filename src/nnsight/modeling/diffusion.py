@@ -273,7 +273,10 @@ class DiffusionModel(HuggingFaceModel):
             else getattr(pipelines, automodel)
         )
 
-        self.config = None
+        # Use __dict__ directly so we don't mirror this onto the (possibly
+        # already-loaded) underlying module via Envoy.__setattr__ — we're
+        # caching the config on the wrapper, not mutating the model's own.
+        self.__dict__["config"] = None
         self._model: Diffuser = None
 
         super().__init__(*args, **kwargs)
@@ -294,7 +297,7 @@ class DiffusionModel(HuggingFaceModel):
             revision: Git revision of the repository.
         """
         if self.config is None:
-            self.config = self.automodel.load_config(repo_id, revision=revision)
+            self.__dict__["config"] = self.automodel.load_config(repo_id, revision=revision)
 
     def _load_meta(self, repo_id: str, revision: Optional[str] = None, **kwargs):
         """Load a meta (placeholder) version of the diffusion model.
@@ -338,8 +341,6 @@ class DiffusionModel(HuggingFaceModel):
             A :class:`Diffuser` instance.
         """
         self._load_config(repo_id, revision=revision)
-
-        device_map = "balanced" if device_map == "auto" or device_map is None else device_map
 
         model = Diffuser(
             self.automodel, repo_id, revision=revision, device_map=device_map, config=self.config, **kwargs
@@ -417,7 +418,7 @@ class DiffusionModel(HuggingFaceModel):
         Returns:
             The pipeline output passed through the wrapper module.
         """
-        if self._interleaver is not None:
+        if self.interleaver is not None:
             steps = kwargs.get("num_inference_steps")
             if steps is None:
                 try:
@@ -428,7 +429,7 @@ class DiffusionModel(HuggingFaceModel):
                     )
                 except Exception:
                     steps = 50
-            self._interleaver.default_all = steps
+            self.interleaver.default_all = steps
 
         generator = torch.Generator(self.device)
 
@@ -447,8 +448,8 @@ class DiffusionModel(HuggingFaceModel):
             prepared_inputs, *args, generator=generator, **kwargs
         )
 
-        if self._interleaver is not None:
-            self._interleaver.default_all = None
+        if self.interleaver is not None:
+            self.interleaver.default_all = None
 
         output = self._model(output)
 

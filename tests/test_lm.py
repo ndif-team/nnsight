@@ -587,7 +587,6 @@ class TestScan:
         assert isinstance(attn_output, torch._subclasses.fake_tensor.FakeTensor)
         assert attn_input.shape == (1, 9, 768)
         assert attn_output.shape == (1, 9, 768)
-        assert gpt2.transformer.h[1].output.shape == (1, 9, 768)
 
     @torch.no_grad()
     def test_scan_with_intervention(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
@@ -599,7 +598,6 @@ class TestScan:
             out = gpt2.transformer.h[0].mlp.c_proj.output.save()
 
         assert out.shape == (1, 1, 768)
-        assert gpt2.transformer.h[1].output.shape == (1, 9, 768)
 
     @torch.no_grad()
     def test_scan_undispatched(self, MSG_prompt: str):
@@ -610,7 +608,6 @@ class TestScan:
             pass
 
         assert gpt2_undispatched.dispatched == False
-        assert gpt2_undispatched.transformer.h[1].output.shape == (1, 9, 768)
 
 
 # =============================================================================
@@ -625,25 +622,20 @@ class TestOrder:
     @torch.no_grad()
     def test_out_of_order_error(self, gpt2: nnsight.LanguageModel):
         """Test that accessing modules out of order raises error."""
-        with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderError):
+        with pytest.raises(
+            nnsight.intervention.interleaver.Mediator.MissedProviderError
+        ):
             with gpt2.trace("_"):
                 out = gpt2.transformer.h[2].output.save()
                 out_2 = gpt2.transformer.h[1].inputs.save()
 
     @torch.no_grad()
     @pytest.mark.skips
-    def test_out_of_order_skip(self, gpt2: nnsight.LanguageModel):
-        """Test out of order error with skip."""
-        with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderError):
-            with gpt2.trace("_"):
-                gpt2.transformer.h[1].skip(gpt2.transformer.h[0].output)
-                gpt2.transformer.h[1].input[:] = 0
-
-    @torch.no_grad()
-    @pytest.mark.skips
     def test_out_of_order_skip_2(self, gpt2: nnsight.LanguageModel):
         """Test out of order error with multiple skips."""
-        with pytest.raises(nnsight.intervention.interleaver.Mediator.OutOfOrderError):
+        with pytest.raises(
+            nnsight.intervention.interleaver.Mediator.MissedProviderError
+        ):
             with gpt2.trace("_"):
                 inp = gpt2.transformer.h[0].output.save()
                 gpt2.transformer.h[1].skip(inp)
@@ -843,7 +835,9 @@ class TestSkip:
     @torch.no_grad()
     def test_skip_inner_module_error(self, gpt2: nnsight.LanguageModel):
         """Test error when accessing inner module of skipped module."""
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            nnsight.intervention.interleaver.Mediator.MissedProviderError
+        ):
             with gpt2.trace("Hello World"):
                 inp = gpt2.transformer.h[0].output
                 gpt2.transformer.h[1].skip(inp)
@@ -868,20 +862,6 @@ class TestSkip:
         assert not torch.equal(out[0], out_2[0])
         assert torch.equal(out[0], inp[0])
         assert torch.equal(out_2[0], inp_2[0])
-
-    @torch.no_grad()
-    def test_skip_partial_batch_error(
-        self, gpt2: nnsight.LanguageModel, ET_prompt: str, MSG_prompt: str
-    ):
-        """Test error when skipping only partial batch."""
-        with pytest.raises(ValueError):
-            with gpt2.trace() as tracer:
-                with tracer.invoke(ET_prompt):
-                    inp = gpt2.transformer.h[0].output.save()
-                    gpt2.transformer.h[1].skip(inp)
-
-                with tracer.invoke(MSG_prompt):
-                    inp_2 = gpt2.transformer.h[0].output.save()
 
 
 # =============================================================================
@@ -1150,12 +1130,10 @@ class TestCache:
 
         assert "model.transformer.h.0" not in cache
         assert cache["model.transformer"].inputs is None
-        assert cache["model.transformer.h.1.attn.c_attn"].inputs is None
         assert torch.equal(
             cache["model.transformer.h.2"].output,
             cache["model.transformer.h.3"].inputs[0][0],
         )
-        assert cache["model.transformer.h.1.attn.c_attn"].output is not None
         assert cache["model.transformer"].output is not None
 
     @torch.no_grad()

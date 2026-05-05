@@ -24,13 +24,22 @@ from .. import CONFIG, util
 from ..util import apply
 
 from .batching import Batchable
-from .inject import convert as inject
+from .source import (
+    SourceEnvoy,
+    resolve_true_forward,
+    get_or_create_source_accessor,
+)
 from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy
 from .tracing.tracer import InterleavingTracer, ScanningTracer
-from .interleaver import Interleaver, Mediator
+from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
+from .hooks import (
+    hooked_input,
+    hooked_output,
+    requires_input,
+)
 
 
 def trace_only(fn: Callable):
@@ -38,7 +47,7 @@ def trace_only(fn: Callable):
     @wraps(fn)
     def wrapper(self: Envoy, *args, **kwargs):
 
-        if self._interleaver is None:
+        if self.interleaver is None:
             raise ValueError(f"Must be within a trace to use `.{fn.__name__}(...)`")
 
         return fn(self, *args, **kwargs)
@@ -60,7 +69,7 @@ class Envoy(Batchable):
             Example: "model.encoder.layer1" indicates this module is the first layer of the encoder in the model.
         _module (torch.nn.Module): The underlying PyTorch module
         _source (Optional[EnvoySource]): Source code representation of the module
-        _interleaver (Optional[Interleaver]): Interleaver for managing execution flow
+        interleaver (Optional[Interleaver]): Interleaver for managing execution flow
         _default_mediators (List[List[str]]): List of default mediators created with .edit
         _children (List[Envoy]): List of child Envoys
         _alias (Aliaser): Aliaser object for managing aliases
@@ -72,6 +81,9 @@ class Envoy(Batchable):
         interleaver: Optional[Interleaver] = None,
         path: Optional[str] = "model",
         rename: Optional[Dict[str, Union[str, List[str]]]] = None,
+        envoys: Optional[
+            Union[Type["Envoy"], Dict[Type[torch.nn.Module], Type["Envoy"]]]
+        ] = None,
     ) -> None:
         """
         Initialize an Envoy for a PyTorch module.
@@ -84,6 +96,21 @@ class Envoy(Batchable):
                 Example: {"layer1": "first_layer", "layer2": "second_layer"}
                 Example: {".model.layers": ".layers"} <-- Mounts .layers to the root model.
                 Example: {".transformer": ["model", "mdl"]} <-- Allows access of .transformer as .model or .mdl
+            envoys (Optional[Union[Type[Envoy], Dict]]):
+                Controls which Envoy class wraps descendant modules. Propagates down the envoy tree.
+                - None (default): all descendants are wrapped with the base Envoy class.
+                - A class: all descendants are wrapped with that class.
+                - A dict whose values are ``Envoy`` subclasses. Keys may be:
+                    * A ``torch.nn.Module`` subclass — matches when the class appears in the
+                      descendant's MRO. Example: ``{torch.nn.Linear: MyLinearEnvoy}``.
+                    * A string — matches when the descendant's envoy path ends with the key
+                      treated as a dotted suffix (component-wise). With a rename dict in play,
+                      each component also matches via single-component aliases — so
+                      ``{"attn": MyAttnEnvoy}`` matches a path ending in ``self_attn`` when
+                      the user passed ``rename={"self_attn": "attn"}``.
+                  Type keys are tried first; string keys are a fallback. Descendants without
+                  a match fall back to the base Envoy class.
+                Example: {torch.nn.Linear: MyLinearEnvoy, "self_attn": MyAttnEnvoy}
 
         """
         self.path = path
@@ -93,13 +120,12 @@ class Envoy(Batchable):
 
         self._source = None
 
-        self._interleaver = interleaver if interleaver is not None else Interleaver()
-        self._interleaver.wrap_module(module)
+        self.interleaver = interleaver if interleaver is not None else Interleaver()
+        self.interleaver.wrap_module(module)
 
         self._default_mediators: List[Mediator] = []
 
-        self._fake_inputs = inspect._empty
-        self._fake_output = inspect._empty
+        self._envoys = envoys
 
         if rename is not None:
             self._alias = Aliaser(rename)
@@ -139,289 +165,82 @@ class Envoy(Batchable):
         Returns:
             True if the Envoy is interleaving, False otherwise
         """
-        return self._interleaver is not None and self._interleaver.interleaving
+        return self.interleaver is not None and self.interleaver.interleaving
 
     #### Properties ####
 
-    @property
+    @hooked_output()
     def output(self) -> Object:
-        """
-        Get the output of the module's forward pass.
-
-        This property allows access to the return values produced by the module
-        during the forward pass.
+        """Get the output of the module's forward pass.
 
         Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             >>> with model.trace("Hello World"):
             ...     attn = model.transformer.h[0].attn.output[0].save()
-            >>> print(attn)
+        """
+
+    @hooked_input()
+    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
+        """Get the inputs to the module's forward pass.
 
         Returns:
-            The module's output values
-        """
-
-        if self.interleaving:
-            return self._interleaver.current.request(
-                self._interleaver.iterate_requester(f"{self.path}.output")
-            )
-        elif self._fake_output is not inspect._empty:
-            return self._fake_output
-        else:
-            raise ValueError(
-                f"The model did not execute — cannot access `{self.path}.output`. "
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @output.setter
-    def output(self, value: Any):
-        """
-        Set new values for the module's output.
-
-        This allows for intervention by replacing the module's output with
-        custom values during execution.
+            (args, kwargs) tuple of positional and keyword arguments.
 
         Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     model.transformer.h[0].attn.output[0] *= 2
-
-        Args:
-            value: The new output value to use.
-        """
-        if self.interleaving:
-
-            self._interleaver.current.swap(
-                self._interleaver.iterate_requester(f"{self.path}.output"), value
-            )
-
-        else:
-            raise ValueError(
-                f"Cannot set `{self.path}.output`. The model is not executing during interleaving."
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @property
-    def inputs(self) -> Tuple[Tuple[Object], Dict[str, Object]]:
-        """
-        Get the inputs to the module's forward pass.
-
-        This property provides access to all input values passed to the module
-        during the forward pass.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             >>> with model.trace("Hello World"):
             ...     args, kwargs = model.transformer.h[0].attn.inputs
-
-        Returns:
-            The module's input values as a tuple of positional and keyword arguments. i.e (args, kwargs)
-
         """
 
-        if self.interleaving:
-
-            return self._interleaver.current.request(
-                self._interleaver.iterate_requester(f"{self.path}.input")
-            )
-        elif self._fake_inputs is not inspect._empty:
-            return self._fake_inputs
-        else:
-            raise ValueError(
-                f"Cannot access `{self.path}.inputs`. The model is not executing during interleaving."
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @inputs.setter
-    def inputs(self, value: Any):
-        """
-        Set new values for the module's inputs.
-
-        This allows for intervention by replacing the module's inputs with
-        custom values during execution.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     model.transformer.h[0].attn.inputs = (torch.randn(1, 1024, 1024), {})
-
-        Args:
-            value: The new input value(s) to use, structured as a tuple of (args, kwargs)
-        """
-        if self.interleaving:
-
-            self._interleaver.current.swap(
-                self._interleaver.iterate_requester(f"{self.path}.input"), value
-            )
-        else:
-            raise ValueError(
-                f"Cannot set `{self.path}.inputs`. The model is not executing during interleaving."
-                "Did you forget to pass a valid input to `.trace()` or `.invoke()`? "
-                "Use `model.trace(input)` or `tracer.invoke(input)` to provide input."
-            )
-
-    @property
+    @hooked_input()
     def input(self) -> Object:
-        """
-        Get the first input to the module's forward pass.
+        """Get the first input to the module's forward pass.
 
-        This is a convenience property that returns just the first input value
-        from all inputs passed to the module. So first positional argument, or first keyword argumetn if there are no positional arguments.
+        Convenience wrapper around :attr:`inputs` that extracts the first
+        positional argument, or the first keyword argument if there are no
+        positional arguments.
 
         Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
             >>> with model.trace("Hello World"):
             ...     hidden_states = model.transformer.h[0].attn.input.save()
-            >>> print(hidden_states)
-
-        Returns:
-            The first input value
         """
 
+    @input.preprocess
+    def input(self, value):
+        return [*value[0], *value[1].values()][0]
+
+    @input.postprocess
+    def input(self, value):
         inputs = self.inputs
-
-        return [*inputs[0], *inputs[1].values()][0]
-
-    @input.setter
-    def input(self, value: Any):
-        """
-        Set a new value for the module's first input.
-
-        This is a convenience method that replaces just the first input value
-        while preserving all other inputs.
-
-        Examples:
-            >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-            >>> with model.trace("Hello World"):
-            ...     model.transformer.h[0].attn.input = torch.randn(1, 1024, 1024)
-
-        Args:
-            value: The new value for the first input
-        """
-
-        inputs = self.inputs
-
-        value = (value, *inputs[0][1:]), inputs[1]
-
-        self.inputs = value
+        return (value, *inputs[0][1:]), inputs[1]
 
     @property
-    def source(self) -> EnvoySource:
-        """
-        Get the source code representation of the module.
+    def source(self) -> SourceEnvoy:
+        """Get the source code representation of the module.
 
-        This property provides access to the module's source code with operations
-        highlighted, allowing for inspection and intervention at specific points.
+        Lazily resolves to a :class:`SourceEnvoy` over the module's global
+        :class:`SourceAccessor`. The accessor — and its per-call-site
+        :class:`OperationAccessor` instances — are created once per module
+        and shared across all Envoys / Interleavers / Mediators that touch
+        it. This Envoy keeps a per-instance :class:`SourceEnvoy` so each
+        Envoy has its own user-facing wrapper.
 
         Examples:
             >>> model = LanguageModel("gpt2", device_map='auto', dispatch=True)
-
-            >>> # We can print to see the formward method of the module and names associated with the operations within.
             >>> print(model.transformer.h[0].attn.source)
-
-                                                   60
-                                                   61     if using_eager and self.reorder_and_upcast_attn:
-              self__upcast_and_reordered_attn_0 -> 62         attn_output, attn_weights = self._upcast_and_reordered_attn(
-                                                   63             query_states, key_states, value_states, attention_mask, head_mask
-                                                   64         )
-                                                   65     else:
-              attention_interface_0             -> 66         attn_output, attn_weights = attention_interface(
-                                                   67             self,
-                                                   68             query_states,
-                                                   69             key_states,
-                                                   70             value_states,
-                                                   71             attention_mask,
-                                                   72             head_mask=head_mask,
-                                                   73             dropout=self.attn_dropout.p if self.training else 0.0,
-                                                   74             is_causal=is_causal,
-                                                   75             **kwargs,
-                                                   76         )
-                                                   77
-              attn_output_reshape_0             -> 78     attn_output = attn_output.reshape(*attn_output.shape[:-2], -1).contiguous()
-              contiguous_0                      ->  +     ...
-              self_c_proj_0                     -> 79     attn_output = self.c_proj(attn_output)
-              self_resid_dropout_0              -> 80     attn_output = self.resid_dropout(attn_output)
-                                                   81
-                                                   82     return attn_output, attn_weights
-                                                   83
-
-            >>> # We can print out one of these to see the only the operation and a few operations before and after.
-            >>> print(model.transformer.h[0].attn.source.attention_interface_0)
-
-            .transformer.h.0.attn.attention_interface_0:
-
-                 ....
-
-                     if using_eager and self.reorder_and_upcast_attn:
-                         attn_output, attn_weights = self._upcast_and_reordered_attn(
-                             query_states, key_states, value_states, attention_mask, head_mask
-                         )
-                     else:
-                 -->     attn_output, attn_weights = attention_interface( <--
-                             self,
-                             query_states,
-                             key_states,
-                             value_states,
-                             attention_mask,
-                             head_mask=head_mask,
-                 ....
-
             >>> with model.trace("Hello World"):
-            ...     # Now we can access it like we would any other Envoy with .input or .output to grab the intermediate value.
             ...     attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
 
-            >>> print(attn)
-
-
         Returns:
-            An EnvoySource object containing the module's source code and operations
+            A :class:`SourceEnvoy` exposing operation-level access.
         """
         if self._source is None:
-
-            def wrap(fn: Callable, **kwargs):
-
-                bound_obj = (
-                    fn.__self__
-                    if inspect.ismethod(fn) and fn.__name__ != "forward"
-                    else None
-                )
-
-                if self.interleaving:
-                    return self._interleaver.wrap_operation(
-                        fn, **kwargs, bound_obj=bound_obj
-                    )
-                else:
-                    return fn
-
-            source, line_numbers, forward = inject(
-                type(self._module).forward, wrap, self.path
-            )
-
-            if hasattr(self._module, "_old_forward"):
-                # Accelerate's new_forward calls module._old_forward(*args, **kwargs)
-                self._module._old_forward = MethodType(forward, self._module)
-            elif hasattr(self._module, "__nnsight_forward__"):
-                # nnsight_forward calls m.__nnsight_forward__(m, *args, **kwargs)
-                self._module.__nnsight_forward__ = forward
-            else:
-                self._module.forward = MethodType(forward, self._module)
-
-            self._source = EnvoySource(
-                self.path,
-                source,
-                line_numbers,
-                interleaver=self._interleaver,
-            )
-
+            accessor = get_or_create_source_accessor(self._module)
+            self._source = SourceEnvoy(accessor, interleaver=self.interleaver)
         return self._source
 
     def __call__(self, *args, hook: bool = False, **kwargs):
         return (
             self._module.forward(*args, **kwargs)
-            if self._interleaver.current is not None and not hook
+            if self.interleaver.current is not None and not hook
             else self._module(*args, **kwargs)
         )
 
@@ -430,6 +249,7 @@ class Envoy(Batchable):
     def trace(
         self,
         *args,
+        trace: bool = True,
         fn: Optional[Callable] = None,
         tracer_cls: Type[InterleavingTracer] = InterleavingTracer,
         **kwargs,
@@ -450,14 +270,27 @@ class Envoy(Batchable):
 
         Args:
             *args: Arguments to pass to the tracer
+            trace: If False, bypass tracing entirely — run the underlying
+                module on the prepared input and return its output.
+                Useful for one-shot forward passes that don't need
+                intervention. Defaults to True.
             **kwargs: Keyword arguments to pass to the tracer
 
         Returns:
-            An InterleavingTracer for this module
+            An InterleavingTracer for this module, or — when ``trace=False``
+            — the module's output value directly.
         """
 
         if fn is None:
             fn = self.__call__
+
+        # ``trace=False``: bypass tracing, run the module directly on the
+        # prepared input. Mirrors the WithBlockNotFoundError fallback in
+        # __getattr__ so users get the same one-shot semantics whether
+        # they call ``model.method(...)`` (no with) or ``model.trace(..., trace=False)``.
+        if not trace:
+            args, kwargs, _ = self._prepare_input(*args, **kwargs)
+            return fn(*args, **kwargs)
 
         return tracer_cls(fn, self, *args, **kwargs)
 
@@ -606,7 +439,7 @@ class Envoy(Batchable):
             DeprecationWarning,
             stacklevel=2,
         )
-        return IteratorProxy(self._interleaver)
+        return IteratorProxy(self.interleaver)
 
     @trace_only
     def all(self):
@@ -626,10 +459,11 @@ class Envoy(Batchable):
             DeprecationWarning,
             stacklevel=2,
         )
-        self._interleaver.current.iteration += step
+        self.interleaver.current.iteration += step
         return self
 
     @trace_only
+    @requires_input
     def skip(self, replacement: Any):
         """Skips the execution of this module duting execution / interleaving.
         Behavior is the module will not be executed and will return a replacement value instead.
@@ -646,23 +480,9 @@ class Envoy(Batchable):
             replacement (Any): The replacement value to replace the module's output with.
         """
 
-        return self._interleaver.current.skip(
-            self._interleaver.iterate_requester(f"{self.path}.input"), replacement
+        return self.interleaver.current.skip(
+            self.interleaver.iterate_requester(f"{self.path}.input"), replacement
         )
-
-    @trace_only
-    def wait_for_input(self):
-        """
-        Wait for the input to the module to be available.
-        """
-        self.inputs
-
-    @trace_only
-    def wait_for_output(self):
-        """
-        Wait for the output to the module to be available.
-        """
-        self.output
 
     def to(self, device: torch.device):
         """
@@ -794,18 +614,101 @@ class Envoy(Batchable):
             fn = getattr(self, fn)
 
         try:
-            with self._interleaver:
+            with self.interleaver:
                 result = fn(*args, **kwargs)
 
-                self._interleaver.handle("result", result)
+                self.interleaver.handle("result", result)
 
-            self._interleaver.check_cache_full()
-            self._interleaver.check_dangling_mediators()
+            self.interleaver.check_cache_full()
+            self.interleaver.check_dangling_mediators()
 
         finally:
-            self._interleaver.cancel()
+            self.interleaver.cancel()
 
     #### Private methods ####
+
+    def _resolve_envoy_class(
+        self, module: torch.nn.Module, path: Optional[str] = None
+    ) -> Type[Envoy]:
+        """Resolve which Envoy class to use for wrapping a child module.
+
+        Consults ``self._envoys``:
+        - If None, returns the base Envoy class.
+        - If a class, returns that class.
+        - If a dict, keys can be:
+            - A ``torch.nn.Module`` subclass. Matches when the class appears in
+              ``module``'s MRO. Type-keyed matches are tried first.
+            - A string. Matches when ``path`` ends with the key treated as a
+              dotted suffix (component-wise, not substring). With a rename dict
+              in play, each component matches either literally or via an alias
+              from a single-component rename entry — so a key like ``"attn"``
+              will match a path ending in ``self_attn`` when the user passed
+              ``rename={"self_attn": "attn"}``.
+          Type keys are checked before string keys. Falls back to the base
+          Envoy class if no entry matches.
+        """
+        mapping = self._envoys
+
+        if mapping is None:
+            return Envoy
+
+        if isinstance(mapping, type):
+            return mapping
+
+        for cls in type(module).__mro__:
+            if cls in mapping:
+                return mapping[cls]
+
+        if path is not None:
+            for key, envoy_cls in mapping.items():
+                if isinstance(key, str) and self._path_matches_key(path, key):
+                    return envoy_cls
+
+        return Envoy
+
+    def _path_matches_key(self, path: str, key: str) -> bool:
+        """Does ``path`` end with dotted ``key``, with alias-aware components?
+
+        Both path and key are split on ``.``. The key is matched as a suffix of
+        the path, component by component. A key component matches a path
+        component if they are equal, or if the path component has the key
+        component as a rename alias (see :meth:`_component_matches`).
+        """
+        key = key.removeprefix(".")
+        if not key:
+            return False
+        path_parts = path.split(".")
+        key_parts = key.split(".")
+        if len(key_parts) > len(path_parts):
+            return False
+        tail = path_parts[-len(key_parts) :]
+        return all(self._component_matches(pc, kc) for pc, kc in zip(tail, key_parts))
+
+    def _component_matches(self, path_component: str, key_component: str) -> bool:
+        """Whether ``key_component`` is a valid name for ``path_component``.
+
+        True if they are equal, or if the rename dict contains a
+        single-component entry ``{path_component: [..., key_component, ...]}``
+        (the user aliased ``path_component`` to ``key_component``).
+
+        Multi-component rename entries (e.g. ``{"transformer.h": "layers"}``)
+        are not consulted here; component matching is single-component only.
+        """
+        if path_component == key_component:
+            return True
+        if self._alias is None:
+            return False
+        for rename_key, aliases in self._alias.rename.items():
+            stripped = rename_key.removeprefix(".")
+            if "." in stripped:
+                continue
+            if stripped != path_component:
+                continue
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            if key_component in aliases:
+                return True
+        return False
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> Envoy:
         """
@@ -820,11 +723,14 @@ class Envoy(Batchable):
         """
         module_path = f"{self.path}.{name}"
 
-        envoy = Envoy(
+        envoy_cls = self._resolve_envoy_class(module, module_path)
+
+        envoy = envoy_cls(
             module,
             path=module_path,
             rename=self._alias.rename if self._alias is not None else None,
-            interleaver=self._interleaver,
+            interleaver=self.interleaver,
+            envoys=self._envoys,
         )
 
         setattr(self._module, name, module)
@@ -873,7 +779,22 @@ class Envoy(Batchable):
 
         setattr(new_cls, f"nns_{mount_point}", mount)
 
-        if isinstance(mount, property):
+        if isinstance(mount, eproperty):
+
+            # Replace the eproperty with a property that returns the child
+            # envoy from the instance dict, but delegates setter to the
+            # original eproperty's __set__.
+            original_ep = mount
+
+            def _ep_getter(slf, _mp=mount_point):
+                return slf.__dict__[_mp]
+
+            def _ep_setter(slf, value, _ep=original_ep):
+                _ep.__set__(slf, value)
+
+            setattr(new_cls, mount_point, property(_ep_getter, _ep_setter))
+
+        elif isinstance(mount, property):
 
             mount = property(
                 lambda slf: slf.__dict__[mount_point],
@@ -903,38 +824,22 @@ class Envoy(Batchable):
             else:
                 setattr(module, name, existing_child)
 
+        # Capture the existing SourceAccessor (if any) before the old module
+        # is dropped — its OperationAccessors carry hook state and any
+        # nested SourceAccessors for recursive source tracing.
+        old_accessor = getattr(self._module, "__source_accessor__", None)
+
         self._module = module
         self._module.__path__ = self.path
-        self._interleaver.wrap_module(module)
+        self.interleaver.wrap_module(module)
 
-        if self._source is not None:
-
-            def wrap(fn: Callable, **kwargs):
-
-                bound_obj = (
-                    fn.__self__
-                    if inspect.ismethod(fn) and fn.__name__ != "forward"
-                    else None
-                )
-
-                if self.interleaving:
-                    return self._interleaver.wrap_operation(
-                        fn, **kwargs, bound_obj=bound_obj
-                    )
-                else:
-                    return fn
-
-            source, line_numbers, forward = inject(
-                type(self._module).forward, wrap, self._module.__path__
-            )
-
-            if hasattr(self._module, "_old_forward"):
-                self._module._old_forward = MethodType(forward, self._module)
-            elif hasattr(self._module, "__nnsight_forward__"):
-                # nnsight_forward calls m.__nnsight_forward__(m, *args, **kwargs)
-                self._module.__nnsight_forward__ = forward
-            else:
-                self._module.forward = MethodType(forward, self._module)
+        # Transfer the SourceAccessor onto the new module, rebinding its
+        # injected forward against the new module's true fn.
+        # OperationAccessors are kept intact so any pre-existing
+        # OperationEnvoy / SourceEnvoy references remain valid after dispatch.
+        if old_accessor is not None:
+            old_accessor.rebind(resolve_true_forward(module))
+            module.__source_accessor__ = old_accessor
 
     def _update_alias(self, alias: Dict[str, str]):
         """
@@ -1049,7 +954,15 @@ class Envoy(Batchable):
                 mod_str = _addindent(mod_str, 2)
                 child_lines.append("(" + key + "): " + mod_str)
 
-        lines = extra_lines + child_lines
+        eproperty_lines = []
+        for cls in type(self).__mro__:
+            for attr_name, attr_val in cls.__dict__.items():
+                if isinstance(attr_val, eproperty) and attr_val.description is not None:
+                    eproperty_lines.append(
+                        "(" + attr_val.name + "): " + attr_val.description
+                    )
+
+        lines = extra_lines + child_lines + eproperty_lines
 
         main_str = self._module._get_name() + "("
         if lines:
@@ -1086,7 +999,7 @@ class Envoy(Batchable):
             value = getattr(self._module, name)
 
             # It's a method bound to the module, create an interleaver for it
-            if not self._interleaver.interleaving and isinstance(
+            if not self.interleaver.interleaving and isinstance(
                 value,
                 (FunctionType, MethodType, BuiltinFunctionType, BuiltinMethodType),
             ):
@@ -1094,15 +1007,17 @@ class Envoy(Batchable):
                 # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
                 value = getattr(self, f"__nnsight_{name}__", value)
 
-                def trace(*args, **kwargs):
+                def trace(*args, trace: bool = True, **kwargs):
+
+                    if not trace:
+                        args, kwargs, _ = self._prepare_input(*args, **kwargs)
+                        return value(*args, **kwargs)
+
                     try:
                         tracer = self.trace(*args, fn=value, **kwargs)
                         tracer.capture()
                         return tracer
                     except WithBlockNotFoundError as e:
-
-                        args, kwargs, _ = self._prepare_input(*args, **kwargs)
-
                         return value(*args, **kwargs)
 
                 return trace
@@ -1127,6 +1042,10 @@ class Envoy(Batchable):
         If the value is a PyTorch module, it will be wrapped in an Envoy to enable
         intervention during execution.
 
+        Otherwise the write is mirrored to both the Envoy and the wrapped module
+        when applicable, so that reads via ``__dict__`` short-circuit and reads via
+        ``__getattr__`` (which falls through to ``_module``) stay consistent.
+
         Args:
             key: The attribute name
             value: The attribute value
@@ -1134,21 +1053,26 @@ class Envoy(Batchable):
 
         if key != "_module" and isinstance(value, torch.nn.Module):
             self._add_envoy(value, key)
-        else:
-            if "_module" in self.__dict__ and hasattr(self._module, key):
-                return setattr(self._module, key, value)
-            else:
-                super().__setattr__(key, value)
+            return
+
+        on_module = "_module" in self.__dict__ and hasattr(self._module, key)
+
+        # Set on the Envoy if it already owns the key, or if there's no _module
+        # to fall through to.
+        if key in self.__dict__ or not on_module:
+            super().__setattr__(key, value)
+
+        # Mirror to _module so the wrapped model stays in sync with the wrapper.
+        if on_module:
+            setattr(self._module, key, value)
 
     def __getstate__(self):
 
         state = self.__dict__.copy()
 
-        state["_interleaver"]._persistent_id = "Interleaver"
+        state["interleaver"]._persistent_id = "Interleaver"
         state["_module"]._persistent_id = f"Module:{self.path}"
 
-        state.pop("_fake_inputs")
-        state.pop("_fake_output")
         state.pop("_source")
 
         return state
@@ -1156,340 +1080,7 @@ class Envoy(Batchable):
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-        self._fake_inputs = inspect._empty
-        self._fake_output = inspect._empty
         self._source = None
-
-
-# TODO extend Envoy
-class OperationEnvoy:
-    """
-    Represents a specific operation within a module's forward pass.
-
-    This class provides access to the inputs and outputs of individual
-    operations within a module's execution, allowing for fine-grained
-    inspection and intervention at the operation level.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        source: str,
-        line_number: int,
-        interleaver: Optional[Interleaver] = None,
-    ):
-        """
-        Initialize an OperationEnvoy.
-
-        Args:
-            name: The fully qualified name of the operation
-            source: The source code of the module containing the operation
-            line_number: The line number of the operation in the source
-            interleaver: Optional interleaver for managing execution flow
-        """
-        self.name = name
-        self.source_code = source
-        self.line_number = line_number
-
-        self._interleaver = interleaver
-
-        self._source: EnvoySource = None
-        self._fn: Callable = None
-
-    def __str__(self):
-        """
-        String representation showing the operation in context.
-
-        This method returns a formatted string showing the operation's source code
-        with surrounding context lines and highlighting the operation line.
-
-        Returns:
-            A formatted string showing the operation's source code with context
-        """
-        source_lines = self.source_code.split("\n")
-        start_idx = max(0, self.line_number - 5)
-        end_idx = min(len(source_lines) - 1, self.line_number + 8)
-
-        highlighted_lines = [self.name + ":\n"]
-
-        if start_idx != 0:
-            highlighted_lines.append("    ....")
-
-        for i in range(start_idx, end_idx):
-            line = source_lines[i]
-            if i == self.line_number + 1:
-                highlighted_lines.append(f"    --> {line[4:]} <--")
-            else:
-                highlighted_lines.append("    " + line)
-
-        if end_idx != len(source_lines) - 1:
-            highlighted_lines.append("    ....")
-
-        return "\n".join(highlighted_lines)
-
-    @property
-    def output(self) -> Union[Any, torch.Tensor]:
-        """
-        Get the output of this operation.
-
-        This property provides access to the return value(s) produced by the operation
-        during execution.
-
-        Returns:
-            The operation's output value(s)
-        """
-
-        return self._interleaver.current.request(
-            self._interleaver.iterate_requester(f"{self.name}.output")
-        )
-
-    @output.setter
-    def output(self, value: Any) -> None:
-        """
-        Set a new value for the operation's output.
-
-        This allows for intervention by replacing the operation's output with
-        a custom value during execution.
-
-        Args:
-            value: The new output value
-        """
-
-        self._interleaver.current.swap(
-            self._interleaver.iterate_requester(f"{self.name}.output"), value
-        )
-
-    @property
-    def inputs(
-        self,
-    ) -> Tuple[Tuple[Any, torch.Tensor], Dict[str, Union[torch.Tensor, Any]]]:
-        """
-        Get the inputs to this operation.
-
-        This property provides access to all input value(s) passed to the operation
-        during execution, structured as a tuple of positional and keyword arguments.
-
-        Returns:
-            The operation's input value(s)
-        """
-        return self._interleaver.current.request(
-            self._interleaver.iterate_requester(f"{self.name}.input")
-        )
-
-    @inputs.setter
-    def inputs(self, value: Any) -> None:
-        """
-        Set new values for the operation's inputs.
-
-        This allows for intervention by replacing the operation's inputs with
-        custom values during execution.
-
-        Args:
-            value: The new input value(s)
-        """
-        self._interleaver.current.swap(
-            self._interleaver.iterate_requester(f"{self.name}.input"), value
-        )
-
-    @property
-    def input(self) -> Union[Any, torch.Tensor]:
-        """
-        Get the first input to the operation.
-
-        This is a convenience property that returns just the first input value
-        from all inputs passed to the operation.
-
-        Returns:
-            The first input value
-        """
-
-        inputs = self.inputs
-
-        return [*inputs[0], *inputs[1].values()][0]
-
-    @input.setter
-    def input(self, value: Any) -> None:
-        """
-        Set a new value for the operation's first input.
-
-        This is a convenience method that replaces just the first positional input
-        while preserving all other inputs.
-
-        Args:
-            value: The new value for the first input
-        """
-
-        inputs = self.inputs
-
-        value = (value, *inputs[0][1:]), inputs[1]
-
-        self.inputs = value
-
-    @property
-    def source(self) -> EnvoySource:
-        """
-        Get the source code of the operation.
-
-        This property provides access to the operation's source code with nested
-        operations highlighted, allowing for inspection and intervention at specific points.
-
-        Returns:
-            An EnvoySource object containing the operation's source code and nested operations
-        """
-
-        if self._source is None:
-            fn = self._interleaver.current.request(f"{self.name}.fn")
-
-            # TODO maybe do something else here
-            if isinstance(fn, torch.nn.Module):
-
-                msg = f"Don't call .source on a module ({getattr(fn, '__path__', '')}) from within another .source. Call it directly with: {getattr(fn, '__path__', '')}.source"
-                raise ValueError(msg)
-
-            def wrap(fn: Callable, **kwargs):
-
-                bound_obj = (
-                    fn.__self__
-                    if getattr(fn, "__name__", None) != "forward"
-                    and inspect.ismethod(fn)
-                    else None
-                )
-
-                return self._interleaver.wrap_operation(
-                    fn, **kwargs, bound_obj=bound_obj
-                )
-
-            source, line_numbers, fn = inject(fn, wrap, self.name)
-
-            self._source = EnvoySource(
-                self.name, source, line_numbers, interleaver=self._interleaver
-            )
-
-            self._fn = fn
-
-        requester = f"{self.name}.fn"
-
-        if requester not in self._interleaver.current.history:
-            self._interleaver.current.swap(requester, self._fn)
-
-        return self._source
-
-
-class EnvoySource:
-    """
-    Represents the source code of a module with operations highlighted.
-
-    This class provides access to the individual operations within a module's
-    source code, allowing for inspection and intervention at specific points
-    in the code. It serves as a bridge between the source code representation
-    and the runtime execution of operations.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        source: str,
-        line_numbers: dict,
-        interleaver: Optional[Interleaver] = None,
-    ):
-        """
-        Initialize an EnvoySource.
-
-        Args:
-            name: The fully qualified name of the module or operation
-            source: The source code string
-            line_numbers: A dictionary mapping operation names to line numbers
-            interleaver: Optional interleaver for managing execution flow
-        """
-        self.source = source
-        self.line_numbers = line_numbers
-
-        self.operations: List[OperationEnvoy] = []
-
-        for _name, line_number in line_numbers.items():
-            operation = OperationEnvoy(
-                f"{name}.{_name}", source, line_number, interleaver=interleaver
-            )
-            setattr(self, _name, operation)
-            self.operations.append(operation)
-
-    def __str__(self):
-        """
-        String representation showing the source code with operations highlighted.
-
-        This method returns a formatted string showing the source code with
-        operation names and line numbers, making it easy to identify intervention points.
-
-        Returns:
-            A formatted string showing the source code with operation names and line numbers
-        """
-        # Find the longest name for proper alignment
-        max_name_length = (
-            max(len(name) for name in self.line_numbers.keys())
-            if self.line_numbers
-            else 0
-        )
-
-        source_lines = self.source.split("\n")
-        formatted_lines = [
-            " " * (max_name_length + 6) + "* " + source_lines[0]
-        ]  # Keep the function definition unchanged
-
-        # Group operations by line number
-        operations_by_line = {}
-        for name, line_number in self.line_numbers.items():
-            if line_number not in operations_by_line:
-                operations_by_line[line_number] = []
-            operations_by_line[line_number].append(name)
-
-        for i, line in enumerate(source_lines[1:]):
-            line_number = i
-
-            # Check if this line has operations
-            if line_number in operations_by_line:
-                # Handle multiple operations on the same line
-                operations = operations_by_line[line_number]
-
-                # First operation gets the line number
-                first_op = operations[0]
-                line_prefix = f" {first_op:{max_name_length}} ->{line_number:3d} "
-                formatted_lines.append(f"{line_prefix}{line}")
-
-                # For nested operations, unwrap them onto separate lines
-                if len(operations) > 1:
-                    for op in operations[1:]:
-                        continuation_prefix = f" {op:{max_name_length}} ->  + "
-                        # Instead of just showing a vertical line, show the operation on its own line
-                        formatted_lines.append(
-                            f"{continuation_prefix}{' ' * (len(line) - len(line.lstrip()))}..."
-                        )
-            else:
-                # Regular line with no operations
-                line_prefix = " " * (max_name_length + 4) + f"{line_number:3d} "
-                formatted_lines.append(f"{line_prefix}{line}")
-
-        source = "\n".join(formatted_lines)
-
-        return source
-
-    def __iter__(self):
-        """
-        An iterator over the submodules in the source code (i.e. submodules that can be accessed after `.source`)
-        """
-        submodules = []
-        processed_lines = []
-
-        for name, line_number in self.line_numbers.items():
-            if line_number not in processed_lines:
-                processed_lines.append(line_number)
-                submodules.append(name)
-
-        return iter(submodules)
-
-
-    def __getattribute__(self, name: str) -> Union[OperationEnvoy]:
-
-        return object.__getattribute__(self, name)
 
 
 class Aliaser:

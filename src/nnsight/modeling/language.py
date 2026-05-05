@@ -79,6 +79,43 @@ class LanguageModel(TransformersModel):
 
         self.generator: Envoy = LanguageModel.Generator()
 
+    def _check_is_text_only(self, repo_id: str) -> None:
+        """Raise a friendly error if ``self.config`` belongs to a multimodal model.
+
+        Modern multimodal models (Qwen-VL, Llama-Vision, Kimi, etc.) register
+        their config class with ``AutoModelForImageTextToText`` rather than
+        ``AutoModelForCausalLM``, and nest text-side fields (``vocab_size``,
+        ``num_hidden_layers``, …) under ``config.text_config``. Loading them
+        through ``LanguageModel`` errors deep inside HuggingFace with a
+        confusing ``AttributeError: '...Config' object has no attribute
+        'vocab_size'``. Catch the case up front and tell the user to use
+        ``VisionLanguageModel`` instead.
+
+        Only fires when ``automodel`` is the default ``AutoModelForCausalLM``;
+        if the user has chosen a non-default automodel, we don't second-guess.
+        """
+
+        if self.automodel is not AutoModelForCausalLM:
+            return
+
+        try:
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES,
+            )
+        except ImportError:
+            return
+
+        model_type = getattr(self.config, "model_type", None)
+        if model_type and model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
+            raise ValueError(
+                f"{repo_id!r} ({model_type}) is registered with "
+                f"AutoModelForImageTextToText — it's a multimodal model so "
+                f"LanguageModel(...) can't load it. Use VisionLanguageModel "
+                f"instead:\n\n"
+                f"    from nnsight import VisionLanguageModel\n"
+                f"    model = VisionLanguageModel({repo_id!r}, ...)"
+            )
+
     def _load_meta(
         self,
         repo_id: str,
@@ -88,6 +125,8 @@ class LanguageModel(TransformersModel):
     ):
 
         self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._check_is_text_only(repo_id)
 
         self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
@@ -106,6 +145,8 @@ class LanguageModel(TransformersModel):
     ):
 
         self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._check_is_text_only(repo_id)
 
         self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
@@ -147,15 +188,15 @@ class LanguageModel(TransformersModel):
 
         max_new_tokens = kwargs.get("max_new_tokens", None)
 
-        if max_new_tokens is not None and self._interleaver is not None:
-            self._interleaver.default_all = max_new_tokens
+        if max_new_tokens is not None and self.interleaver is not None:
+            self.interleaver.default_all = max_new_tokens
 
         streamer = kwargs.pop("streamer", self.generator.streamer._module)
 
         output = self._model.generate(*args, streamer=streamer, **kwargs)
 
-        if self._interleaver is not None:
-            self._interleaver.default_all = None
+        if self.interleaver is not None:
+            self.interleaver.default_all = None
 
         output = self.generator(output, hook=True)
 
@@ -300,6 +341,16 @@ class LanguageModel(TransformersModel):
         if attention_mask is not None:
             inputs["attention_mask"] = attention_mask
 
+        tokenized_input_ids = inputs.get("input_ids", None)
+        if (
+            isinstance(tokenized_input_ids, torch.Tensor)
+            and tokenized_input_ids.shape[-1] == 0
+        ):
+            raise ValueError(
+                "Input produced zero tokens after tokenization. "
+                "Pass a non-empty prompt or non-empty `input_ids`."
+            )
+
         return (
             tuple(),
             {**inputs, "labels": labels, **remaining_kwargs},
@@ -326,7 +377,9 @@ class LanguageModel(TransformersModel):
 
         batched_labels = batched_inputs["labels"]
 
-        attention_mask = batched_inputs.get("attention_mask", torch.ones_like(batched_inputs["input_ids"]))
+        attention_mask = batched_inputs.get(
+            "attention_mask", torch.ones_like(batched_inputs["input_ids"])
+        )
 
         batched_ids = [
             {"input_ids": ids}
@@ -352,9 +405,13 @@ class LanguageModel(TransformersModel):
         for row_start, mask in [(0, attention_mask), (n_old, new_attention_mask)]:
             if mask is not None:
                 if left:
-                    combined_mask[row_start : row_start + mask.shape[0], -mask.shape[1] :] = mask
+                    combined_mask[
+                        row_start : row_start + mask.shape[0], -mask.shape[1] :
+                    ] = mask
                 else:
-                    combined_mask[row_start : row_start + mask.shape[0], : mask.shape[1]] = mask
+                    combined_mask[
+                        row_start : row_start + mask.shape[0], : mask.shape[1]
+                    ] = mask
 
         new_batched_inputs["attention_mask"] = combined_mask
 

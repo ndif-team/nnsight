@@ -89,7 +89,7 @@ def test_basic_logit(model):
     prompt = "The Eiffel Tower is located in the city of"
 
     with model.trace(prompt, temperature=0.0, top_p=1):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     next_token = model.tokenizer.decode(logits.argmax(dim=-1))
     assert next_token == " Paris", f"Expected ' Paris', got '{next_token}'"
@@ -104,7 +104,7 @@ def test_intervention(model):
         out[:] = 0
         model.transformer.h[-2].mlp.output = out
         hs = model.transformer.h[-2].mlp.output.save()
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     assert torch.all(hs == 0), "Hidden states should be all zeros after intervention"
 
@@ -116,7 +116,7 @@ def test_multi_token_generation(model):
     with model.trace(prompt, temperature=0.0, top_p=1.0, max_tokens=3) as tracer:
         logits = list().save()
         with tracer.iter[0:3]:
-            logits.append(model.logits.output)
+            logits.append(model.logits)
 
     assert len(logits) == 3, f"Expected 3 logits, got {len(logits)}"
 
@@ -135,7 +135,7 @@ def test_generation_with_intervention(model):
                 model.transformer.h[-2].output = out
 
             hs_list.append(model.transformer.h[-2].output[0])
-            logits.append(model.logits.output)
+            logits.append(model.logits)
 
     assert [torch.all(hs == 0) for hs in hs_list] == [
         False,
