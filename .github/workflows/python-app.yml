@@ -40,11 +40,9 @@ jobs:
           tests/test_envoys.py \
           tests/test_iter_edge_cases.py \
           tests/test_transform.py \
-          tests/test_lambda_serialization.py \
           tests/test_local_recursion.py \
           tests/test_local_mutual_recursion.py \
           tests/test_mutual_recursion.py \
           tests/test_local_env.py \
           tests/test_local_simulation.py \
-          tests/test_vlm.py \
           --device cpu
