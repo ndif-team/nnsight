@@ -131,22 +131,30 @@ class TestBasicInference:
 class TestInterventions:
     """Activation modification via serve=."""
 
-    def test_zero_out_mlp(self, model):
-        """Zero out an MLP output and verify the prediction changes."""
-        # Get clean prediction first
+    def test_zero_out_mlp_raises_clear_error(self, model):
+        """In-place modification of an inference-mode tensor must surface
+        the underlying RuntimeError to the client, not silently drop the
+        save and leave the user with an UnboundLocalError on the next line.
+        """
+        # Clean trace works.
         with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
             clean_logits = model.logits.save()
         clean_token = model.tokenizer.decode(clean_logits.argmax(dim=-1))
         assert "Paris" in clean_token
 
-        # Zero out MLP and check prediction changed
-        with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
-            model.model.layers[-2].mlp.output[:] = 0
-            logits = model.logits.save()
+        # In-place write on an inference-mode tensor must raise a typed
+        # RuntimeError carrying the original cause, intervention frame,
+        # and a request id — not be smuggled inside the saves dict.
+        with pytest.raises(RuntimeError) as exc_info:
+            with model.trace(ET_PROMPT, temperature=0.0, top_p=1, serve=SERVE_URL):
+                model.model.layers[-2].mlp.output[:] = 0
+                model.logits.save()
 
-        _assert_not_dispatched(model)
-        next_token = model.tokenizer.decode(logits.argmax(dim=-1))
-        assert "Paris" not in next_token
+        msg = str(exc_info.value)
+        assert "Inplace update to inference tensor" in msg
+        assert "[vLLM serve]" in msg
+        assert "Intervention traceback" in msg
+        assert "req_id=" in msg
 
     def test_swap_intervention(self, model):
         """Swap an MLP output with zeros and verify the prediction changes."""
@@ -168,22 +176,23 @@ class TestInterventions:
 class TestBatching:
     """Multiple prompts in a single trace via invoke()."""
 
-    def test_batched_clean_and_corrupted(self, model):
-        """Run clean and corrupted versions of the same prompt in one trace."""
-        with model.trace(temperature=0.0, top_p=1, serve=SERVE_URL) as tracer:
-            with tracer.invoke(ET_PROMPT):
-                clean_logits = model.logits.save()
+    def test_batched_clean_and_corrupted_raises_clear_error(self, model):
+        """Co-batched failing invoke must raise a typed RuntimeError at the
+        trace boundary — not leave the client with an UnboundLocalError on
+        the corrupted invoke's variable while silently swallowing the cause.
+        """
+        with pytest.raises(RuntimeError) as exc_info:
+            with model.trace(temperature=0.0, top_p=1, serve=SERVE_URL) as tracer:
+                with tracer.invoke(ET_PROMPT):
+                    model.logits.save()
 
-            with tracer.invoke(ET_PROMPT):
-                model.model.layers[-2].mlp.output[:] = 0
-                corrupted_logits = model.logits.save()
+                with tracer.invoke(ET_PROMPT):
+                    model.model.layers[-2].mlp.output[:] = 0
+                    model.logits.save()
 
-        _assert_not_dispatched(model)
-
-        clean_token = model.tokenizer.decode(clean_logits.argmax(dim=-1))
-        corrupted_token = model.tokenizer.decode(corrupted_logits.argmax(dim=-1))
-        assert "Paris" in clean_token
-        assert "Paris" not in corrupted_token
+        msg = str(exc_info.value)
+        assert "Inplace update to inference tensor" in msg
+        assert "[vLLM serve]" in msg
 
     def test_two_different_prompts(self, model):
         """Capture logits from two different prompts in one trace."""

@@ -9,8 +9,6 @@ if TYPE_CHECKING:
 else:
     Tracer = Any
 
-from ..tracing.globals import _ensure_mounted
-
 
 class ExecutionBackend(Backend):
 
@@ -19,13 +17,11 @@ class ExecutionBackend(Backend):
         fn = super().__call__(tracer)
 
         try:
-            # Eager one-time mount: `.save()` is dispatched via this C-level mount so any
-            # object can carry the method, and the user calls `.save()` directly inside
-            # trace bodies — meaning the mount must already be in place by the time user
-            # code runs. No tracer-entry hook is available before the user types
-            # `attn.output.save()`, so we mount at import.
-            _ensure_mounted()
-
+            # ``Object.save`` mount is installed in
+            # ``InterleavingTracer._setup_interleaver`` — the chokepoint
+            # that every executor (this backend, AsyncVLLMBackend, vLLM
+            # serve ``server.py``, LocalSimulationBackend) routes through
+            # before running the outer trace body.
             return tracer.execute(fn)
         except Exception as e:
 

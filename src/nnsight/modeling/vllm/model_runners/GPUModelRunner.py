@@ -360,6 +360,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         self.nnsight_model.interleaver.defer_exceptions = True
 
+        # Mount ``Object.save`` in the worker subprocess. The driver
+        # process gets its mount via ``Tracer.__init__``/``__setstate__``
+        # (the client constructs Tracers, the serve handler unpickles
+        # them), but vLLM workers receive only deserialized Mediators —
+        # they never touch a Tracer. Without this call, user code's
+        # ``tensor.save()`` AttributeErrors inside the worker thread.
+        from ....intervention.tracing.globals import _ensure_mounted
+
+        _ensure_mounted()
+
         # Only wrap when TP > 1: registers hooks that handle
         # gather/split of sharded tensors and CUDA synchronization
         # for TP-parallel modules.  With TP == 1 nothing is sharded
@@ -497,26 +507,23 @@ class NNsightGPUModelRunner(GPUModelRunner):
         helper.cleanup_finished(finished_keys, removals)
 
         # Collect deferred exceptions.  Each mediator has its own —
-        # nest it inside THAT request's sub-dict under
-        # ``__nnsight_exceptions__`` in the ``{base_id: exc_info}``
-        # shape the sync ``vllm.py`` consumer understands.  The wrapped
-        # exception can't be pickled (dynamic class), so ship type +
-        # message strings instead.
+        # nest the typed envelope inside THAT request's sub-dict under
+        # ``__nnsight_exceptions__`` in the ``{base_id: DeferredError}``
+        # shape the client's ``surface_server_errors`` understands.
+        # The dynamic NNsightException subclass can't be pickled, so the
+        # helper ships plain strings (type_name, message, traceback,
+        # is_control_flow).
+        from ....intervention.errors import capture_deferred
+
         for base_id, mediator, _internal_key in matched:
-            if mediator.deferred_exception is not None:
-                exc = mediator.deferred_exception
-                exc_bases = getattr(type(exc), "__bases__", ())
-                exc_type_name = (
-                    exc_bases[0].__name__ if exc_bases else type(exc).__name__
-                )
+            entry = capture_deferred(mediator, req_id=base_id)
+            if entry is not None:
                 per_req = saves_by_req.setdefault(base_id, {})
-                per_req["__nnsight_exceptions__"] = {
-                    base_id: {
-                        "type": exc_type_name,
-                        "message": str(exc),
-                    }
-                }
+                per_req["__nnsight_exceptions__"] = {base_id: entry}
                 mediator.deferred_exception = None
+                mediator._deferred_type_name = None
+                mediator._deferred_traceback = None
+                mediator._deferred_is_control_flow = False
 
         torch.cuda.synchronize()
         return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves_by_req))

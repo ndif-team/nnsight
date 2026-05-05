@@ -133,4 +133,28 @@ class LocalServeBackend(Backend):
             map_location="cpu",
             weights_only=False,
         )
-        return result.get("saves", {})
+        saves = result.get("saves", {})
+
+        # Pop the typed deferred-exception envelope before returning saves.
+        # Server-side defer mode means an intervention that errored on the
+        # worker comes back here as a DeferredError dict (type_name,
+        # message, traceback, is_control_flow) rather than as a raised
+        # exception. Surface it as a RuntimeError so the client sees the
+        # original cause instead of an UnboundLocalError on a saved name
+        # that never got assigned. Control-flow entries (EarlyStopException
+        # from tracer.stop()) are filtered inside surface_server_errors.
+        exc_map = saves.pop("__nnsight_exceptions__", None)
+        if exc_map:
+            from ..errors import surface_server_errors
+
+            surface_server_errors(list(exc_map.values()), context="[vLLM serve]")
+
+        # Mark deserialized values as saved so Tracer.push's root-filter
+        # (id(v) in Globals.saves) doesn't drop them on the way back into
+        # the user's frame. RemoteBackend does the same — see remote.py.
+        from ..tracing.globals import save as _mark_saved
+
+        for value in saves.values():
+            _mark_saved(value)
+
+        return saves
