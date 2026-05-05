@@ -273,7 +273,10 @@ class DiffusionModel(HuggingFaceModel):
             else getattr(pipelines, automodel)
         )
 
-        self.config = None
+        # Use __dict__ directly so we don't mirror this onto the (possibly
+        # already-loaded) underlying module via Envoy.__setattr__ — we're
+        # caching the config on the wrapper, not mutating the model's own.
+        self.__dict__["config"] = None
         self._model: Diffuser = None
 
         super().__init__(*args, **kwargs)
@@ -294,7 +297,7 @@ class DiffusionModel(HuggingFaceModel):
             revision: Git revision of the repository.
         """
         if self.config is None:
-            self.config = self.automodel.load_config(repo_id, revision=revision)
+            self.__dict__["config"] = self.automodel.load_config(repo_id, revision=revision)
 
     def _load_meta(self, repo_id: str, revision: Optional[str] = None, **kwargs):
         """Load a meta (placeholder) version of the diffusion model.

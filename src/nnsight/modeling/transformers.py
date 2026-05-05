@@ -35,8 +35,11 @@ class TransformersModel(HuggingFaceModel):
 
     def __init__(self, *args, config_model: Type[PretrainedConfig] = None, automodel: Type[AutoModel] = AutoModel, **kwargs):
 
-        self.config: PretrainedConfig = config_model
-        
+        # Use __dict__ directly so we don't mirror this onto the (possibly
+        # already-loaded) underlying module via Envoy.__setattr__ — we're
+        # caching the config on the wrapper, not mutating the model's own.
+        self.__dict__["config"] = config_model
+
         self.automodel = (
             automodel
             if not isinstance(automodel, str)
@@ -49,7 +52,7 @@ class TransformersModel(HuggingFaceModel):
 
         if self.config is None:
 
-            self.config = AutoConfig.from_pretrained(
+            self.__dict__["config"] = AutoConfig.from_pretrained(
                 repo_id, revision=revision, **kwargs
             )
 
@@ -64,7 +67,7 @@ class TransformersModel(HuggingFaceModel):
 
         model = self.automodel.from_config(self.config, trust_remote_code=True)
 
-        self.config = model.config
+        self.__dict__["config"] = model.config
 
         return model
 
@@ -79,6 +82,6 @@ class TransformersModel(HuggingFaceModel):
 
         model = self.automodel.from_pretrained(repo_id, revision=revision, **kwargs)
 
-        self.config = model.config
+        self.__dict__["config"] = model.config
 
         return model
