@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import httpx
 import torch
 
+from ..errors import surface_server_errors
 from ..tracing.util import wrap_exception
 from ...schema.request import RequestModel
 from .base import Backend
@@ -98,14 +99,28 @@ class LocalServeBackend(Backend):
             raise wrap_exception(e, tracer.info) from None
 
         if self.blocking:
-            saves = self._send(data, compress)
+            saves, errors = self._send(data, compress)
+            # Push saves FIRST so partial successes survive the raise —
+            # matches local-trace semantics where values saved before the
+            # error are still accessible in the caller's frame.
             tracer.push(saves)
+            surface_server_errors(errors, context="[nnsight-serve]")
         else:
             future = _pool.submit(self._send, data, compress)
+            # Store the raw future on the tracer. The caller's
+            # ``tracer.collect()`` is responsible for awaiting it,
+            # pushing saves, and calling ``surface_server_errors``.
+            # See ``modeling/mixins/serve_tracer.py``.
             tracer._serve_future = future
 
-    def _send(self, data: bytes, compress: bool) -> Dict[str, Any]:
-        """Send serialized request, return saves dict."""
+    def _send(self, data: bytes, compress: bool):
+        """Send serialized request, return ``(saves, errors)``.
+
+        ``errors`` is a list of ``DeferredError`` dicts (may be empty).
+        Callers are responsible for invoking ``surface_server_errors``
+        AFTER pushing saves so partial-success values land in the
+        caller's frame before any exception is raised.
+        """
         headers = {
             "Content-Type": "application/octet-stream",
             "nnsight-compress": str(compress),
@@ -134,20 +149,7 @@ class LocalServeBackend(Backend):
             weights_only=False,
         )
         saves = result.get("saves", {})
-
-        # Pop the typed deferred-exception envelope before returning saves.
-        # Server-side defer mode means an intervention that errored on the
-        # worker comes back here as a DeferredError dict (type_name,
-        # message, traceback, is_control_flow) rather than as a raised
-        # exception. Surface it as a RuntimeError so the client sees the
-        # original cause instead of an UnboundLocalError on a saved name
-        # that never got assigned. Control-flow entries (EarlyStopException
-        # from tracer.stop()) are filtered inside surface_server_errors.
-        exc_map = saves.pop("__nnsight_exceptions__", None)
-        if exc_map:
-            from ..errors import surface_server_errors
-
-            surface_server_errors(list(exc_map.values()), context="[vLLM serve]")
+        errors = result.get("errors", [])
 
         # Mark deserialized values as saved so Tracer.push's root-filter
         # (id(v) in Globals.saves) doesn't drop them on the way back into
@@ -157,4 +159,4 @@ class LocalServeBackend(Backend):
         for value in saves.values():
             _mark_saved(value)
 
-        return saves
+        return saves, errors

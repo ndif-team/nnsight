@@ -1070,8 +1070,16 @@ class Envoy(Batchable):
 
         state = self.__dict__.copy()
 
-        state["interleaver"]._persistent_id = "Interleaver"
-        state["_module"]._persistent_id = f"Module:{self.path}"
+        # Write directly to __dict__ to bypass any __setattr__ override
+        # on the underlying object. The pickler's persistent_id hook
+        # reads via ``obj.__dict__["_persistent_id"]``
+        # (``intervention/serialization.py``), so the tag must land in
+        # ``__dict__`` — but it's internal pickle bookkeeping, not user
+        # code, and shouldn't trip protection wrappers like NDIF's
+        # ``ProtectedObject.__setattr__`` which records originals via
+        # ``getattr`` and crashes on new attributes.
+        state["interleaver"].__dict__["_persistent_id"] = "Interleaver"
+        state["_module"].__dict__["_persistent_id"] = f"Module:{self.path}"
 
         state.pop("_source")
 
