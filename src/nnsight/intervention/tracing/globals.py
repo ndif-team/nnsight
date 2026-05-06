@@ -1,4 +1,5 @@
-from typing import Any, Tuple
+import contextvars
+from typing import Any, Optional, Set, Tuple
 
 import torch
 from typing_extensions import Self
@@ -7,6 +8,15 @@ from ... import CONFIG
 
 
 _mounted = False
+
+# Per-context override for ``.save()``: when set (e.g. by a server
+# request helper before starting a worker thread), saves go into this
+# set in addition to ``Globals.saves``. Lets concurrent server requests
+# pre-register saved-name IDs in their own per-trace bucket while
+# leaving single-trace local execution unaffected (default ``None``).
+_saves_var: contextvars.ContextVar[Optional[Set[int]]] = contextvars.ContextVar(
+    "nnsight_saves", default=None
+)
 
 
 def _ensure_mounted():
@@ -23,7 +33,16 @@ def _ensure_mounted():
 
 def save(object: Any):
 
+    # Clone inference-mode tensors on save to protect against downstream
+    # in-place mutations by fused kernels (e.g. vLLM's fused_add_rms_norm).
+    if isinstance(object, torch.Tensor) and object.is_inference():
+        object = object.clone()
+
     Globals.saves.add(id(object))
+
+    per_trace = _saves_var.get()
+    if per_trace is not None:
+        per_trace.add(id(object))
 
     return object
 
@@ -42,9 +61,7 @@ class Object(torch.Tensor):
         >>> print(attn_0)
         """
 
-        save(self)
-
-        return self
+        return save(self)
 
     def __getattr__(self, name: str) -> Self:
 
