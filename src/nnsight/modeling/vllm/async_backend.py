@@ -7,7 +7,6 @@ import zstandard as _zstd
 _ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
 
 from ...intervention.backends.base import Backend
-from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.util import wrap_exception
 
 if TYPE_CHECKING:
@@ -46,8 +45,6 @@ class AsyncVLLMBackend(Backend):
         fn = Backend.__call__(self, tracer)
 
         try:
-            Globals.enter()
-
             # Set up mediators and collect batched args (shared with sync path).
             args, kwargs = tracer._setup_interleaver(fn)
 
@@ -68,8 +65,6 @@ class AsyncVLLMBackend(Backend):
             tracer.mediators.clear()
         except Exception as e:
             raise wrap_exception(e, tracer.info) from None
-        finally:
-            Globals.exit()
 
     def __await__(self):
         return self._generator.__await__()
@@ -89,5 +84,14 @@ class AsyncVLLMBackend(Backend):
                 )
                 saves_bytes = next((r for r in results if r is not None), None)
                 if saves_bytes:
-                    output.saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(saves_bytes))
+                    # Worker returns ``{base_id: {var_name: value}}``.
+                    # Pull THIS request's sub-dict — the outer layer
+                    # exists to keep concurrent independent traces from
+                    # colliding at shared variable names.
+                    saves_by_req = pickle.loads(
+                        _ZSTD_DECOMPRESSOR.decompress(saves_bytes)
+                    )
+                    per_req = saves_by_req.get(output.request_id)
+                    if per_req:
+                        output.saves = per_req
             yield output

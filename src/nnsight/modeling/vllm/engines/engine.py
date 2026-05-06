@@ -29,9 +29,19 @@ class NNsightLLMEngine(LLMEngine):
             # results is a list (one per worker). Rank-0 returns pickled bytes, others None.
             saves_bytes = next((r for r in results if r is not None), None)
             if saves_bytes:
-                saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(saves_bytes))
+                # Worker returns ``{base_id: {var_name: value}}`` so the
+                # step attaches each request's OWN saves sub-dict to its
+                # OWN RequestOutput.  The previous flat-dict shape bound
+                # the same dict to every finished output and entangled
+                # concurrent independent traces whose user code used
+                # overlapping variable names — one winner clobbered all.
+                saves_by_req = pickle.loads(
+                    _ZSTD_DECOMPRESSOR.decompress(saves_bytes)
+                )
                 for ro in request_outputs:
                     if ro.finished:
-                        ro.saves = saves
+                        per_req = saves_by_req.get(ro.request_id)
+                        if per_req:
+                            ro.saves = per_req
 
         return request_outputs

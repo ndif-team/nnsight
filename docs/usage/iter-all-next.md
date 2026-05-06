@@ -145,6 +145,7 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 - **`module.next()` is deprecated; prefer `tracer.next()`.** `model.transformer.h[-1].next()` still works but emits `DeprecationWarning` (`src/nnsight/intervention/envoy.py:440`). The behavior is identical — both bump the same `mediator.iteration`.
 - **`.next()` only advances the iteration counter.** It does not block until the model has actually run that step. The model still runs forward in lockstep with hook resolution; `.next()` just tells the mediator which step's hooks to register next.
 - **Don't mix `.next()` with an `iter[...]` loop.** Inside a `for step in tracer.iter[...]` block, `mediator.iteration` is overwritten on each yield. Calling `.next()` inside the loop will be clobbered on the next iteration.
+- **For the final pipeline output, use `tracer.result.save()` — not `model.generator.output.save()` after `tracer.next()`.** `tracer.next()` advances the iteration counter for *every* module access, including `model.generator`, but the generator only fires once at the end of generation. After `for i in range(N): tracer.next()`, requesting `model.generator.output` asks for "iteration N's generator output" which does not exist (`model.generator.output.iN was not provided`). `tracer.result` is exempt from iteration tracking and always refers to the final pipeline output, so it's the right way to capture the end-of-generation result regardless of where the iter counter is.
 
 ## Related
 

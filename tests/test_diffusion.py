@@ -160,16 +160,16 @@ class TestDiffusionBatching:
         ) as tracer:
 
             with tracer.invoke(cat_prompt):
-                encoder_out_1 = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_1 = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
             with tracer.invoke([panda_prompt, birthday_cake_prompt]):
-                encoder_out_2 = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_2 = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
             with tracer.invoke(wave_prompt):
-                encoder_out_3 = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_3 = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
             with tracer.invoke():
-                encoder_out_all = tiny_sd.text_encoder.text_model.encoder.layers[-1].output.save()
+                encoder_out_all = tiny_sd.text_encoder.encoder.layers[-1].output.save()
 
         assert encoder_out_all.shape[0] == encoder_out_1.shape[0] + encoder_out_2.shape[0] + encoder_out_3.shape[0]
         assert encoder_out_1.shape[0] == 1
@@ -300,7 +300,7 @@ class TestDiffusionBatching:
         birthday_cake_prompt,
         wave_prompt
     ):
-        module = tiny_sd.text_encoder.text_model.encoder.layers[-1]
+        module = tiny_sd.text_encoder.encoder.layers[-1]
 
         with tiny_sd.generate(
             num_inference_steps=20,
@@ -573,6 +573,229 @@ class TestDiffusionMetaLoading:
         # After trace, parameters should no longer be on meta device
         for param in model._model.unet.parameters():
             assert param.device.type != "meta"
+
+
+# =============================================================================
+# Rename Tests
+# =============================================================================
+
+
+class TestDiffusionRename:
+    """Tests for the ``rename={...}`` constructor kwarg on DiffusionModel."""
+
+    @torch.no_grad()
+    def test_rename_aliases_top_level_module(self, device, sd_prompt):
+        """Aliased top-level module is reachable via the alias and the original name still works."""
+        sd = DiffusionModel(
+            "segmind/tiny-sd",
+            torch_dtype=torch.float16,
+            safety_checker=None,
+            dispatch=True,
+            rename={"unet": "denoiser"},
+        ).to(device)
+
+        with sd.trace(sd_prompt) as tracer:
+            via_alias = sd.denoiser.output.save()
+            via_original = sd.unet.output.save()
+            output = tracer.result.save()
+
+        assert hasattr(output, "images")
+        # Both paths should yield the same Envoy → same captured value.
+        a = via_alias[0] if isinstance(via_alias, tuple) else via_alias
+        b = via_original[0] if isinstance(via_original, tuple) else via_original
+        assert torch.equal(a, b)
+
+    @torch.no_grad()
+    def test_rename_multiple_components(self, device, sd_prompt):
+        """Multiple aliases in one rename dict all resolve.
+
+        Modules must be accessed in forward-pass order: text_encoder runs
+        before unet in the SD pipeline.
+        """
+        sd = DiffusionModel(
+            "segmind/tiny-sd",
+            torch_dtype=torch.float16,
+            safety_checker=None,
+            dispatch=True,
+            rename={"unet": "denoiser", "text_encoder": "txt"},
+        ).to(device)
+
+        with sd.trace(sd_prompt) as tracer:
+            txt_out = sd.txt.output.save()
+            denoiser_out = sd.denoiser.output.save()
+
+        assert denoiser_out is not None
+        assert txt_out is not None
+
+
+# =============================================================================
+# Cache Tests
+# =============================================================================
+
+
+class TestDiffusionCache:
+    """Tests for ``tracer.cache(...)`` on DiffusionModel."""
+
+    @torch.no_grad()
+    def test_cache_unet_single_module(self, tiny_sd, sd_prompt):
+        """Caching a single denoiser module produces a single Cache.Entry."""
+        with tiny_sd.trace(sd_prompt) as tracer:
+            cache = tracer.cache(modules=[tiny_sd.unet]).save()
+
+        from nnsight.intervention.tracing.tracer import Cache
+
+        keys = list(cache.keys())
+        assert len(keys) == 1
+        entry = cache[keys[0]]
+        assert isinstance(entry, Cache.Entry)
+        assert entry.output is not None
+
+    @torch.no_grad()
+    def test_cache_multiple_modules(self, tiny_sd, sd_prompt):
+        """Caching multiple UNet sub-blocks records each path.
+
+        We use UNet sub-blocks (rather than top-level vae / text_encoder)
+        because the pipeline calls ``vae.decode(...)`` and the encoder via
+        a sub-method, so the top-level modules' ``forward`` doesn't fire
+        and they wouldn't be hit by the cache hook.
+        """
+        with tiny_sd.trace(sd_prompt) as tracer:
+            cache = tracer.cache(
+                modules=[
+                    tiny_sd.unet,
+                    tiny_sd.unet.conv_in,
+                    tiny_sd.unet.conv_out,
+                ]
+            ).save()
+
+        keys = set(cache.keys())
+        assert any(k.endswith(".unet") for k in keys)
+        assert any(k.endswith(".unet.conv_in") for k in keys)
+        assert any(k.endswith(".unet.conv_out") for k in keys)
+
+    @torch.no_grad()
+    def test_cache_accumulates_across_steps(self, tiny_sd, sd_prompt):
+        """Multi-step generate causes the same module to fire N times → list[Entry]."""
+        num_steps = 3
+        with tiny_sd.generate(
+            sd_prompt, num_inference_steps=num_steps, seed=42
+        ) as tracer:
+            cache = tracer.cache(modules=[tiny_sd.unet]).save()
+
+        from nnsight.intervention.tracing.tracer import Cache
+
+        keys = list(cache.keys())
+        assert len(keys) == 1
+        val = cache[keys[0]]
+        # CFG (default guidance_scale > 1) doubles every UNet call,
+        # so total entries are 2 * num_steps. With guidance_scale==1 it
+        # would be exactly num_steps. Either way it's a list.
+        assert isinstance(val, list)
+        assert len(val) >= num_steps
+        for entry in val:
+            assert isinstance(entry, Cache.Entry)
+            assert entry.output is not None
+
+    @torch.no_grad()
+    def test_cache_include_inputs(self, tiny_sd, sd_prompt):
+        """``include_inputs=True`` populates ``Entry.inputs`` and ``.input``."""
+        with tiny_sd.trace(sd_prompt) as tracer:
+            cache = tracer.cache(
+                modules=[tiny_sd.unet], include_inputs=True
+            ).save()
+
+        keys = list(cache.keys())
+        entry = cache[keys[0]]
+        # inputs is (args, kwargs); .input is the first positional/kwarg
+        assert entry.inputs is not None
+        assert entry.input is not None
+
+
+# =============================================================================
+# Source Tests
+# =============================================================================
+
+
+class TestDiffusionSource:
+    """Tests for ``.source.<op_name>.output`` on diffusion submodules."""
+
+    @torch.no_grad()
+    def test_source_op_output(self, tiny_sd, sd_prompt):
+        """Reading a UNet-internal operation's output via .source returns a tensor."""
+        with tiny_sd.trace(sd_prompt) as tracer:
+            conv_out = tiny_sd.unet.source.self_conv_out_0.output.save()
+
+        assert isinstance(conv_out, torch.Tensor)
+        # UNet conv_out produces [batch, 4 (channels), H, W] for SD pipelines
+        assert conv_out.ndim == 4
+
+    @torch.no_grad()
+    def test_source_op_replacement_changes_output(self, tiny_sd, sd_prompt):
+        """Zeroing an op's output via .source changes the final image."""
+        with tiny_sd.trace(sd_prompt) as tracer:
+            output_clean = tracer.result.save()
+
+        with tiny_sd.trace(sd_prompt) as tracer:
+            tiny_sd.unet.source.self_conv_out_0.output[:] = 0
+            output_modified = tracer.result.save()
+
+        clean_arr = np.array(output_clean.images[0])
+        modified_arr = np.array(output_modified.images[0])
+
+        assert not np.array_equal(clean_arr, modified_arr)
+
+    @torch.no_grad()
+    def test_recursive_source(self, tiny_sd, sd_prompt):
+        """Recursive .source — chain ``.source.<op>.source.<inner_op>`` inside a trace."""
+        attn = tiny_sd.unet.down_blocks[1].attentions[0]
+
+        with tiny_sd.trace(sd_prompt) as tracer:
+            inner_out = (
+                attn.source.self__get_output_for_continuous_inputs_0
+                .source.self_proj_out_0.output.save()
+            )
+
+        assert isinstance(inner_out, torch.Tensor)
+        assert inner_out.ndim == 4
+
+    @torch.no_grad()
+    def test_recursive_source_outside_trace_raises(self, tiny_sd):
+        """Recursive ``.source`` outside a trace raises a clear error."""
+        attn = tiny_sd.unet.down_blocks[1].attentions[0]
+        with pytest.raises(ValueError, match="Must be within a trace"):
+            _ = attn.source.self__get_output_for_continuous_inputs_0.source
+
+
+# =============================================================================
+# Skip Tests
+# =============================================================================
+
+
+class TestDiffusionSkip:
+    """Tests for ``module.skip(replacement)`` on DiffusionModel submodules."""
+
+    @torch.no_grad()
+    def test_skip_changes_output(self, tiny_sd, sd_prompt):
+        """Skipping ``unet.conv_in`` with zeros changes the final image vs the unmodified run."""
+        # Baseline
+        with tiny_sd.trace(sd_prompt) as tracer:
+            output_clean = tracer.result.save()
+
+        # Skip conv_in: replace its output with zeros of the expected shape.
+        # conv_in transforms latents [B, 4, H, W] → [B, 320, H, W] for SD 1.x.
+        with tiny_sd.trace(sd_prompt) as tracer:
+            inp = tiny_sd.unet.conv_in.input
+            replacement = torch.zeros(
+                (inp.shape[0], 320, inp.shape[2], inp.shape[3]),
+                dtype=inp.dtype,
+                device=inp.device,
+            )
+            tiny_sd.unet.conv_in.skip(replacement)
+            output_modified = tracer.result.save()
+
+        clean_arr = np.array(output_clean.images[0])
+        modified_arr = np.array(output_modified.images[0])
+        assert not np.array_equal(clean_arr, modified_arr)
 
 
 # =============================================================================

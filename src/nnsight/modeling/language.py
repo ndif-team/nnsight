@@ -79,6 +79,43 @@ class LanguageModel(TransformersModel):
 
         self.generator: Envoy = LanguageModel.Generator()
 
+    def _check_is_text_only(self, repo_id: str) -> None:
+        """Raise a friendly error if ``self.config`` belongs to a multimodal model.
+
+        Modern multimodal models (Qwen-VL, Llama-Vision, Kimi, etc.) register
+        their config class with ``AutoModelForImageTextToText`` rather than
+        ``AutoModelForCausalLM``, and nest text-side fields (``vocab_size``,
+        ``num_hidden_layers``, …) under ``config.text_config``. Loading them
+        through ``LanguageModel`` errors deep inside HuggingFace with a
+        confusing ``AttributeError: '...Config' object has no attribute
+        'vocab_size'``. Catch the case up front and tell the user to use
+        ``VisionLanguageModel`` instead.
+
+        Only fires when ``automodel`` is the default ``AutoModelForCausalLM``;
+        if the user has chosen a non-default automodel, we don't second-guess.
+        """
+
+        if self.automodel is not AutoModelForCausalLM:
+            return
+
+        try:
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES,
+            )
+        except ImportError:
+            return
+
+        model_type = getattr(self.config, "model_type", None)
+        if model_type and model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
+            raise ValueError(
+                f"{repo_id!r} ({model_type}) is registered with "
+                f"AutoModelForImageTextToText — it's a multimodal model so "
+                f"LanguageModel(...) can't load it. Use VisionLanguageModel "
+                f"instead:\n\n"
+                f"    from nnsight import VisionLanguageModel\n"
+                f"    model = VisionLanguageModel({repo_id!r}, ...)"
+            )
+
     def _load_meta(
         self,
         repo_id: str,
@@ -88,6 +125,8 @@ class LanguageModel(TransformersModel):
     ):
 
         self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._check_is_text_only(repo_id)
 
         self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
@@ -106,6 +145,8 @@ class LanguageModel(TransformersModel):
     ):
 
         self._load_config(repo_id, revision=revision, **kwargs)
+
+        self._check_is_text_only(repo_id)
 
         self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
@@ -299,6 +340,16 @@ class LanguageModel(TransformersModel):
 
         if attention_mask is not None:
             inputs["attention_mask"] = attention_mask
+
+        tokenized_input_ids = inputs.get("input_ids", None)
+        if (
+            isinstance(tokenized_input_ids, torch.Tensor)
+            and tokenized_input_ids.shape[-1] == 0
+        ):
+            raise ValueError(
+                "Input produced zero tokens after tokenization. "
+                "Pass a non-empty prompt or non-empty `input_ids`."
+            )
 
         return (
             tuple(),

@@ -249,6 +249,7 @@ class Envoy(Batchable):
     def trace(
         self,
         *args,
+        trace: bool = True,
         fn: Optional[Callable] = None,
         tracer_cls: Type[InterleavingTracer] = InterleavingTracer,
         **kwargs,
@@ -269,14 +270,27 @@ class Envoy(Batchable):
 
         Args:
             *args: Arguments to pass to the tracer
+            trace: If False, bypass tracing entirely — run the underlying
+                module on the prepared input and return its output.
+                Useful for one-shot forward passes that don't need
+                intervention. Defaults to True.
             **kwargs: Keyword arguments to pass to the tracer
 
         Returns:
-            An InterleavingTracer for this module
+            An InterleavingTracer for this module, or — when ``trace=False``
+            — the module's output value directly.
         """
 
         if fn is None:
             fn = self.__call__
+
+        # ``trace=False``: bypass tracing, run the module directly on the
+        # prepared input. Mirrors the WithBlockNotFoundError fallback in
+        # __getattr__ so users get the same one-shot semantics whether
+        # they call ``model.method(...)`` (no with) or ``model.trace(..., trace=False)``.
+        if not trace:
+            args, kwargs, _ = self._prepare_input(*args, **kwargs)
+            return fn(*args, **kwargs)
 
         return tracer_cls(fn, self, *args, **kwargs)
 
@@ -993,15 +1007,17 @@ class Envoy(Batchable):
                 # If the Envoy defines a method with __nnsight_{name}__, use it instead to override
                 value = getattr(self, f"__nnsight_{name}__", value)
 
-                def trace(*args, **kwargs):
+                def trace(*args, trace: bool = True, **kwargs):
+
+                    if not trace:
+                        args, kwargs, _ = self._prepare_input(*args, **kwargs)
+                        return value(*args, **kwargs)
+
                     try:
                         tracer = self.trace(*args, fn=value, **kwargs)
                         tracer.capture()
                         return tracer
                     except WithBlockNotFoundError as e:
-
-                        args, kwargs, _ = self._prepare_input(*args, **kwargs)
-
                         return value(*args, **kwargs)
 
                 return trace
@@ -1026,6 +1042,10 @@ class Envoy(Batchable):
         If the value is a PyTorch module, it will be wrapped in an Envoy to enable
         intervention during execution.
 
+        Otherwise the write is mirrored to both the Envoy and the wrapped module
+        when applicable, so that reads via ``__dict__`` short-circuit and reads via
+        ``__getattr__`` (which falls through to ``_module``) stay consistent.
+
         Args:
             key: The attribute name
             value: The attribute value
@@ -1033,11 +1053,18 @@ class Envoy(Batchable):
 
         if key != "_module" and isinstance(value, torch.nn.Module):
             self._add_envoy(value, key)
-        else:
-            if "_module" in self.__dict__ and hasattr(self._module, key):
-                return setattr(self._module, key, value)
-            else:
-                super().__setattr__(key, value)
+            return
+
+        on_module = "_module" in self.__dict__ and hasattr(self._module, key)
+
+        # Set on the Envoy if it already owns the key, or if there's no _module
+        # to fall through to.
+        if key in self.__dict__ or not on_module:
+            super().__setattr__(key, value)
+
+        # Mirror to _module so the wrapped model stays in sync with the wrapper.
+        if on_module:
+            setattr(self._module, key, value)
 
     def __getstate__(self):
 

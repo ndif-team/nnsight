@@ -380,6 +380,32 @@ class SkipException(Exception):
         self.value = value
 
 
+def _store_deferred_exception(mediator: Any, exception: Exception) -> None:
+    """Capture a deferred exception + metadata on the mediator.
+
+    Populates ``deferred_exception`` alongside three serialization-friendly
+    fields read by ``intervention.errors.capture_deferred``:
+
+    - ``_deferred_type_name``: original exception class name, captured BEFORE
+      any ``wrap_exception`` call that would replace the class with a dynamic
+      ``NNsightException`` subclass.
+    - ``_deferred_traceback``: formatted traceback string of the original
+      exception, for debugging across the server boundary where the user
+      cannot inspect the live frames.
+    - ``_deferred_is_control_flow``: True for ``EarlyStopException`` (raised
+      by ``tracer.stop()``), so server paths can filter intentional control
+      flow out of error responses without name compares.
+    """
+    import traceback as _tb
+
+    mediator._deferred_type_name = type(exception).__name__
+    mediator._deferred_traceback = "".join(
+        _tb.format_exception(type(exception), exception, exception.__traceback__)
+    )
+    mediator._deferred_is_control_flow = isinstance(exception, EarlyStopException)
+    mediator.deferred_exception = exception
+
+
 NNSIGHT_PREFIX = "__nnsight"
 
 
@@ -415,6 +441,11 @@ class Interleaver:
         self.initialize(mediators, tracer, batcher)
 
         self._interleaving = False
+
+        # Set by the vLLM model runner around ``execute_model`` so that
+        # exceptions raised inside the worker are stored on each
+        # mediator instead of bubbling up and killing the engine.
+        self.defer_exceptions = False
 
     def initialize(
         self,
@@ -546,13 +577,9 @@ class Interleaver:
                     # Multi-invoke skip: each mediator's hook contributed its
                     # narrow value. Sort by batch start and concat along dim 0
                     # so the splice matches the model's expected batch order.
-                    entries.sort(
-                        key=lambda e: e[0][0] if e[0] is not None else -1
-                    )
+                    entries.sort(key=lambda e: e[0][0] if e[0] is not None else -1)
                     values = [v for _, v in entries]
-                    return applyn(
-                        values, lambda *t: torch.cat(t, dim=0), torch.Tensor
-                    )
+                    return applyn(values, lambda *t: torch.cat(t, dim=0), torch.Tensor)
                 source_accessor = getattr(m, "__source_accessor__", None)
 
                 # Once a SourceAccessor exists for this module (built on the
@@ -617,8 +644,14 @@ class Interleaver:
         # Clear the mediators that are no longer alive.
         self.mediators = [mediator for mediator in self.mediators if mediator.alive]
 
-        # Ignore EarlyStopException errors.
-        if exc_type is not None and issubclass(exc_type, EarlyStopException):
+        # Swallow internal control-flow exceptions so they don't escape the
+        # ``with self.interleaver:`` block in server worker paths and kill
+        # the engine. ``EarlyStopException`` is ``tracer.stop()`` control
+        # flow; ``Cancelation`` is internal mediator bookkeeping (raised
+        # when ``mediator.cancel()`` is called during cleanup).
+        if exc_type is not None and issubclass(
+            exc_type, (EarlyStopException, Cancelation)
+        ):
             return True
 
     def handle(
@@ -859,6 +892,17 @@ class Mediator:
         self.cross_invoker = None
 
         self.original_globals = {}
+
+        # Set by ``handle_exception_event`` when the interleaver is in
+        # defer mode (vLLM); collected by the model runner from each
+        # mediator and shipped back to the client as
+        # ``saves["__nnsight_exceptions__"][base_id]``.
+        self.deferred_exception = None
+        # Metadata captured at deferral time for server-side serialization.
+        # See ``_store_deferred_exception`` and ``intervention.errors``.
+        self._deferred_type_name: Optional[str] = None
+        self._deferred_traceback: Optional[str] = None
+        self._deferred_is_control_flow: bool = False
 
         self._prev = None
 
@@ -1136,8 +1180,30 @@ class Mediator:
         # Cancelation is okay
         if not isinstance(exception, Cancelation):
 
+            # In vLLM mode, defer the exception so the engine stays
+            # alive.  The mediator is already cancelled (above), so
+            # subsequent hooks will skip it.  Other mediators keep
+            # running and the model runner ships this exception back to
+            # the client alongside any saves that were already collected.
+            #
+            # Capture metadata BEFORE ``wrap_exception`` rewrites the type
+            # and traceback — the dynamic ``NNsightException`` subclass and
+            # rebuilt traceback are useful for the local-raise path but
+            # lose information across the server boundary, where the
+            # client only sees what we serialize.  ``_store_deferred_exception``
+            # also records ``deferred_exception`` itself, so the assignment
+            # below the wrap_exception call replaces it with the wrapped
+            # form for any downstream consumer that wants the rich type.
+            if self.interleaver.defer_exceptions:
+                _store_deferred_exception(self, exception)
+
             # because of the defered execution of NNsight, we need to rebuild where the execption was in the original user code instead of this execption.
             exception = wrap_exception(exception, self.info)
+
+            if self.interleaver.defer_exceptions:
+                self.cancel()
+                self.deferred_exception = exception
+                return False
 
             raise exception
 
@@ -1146,6 +1212,16 @@ class Mediator:
     def handle_barrier_event(self, provider: Any, participants: Set[str]):
         """
         Handle a barrier event by setting a barrier.
+
+        Propagates each participant's nested handle return value back
+        into ``batcher.current_value``.  Without this, a SWAP fired in
+        a participant's body during the barrier walk produces a new
+        tensor (concat path) that ``Mediator.handle``'s ``prev_value``
+        restore immediately discards — making cross-invoke transfers
+        of swapped values silently no-op.  The nested handle's return
+        value is the post-restore value (captured before the restore
+        runs in :meth:`Mediator.handle`), so re-assigning it here
+        carries the swap forward to the outer handle context.
         """
 
         if participants is not None:
@@ -1160,7 +1236,11 @@ class Mediator:
 
                     mediator.respond()
 
-                    mediator.handle(provider, self.interleaver.batcher.current_value)
+                    result = mediator.handle(
+                        provider, self.interleaver.batcher.current_value
+                    )
+
+                    self.interleaver.batcher.current_value = result
 
             self.interleaver.current = prev_current
 
@@ -1426,3 +1506,7 @@ class Mediator:
         self.args = list()
         self.original_globals = {}
         self.cross_invoker = None
+        self.deferred_exception = None
+        self._deferred_type_name = None
+        self._deferred_traceback = None
+        self._deferred_is_control_flow = False

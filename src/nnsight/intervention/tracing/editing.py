@@ -22,8 +22,6 @@ class EditingTracer(InterleavingTracer):
         **kwargs,
     ):
 
-        self.capture()
-
         self.return_tracer = False
 
         super().__init__(*args, backend=backend, **kwargs)

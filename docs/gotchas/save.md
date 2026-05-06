@@ -11,6 +11,7 @@ sources: [src/nnsight/intervention/tracing/globals.py:9, src/nnsight/interventio
 ## TL;DR
 - Forget `.save()` and the variable is filtered out when the **root** trace exits — you get `NameError` or stale references.
 - `.save()` is required inside `model.scan(...)` too, not only `model.trace(...)`.
+- **Reassigning a saved name to an unsaved value un-saves it.** `x = t.save(); x = 2` leaves the outer `x` at its pre-trace value — the save filter tracks `id(value)`, not the name.
 - **Nested traces don't need `.save()` between them.** Variables flow freely between an inner trace and its enclosing tracing context (e.g. inside a `model.session()`). Only the root-trace boundary applies the save filter.
 - For remote traces, `.save()` is the *only* mechanism that transmits values back — non-saved values are dropped on the server.
 - `local_list.append(x.save())` where `local_list` was defined *outside* the trace ends up empty for remote traces; create the list *inside* the trace.
@@ -43,6 +44,45 @@ print(output.shape)   # torch.Size([1, 2, 768])
 ### Mitigation / how to spot it early
 - If a variable "exists inside the trace but disappears outside", you forgot `.save()`.
 - Make `.save()` your default — strip it back if you don't need the value.
+
+---
+
+## Reassigning a saved name un-saves it
+
+### Symptom
+You called `.save()` on a value, then later in the same trace rebound the same name to something unsaved. After the trace exits, the outer name still holds its pre-trace value (or is undefined) — the saved tensor is lost.
+
+### Cause
+The save filter tracks the `id(...)` of the saved object, not the name it was bound to. Rebinding the name to a new (unsaved) object means the saved tensor is no longer reachable through that local at trace-exit time, and the filter drops everything else.
+
+### Wrong code
+```python
+x = "default"
+with model.trace("a"):
+    x = torch.tensor([1, 2, 3]).save()
+    x = 2                            # rebinds x to an unsaved int
+print(x)   # "default" (or NameError if x was undefined before the trace)
+```
+
+### Right code
+```python
+with model.trace("a"):
+    x = torch.tensor([1, 2, 3]).save()   # leave x bound to the saved tensor
+print(x)   # tensor([1, 2, 3])
+```
+
+If you need the integer too, give it its own name and save it explicitly:
+```python
+import nnsight
+with model.trace("a"):
+    x = torch.tensor([1, 2, 3]).save()
+    y = nnsight.save(2)
+print(x, y)
+```
+
+### Mitigation / how to spot it early
+- Treat `.save()` as binding the *value* to its return slot; don't reuse the name for something else in the same trace.
+- If a saved tensor mysteriously disappears, search the trace body for any later assignment to the same name.
 
 ---
 

@@ -34,7 +34,7 @@ The overhead is **constant** in model size — it doesn't scale with parameter c
 
 `Tracer.capture` (`src/nnsight/intervention/tracing/base.py:204`) is the bulk of trace setup:
 
-1. Walk the call stack to find the user's frame (`get_non_nnsight_frame`).
+1. Find the user's frame. From `Tracer.__enter__` this is `get_entered_frame()` — walks past any `__enter__` chain (subclass `super().__enter__()` calls, user-defined CM wrappers). For the two direct-capture call sites (`Tensor.backward` patcher, `Envoy.__getattr__` fallback) `capture(frame=None)` falls back to `get_non_nnsight_frame()`, which walks the stack until the next frame's `__name__` is not `nnsight*`.
 2. Compute `cache_key = hash((co_filename, start_line, co_name, co_firstlineno))`.
 3. Look up `Globals.cache.get(cache_key)` — if present, reuse source, AST node, and filename. Done.
 4. On miss: extract source via `inspect.getsourcelines(frame)`, normalize indentation, parse the AST to find the `with` block, compile, and store in cache.

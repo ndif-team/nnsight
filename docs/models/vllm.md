@@ -326,6 +326,23 @@ Print `model` to see the actual tree for your model.
 
 ## Gotchas
 
+- **Scripts must use an `if __name__ == "__main__":` guard.** vLLM uses `spawn` multiprocessing for its EngineCore subprocess (CUDA contexts can't be safely forked), and `spawn` re-imports your main module in the child. Without the guard, the child re-runs the top-level `VLLM(...)` / `.trace(...)` calls and tries to spawn another EngineCore — Python's `_check_not_importing_main` then raises `RuntimeError: An attempt has been made to start a new process before the current process has finished its bootstrapping phase`. The fix is the standard idiom:
+
+  ```python
+  from nnsight.modeling.vllm import VLLM
+
+  def main():
+      model = VLLM("gpt2")
+      with model.trace("hello", max_tokens=1):
+          out = model.transformer.h[0].output.save()
+      print(out.shape)
+
+  if __name__ == "__main__":
+      main()
+  ```
+
+  This is a vLLM / Python multiprocessing requirement, not nnsight-specific — raw `vllm.LLM(...)` at module level has the same constraint. Notebooks (Jupyter / Colab) are fine because they don't re-import.
+
 - **Mode is set at construction time, not per-trace.** You can't switch between sync and async on the same `VLLM` instance. Construct with `mode="async"` if you want streaming.
 - **`tracer.backend()` only exists in async mode.** In sync mode, results are pushed back into your local variables automatically when the trace block exits.
 - **`model.logits` and `model.samples` are NNsight-specific eproperties** (`vllm.py:102-122`) — they don't exist on a vanilla `vllm.LLM`. Don't try to use them outside a trace.

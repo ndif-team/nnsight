@@ -646,6 +646,13 @@ class OperationEnvoy:
         # Local import to avoid circular dependency at module import time.
         from .hooks import operation_fn_hook
 
+        if self.interleaver is None or self.interleaver.current is None:
+            raise ValueError(
+                "Must be within a trace to use recursive `.source` "
+                f"(on operation `{self.path}`). Access the operation's "
+                "nested `.source` from inside a `with model.trace(...)` block."
+            )
+
         accessor = self.accessor
         mediator = self.interleaver.current
 

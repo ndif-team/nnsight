@@ -302,6 +302,14 @@ class Batcher:
                 current_value.requires_grad and current_value.is_leaf
             ) or current_value._base is not None
 
+            # When ``swap_value`` is itself a view of ``current_value``
+            # (e.g. user read a narrow slice from the batcher and assigned
+            # it back), in-place assignment ``current_value[start:end] =
+            # swap_value`` creates a self-referential autograd graph and
+            # segfaults during backward.  Force the concat path instead.
+            if not needs_concat and swap_value._base is current_value:
+                needs_concat = True
+
             if needs_concat:
                 pre = current_value.narrow(0, 0, batch_start)
                 post = (

@@ -338,6 +338,26 @@ def get_non_nnsight_frame() -> FrameType:
     return frame
 
 
+def get_entered_frame() -> FrameType:
+    """Return the frame that executed the user's ``with`` statement.
+
+    Designed to be called from within a ``__enter__`` implementation.
+    Starts from the caller (the immediate ``__enter__`` frame) and
+    walks past any chain of ``__enter__`` frames — both subclasses
+    calling ``super().__enter__()`` and user-defined context-manager
+    wrappers whose ``__enter__`` opens the inner ``with`` block. The
+    first non-``__enter__`` frame above is the user's actual frame.
+    """
+    frame = inspect.currentframe().f_back  # the __enter__ that called us
+    while frame is not None and frame.f_back is not None:
+        back = frame.f_back
+        if back.f_code.co_name == "__enter__":
+            frame = back
+            continue
+        break
+    return frame.f_back if frame is not None else None
+
+
 _py_object = ctypes.py_object
 _c_int_0 = ctypes.c_int(0)
 _locals_to_fast = ctypes.pythonapi.PyFrame_LocalsToFast
