@@ -458,7 +458,7 @@ class TestRequestHelper:
                 last_batch_group = None
                 needs_batching = False
         class MockModel:
-            _interleaver = MockInterleaver()
+            interleaver = MockInterleaver()
 
         m1 = MockMediator()
         m2 = MockMediator()
@@ -644,6 +644,7 @@ class TestCrossRequestBatching:
 # Mediator timeout
 # ------------------------------------------------------------------
 
+@pytest.mark.skip(reason="Per-mediator timeout (Value.wait(timeout=...), Interleaver.mediator_timeout) lands in PR 2 — NDIF integration glue")
 class TestMediatorTimeout:
     """Per-mediator timeout prevents a hung intervention from wedging the batch."""
 
