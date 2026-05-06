@@ -371,6 +371,41 @@ class EarlyStopException(Exception):
     pass
 
 
+class MediatorTimeout(Exception):
+    """Raised by ``Mediator.Value.wait`` when ``Interleaver.mediator_timeout``
+    expires before a value arrives.
+
+    Servers convert this to ``TimeoutError`` and store it via
+    ``_store_deferred_exception`` so the offending request is finalized
+    with an error envelope while siblings keep running.
+    """
+
+
+def _store_deferred_exception(mediator: Any, exception: Exception) -> None:
+    """Capture a deferred exception + metadata on the mediator.
+
+    Populates ``deferred_exception`` alongside three serialization-friendly
+    fields read by ``intervention.errors.capture_deferred``:
+
+    - ``_deferred_type_name``: original exception class name, captured
+      BEFORE any ``wrap_exception`` call that would replace the class
+      with a dynamic ``NNsightException`` subclass.
+    - ``_deferred_traceback``: formatted traceback string of the
+      original exception, for debugging across the server boundary.
+    - ``_deferred_is_control_flow``: True for ``EarlyStopException`` so
+      downstream surfacing can filter it out without string-name
+      compares.
+    """
+    import traceback as _tb
+
+    mediator._deferred_type_name = type(exception).__name__
+    mediator._deferred_traceback = "".join(
+        _tb.format_exception(type(exception), exception, exception.__traceback__)
+    )
+    mediator._deferred_is_control_flow = isinstance(exception, EarlyStopException)
+    mediator.deferred_exception = exception
+
+
 class SkipException(Exception):
     """
     Exception raised to skip the execution of the model.
@@ -438,8 +473,10 @@ class Interleaver:
             tracer (InterleavingTracer): The tracer object that created this interleaver.
             batcher (Batcher): The batcher object that manages the slice of inputs associtated with each mediator.
         """
-        self.initialize(mediators, tracer, batcher)
-
+        # Must be set BEFORE ``initialize`` — the invariant assertion
+        # in ``initialize`` reads ``self.interleaving`` to refuse resets
+        # mid-session. At first construction we're definitively not
+        # interleaving yet.
         self._interleaving = False
 
         # Set by the vLLM model runner around ``execute_model`` so that
@@ -447,12 +484,47 @@ class Interleaver:
         # mediator instead of bubbling up and killing the engine.
         self.defer_exceptions = False
 
+        # Wall-clock per-mediator timeout used by per-mediator
+        # ``Value.wait`` calls. ``None`` (default) means wait forever —
+        # appropriate for local single-trace runs. Servers set a finite
+        # value (e.g. 30 s) so a hung user intervention can't wedge the
+        # shared forward thread and block all concurrent requests.
+        self.mediator_timeout: Optional[float] = None
+
+        # Optional factory that wraps the user's intervention function in
+        # a per-thread context (e.g. NDIF's import/builtin sandbox). The
+        # worker thread calls ``worker_context(intervention.__globals__)``
+        # and runs the user code inside the returned context manager.
+        # ``None`` disables the wrap — local ``model.trace()`` runs
+        # unsandboxed.
+        self.worker_context: Optional[Callable[[dict], Any]] = None
+
+        self.initialize(mediators, tracer, batcher)
+
     def initialize(
         self,
         mediators: List[Mediator],
         tracer: InterleavingTracer,
         batcher: Batcher = None,
     ):
+
+        # Resetting ``self.current = None`` and replacing
+        # ``self.mediators`` while an active interleaving session is
+        # still running causes a race: a background worker's
+        # ``Mediator.start()`` relies on ``current = self`` staying
+        # stable between ``worker.start()`` and the worker's first
+        # ``.output`` access. Fail loudly so a future handler that
+        # forgets doesn't silently reintroduce intermittent races
+        # under load.
+        if self._interleaving:
+            raise RuntimeError(
+                "Cannot Interleaver.initialize() while interleaving is "
+                "active. Handler paths that share model.interleaver with "
+                "a background execution thread must call "
+                "tracer._run_user_fn(fn) WITHOUT "
+                "tracer._init_shared_interleaver() and read mediators "
+                "from tracer.mediators directly."
+            )
 
         self.mediators: List[Mediator] = mediators
 
@@ -649,8 +721,13 @@ class Interleaver:
         # the engine. ``EarlyStopException`` is ``tracer.stop()`` control
         # flow; ``Cancelation`` is internal mediator bookkeeping (raised
         # when ``mediator.cancel()`` is called during cleanup).
+        # ``MediatorTimeout`` / ``TimeoutError``: ``__enter__`` / Mediator
+        # methods already stored the timeout via
+        # ``_store_deferred_exception`` and abandoned the worker; raising
+        # here would double-surface and crash the engine for sibling
+        # requests. Servers see it via ``mediator.deferred_exception``.
         if exc_type is not None and issubclass(
-            exc_type, (EarlyStopException, Cancelation)
+            exc_type, (EarlyStopException, Cancelation, MediatorTimeout, TimeoutError)
         ):
             return True
 
@@ -837,8 +914,27 @@ class Mediator:
 
             return value
 
-        def wait(self):
-            self.lock.acquire()
+        def wait(self, timeout: Optional[float] = None) -> bool:
+            """Block until ``put`` is called or ``timeout`` seconds pass.
+
+            Args:
+                timeout: Wall-clock seconds to wait. ``None`` blocks
+                    forever (matches the original behavior used by
+                    local single-trace runs).
+
+            Returns:
+                ``True`` if a value arrived; ``False`` on timeout.
+
+            Note:
+                ``_thread.LockType.acquire`` returns a bool when called
+                with a numeric timeout, so we forward that. With no
+                timeout we just block on the lock and return ``True``
+                because by then ``put`` released it.
+            """
+            if timeout is None:
+                self.lock.acquire()
+                return True
+            return bool(self.lock.acquire(timeout=timeout))
 
         def put(self, value: Any):
             self.restore(value)
@@ -903,6 +999,14 @@ class Mediator:
         self._deferred_type_name: Optional[str] = None
         self._deferred_traceback: Optional[str] = None
         self._deferred_is_control_flow: bool = False
+
+        # Per-server-trace saves set, populated by
+        # ``NNsightRequestHelper._register_mediator``. Filters which
+        # frame-local values count as "saved" when the worker thread's
+        # ``.save()`` calls fan out across the global-and-context-var
+        # set. ``None`` outside server contexts. Initialized to ``None``
+        # in ``__setstate__`` too — server reconstructs it post-pickle.
+        self._trace_saves: Optional[set] = None
 
         self._prev = None
 
@@ -971,11 +1075,22 @@ class Mediator:
 
         _intervention = self.intervention
         _args = (self, self.info, *self.args)
+        _worker_context = self.interleaver.worker_context
 
         def _worker_target():
             if _caller_stream is not None:
                 torch.cuda.set_stream(_caller_stream)
-            _intervention(*_args)
+            if _worker_context is None:
+                _intervention(*_args)
+            else:
+                # Scope a caller-provided sandbox (e.g. NDIF's import /
+                # builtin Protector) to exactly this worker thread and
+                # the user frame it's about to execute. The factory
+                # receives the intervention's ``__globals__`` so it can
+                # swap ``__builtins__`` on the user frame without
+                # touching process state.
+                with _worker_context(_intervention.__globals__):
+                    _intervention(*_args)
 
         # Start the worker thread.
         self.worker = Thread(
@@ -986,7 +1101,16 @@ class Mediator:
 
         self.interleaver.current = self
         self.worker.start()
-        self.event_queue.wait()
+        # Bound the wait so a hung user intervention can't wedge the
+        # shared forward thread. ``mediator_timeout=None`` (default for
+        # local single-trace runs) preserves the original block-forever
+        # behavior. ``MediatorTimeout`` is converted to a stored
+        # ``TimeoutError`` by ``Interleaver.__enter__`` for server paths.
+        if not self.event_queue.wait(timeout=self.interleaver.mediator_timeout):
+            raise MediatorTimeout(
+                f"Mediator {self.name} did not emit its first event within "
+                f"{self.interleaver.mediator_timeout}s"
+            )
 
         # Handle the first event for each mediator to clear mediators that already ended.
         try:
@@ -1306,7 +1430,10 @@ class Mediator:
 
         # Respond and resume the mediator thread.
         self.response_queue.put(value)
-        self.event_queue.wait()
+        if not self.event_queue.wait(timeout=self.interleaver.mediator_timeout):
+            raise MediatorTimeout(
+                f"Mediator {self.name} hung after respond ({self.interleaver.mediator_timeout}s)"
+            )
 
     ### Requester Methods ###
 
@@ -1331,7 +1458,11 @@ class Mediator:
         self.event_queue.put((event, requester))
 
         # Wait for the interleaver to process the event and respond with the value.
-        self.response_queue.wait()
+        if not self.response_queue.wait(timeout=self.interleaver.mediator_timeout):
+            raise MediatorTimeout(
+                f"Mediator {self.name} forward thread did not respond within "
+                f"{self.interleaver.mediator_timeout}s"
+            )
         response = self.response_queue.get()
 
         # If the response is an exception, raise it.
@@ -1510,3 +1641,14 @@ class Mediator:
         self._deferred_type_name = None
         self._deferred_traceback = None
         self._deferred_is_control_flow = False
+        # ``_trace_saves`` is per-server-trace state — the server
+        # reconstructs it post-deserialize via
+        # ``NNsightRequestHelper._register_mediator``. Must default to
+        # ``None`` so a freshly-unpickled mediator matches a freshly-
+        # constructed one for the single-shot path that bypasses the
+        # request helper.
+        self._trace_saves: Optional[set] = None
+        self.transform = None
+        self.lock = 0
+        self._prev = None
+        self.skip_container = None

@@ -460,18 +460,24 @@ class InterleavingTracer(Tracer):
 
         return self._frame
 
-    def _setup_interleaver(self, fn: Callable):
-        """Run compiled user code, collect batched args, and initialize the interleaver.
+    def _run_user_fn(self, fn: Callable):
+        """Run compiled user code and collect the batched arguments.
+
+        First phase of trace execution. Populates ``self.mediators`` as a
+        side effect of ``fn(info, self)``. Does NOT initialize the
+        interleaver — that's a separate step (see
+        :meth:`_init_shared_interleaver`) so server paths can skip it
+        when another thread already owns ``model.interleaver``.
 
         Returns:
             (args, kwargs): The batched positional and keyword arguments.
         """
         # Process-global one-shot: install ``Object.save`` on every type so
         # outer-body code (``out_ids = [...].save()`` etc.) resolves before
-        # ``fn(...)`` runs. ``_setup_interleaver`` is the chokepoint for
-        # outer-body execution — every executor (ExecutionBackend,
-        # AsyncVLLMBackend, vLLM serve ``server.py``, LocalSimulationBackend)
-        # routes through here in whatever process runs the tracer.
+        # ``fn(...)`` runs. This is the chokepoint for outer-body
+        # execution — every executor (ExecutionBackend, AsyncVLLMBackend,
+        # vLLM serve ``server.py``, LocalSimulationBackend) routes through
+        # here in whatever process runs the tracer.
         from .globals import _ensure_mounted
 
         _ensure_mounted()
@@ -484,9 +490,40 @@ class InterleavingTracer(Tracer):
         self.batcher.batched_args = tuple()
         self.batcher.batched_kwargs = {}
 
+        return args, kwargs
+
+    def _init_shared_interleaver(self):
+        """Bind this tracer's mediators onto ``model.interleaver``.
+
+        Skip this from server-side paths (HTTP handlers, async vLLM
+        backends, HF CB handlers) where another thread already owns
+        ``model.interleaver``. ``Interleaver.initialize`` resets
+        ``current = None`` and replaces ``mediators``/``batcher``; on a
+        background thread that races with ``Mediator.start()`` (which
+        relies on ``current = self`` staying stable between
+        ``worker.start()`` and the worker's first ``.output`` access).
+        Callers that skip this must read mediators from
+        ``self.mediators`` rather than ``model.interleaver.mediators``.
+        """
         interleaver = self.model.interleaver
         interleaver.initialize(self.mediators, self, batcher=self.batcher)
 
+    def _setup_interleaver(
+        self, fn: Callable, init_interleaver: bool = True
+    ):
+        """Backward-compatible wrapper: run user fn + (optionally) init.
+
+        ``init_interleaver=False`` lets server paths share an interleaver
+        across requests without racing on a re-init. New code should
+        prefer :meth:`_run_user_fn` and :meth:`_init_shared_interleaver`
+        explicitly.
+
+        Returns:
+            (args, kwargs): The batched positional and keyword arguments.
+        """
+        args, kwargs = self._run_user_fn(fn)
+        if init_interleaver:
+            self._init_shared_interleaver()
         return args, kwargs
 
     def execute(self, fn: Callable):
@@ -495,7 +532,8 @@ class InterleavingTracer(Tracer):
         then creates an Interleaver to manage the interventions during model execution.
         """
 
-        args, kwargs = self._setup_interleaver(fn)
+        args, kwargs = self._run_user_fn(fn)
+        self._init_shared_interleaver()
 
         try:
             self.model.interleave(self.fn, *args, **kwargs)

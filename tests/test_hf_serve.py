@@ -644,7 +644,6 @@ class TestCrossRequestBatching:
 # Mediator timeout
 # ------------------------------------------------------------------
 
-@pytest.mark.skip(reason="Per-mediator timeout (Value.wait(timeout=...), Interleaver.mediator_timeout) lands in PR 2 — NDIF integration glue")
 class TestMediatorTimeout:
     """Per-mediator timeout prevents a hung intervention from wedging the batch."""
 
@@ -694,7 +693,6 @@ class TestMediatorTimeout:
         assert result is True
         assert 0.05 < elapsed < 0.5
 
-    @pytest.mark.skip(reason="Requires Interleaver.mediator_timeout (lands in PR 2 — NDIF integration glue)")
     def test_hung_intervention_times_out(self, model):
         """A hung intervention times out with a warning, doesn't hang the trace.
 
