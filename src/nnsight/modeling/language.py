@@ -78,6 +78,13 @@ class LanguageModel(TransformersModel):
         super().__init__(*args, automodel=automodel, **kwargs)
 
         self.generator: Envoy = LanguageModel.Generator()
+        # Hookpoints for server-controlled generation: ``logits`` is fed
+        # the post-LM-head tensor before sampling, ``samples`` the
+        # sampled token IDs after. Mirrors the eproperty hookpoints on
+        # ``VLLM`` so HF-serve interventions can target the same logical
+        # values that vLLM-serve users target.
+        self.logits: Envoy = WrapperModule()
+        self.samples: Envoy = WrapperModule()
 
     def _check_is_text_only(self, repo_id: str) -> None:
         """Raise a friendly error if ``self.config`` belongs to a multimodal model.
