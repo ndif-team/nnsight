@@ -44,6 +44,11 @@ from .schema.config import ConfigModel
 PATH = os.path.dirname(os.path.abspath(__file__))
 CONFIG = ConfigModel.load(PATH)
 
+# Pinned vLLM version that the integration in ``modeling/vllm/`` is
+# tested against. ``modeling/vllm/vllm.py`` reads this on import and
+# raises a clear error if a different version is installed.
+NNS_VLLM_VERSION = "0.19.1"
+
 from importlib.metadata import PackageNotFoundError, version
 
 try:

@@ -121,7 +121,6 @@ class TestStateCleanupAfterFailure:
         the exact leak path the fix closes.
         """
         from nnsight.intervention.backends import Backend
-        from nnsight.intervention.tracing.globals import Globals
         from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
 
         server = VanillaBatchServer(model, token_budget=128, max_batch_size=4)
@@ -163,19 +162,15 @@ class TestStateCleanupAfterFailure:
                 if tracer is None:
                     return
                 interventions = Backend.__call__(self_inner, tracer)
-                try:
-                    Globals.enter()
-                    _args, kwargs = tracer._run_user_fn(interventions)
-                    # Test simulator: restore interleaver state for bg thread
-                    # since the model fixture is shared across tests.
-                    tracer._init_shared_interleaver()
-                    entries = self_inner.server.build_entries(kwargs, mediators=tracer.mediators)
-                    tracer.mediators.clear()
-                    pending = [
-                        (e, self_inner.server.submit(e)) for e in entries
-                    ]
-                finally:
-                    Globals.exit()
+                _args, kwargs = tracer._run_user_fn(interventions)
+                # Test simulator: restore interleaver state for bg thread
+                # since the model fixture is shared across tests.
+                tracer._init_shared_interleaver()
+                entries = self_inner.server.build_entries(kwargs, mediators=tracer.mediators)
+                tracer.mediators.clear()
+                pending = [
+                    (e, self_inner.server.submit(e)) for e in entries
+                ]
                 # Arm the failure for the step that processes these entries.
                 fail_once["armed"] = True
                 for _, event in pending:

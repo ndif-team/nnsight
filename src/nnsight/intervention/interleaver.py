@@ -699,7 +699,21 @@ class Interleaver:
                 mediator.idx = idx
                 if mediator.alive:
                     continue
-                mediator.start(self)
+                try:
+                    mediator.start(self)
+                except MediatorTimeout as e:
+                    # Worker hung before emitting its first event. Store
+                    # the timeout as a deferred ``TimeoutError`` so the
+                    # client (or local trace) sees the original cause,
+                    # abandon this mediator's worker, warn, and keep
+                    # starting the remaining mediators in the batch.
+                    _store_deferred_exception(mediator, TimeoutError(str(e)))
+                    mediator.worker = None
+                    warnings.warn(
+                        f"Mediator {mediator.name} timed out during start; "
+                        f"abandoning worker and continuing.",
+                        RuntimeWarning,
+                    )
 
         except:
             # Clear the interleaving flag on error.
@@ -1617,14 +1631,22 @@ class Mediator:
         }
 
     def __setstate__(self, state):
-        """Set the state of the mediator for deserialization."""
-        self.name = state["name"]
-        self.idx = state["idx"]
-        self.info = state["info"]
-        self.batch_group = state["batch_group"]
-        self.intervention = state["intervention"]
-        self.all_stop = state["all_stop"]
-        self.iteration_tracker = state["iteration_tracker"]
+        """Set the state of the mediator for deserialization.
+
+        Non-essential keys use ``state.get(..., default)`` so the
+        unpickle stays tolerant of state dicts produced by older
+        versions of ``__getstate__`` or by ad-hoc minimal-state
+        construction in tests.
+        """
+        from collections import defaultdict
+
+        self.name = state.get("name", f"Mediator{id(self)}")
+        self.idx = state.get("idx", None)
+        self.info = state.get("info", None)
+        self.batch_group = state.get("batch_group", None)
+        self.intervention = state.get("intervention", None)
+        self.all_stop = state.get("all_stop", None)
+        self.iteration_tracker = state.get("iteration_tracker", defaultdict(int))
         self.event_queue = Mediator.Value()
         self.response_queue = Mediator.Value()
 
