@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import uuid
 from typing import TYPE_CHECKING, Optional
 
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
 
 from ....intervention.backends.base import Backend
+from ....intervention.tracing.globals import Globals
 from ....schema.request import RequestModel
 
 if TYPE_CHECKING:
@@ -87,10 +89,11 @@ async def generate(request: Request):
     body = await request.body()
     compress = request.headers.get("nnsight-compress", "False").lower() == "true"
 
+    request_id = str(uuid.uuid4())
     client_host = request.client.host if request.client else "unknown"
     logger.info(
-        "Received request: %d bytes, compress=%s, client=%s",
-        len(body), compress, client_host,
+        "Received request: id=%s, %d bytes, compress=%s, client=%s",
+        request_id, len(body), compress, client_host,
     )
 
     try:
@@ -98,22 +101,28 @@ async def generate(request: Request):
             body, _persistent_objects, compress
         )
     except Exception as e:
-        logger.exception("Failed to deserialize request")
-        raise HTTPException(status_code=400, detail=f"Deserialization failed: {e}")
+        # Generic 400 to avoid leaking pickle internals; full traceback is
+        # in the server log under this request_id. See I2 / errors.py.
+        from ....intervention.errors import log_invalid_payload
+        raise HTTPException(
+            status_code=400,
+            detail=log_invalid_payload(logger, request_id, e),
+        )
 
     fn = request_model.interventions
     tracer = request_model.tracer
 
     # --- Sync-atomic compile + extract + submit ---
-    # No `await` between _setup_interleaver and submit_async, so two
-    # concurrent handlers cannot race with each other on the compile step.
-    # `init_interleaver=False` prevents racing with the background
-    # generation thread: `Interleaver.initialize()` would reset
-    # `interleaver.current=None` mid-`Mediator.start()`, causing a worker
-    # to read None at its first `.output` access and crash the whole
-    # in-flight batch. See commit introducing the flag.
+    # No `await` between _run_user_fn and submit_async, so two concurrent
+    # handlers cannot race with each other on the compile step. We
+    # deliberately do NOT call ``_init_shared_interleaver()``: the
+    # background generation thread owns ``model.interleaver``, and
+    # calling ``Interleaver.initialize`` here would reset
+    # ``interleaver.current=None`` mid-``Mediator.start()``, causing a
+    # worker to read None at its first ``.output`` access and crash the
+    # whole in-flight batch.
     try:
-        _args, kwargs = tracer._setup_interleaver(fn, init_interleaver=False)
+        _args, kwargs = tracer._run_user_fn(fn)
         entries = _server.build_entries(kwargs, mediators=tracer.mediators)
         tracer.mediators.clear()
         futures = [_server.submit_async(req) for req in entries]
@@ -126,22 +135,44 @@ async def generate(request: Request):
     # requests, enabling cross-request batching in the scheduler.
     results = await asyncio.gather(*futures)
 
-    # --- Merge saves across invokes ---
+    # --- Merge saves + errors across invokes ---
+    # Typed envelope: saves from every successful invoke are merged;
+    # every failed invoke contributes a DeferredError dict to ``errors``.
+    # The client (``local_serve.py``) calls ``surface_server_errors`` on
+    # ``errors`` after pushing saves, so partial-success saves are
+    # preserved before the raise — matches local-trace semantics.
     all_saves = {}
+    errors = []
     for result in results:
-        if result and "__error__" not in result:
+        if not result:
+            continue
+        err = result.pop("__error__", None)
+        if err is not None:
+            # Legacy string-form payloads (defensive: the bg thread's
+            # catch-all also emits dict-form now, but a downgrade path
+            # here is cheap and keeps the envelope shape uniform).
+            if isinstance(err, str):
+                err = {
+                    "type_name": "Exception",
+                    "message": err,
+                    "traceback": "",
+                    "is_control_flow": False,
+                }
+            errors.append(err)
+        if result:
             all_saves.update(result)
 
-    response_data = {"saves": all_saves}
+    response_data = {"saves": all_saves, "errors": errors}
     buf = io.BytesIO()
     torch.save(response_data, buf)
     resp_bytes = buf.getvalue()
 
     logger.info(
-        "Completed request: %d invokes, %d saves (%s), %d bytes response",
+        "Completed request: %d invokes, %d saves (%s), %d errors, %d bytes response",
         len(entries),
         len(all_saves),
         ", ".join(all_saves.keys()) if all_saves else "none",
+        len(errors),
         len(resp_bytes),
     )
     return Response(content=resp_bytes, media_type="application/octet-stream")

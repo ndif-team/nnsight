@@ -15,23 +15,21 @@ Design choices:
 
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
-import pickle
 import uuid
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
-import zstandard as _zstd
 from fastapi import FastAPI, HTTPException, Request, Response
 
-# Worker-side ``GPUModelRunner.collect_nnsight`` returns
-# zstd-compressed pickle bytes; reuse a single decompressor.
-_ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
-
-from ....intervention.backends.base import Backend
 from ....schema.request import RequestModel
+from ..exceptions import (
+    EngineNotDispatchedError,
+    GenerationError,
+    TraceCompilationError,
+)
+from ..execute import execute_request
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -85,117 +83,61 @@ async def generate(request: Request):
     body = await request.body()
     compress = request.headers.get("nnsight-compress", "False").lower() == "true"
 
+    request_id = str(uuid.uuid4())
     client_host = request.client.host if request.client else "unknown"
     logger.info(
-        "Received request: %d bytes, compress=%s, client=%s",
-        len(body), compress, client_host,
+        "Received request: id=%s, %d bytes, compress=%s, client=%s",
+        request_id, len(body), compress, client_host,
     )
     try:
         request_model = RequestModel.deserialize(
             body, _persistent_objects, compress
         )
     except Exception as e:
-        logger.exception("Failed to deserialize request")
-        raise HTTPException(status_code=400, detail=f"Deserialization failed: {e}")
+        # Generic 400 to avoid leaking pickle internals; full traceback is
+        # in the server log under this request_id. See I2 / errors.py.
+        from ....intervention.errors import log_invalid_payload
+        raise HTTPException(
+            status_code=400,
+            detail=log_invalid_payload(logger, request_id, e),
+        )
 
-    fn = request_model.interventions
-    tracer = request_model.tracer
+    # Engine readiness check is duplicated against ``execute_request``'s
+    # own ``EngineNotDispatchedError`` raise (defense-in-depth): the CLI
+    # asserts dispatch at startup, so hitting this branch indicates an
+    # inconsistent server state. Auto-dispatch from an HTTP handler is
+    # a TOCTOU hazard (two concurrent first-requests can both observe
+    # ``dispatched=False`` and race into ``dispatch()``), so we 503
+    # rather than silently dispatching.
+    if not _model.dispatched:
+        raise HTTPException(
+            status_code=503,
+            detail="Engine not dispatched. Server startup should have "
+                   "ensured dispatch before accepting requests.",
+        )
 
     try:
-        # Set up mediators from the compiled intervention function.
-        # Under dev's lazy-hook architecture, hooks are mediator-owned and
-        # registered on demand from the worker thread, so calling
-        # ``initialize`` from this HTTP handler thread does not race with
-        # ``Mediator.start()`` the way it did under permanent hooks.
-        args, kwargs = tracer._setup_interleaver(fn)
-
-        if not _model.dispatched:
-            # Should already be dispatched by cli.py, but just in case.
-            _model.dispatch()
-
-        # Serialize mediators into SamplingParams.extra_args. Reads from
-        # ``self.interleaver.mediators`` populated by ``_setup_interleaver``.
-        prompts, params, lora_requests = _model._serialize_mediators(
-            *args, **kwargs
-        )
-
-        tracer.mediators.clear()
-    except Exception as e:
-        logger.exception("Failed to compile trace")
-        raise HTTPException(status_code=400, detail=f"Trace compilation failed: {e}")
-
-    # Submit all invokes concurrently and collect saves.
-    engine = _model.vllm_entrypoint
-    all_saves = {}
-    generation_outputs = []
-
-    async def run_invoke(prompt, param, lora_request):
-        request_id = str(uuid.uuid4())
-        last_output = None
-
-        async for output in engine.generate(
-            prompt, param, request_id, lora_request=lora_request
-        ):
-            last_output = output
-
-        # Collect saves from workers.  Each rank returns per-request
-        # ``{base_id: {var_name: value}}``; we extract THIS request's
-        # sub-dict rather than flat-merging across ranks.  collective_rpc
-        # is already scoped to one request_id here, but we still unwrap
-        # the outer layer so concurrent traces with overlapping variable
-        # names don't entangle (see commit b0e56be on vllm-serve-combined
-        # for the original motivation).
-        finished = [request_id]
-        results = await engine.collective_rpc(
-            "collect_nnsight",
-            args=([request_id], finished),
-        )
-        saves = {}
-        for r in results:
-            if r is not None:
-                rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
-                per_req = rank_saves.get(request_id) if rank_saves else None
-                if per_req:
-                    saves.update(per_req)
-
-        gen_output = {}
-        if last_output is not None:
-            out = last_output.outputs[0] if last_output.outputs else None
-            gen_output = {
-                "text": out.text if out else "",
-                "token_ids": list(out.token_ids) if out else [],
-            }
-
-        return saves, gen_output
-
-    tasks = []
-    for i, (prompt, param) in enumerate(zip(prompts, params)):
-        lora_req = lora_requests[i] if lora_requests else None
-        tasks.append(run_invoke(prompt, param, lora_req))
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for result in results:
-        if isinstance(result, Exception):
-            logger.exception("Generation failed", exc_info=result)
-            raise HTTPException(
-                status_code=500, detail=f"Generation failed: {result}"
-            )
-        saves, gen_output = result
-        all_saves.update(saves)
-        generation_outputs.append(gen_output)
+        result = await execute_request(_model, request_model)
+    except EngineNotDispatchedError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except TraceCompilationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except GenerationError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     # Serialize response using torch.save (handles tensors correctly).
-    response_data = {"saves": all_saves, "outputs": generation_outputs}
+    # ``result`` already has the {saves, errors, outputs} shape — wire-
+    # compatible with pre-refactor responses.
     buf = io.BytesIO()
-    torch.save(response_data, buf)
+    torch.save(result, buf)
     resp_bytes = buf.getvalue()
 
     logger.info(
-        "Completed request: %d invokes, %d saves (%s), %d bytes response",
-        len(generation_outputs),
-        len(all_saves),
-        ", ".join(all_saves.keys()) if all_saves else "none",
+        "Completed request: %d invokes, %d saves (%s), %d errors, %d bytes response",
+        len(result["outputs"]),
+        len(result["saves"]),
+        ", ".join(result["saves"].keys()) if result["saves"] else "none",
+        len(result["errors"]),
         len(resp_bytes),
     )
     return Response(content=resp_bytes, media_type="application/octet-stream")

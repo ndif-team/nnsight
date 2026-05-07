@@ -242,9 +242,6 @@ class NNsightCBManager(ContinuousBatchingManager):
         # from `helper.mediators` to build the interleaver's list.
         self._register_pending_mediators(batch_req_ids)
 
-        self.request_helper._batch_req_ids = batch_req_ids
-        self.request_helper._num_scheduled_tokens = num_tokens_scheduled
-
         self.request_helper.process_batch_groups(
             num_tokens_scheduled, batch_req_ids, self.nnsight_model
         )

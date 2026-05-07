@@ -1,10 +1,22 @@
+from ... import NNS_VLLM_VERSION
+
 import atexit
 import uuid
+import vllm
+
+# Check vLLM version compatibility
+_installed_version = getattr(vllm, "__version__", "unknown")
+if _installed_version != NNS_VLLM_VERSION:
+    raise ImportError(
+        f"nnsight requires vLLM version {NNS_VLLM_VERSION}, but found {_installed_version}. "
+        f"Please install the correct version:\n\n"
+        f"    pip install vllm=={NNS_VLLM_VERSION}\n"
+    )
 
 import torch
 
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.inputs import TokensPrompt
 
@@ -15,25 +27,21 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
-from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.entrypoints.llm import LLM
 
-from ...intervention.envoy import eproperty
+from ...intervention.envoy import Envoy
 from ...intervention.tracing.globals import Globals
 from ...intervention.tracing.tracer import ScanningTracer
 from ...intervention.tracing.util import push_variables
+from ...util import WrapperModule
 from ..mixins import RemoteableMixin
 from .sampling import NNsightSamplingParams
 from ...intervention.serialization import save as serialize
 from ... import save
-from ... import CONFIG
 from .engines.engine import NNsightLLMEngine
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
-
-CONFIG.APP.CROSS_INVOKER = False
 if TYPE_CHECKING:
     from torch.nn import Module
 
@@ -42,12 +50,12 @@ if TYPE_CHECKING:
 
 class VLLM(RemoteableMixin):
     """NNsight wrapper to conduct interventions on a vLLM inference engine.\
-
+    
     Attributes:
         - vllm_entrypoint (vllm.LLM): vLLM language model.
         - tokenizer (vllm.transformers_utils.tokenizer.AnyTokenizer): tokenizer.
-        - logits (eproperty): logit tensor.
-        - samples (eproperty): sampled token ids.
+        - logits (nnsight.WrapperModule): logits.
+        - samples (nnsight.WrapperModule): sampled tokens.
 
     .. code-block:: python
         from nnsight.models.VLLM import VLLM
@@ -69,7 +77,9 @@ class VLLM(RemoteableMixin):
 
         mode = kwargs.pop("mode", "sync")
         if mode not in ("sync", "async"):
-            raise ValueError(f"Invalid mode {mode!r}. Must be 'sync' or 'async'.")
+            raise ValueError(
+                f"Invalid mode {mode!r}. Must be 'sync' or 'async'."
+            )
         self._async_engine: bool = mode == "async"
         self._compat: bool = kwargs.pop("compat", True)
 
@@ -96,41 +106,17 @@ class VLLM(RemoteableMixin):
                 backend="gloo",
             )
 
-            # Run model-parallel init under a default VllmConfig and OUTSIDE
-            # the ``init_empty_weights`` context that ``MetaMixin.__init__``
-            # opens for ``_load_meta``. vLLM 0.19+ creates rank tensors
-            # during this call; if torch is in meta-device mode, a later
-            # ``.tolist()`` raises "Cannot copy out of meta tensor".
-            with set_current_vllm_config(VllmConfig()):
-                initialize_model_parallel(
-                    tensor_model_parallel_size=1, pipeline_model_parallel_size=1
-                )
+            initialize_model_parallel(
+                tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+            )
 
         atexit.register(VLLM._cleanup_distributed)
 
         super().__init__(*args, **kwargs)
 
-    @eproperty(description="Logits", iterate=True)
-    def logits(self):
-        """The logit tensor produced by the model before sampling.
-
-        Access during a trace to observe or modify logits::
-
-            with model.trace("Hello", temperature=0.0, top_p=1):
-                logits = model.logits.save()
-        """
-
-    @eproperty(description="Sampled token ids", iterate=True)
-    def samples(self):
-        """The sampled token IDs produced by the sampler after logits.
-
-        Access during a trace to observe or modify sampled tokens::
-
-            with model.trace("Hello", temperature=0.8, top_p=0.95, max_tokens=3) as tracer:
-                tokens = list().save()
-                for step in tracer.iter[:]:
-                    tokens.append(model.samples.item())
-        """
+        self.logits: Envoy = WrapperModule()
+        self.samples: Envoy = WrapperModule()
+        self.generator: Envoy = WrapperModule()
 
     @staticmethod
     def _cleanup_distributed():
@@ -160,12 +146,9 @@ class VLLM(RemoteableMixin):
 
         vllm_config.load_config.device = "meta"
 
-        # Load the meta-device weights under the vllm_config. Model-parallel
-        # init was already done in VLLM.__init__ outside the meta context.
-        with set_current_vllm_config(vllm_config):
-            loader = DummyModelLoader(vllm_config.load_config)
-            loader.load_weights = lambda *args, **kwargs: None
-            model = loader.load_model(vllm_config, vllm_config.model_config)
+        loader = DummyModelLoader(vllm_config.load_config)
+        loader.load_weights = lambda *args, **kwargs: None
+        model = loader.load_model(vllm_config, vllm_config.model_config)
 
         _ROPE_DICT.clear()
 
@@ -177,6 +160,12 @@ class VLLM(RemoteableMixin):
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
 
+        # Disable prefix caching by default.  Prefix caching reuses KV values
+        # from previous requests, which can skip the forward pass for cached
+        # tokens — hooks won't fire and interventions on those tokens are
+        # silently skipped.  Users can override with enable_prefix_caching=True.
+        kwargs.setdefault("enable_prefix_caching", False)
+
         meta_model = self._load_meta(repo_id, **kwargs)
 
         destroy_model_parallel()
@@ -186,7 +175,6 @@ class VLLM(RemoteableMixin):
         _uses_ray = kwargs.get("distributed_executor_backend") == "ray"
         if _uses_ray:
             from .executors.ray_workaround import NNsightRayExecutor
-
             kwargs["distributed_executor_backend"] = NNsightRayExecutor
 
         if self._async_engine:
@@ -196,7 +184,6 @@ class VLLM(RemoteableMixin):
             # cluster is available before the subprocess starts.
             if _uses_ray:
                 import ray
-
                 if not ray.is_initialized():
                     ray.init()
             from vllm.engine.arg_utils import AsyncEngineArgs
@@ -253,9 +240,7 @@ class VLLM(RemoteableMixin):
             # --- HuggingFace tokenizer dict (e.g. tokenizer("hello")) ---
             if type(arg) is dict:
                 keys = set(arg.keys())
-                if "input_ids" in keys and keys.issubset(
-                    {"input_ids", "attention_mask"}
-                ):
+                if "input_ids" in keys and keys.issubset({"input_ids", "attention_mask"}):
                     prompt = self._parse_hf_tokenizer_dict(arg)
                     prompts.append(prompt)
                     params.append(NNsightSamplingParams(**kwargs))
@@ -321,16 +306,12 @@ class VLLM(RemoteableMixin):
             )
 
         input_ids = batch_input_ids[0]
-        attention_mask = (
-            batch_attention_mask[0] if batch_attention_mask is not None else None
-        )
+        attention_mask = batch_attention_mask[0] if batch_attention_mask is not None else None
 
         # Filter out masked tokens if attention mask is provided
         if attention_mask is not None:
             return TokensPrompt(
-                prompt_token_ids=[
-                    t for t, m in zip(input_ids, attention_mask) if m != 0
-                ]
+                prompt_token_ids=[t for t, m in zip(input_ids, attention_mask) if m != 0]
             )
         return TokensPrompt(prompt_token_ids=input_ids)
 
@@ -358,14 +339,24 @@ class VLLM(RemoteableMixin):
         prompts: List[str],
         params: List[NNsightSamplingParams],
         lora_requests: List[Any],
+        mediators: Optional[List[Any]] = None,
         **kwargs,
     ) -> Tuple[List[str], List[NNsightSamplingParams], List[Any]]:
         """Serialize mediators and attach them to sampling params.
 
-        Collects all input mediators from the interleaver, serializes
-        each one into the corresponding ``NNsightSamplingParams.extra_args``,
-        and propagates any root-trace kwargs to params that still carry
-        defaults.
+        Collects all input mediators, serializes each into the corresponding
+        ``NNsightSamplingParams.extra_args``, and propagates any root-trace
+        kwargs to params that still carry defaults.
+
+        Args:
+            mediators: Explicit mediator list. Server paths pass
+                ``tracer.mediators`` because they call ``_run_user_fn``
+                without ``_init_shared_interleaver`` to avoid racing with
+                ``Mediator.start()`` on the vLLM worker thread; those paths
+                cannot rely on ``self.interleaver.mediators`` being current.
+                When ``None`` (local sync/async paths), falls back to
+                ``self.interleaver.mediators`` as populated by
+                ``Interleaver.initialize``.
 
         Returns:
             ``(prompts, params, lora_requests)`` with mediator data attached.
@@ -373,9 +364,13 @@ class VLLM(RemoteableMixin):
 
         default_param = NNsightSamplingParams.from_optional()
 
+        source_mediators = (
+            mediators if mediators is not None else self.interleaver.mediators
+        )
+
         # Collect all input mediators (those with batch_group, i.e. not empty invokes)
         input_mediators = []
-        for mediator in self.interleaver.mediators:
+        for mediator in source_mediators:
             if mediator.batch_group is not None:
                 mediator.intervention.__source__ = "".join(mediator.info.source)
                 input_mediators.append(mediator)
@@ -387,7 +382,8 @@ class VLLM(RemoteableMixin):
         if input_mediators:
             frame_globals = input_mediators[0].intervention.__globals__
             saved_names = [
-                name for name, val in frame_globals.items() if id(val) in Globals.saves
+                name for name, val in frame_globals.items()
+                if id(val) in Globals.saves
             ]
 
         trace_id = str(uuid.uuid4())
@@ -425,21 +421,20 @@ class VLLM(RemoteableMixin):
         Each mediator maps to exactly one prompt/param (1:1).
         """
 
-        prompts, params, lora_requests = self._serialize_mediators(
-            prompts, params, lora_requests, **kwargs
-        )
+        prompts, params, lora_requests = self._serialize_mediators(prompts, params, lora_requests, **kwargs)
 
-        # Do VLLM generation with NNsight
-        outputs = self.vllm_entrypoint.generate(
-            prompts, sampling_params=params, lora_request=lora_requests
-        )
+        outputs = self.vllm_entrypoint.generate(prompts, sampling_params=params, lora_request=lora_requests)
 
         saves = {}
 
-        # Some of the output objects will have a saves attribute, which contains the saved variables
         for output in outputs:
             if hasattr(output, "saves"):
                 saves.update(output.saves)
+
+        # Extract deferred exceptions from worker, keyed by request ID.
+        # ``collect_nnsight`` emits {req_id: DeferredError} dicts — see
+        # ``intervention.errors.capture_deferred``.
+        deferred_exceptions = saves.pop("__nnsight_exceptions__", None)
 
         # Save the variables in our local environment
         for value in saves.values():
@@ -449,44 +444,46 @@ class VLLM(RemoteableMixin):
         # Push the variables to the interleaver frame
         push_variables(self.interleaver.mediators[0].info.frame, saves)
 
+        # Raise deferred exceptions at the trace boundary (after saves are
+        # pushed so any values saved before the error are still accessible).
+        if deferred_exceptions is not None:
+            from ...intervention.errors import surface_server_errors
+
+            errors_list = []
+            for req_id, entry in deferred_exceptions.items():
+                if not isinstance(entry, dict):
+                    continue
+                # Defensive upgrade for legacy {type, message} entries that
+                # might be produced by older workers in mixed-version
+                # deployments. New workers emit the DeferredError shape.
+                if "type_name" not in entry and "type" in entry:
+                    entry = {
+                        "type_name": entry.get("type", "Exception"),
+                        "message": entry.get("message", ""),
+                        "traceback": entry.get("traceback", ""),
+                        "is_control_flow": entry.get("type") == "EarlyStopException",
+                    }
+                entry.setdefault("req_id", req_id)
+                errors_list.append(entry)
+
+            surface_server_errors(errors_list, context="[vLLM worker]")
+
     def trace(self, *inputs, **kwargs):
         serve = kwargs.pop("serve", None)
         if serve is not None and kwargs.get("backend") is None:
             from ...intervention.backends.local_serve import LocalServeBackend
-            from .serve_tracer import ServeInterleavingTracer
-
+            from ..mixins.serve_tracer import ServeInterleavingTracer
             blocking = kwargs.pop("blocking", True)
             api_key = kwargs.pop("api_key", None)
-            kwargs["backend"] = LocalServeBackend(
-                self, host=serve, blocking=blocking, api_key=api_key
-            )
+            kwargs["backend"] = LocalServeBackend(self, host=serve, blocking=blocking, api_key=api_key)
             kwargs.setdefault("tracer_cls", ServeInterleavingTracer)
         else:
             if "api_key" in kwargs:
-                raise ValueError(
-                    "api_key= requires serve= to specify the server URL"
-                )
-            if (
-                self._async_engine
-                and kwargs.get("backend") is None
-                and not kwargs.get("remote")
-            ):
+                raise ValueError("api_key= requires serve= to specify the server URL")
+            if self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
                 from .async_backend import AsyncVLLMBackend
-
-                kwargs["backend"] = AsyncVLLMBackend(self)
+                kwargs['backend'] = AsyncVLLMBackend(self)
         return super().trace(*inputs, **kwargs)
-
-    def generate(self, *inputs, **kwargs):
-        """Alias for :meth:`trace` to match the :class:`LanguageModel` API.
-
-        vLLM tracing is inherently multi-token (driven by ``max_tokens``),
-        so there's no separate generate vs forward distinction like there
-        is for HuggingFace causal LMs. ``max_new_tokens`` is accepted for
-        cross-API portability and rewritten to ``max_tokens``.
-        """
-        if "max_new_tokens" in kwargs and "max_tokens" not in kwargs:
-            kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
-        return self.trace(*inputs, **kwargs)
 
     def interleave(self, fn: Callable, *args, **kwargs):
         """Execute the traced function with vLLM, dispatching the engine if needed."""
