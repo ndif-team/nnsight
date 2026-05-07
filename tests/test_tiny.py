@@ -268,3 +268,116 @@ class TestEarlyStopping:
                 l.append(item)
 
         assert l == [0, 1]
+
+
+# =============================================================================
+# Module Renaming (Tiny Model)
+# =============================================================================
+
+
+class TestRename:
+    """Tests for module renaming/aliasing with tiny model."""
+
+    @torch.no_grad()
+    def test_rename_simple_module(self, device: str, tiny_input: torch.Tensor):
+        """Test basic module renaming."""
+        from collections import OrderedDict
+
+        net = torch.nn.Sequential(
+            OrderedDict([
+                ("layer1", torch.nn.Linear(5, 10)),
+                ("layer2", torch.nn.Linear(10, 2)),
+            ])
+        )
+        model = NNsight(net, rename={"layer1": "first"}).to(device)
+
+        with model.trace(tiny_input):
+            # Access via alias
+            alias_out = model.first.output.save()
+            # Access via original name
+            original_out = model.layer1.output.save()
+
+        assert torch.equal(alias_out, original_out)
+
+    @torch.no_grad()
+    def test_rename_bidirectional(self, device: str, tiny_input: torch.Tensor):
+        """Test that both original and alias names work identically."""
+        from collections import OrderedDict
+
+        net = torch.nn.Sequential(
+            OrderedDict([
+                ("layer1", torch.nn.Linear(5, 10)),
+                ("layer2", torch.nn.Linear(10, 2)),
+            ])
+        )
+        model = NNsight(net, rename={"layer2": "output_layer"}).to(device)
+
+        with model.trace(tiny_input):
+            original = model.layer2.output.save()
+            aliased = model.output_layer.output.save()
+
+        assert torch.equal(original, aliased)
+
+    @torch.no_grad()
+    def test_rename_multiple_aliases(self, device: str, tiny_input: torch.Tensor):
+        """Test multiple aliases for the same module."""
+        from collections import OrderedDict
+
+        net = torch.nn.Sequential(
+            OrderedDict([
+                ("layer1", torch.nn.Linear(5, 10)),
+                ("layer2", torch.nn.Linear(10, 2)),
+            ])
+        )
+        model = NNsight(
+            net, rename={"layer1": ["first", "input_layer"]}
+        ).to(device)
+
+        with model.trace(tiny_input):
+            original = model.layer1.output.save()
+            alias1 = model.first.output.save()
+            alias2 = model.input_layer.output.save()
+
+        assert torch.equal(original, alias1)
+        assert torch.equal(original, alias2)
+
+    @torch.no_grad()
+    def test_rename_forward_call(self, device: str, tiny_input: torch.Tensor):
+        """Test calling forward on renamed module."""
+        from collections import OrderedDict
+
+        net = torch.nn.Sequential(
+            OrderedDict([
+                ("layer1", torch.nn.Linear(5, 10)),
+                ("layer2", torch.nn.Linear(10, 2)),
+            ])
+        )
+        model = NNsight(net, rename={"layer2": "final"}).to(device)
+
+        with model.trace(tiny_input):
+            # Get intermediate output
+            l1_out = model.layer1.output
+            # Call forward on renamed module
+            result = model.final(l1_out).save()
+
+        assert result is not None
+        assert result.shape == (1, 2)
+
+    @torch.no_grad()
+    def test_rename_input_access(self, device: str, tiny_input: torch.Tensor):
+        """Test accessing input on renamed modules."""
+        from collections import OrderedDict
+
+        net = torch.nn.Sequential(
+            OrderedDict([
+                ("layer1", torch.nn.Linear(5, 10)),
+                ("layer2", torch.nn.Linear(10, 2)),
+            ])
+        )
+        model = NNsight(net, rename={"layer2": "out"}).to(device)
+
+        with model.trace(tiny_input):
+            original_input = model.layer2.input.save()
+            alias_input = model.out.input.save()
+
+        assert torch.equal(original_input[0][0], alias_input[0][0])
