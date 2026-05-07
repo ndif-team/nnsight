@@ -44,6 +44,42 @@ class TestBasicTracing:
             torch.zeros(l1_output.shape)
 
 
+class TestSaveCloning:
+    """Regression tests for #661: save() must clone inference-mode tensors so
+    saved values aren't aliased to buffers that downstream in-place kernels
+    (e.g. vLLM's fused_add_rms_norm) overwrite after the trace continues."""
+
+    def test_save_clones_inference_mode_tensors(self):
+        from nnsight.intervention.tracing.globals import save
+
+        with torch.inference_mode():
+            x = torch.randn(8) * 0.1
+            saved = save(x)
+            x.mul_(1000)
+
+        assert saved is not x
+        assert saved.std().item() < 1.0
+        assert x.std().item() > 50.0
+
+    def test_save_does_not_clone_normal_tensors(self):
+        from nnsight.intervention.tracing.globals import save
+
+        x = torch.randn(8)
+        saved = save(x)
+
+        assert saved is x
+
+    def test_module_save_under_inference_mode_returns_clone(
+        self, tiny_model: NNsight, tiny_input: torch.Tensor
+    ):
+        with torch.inference_mode():
+            with tiny_model.trace(tiny_input):
+                hs = tiny_model.layer1.output.save()
+
+        assert isinstance(hs, torch.Tensor)
+        assert not hs.is_inference()
+
+
 class TestGradients:
     """Tests for gradient access and modification."""
 
