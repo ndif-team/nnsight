@@ -205,7 +205,3 @@ def apply_patch():
     # Apply the patch
     engineio.client.Client._connect_websocket = _patched_connect_websocket
     _patched = True
-
-
-# Auto-apply patch on import
-apply_patch()

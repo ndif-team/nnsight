@@ -1,8 +1,3 @@
-# Apply engineio SSL race condition fix before any socketio imports.
-# This fixes a ~30-55% connection failure rate over TLS.
-# See: https://github.com/miguelgrinberg/python-socketio/issues/1568
-from . import _engineio_patch  # noqa: F401
-
 # This section ensures that the source code for both the main script and the file where `nnsight` is imported
 # is cached in Python's `linecache` module. This is important for robust stack trace and debugging support,
 # especially in interactive or dynamic environments where files may change after import.
@@ -57,11 +52,12 @@ except PackageNotFoundError:
 from .intervention.tracing.globals import save
 from .ndif import *
 
-from IPython import get_ipython
-
+# Detect IPython without importing it — if IPython isn't already in sys.modules,
+# we are not running under IPython and there's no need to pay its import cost.
+_ipy_mod = sys.modules.get("IPython")
 try:
-    __IPYTHON__ = get_ipython() is not None
-except NameError:
+    __IPYTHON__ = _ipy_mod is not None and _ipy_mod.get_ipython() is not None
+except Exception:
     __IPYTHON__ = False
 
 __INTERACTIVE__ = (sys.flags.interactive or not sys.argv[0]) and not __IPYTHON__
@@ -72,10 +68,24 @@ from .modeling.base import NNsight
 from .modeling.language import LanguageModel
 from .modeling.vlm import VisionLanguageModel
 
-try:
-    from .modeling.diffusion import DiffusionModel
-except ImportError:
-    pass
+
+def __getattr__(name):
+    # Lazy-load DiffusionModel: importing diffusers costs ~1.5s and most
+    # users never touch it. Import only on first attribute access, then
+    # cache on the module so subsequent accesses skip this hook.
+    if name == "DiffusionModel":
+        try:
+            from .modeling.diffusion import DiffusionModel as _DiffusionModel
+        except ImportError as e:
+            raise AttributeError(
+                "DiffusionModel is unavailable: install the 'diffusers' package "
+                f"to use it ({e})."
+            ) from e
+        globals()["DiffusionModel"] = _DiffusionModel
+        return _DiffusionModel
+    raise AttributeError(f"module 'nnsight' has no attribute {name!r}")
+
+
 from .intervention.tracing.base import Tracer
 from .intervention.tracing.util import ExceptionWrapper
 
@@ -98,7 +108,7 @@ sys.excepthook = _nnsight_excepthook
 
 # Also handle IPython if available
 try:
-    _ipython = get_ipython()
+    _ipython = _ipy_mod.get_ipython() if _ipy_mod is not None else None
     if _ipython is not None:
 
         def _nnsight_ipython_exception_handler(self, etype, evalue, tb, tb_offset=None):

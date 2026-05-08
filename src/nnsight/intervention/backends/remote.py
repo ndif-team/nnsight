@@ -884,6 +884,8 @@ class RemoteBackend(Backend):
             RemoteException: If the job fails on the server.
         """
         # Establish WebSocket connection for real-time updates
+        from ..._engineio_patch import apply_patch
+        apply_patch()
         with socketio.SimpleClient(reconnection_attempts=10) as sio:
             sio.connect(
                 self.ws_address,
@@ -931,6 +933,8 @@ class RemoteBackend(Backend):
     async def async_request(self, tracer: Tracer) -> Optional[RESULT]:
         """Async version of blocking_request(). See blocking_request() for full documentation."""
         # Establish async WebSocket connection
+        from ..._engineio_patch import apply_patch
+        apply_patch()
         async with socketio.AsyncSimpleClient(reconnection_attempts=10) as sio:
             await sio.connect(
                 self.ws_address,
