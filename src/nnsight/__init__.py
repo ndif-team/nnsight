@@ -65,25 +65,39 @@ __INTERACTIVE__ = (sys.flags.interactive or not sys.argv[0]) and not __IPYTHON__
 
 from .intervention.envoy import Envoy
 from .modeling.base import NNsight
-from .modeling.language import LanguageModel
-from .modeling.vlm import VisionLanguageModel
+
+# Public names whose modules are expensive to import (transformers ~3s,
+# diffusers ~1.5s) but only relevant when those classes are actually used.
+# Map: public name -> submodule (relative to this package) defining it.
+_LAZY_IMPORTS = {
+    "LanguageModel":       ".modeling.language",
+    "VisionLanguageModel": ".modeling.vlm",
+    "DiffusionModel":      ".modeling.diffusion",
+}
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    # Static-analyzer view (Pyright/Pylance/mypy/PyCharm). Dead at runtime.
+    from .modeling.language import LanguageModel
+    from .modeling.vlm import VisionLanguageModel
+    from .modeling.diffusion import DiffusionModel
 
 
 def __getattr__(name):
-    # Lazy-load DiffusionModel: importing diffusers costs ~1.5s and most
-    # users never touch it. Import only on first attribute access, then
-    # cache on the module so subsequent accesses skip this hook.
-    if name == "DiffusionModel":
-        try:
-            from .modeling.diffusion import DiffusionModel as _DiffusionModel
-        except ImportError as e:
-            raise AttributeError(
-                "DiffusionModel is unavailable: install the 'diffusers' package "
-                f"to use it ({e})."
-            ) from e
-        globals()["DiffusionModel"] = _DiffusionModel
-        return _DiffusionModel
-    raise AttributeError(f"module 'nnsight' has no attribute {name!r}")
+    target = _LAZY_IMPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module 'nnsight' has no attribute {name!r}")
+    import importlib
+    try:
+        module = importlib.import_module(target, __name__)
+    except ImportError as e:
+        raise AttributeError(
+            f"{name} is unavailable ({e}). Install the missing optional "
+            "dependency to use it."
+        ) from e
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
 
 
 from .intervention.tracing.base import Tracer
