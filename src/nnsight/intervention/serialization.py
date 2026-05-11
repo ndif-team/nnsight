@@ -917,6 +917,18 @@ class CustomCloudPickler(cloudpickle.Pickler):
         return None
 
 
+class UnknownPersistentIdError(pickle.UnpicklingError):
+    """Raised by :class:`CustomCloudUnpickler` when a persistent id is unresolved.
+
+    The persistent id is available as the ``pid`` attribute so callers can
+    branch on the missing reference without parsing the exception message.
+    """
+
+    def __init__(self, pid: Any):
+        super().__init__(f"Unknown persistent id: {pid}")
+        self.pid = pid
+
+
 class CustomCloudUnpickler(pickle.Unpickler):
     """A custom unpickler that resolves persistent object references.
 
@@ -967,13 +979,14 @@ class CustomCloudUnpickler(pickle.Unpickler):
             The object corresponding to the persistent ID.
 
         Raises:
-            pickle.UnpicklingError: If the persistent ID is not found in
-                the persistent_objects dictionary.
+            UnknownPersistentIdError: If the persistent ID is not found in
+                the persistent_objects dictionary. This is a subclass of
+                ``pickle.UnpicklingError``.
         """
         if pid in self.persistent_objects:
             return self.persistent_objects[pid]
 
-        raise pickle.UnpicklingError(f"Unknown persistent id: {pid}")
+        raise UnknownPersistentIdError(pid)
 
 
 def dumps(
@@ -1048,8 +1061,9 @@ def loads(
         The deserialized object.
 
     Raises:
-        pickle.UnpicklingError: If a persistent ID is encountered that isn't
-            in the persistent_objects dictionary.
+        UnknownPersistentIdError: If a persistent ID is encountered that isn't
+            in the persistent_objects dictionary. Subclass of
+            ``pickle.UnpicklingError``.
         FileNotFoundError: If a file path is provided but the file doesn't exist.
 
     Examples:
