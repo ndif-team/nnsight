@@ -3,31 +3,22 @@
 Background
 ----------
 ``Mediator.__init__`` initializes ``self._trace_saves: Optional[set] = None``.
-The attribute is per-server-trace state — set by
-``NNsightRequestHelper._register_mediator`` from a trace's canonical
-globals on batched server paths. Local traces leave it ``None``.
-
-``Interleaver.__enter__`` reads ``mediator._trace_saves`` to decide
-whether to restore the per-trace saves set before starting the
-worker:
-
-    if mediator._trace_saves is not None:
-        _saves_var.set(mediator._trace_saves)
+The attribute was historically per-server-trace state set by
+``NNsightRequestHelper._register_mediator``; since the
+``_saves_var`` contextvar was dropped (saves are now scoped via
+per-frame iteration over the process-wide ``Globals.saves`` set),
+``_trace_saves`` is a vestigial back-compat field. It's kept so
+unpickled mediators don't ``AttributeError`` on framework code that
+hasn't been audited yet.
 
 A pickle round-trip bypasses ``__init__``, so ``__setstate__`` is the
-only chance to set the attribute on a deserialized mediator. The
-original ``__setstate__`` didn't, so unpickled mediators arrived
-without the attribute. The batched server paths papered over this
-because they always called ``_register_mediator`` (which sets it).
-The single-shot path (e.g. NDIF's generate fallback, which routes
-deserialized RequestModels straight through ``RemoteExecutionBackend``
-without going through the request helper) hit ``AttributeError`` at
-``Interleaver.__enter__`` line 484.
+only chance to set the attribute on a deserialized mediator. Without
+the default, unpickled mediators arrive without the attribute, and
+any access — even an ``is not None`` check — raises ``AttributeError``.
 
-Fix: ``__setstate__`` defaults ``_trace_saves`` to ``None`` —
-matching the constructor and the local-trace semantic. Server paths
-that need a real value still set it via ``_register_mediator``
-post-deserialize.
+Fix: ``__setstate__`` defaults ``_trace_saves`` to ``None`` — matching
+the constructor and the local-trace semantic. These tests pin the
+contract.
 """
 
 from __future__ import annotations
