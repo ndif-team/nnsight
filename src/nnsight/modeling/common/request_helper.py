@@ -9,11 +9,18 @@ arrive (serialized vs direct) and which dimension the batcher slices
 The helper tracks:
 - ``mediators``: req_id → Mediator mapping
 - ``trace_contexts``: trace_id → shared state for cross-invoke variable grafting
+
+Save lifecycle: saves are kept in the process-wide ``Globals.saves``
+set. Collection iterates each mediator's own ``info.frame.f_locals``
+and filters by ``id(v) in Globals.saves`` — the per-frame ownership
+boundary keeps concurrent requests isolated even though the id set is
+shared. Cleanup is per-id (``Globals.saves.discard``); the whole set
+is never cleared on the server side.
 """
 
 from typing import Any, Dict, List, Optional, Set
 
-from ...intervention.tracing.globals import Globals, _saves_var
+from ...intervention.tracing.globals import Globals
 
 
 class NNsightRequestHelper:
@@ -28,11 +35,13 @@ class NNsightRequestHelper:
     def __init__(self):
         self.mediators: Dict[str, Any] = {}  # req_id -> Mediator
         self.trace_contexts: Dict[str, dict] = {}  # trace_id -> context
-        # Set per batch step by the engine driver (vLLM ``_update_states``,
-        # HF ``_assign_batch_groups``/vanilla ``_step``) and read by
-        # ``unflatten()``. Initialised here so a fresh helper or a call
-        # before the first batch step is a clean no-op rather than an
-        # ``AttributeError``.
+        # vLLM-only: ``unflatten()`` reads these to map per-row logits
+        # back to per-request mediator slices. Set by
+        # ``GPUModelRunner._update_states`` before each forward pass and
+        # cleared by ``_fail_scheduled`` on the HF vanilla path
+        # (defensively — no HF path actually calls ``unflatten``).
+        # Initialised here so a fresh helper or a call before the first
+        # batch step is a clean no-op rather than an ``AttributeError``.
         self._batch_req_ids: List[str] = []
         self._num_scheduled_tokens: Dict[str, int] = {}
 
@@ -52,9 +61,10 @@ class NNsightRequestHelper:
         """Pure bookkeeping for a new mediator.
 
         Sets up the trace context, grafts canonical globals for
-        cross-invoke variable sharing, attaches the per-trace saves
-        set as ``mediator._trace_saves``, and records the mediator in
-        the helper's dict. Does NOT start the worker or touch the
+        cross-invoke variable sharing, pre-registers saved-name IDs in
+        ``Globals.saves`` so trace-shared variables survive the
+        :meth:`collect_saves` filter, and records the mediator in the
+        helper's dict. Does NOT start the worker or touch the
         interleaver's ``mediators`` list.
 
         Start policy is the caller's responsibility:
@@ -67,29 +77,25 @@ class NNsightRequestHelper:
         - Callers that register before an interleaver is entered (HF
           CB vanilla, and the paged HF path when completed: scheduler
           runs before ``_step()`` enters the interleaver) can rely on
-          ``Interleaver.__enter__``'s auto-start loop, which restores
-          ``_saves_var`` from ``mediator._trace_saves`` per-mediator
-          before calling ``mediator.start()``.
+          ``Interleaver.__enter__``'s auto-start loop.
         """
         # First mediator for this trace: create context and register
         # its __globals__ as canonical for shared variable grafting.
         if trace_id not in self.trace_contexts:
             canonical_globals = mediator.intervention.__globals__
 
-            # Per-trace saves set: isolates save tracking between
-            # concurrent traces. Pre-populated with IDs of objects
-            # named in ``saved_names`` (canonical globals); also
-            # accumulates ``id()`` of values returned from ``.save()``
-            # on the worker thread via the ``_saves_var`` contextvar.
-            trace_saves = set()
+            # Pre-register saved-name IDs in the process-wide
+            # ``Globals.saves`` set so trace-shared canonical-globals
+            # values survive ``collect_saves``'s id filter. Matches the
+            # pattern dev's inline ``NNsightRequestHelper.process_new_reqs``
+            # uses in ``GPUModelRunner.py``.
             for name in saved_names:
                 if name in canonical_globals:
-                    trace_saves.add(id(canonical_globals[name]))
+                    Globals.saves.add(id(canonical_globals[name]))
 
             self.trace_contexts[trace_id] = {
                 "saved_names": saved_names,
                 "canonical_globals": canonical_globals,
-                "saves": trace_saves,
                 "expected_count": expected_count,
                 "received_count": 0,
                 "pending_req_ids": set(),
@@ -105,8 +111,6 @@ class NNsightRequestHelper:
                     med_globals[name] = canonical[name]
 
         ctx = self.trace_contexts[trace_id]
-        mediator._trace_saves = ctx["saves"]
-
         self.mediators[req_id] = mediator
         ctx["pending_req_ids"].add(req_id)
         ctx["received_count"] += 1
@@ -116,11 +120,7 @@ class NNsightRequestHelper:
 
         Appropriate only when called from inside an already-entered
         ``with model.interleaver:`` block (``_interleaving`` is True).
-        Points ``_saves_var`` at the mediator's per-trace set first so
-        the worker thread's ``copy_context()`` captures the right
-        reference for any ``.save()`` calls inside the intervention.
         """
-        _saves_var.set(mediator._trace_saves)
         model.interleaver.mediators.append(mediator)
         mediator.start(model.interleaver)
 
@@ -332,25 +332,27 @@ class NNsightRequestHelper:
     ) -> tuple:
         """Collect saved values from mediator frames.
 
-        Gathers per-invoke saves from frame locals and trace-shared
-        saves from canonical globals (only when a trace is fully done).
-        Uses per-trace saves sets for isolation between concurrent traces.
+        Filters each mediator's ``info.frame.f_locals`` against the
+        process-wide ``Globals.saves`` set. Per-frame iteration keeps
+        concurrent requests isolated: even though the id set is shared,
+        request B never iterates request A's frame, so A's ids are
+        never observed by B's filter pass.
 
         Returns:
-            ``(saves, removals)`` — the saves dict and list of
-            ``(id, trace_saves_ref)`` pairs to discard after collection.
+            ``(saves, removals)`` — the saves dict and list of ``id()``
+            values to discard from ``Globals.saves`` in
+            :meth:`cleanup_finished`.
         """
         saves = {}
         removals = []
 
         for base_id, mediator, internal_key in matched:
             frame = mediator.info.frame
-            trace_saves = mediator._trace_saves
             for key, value in frame.f_locals.items():
-                if id(value) in trace_saves:
+                if id(value) in Globals.saves:
                     saves[key] = value
                     if internal_key in finished_internal_keys:
-                        removals.append((id(value), trace_saves))
+                        removals.append(id(value))
 
         # Trace-shared saves: collect when ALL mediators for a trace
         # have been received AND completed.
@@ -363,14 +365,13 @@ class NNsightRequestHelper:
                         and ctx["received_count"] == ctx["expected_count"]
                     )
                     if trace_fully_done:
-                        trace_saves = ctx["saves"]
                         canonical = ctx["canonical_globals"]
                         for name in ctx["saved_names"]:
                             if name in canonical:
                                 value = canonical[name]
-                                if id(value) in trace_saves:
+                                if id(value) in Globals.saves:
                                     saves[name] = value
-                                    removals.append((id(value), trace_saves))
+                                    removals.append(id(value))
                     break
 
         return saves, removals
@@ -380,11 +381,11 @@ class NNsightRequestHelper:
     ) -> None:
         """Clean up state for finished requests.
 
-        Discards collected IDs from their per-trace saves sets,
-        deletes completed trace contexts, and drops mediator entries.
+        Discards collected IDs from ``Globals.saves``, deletes completed
+        trace contexts, and drops mediator entries.
         """
-        for _id, trace_saves in removals:
-            trace_saves.discard(_id)
+        for _id in removals:
+            Globals.saves.discard(_id)
 
         done_traces = [
             tid
