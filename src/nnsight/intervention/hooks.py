@@ -389,7 +389,7 @@ def _make_hooked(requires_decorator: Callable, *, default_key: Optional[str] = N
         key: Optional[str] = None,
         description: Optional[str] = None,
         iterate: bool = True,
-    ) -> type[property]:
+    ) -> type[eproperty]:
         resolved_key = key if key is not None else default_key
 
         def decorator(fn: Callable[..., T]):
