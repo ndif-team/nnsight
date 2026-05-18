@@ -67,7 +67,7 @@ class RemoteableMixin(MetaMixin):
             from ...intervention.backends.remote import RemoteBackend
 
             backend = RemoteBackend(
-                self.to_model_key(), blocking=blocking, extras=self._remoteable_extras()
+                self.to_model_key(), blocking=blocking, env=self._remoteable_get_env()
             )
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
@@ -77,7 +77,7 @@ class RemoteableMixin(MetaMixin):
                 self.to_model_key(),
                 host=backend,
                 blocking=blocking,
-                extras=self._remoteable_extras(),
+                env=self._remoteable_get_env(),
             )
         kwargs.setdefault("tracer_cls", RemoteInterleavingTracer)
         return super().trace(
@@ -112,7 +112,7 @@ class RemoteableMixin(MetaMixin):
             from ...intervention.backends.remote import RemoteBackend
 
             backend = RemoteBackend(
-                self.to_model_key(), blocking=blocking, extras=self._remoteable_extras()
+                self.to_model_key(), blocking=blocking, env=self._remoteable_get_env()
             )
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
@@ -122,7 +122,7 @@ class RemoteableMixin(MetaMixin):
                 self.to_model_key(),
                 host=backend,
                 blocking=blocking,
-                extras=self._remoteable_extras(),
+                env=self._remoteable_get_env(),
             )
         kwargs.setdefault("tracer_cls", RemoteTracer)
         return super().session(
@@ -141,17 +141,30 @@ class RemoteableMixin(MetaMixin):
 
         return persistent_objects
 
-    def _remoteable_extras(self) -> Dict[str, Any]:
-        """Return a dict of extra server-side kwargs for this model.
+    def _remoteable_get_env(self) -> Dict[str, Any]:
+        """Return a dict of per-request environment for this model.
 
-        Forwarded by :class:`RemoteBackend` to NDIF via the ``ndif-extras``
-        request header (JSON-encoded). The server exposes this dict as
-        ``BackendRequestModel.extras``, where actor classes (e.g.
-        ``PEFTModelActor``) can read specialized settings. Defaults to an
-        empty dict; subclasses override to supply model-specific extras.
+        Forwarded by :class:`RemoteBackend` to NDIF via the ``ndif-env``
+        request header (JSON-encoded) and exposed server-side as
+        ``BackendRequestModel.env``. The base ``ModelActor`` then calls
+        :meth:`_remoteable_set_env` on the model so it can apply the env
+        (e.g. swap a PEFT adapter) before deserialization. Defaults to an
+        empty dict; subclasses override to supply model-specific settings.
         """
 
         return {}
+
+    def _remoteable_set_env(self, env: Dict[str, Any]) -> None:
+        """Apply a per-request environment on the server side.
+
+        Called by the base ``ModelActor`` at the start of ``pre()`` with
+        the dict produced client-side by :meth:`_remoteable_get_env`.
+        Subclasses override to mutate the underlying module (e.g. attach
+        a PEFT adapter) before the request is deserialized. Defaults to
+        a no-op.
+        """
+
+        return
 
     def _remoteable_model_key(self) -> str:
         """Return a string that uniquely identifies this model for the remote server.

@@ -1,5 +1,6 @@
 from peft import PeftModel
 from .huggingface import HuggingFaceModel
+from ..intervention.envoy import Envoy
 
 from torch.nn.modules import Module
 from transformers import AutoConfig, PreTrainedModel, PretrainedConfig
@@ -30,10 +31,11 @@ class TransformersModel(HuggingFaceModel):
             Defaults to ``AutoModel``.
         peft (Optional[str]): HuggingFace repo id of a PEFT adapter to
             apply during remote execution. Forwarded to NDIF via the
-            ``ndif-extras`` header; a PEFT-aware server actor wraps the
-            base model with ``PeftModel.from_pretrained`` for the request
-            and unloads the adapter on cleanup. Defaults to ``None``
-            (no adapter).
+            ``ndif-env`` header; the base ``ModelActor`` calls
+            :meth:`_remoteable_set_env`, which wraps the base model with
+            ``PeftModel.from_pretrained`` for the request and reuses the
+            loaded adapter across requests, swapping only when the
+            requested repo id changes. Defaults to ``None`` (no adapter).
         **kwargs: Forwarded to ``from_pretrained`` / ``from_config``.
 
     Attributes:
@@ -66,10 +68,41 @@ class TransformersModel(HuggingFaceModel):
 
         super().__init__(*args, **kwargs)
 
-    def _remoteable_extras(self) -> Dict[str, Any]:
+    def _remoteable_get_env(self) -> Dict[str, Any]:
         if self.peft is None:
             return {}
         return {"peft_repo_id": self.peft}
+
+    def _remoteable_set_env(self, env: Dict[str, Any]) -> None:
+        """Swap the PEFT adapter to match ``env["peft_repo_id"]``.
+
+        Compares the requested repo id against ``self.peft`` and only
+        rewraps the underlying module when they differ. Transitions:
+
+            current  requested  action
+            -------  ---------  ------
+            None     None       no-op
+            None     X          load X
+            X        X          no-op
+            X        Y          unload X, load Y
+            X        None       unload X
+        """
+
+        requested = env.get("peft_repo_id") if env else None
+
+        if requested == self.peft:
+            return
+
+        if self.peft is not None:
+            Envoy.__init__(
+                self, self._module.unload(), interleaver=self.interleaver
+            )
+
+        if requested:
+            peft_model = PeftModel.from_pretrained(self._module, requested)
+            Envoy.__init__(self, peft_model, interleaver=self.interleaver)
+
+        self.peft = requested
 
     def _load_config(self, repo_id: str, revision: Optional[str] = None, **kwargs):
 
