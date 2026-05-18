@@ -68,7 +68,7 @@ class IEnvoy(Protocol):
     path: Optional[str]
 
 
-class eproperty:
+class eproperty(property):
     """A descriptor for defining hookable properties on :class:`IEnvoy` objects.
 
     ``eproperty`` exposes values through the interleaving request/swap
