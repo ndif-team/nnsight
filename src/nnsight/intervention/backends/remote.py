@@ -496,7 +496,10 @@ class RemoteBackend(Backend):
             )
 
         self.api_key = (
-            api_key or os.environ.get("NDIF_API_KEY", None) or CONFIG.API.APIKEY
+            api_key
+            or os.environ.get("NDIF_API_KEY", None)
+            or CONFIG.API.APIKEY
+            or ""
         )
 
         self.job_id = job_id
