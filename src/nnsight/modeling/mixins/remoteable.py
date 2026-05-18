@@ -6,12 +6,14 @@ from typing import Any, Callable, Dict, Union
 from typing_extensions import Self
 
 from ...intervention.backends import Backend
-from ...intervention.backends.remote import RemoteBackend
-from ...intervention.backends.local_simulation import LocalSimulationBackend
 from ...intervention.serialization import load, save
 from ...intervention.tracing.tracer import InterleavingTracer, Tracer
 from ...util import from_import_path, to_import_path
 from .meta import MetaMixin
+
+# RemoteBackend / LocalSimulationBackend are imported lazily inside trace()/session():
+# RemoteBackend pulls in socketio + engineio + tornado (~250ms) and is only needed
+# when a user actually requests remote=True / remote='local'.
 
 
 class RemoteableMixin(MetaMixin):
@@ -57,16 +59,20 @@ class RemoteableMixin(MetaMixin):
 
         if backend is not None:
             pass
-        elif remote == 'local':
+        elif remote == "local":
+            from ...intervention.backends.local_simulation import LocalSimulationBackend
+
             backend = LocalSimulationBackend(self)
         elif remote:
+            from ...intervention.backends.remote import RemoteBackend
+
             backend = RemoteBackend(
-                self.to_model_key(),
-                blocking=blocking,
-                extras=self._remoteable_extras(),
+                self.to_model_key(), blocking=blocking, extras=self._remoteable_extras()
             )
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
+            from ...intervention.backends.remote import RemoteBackend
+
             backend = RemoteBackend(
                 self.to_model_key(),
                 host=backend,
@@ -103,13 +109,15 @@ class RemoteableMixin(MetaMixin):
         if backend is not None:
             pass
         elif remote:
+            from ...intervention.backends.remote import RemoteBackend
+
             backend = RemoteBackend(
-                self.to_model_key(),
-                blocking=blocking,
-                extras=self._remoteable_extras(),
+                self.to_model_key(), blocking=blocking, extras=self._remoteable_extras()
             )
         # If backend is a string, assume RemoteBackend url.
         elif isinstance(backend, str):
+            from ...intervention.backends.remote import RemoteBackend
+
             backend = RemoteBackend(
                 self.to_model_key(),
                 host=backend,

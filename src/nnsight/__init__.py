@@ -1,8 +1,3 @@
-# Apply engineio SSL race condition fix before any socketio imports.
-# This fixes a ~30-55% connection failure rate over TLS.
-# See: https://github.com/miguelgrinberg/python-socketio/issues/1568
-from . import _engineio_patch  # noqa: F401
-
 # This section ensures that the source code for both the main script and the file where `nnsight` is imported
 # is cached in Python's `linecache` module. This is important for robust stack trace and debugging support,
 # especially in interactive or dynamic environments where files may change after import.
@@ -57,11 +52,12 @@ except PackageNotFoundError:
 from .intervention.tracing.globals import save
 from .ndif import *
 
-from IPython import get_ipython
-
+# Detect IPython without importing it — if IPython isn't already in sys.modules,
+# we are not running under IPython and there's no need to pay its import cost.
+_ipy_mod = sys.modules.get("IPython")
 try:
-    __IPYTHON__ = get_ipython() is not None
-except NameError:
+    __IPYTHON__ = _ipy_mod is not None and _ipy_mod.get_ipython() is not None
+except Exception:
     __IPYTHON__ = False
 
 __INTERACTIVE__ = (sys.flags.interactive or not sys.argv[0]) and not __IPYTHON__
@@ -69,13 +65,41 @@ __INTERACTIVE__ = (sys.flags.interactive or not sys.argv[0]) and not __IPYTHON__
 
 from .intervention.envoy import Envoy
 from .modeling.base import NNsight
-from .modeling.language import LanguageModel
-from .modeling.vlm import VisionLanguageModel
 
-try:
+# Public names whose modules are expensive to import (transformers ~3s,
+# diffusers ~1.5s) but only relevant when those classes are actually used.
+# Map: public name -> submodule (relative to this package) defining it.
+_LAZY_IMPORTS = {
+    "LanguageModel":       ".modeling.language",
+    "VisionLanguageModel": ".modeling.vlm",
+    "DiffusionModel":      ".modeling.diffusion",
+}
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    # Static-analyzer view (Pyright/Pylance/mypy/PyCharm). Dead at runtime.
+    from .modeling.language import LanguageModel
+    from .modeling.vlm import VisionLanguageModel
     from .modeling.diffusion import DiffusionModel
-except ImportError:
-    pass
+
+
+def __getattr__(name):
+    target = _LAZY_IMPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module 'nnsight' has no attribute {name!r}")
+    import importlib
+    try:
+        module = importlib.import_module(target, __name__)
+    except ImportError as e:
+        raise AttributeError(
+            f"{name} is unavailable ({e}). Install the missing optional "
+            "dependency to use it."
+        ) from e
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+
 from .intervention.tracing.base import Tracer
 from .intervention.tracing.util import ExceptionWrapper
 
@@ -98,7 +122,7 @@ sys.excepthook = _nnsight_excepthook
 
 # Also handle IPython if available
 try:
-    _ipython = get_ipython()
+    _ipython = _ipy_mod.get_ipython() if _ipy_mod is not None else None
     if _ipython is not None:
 
         def _nnsight_ipython_exception_handler(self, etype, evalue, tb, tb_offset=None):
@@ -178,6 +202,15 @@ def wrap_backward(func):
 DEFAULT_PATCHER.add(Patch(Tensor, wrap_backward(Tensor.backward), "backward"))
 
 DEFAULT_PATCHER.__enter__()
+
+# `from nnsight import *` consults __all__ (or globals() if absent), but PEP 562
+# module-level __getattr__ is not consulted by star-imports. Without naming the
+# lazy entries here, `LanguageModel` / `VisionLanguageModel` / `DiffusionModel`
+# would silently drop from `*`. Build __all__ from the currently-public globals
+# plus the lazy names to preserve prior star-import behavior end-to-end.
+__all__ = sorted(
+    {name for name in globals() if not name.startswith("_")} | set(_LAZY_IMPORTS)
+)
 
 if __INTERACTIVE__:
     from code import InteractiveConsole
