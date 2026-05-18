@@ -203,6 +203,15 @@ DEFAULT_PATCHER.add(Patch(Tensor, wrap_backward(Tensor.backward), "backward"))
 
 DEFAULT_PATCHER.__enter__()
 
+# `from nnsight import *` consults __all__ (or globals() if absent), but PEP 562
+# module-level __getattr__ is not consulted by star-imports. Without naming the
+# lazy entries here, `LanguageModel` / `VisionLanguageModel` / `DiffusionModel`
+# would silently drop from `*`. Build __all__ from the currently-public globals
+# plus the lazy names to preserve prior star-import behavior end-to-end.
+__all__ = sorted(
+    {name for name in globals() if not name.startswith("_")} | set(_LAZY_IMPORTS)
+)
+
 if __INTERACTIVE__:
     from code import InteractiveConsole
     import readline
