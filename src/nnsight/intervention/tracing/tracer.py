@@ -318,6 +318,12 @@ class Cache:
                 lambda x: x.to(device=_device, dtype=_dtype, non_blocking=True),
                 torch.Tensor,
             )
+            # Synchronize GPU operations to ensure cached tensors are fully
+            # transferred before subsequent forward passes access them. Without
+            # this, non_blocking=True allows async transfers that may not complete
+            # before the model reads the cached value, causing stale data issues.
+            if _device is not None and _device.type == "cuda":
+                torch.cuda.synchronize(_device)
 
         if module_path not in self.cache:
             self.cache[module_path] = Cache.Entry(**{key: value})
