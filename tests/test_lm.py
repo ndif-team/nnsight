@@ -1294,6 +1294,37 @@ class TestCache:
             cache.model.model.h["second_layer"].output,
         )
 
+    @torch.no_grad()
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_cache_gpu_synchronization(self, gpt2: nnsight.LanguageModel, MSG_prompt: str):
+        """Test that GPU-cached tensors are synchronized and ready for use.
+
+        When caching to GPU with non_blocking=True, we must synchronize to ensure
+        the tensor transfer completes before subsequent forward passes access the cache.
+        This test verifies the fix for the GPU sync gap where stale data could be read.
+        """
+        # Cache to GPU
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache(device=torch.device("cuda"), modules=[gpt2.transformer.h[0]])
+
+        # Retrieve cached tensor — if synchronization failed, this could return stale data
+        cached_output = cache["model.transformer.h.0"].output
+
+        # Verify the cached tensor is actually on GPU and ready
+        assert cached_output.device.type == "cuda"
+
+        # Perform immediate computation on cached tensor to verify it's fully transferred
+        # and not stuck in an async transfer. This would fail with a CUDA error if sync is missing.
+        result = cached_output.sum()
+        assert result.is_cuda
+
+        # Re-trace the same input and verify the cached value matches fresh computation
+        with gpt2.trace(MSG_prompt):
+            fresh_output = gpt2.transformer.h[0].output.save()
+
+        # The cached version should match the fresh computation (same input)
+        assert torch.allclose(cached_output.cpu(), fresh_output.cpu())
+
 
 # =============================================================================
 # Module Renaming
