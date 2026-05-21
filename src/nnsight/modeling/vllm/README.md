@@ -43,8 +43,7 @@ The integration solves each of these by subclassing vLLM's engine, worker, and m
 vllm/
 ├── __init__.py                    # Exports VLLM class
 ├── vllm.py                        # VLLM model wrapper (user-facing class)
-├── async_tracer.py                # AsyncInterleavingTracer — deferred execution for async engine
-├── async_backend.py               # AsyncVLLMBackend — dual-call backend that streams via AsyncLLM
+├── async_backend.py               # AsyncVLLMBackend — submits to AsyncLLM on trace exit, async-iterable
 ├── sampling.py                    # NNsightSamplingParams — thin SamplingParams subclass
 ├── batching.py                    # VLLMBatcher — tensor-parallel gather/split + flat-batch slicing
 ├── engines/
@@ -73,13 +72,9 @@ vllm/
 - Forwarding calls to the vLLM engine (`__call__`)
 - Defining `logits` and `samples` eproperties for intercepting model outputs
 - Automatic Ray executor substitution when `distributed_executor_backend="ray"`
-- `trace()` override that injects `AsyncVLLMBackend` and `AsyncInterleavingTracer` when `mode="async"`
+- `trace()` override that injects `AsyncVLLMBackend` when `mode="async"`
 
-**`async_tracer.py`** — `AsyncInterleavingTracer` extends `RemoteInterleavingTracer`. Overrides `execute()` to serialize mediators into sampling params and store the prepared `(prompts, params, kwargs)` on the tracer instance (instead of running synchronous generation). The `AsyncVLLMBackend` reads this prepared data after the trace context exits.
-
-**`async_backend.py`** — `AsyncVLLMBackend` extends `Backend` with a dual-call pattern:
-- `__call__(tracer)`: Called from `__exit__`, compiles and executes the traced function to prepare generation data.
-- `__call__()`: Called by user code, returns an async generator that streams `RequestOutput` objects from `AsyncLLM`. When an output reports `output.finished == True`, calls `collect_nnsight` via `collective_rpc` to retrieve final saves from the worker and attaches them as `output.saves`. Intermediate (non-finished) outputs are forwarded as-is without `.saves`. (Streaming intermediate saves on every output is a planned future option.)
+**`async_backend.py`** — `AsyncVLLMBackend` extends `Backend`. On trace `__exit__`, its `__call__(tracer)` compiles mediators, serializes them into sampling params, submits the request to `AsyncLLM.generate()`, and parks the resulting async generator on `self._generator`. The backend is then directly async-iterable: `async for output in tracer.backend` invokes `__aiter__`, which yields `RequestOutput` objects. When an output reports `output.finished == True`, it calls `collect_nnsight` via `collective_rpc` to retrieve final saves from the worker and attaches them as `output.saves`. Intermediate (non-finished) outputs are forwarded as-is without `.saves`. (Streaming intermediate saves on every output is a planned future option.)
 
 **`sampling.py`** — `NNsightSamplingParams` is a thin subclass of vLLM's `SamplingParams` used for type identification in `_prepare_input`. Mediator data is transported via the built-in `extra_args` dict field on `SamplingParams`, not on a custom field.
 
@@ -114,21 +109,15 @@ Key attributes:
 - `tokenizer` — vLLM's tokenizer
 - `logits` — `eproperty` for intercepting logits
 - `samples` — `eproperty` for intercepting sampled tokens
-- `_async_engine` — Boolean flag (derived from `mode="async"`); when `True`, `trace()` injects async backend/tracer
-
-### AsyncInterleavingTracer (async_tracer.py)
-
-Custom tracer for the async path. Extends `RemoteInterleavingTracer` and overrides `execute()` to prepare generation data without triggering synchronous generation. The key difference from the sync path: instead of calling `model.interleave()` (which runs the full generate loop), it serializes mediators into sampling params and stores the result as `self.prepared`. The `AsyncVLLMBackend` reads this after the trace context exits.
-
-The `VLLM.trace()` override bypasses `RemoteableMixin.trace()` (which hard-codes `tracer_cls=RemoteInterleavingTracer`) by calling `Envoy.trace()` directly with `tracer_cls=AsyncInterleavingTracer`.
+- `_async_engine` — Boolean flag (derived from `mode="async"`); when `True`, `trace()` injects the async backend
 
 ### AsyncVLLMBackend (async_backend.py)
 
-Backend with a dual-call pattern:
-- **First call** `__call__(tracer)`: Invoked by `Tracer.__exit__`. Compiles the user's intervention code and calls `tracer.execute(fn)` to set up mediators and prepare generation data.
-- **Second call** `__call__()`: Invoked by user code via `tracer.backend()`. Returns an async generator (`_stream()`) that submits to `AsyncLLM.generate()` and yields `RequestOutput` objects. On the final output (`output.finished == True`), saves are attached as `output.saves`.
+The async path uses the default `RemoteInterleavingTracer` (inherited from `RemoteableMixin.trace()`) and swaps only the backend. All async-specific behavior lives here:
 
-`_stream()` only calls `collect_nnsight` via `collective_rpc` when an output is finished. The worker then finalizes the mediator (runs result handler, cancels, cleans up) and returns the saves. Intermediate outputs are passed through unchanged. (Streaming intermediate saves on every output is a planned future option — see "Streaming Saves" below.)
+- `__call__(self, tracer)`: Invoked by `Tracer.__exit__`. Sets up the interleaver via `tracer._setup_interleaver(fn)`, serializes mediators into sampling params, submits a single request to `AsyncLLM.generate()` with a fresh request ID, and parks the resulting async generator on `self._generator`. Clears `tracer.mediators` so the trace context can exit cleanly.
+- `__aiter__(self)`: User-facing entry point. `async for output in tracer.backend` iterates the parked generator. For each `RequestOutput`, when `output.finished == True`, calls `collect_nnsight` via `collective_rpc`; the worker returns pickled+zstd-compressed saves which are attached to `output.saves` before the output is yielded. Intermediate outputs are passed through unchanged. (Streaming intermediate saves on every output is a planned future option — see "Streaming Saves" below.)
+- `__await__(self)`: Delegates to the parked generator's `__await__` so callers that want a single resolution rather than streaming can `await tracer.backend`.
 
 ### NNsightSamplingParams (sampling.py)
 
@@ -154,7 +143,7 @@ Key methods:
 - `_update_states(scheduler_output)` — Processes new/finished requests, updates batch groups
 - `execute_model(scheduler_output, ...)` — Runs the forward pass inside an interleaver context, wraps logits
 - `_sample()` — Runs sampling inside an interleaver context, wraps sampled tokens
-- `collect_nnsight(req_ids, finished_req_ids)` — Collects saves from mediators. Called on finished requests in both sync (`NNsightLLMEngine.step()`) and async (`AsyncVLLMBackend._stream()`) paths. Delegates to `NNsightRequestHelper` helper methods:
+- `collect_nnsight(req_ids, finished_req_ids)` — Collects saves from mediators. Called on finished requests in both sync (`NNsightLLMEngine.step()`) and async (`AsyncVLLMBackend.__aiter__()`) paths. Delegates to `NNsightRequestHelper` helper methods:
   - `match_req_ids()` — matches engine-reported IDs to stored mediators (handles vLLM's hash suffix via `rsplit`)
   - `finalize_mediators()` — runs result handler and cancels finished mediators
   - `collect_saves()` — gathers per-invoke saves from frame locals and trace-shared saves from canonical globals
@@ -268,7 +257,7 @@ NNsight captures, parses, and compiles the intervention code into a `Mediator`.
 - Returns saves dict (pickled to bytes so it survives msgpack transport in multiprocessing mode), which gets attached to the `RequestOutput`
 
 **8. On the final streamed output (async path):**
-- `AsyncVLLMBackend._stream()` checks `output.finished` for each yielded `RequestOutput`
+- `AsyncVLLMBackend.__aiter__()` checks `output.finished` for each yielded `RequestOutput`
 - When `finished == True`, calls `collect_nnsight(req_ids, finished_req_ids)` via `collective_rpc`; the request ID appears in both `req_ids` and `finished_req_ids`, so mediators are finalized and cleaned up on the worker
 - Saves are attached as `output.saves` on the finished `RequestOutput`
 - Intermediate (non-finished) outputs are forwarded unchanged with no `.saves` attribute
@@ -279,7 +268,7 @@ NNsight captures, parses, and compiles the intervention code into a `Mediator`.
 - Saved values are pushed back into the user's local variables
 
 **9. Back in user process (async):**
-- User iterates `async for output in tracer.backend()` to receive streamed outputs
+- User iterates `async for output in tracer.backend` to receive streamed outputs
 - Each output has `.saves` with the current saved values
 
 ---
@@ -413,7 +402,7 @@ A separate interleaver context wraps `super()._sample()`. After sampling, the sa
 
 ### Phase 4: Collect (`collect_nnsight`)
 
-When requests complete, `collect_nnsight` is called — by `NNsightLLMEngine.step()` in the sync path, and by `AsyncVLLMBackend._stream()` (gated on `output.finished == True`) in the async path. The interleaver handles the `"result"` provider, letting mediators interact with the final generation output. Saved values are extracted from mediator frames and trace-shared globals. The method delegates to helper methods on `NNsightRequestHelper` for matching, finalizing, collecting, and cleanup.
+When requests complete, `collect_nnsight` is called — by `NNsightLLMEngine.step()` in the sync path, and by `AsyncVLLMBackend.__aiter__()` (gated on `output.finished == True`) in the async path. The interleaver handles the `"result"` provider, letting mediators interact with the final generation output. Saved values are extracted from mediator frames and trace-shared globals. The method delegates to helper methods on `NNsightRequestHelper` for matching, finalizing, collecting, and cleanup.
 
 ### Shared Mediator Threads
 
@@ -465,7 +454,7 @@ vLLM uses continuous batching: new requests can join and finished requests can l
 1. **Per-invoke saves**: Variables `.save()`-ed inside an invoke are collected from each mediator's `info.frame.f_locals`.
 2. **Trace-shared saves**: Variables `.save()`-ed at trace scope are collected from the canonical `__globals__` only after ALL mediators for the trace have been received and completed (`received_count == expected_count` and `pending_req_ids` is empty).
 
-The deferred cleanup prevents premature collection when the scheduler completes one request before another is even scheduled. In the sync path, `NNsightLLMEngine.step()` attaches saves to all finished request outputs. In the async path, `AsyncVLLMBackend._stream()` checks `output.finished` and only invokes `collect_nnsight` on finished outputs, matching the sync path's finished-only behavior. (A future option may stream intermediate saves on every output for real-time monitoring; see "Streaming Saves" below.)
+The deferred cleanup prevents premature collection when the scheduler completes one request before another is even scheduled. In the sync path, `NNsightLLMEngine.step()` attaches saves to all finished request outputs. In the async path, `AsyncVLLMBackend.__aiter__()` checks `output.finished` and only invokes `collect_nnsight` on finished outputs, matching the sync path's finished-only behavior. (A future option may stream intermediate saves on every output for real-time monitoring; see "Streaming Saves" below.)
 
 ---
 
@@ -519,62 +508,71 @@ The async engine enables streaming token-by-token output with NNsight interventi
 ### Usage
 
 ```python
-from nnsight.modeling.vllm import VLLM
 import asyncio
 
-model = VLLM("gpt2", tensor_parallel_size=1, dispatch=True, mode="async")
+from nnsight.modeling.vllm import VLLM
+
 
 async def main():
+    model = VLLM("gpt2", tensor_parallel_size=1, dispatch=True, mode="async")
+
     with model.trace("The Eiffel Tower is in", temperature=0.0, max_tokens=5) as tracer:
         logits = model.logits.save()
 
-    async for output in tracer.backend():
-        print(f"finished={output.finished}, saves={list(output.saves.keys())}")
+    async for output in tracer.backend:
+        if output.finished:
+            print(f"finished, saves={list(output.saves.keys())}")
+        else:
+            print(f"streaming: {output.outputs[0].text!r}")
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
+
+`AsyncLLM` spawns the engine core as a child process via `multiprocessing` spawn, so the `if __name__ == "__main__":` guard is required. `output.saves` is only set on the finished output; intermediate outputs do not carry a `.saves` attribute.
 
 ### Architecture
 
-The async path introduces three new components that work together to defer generation to after the trace context exits:
+The async path swaps only the backend; the tracer class is the same `RemoteInterleavingTracer` as the sync path. All async-specific behavior lives in `AsyncVLLMBackend`:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  User Code                                                      │
 │  with model.trace("Hello", ...) as tracer:                      │
-│      logits = model.logits.save()                        │
+│      logits = model.logits.save()                               │
 │                                                                 │
-│  async for output in tracer.backend():  # <-- streaming here    │
-│      print(output.saves)                                        │
+│  async for output in tracer.backend:    # <-- streaming here    │
+│      if output.finished:                                        │
+│          print(output.saves)                                    │
 └──────┬──────────────────────────────────────────────────────────┘
        │
        v
 ┌─────────────────────────────────────────────────────────────────┐
 │  VLLM.trace() override                                          │
-│  - Detects mode="async"                                         │
-│  - Injects AsyncVLLMBackend and AsyncInterleavingTracer         │
-│  - Bypasses RemoteableMixin.trace() → calls Envoy.trace()       │
+│  - Detects self._async_engine (mode="async")                    │
+│  - Injects kwargs["backend"] = AsyncVLLMBackend(self)           │
+│  - Delegates to super().trace() (default RemoteInterleavingTracer) │
 └──────┬──────────────────────────────────────────────────────────┘
        │
-       v
+       v (on Tracer.__exit__)
 ┌─────────────────────────────────────────────────────────────────┐
-│  AsyncInterleavingTracer.execute()                              │
-│  - Runs compiled user code to set up mediators                  │
-│  - Serializes mediators into sampling params                    │
-│  - Stores prepared (prompts, params, kwargs) on self.prepared   │
-│  - Does NOT call model.interleave() (no sync generation)        │
+│  AsyncVLLMBackend.__call__(tracer)                              │
+│  - tracer._setup_interleaver(fn) → compiled mediators           │
+│  - model._serialize_mediators(*args, **kwargs)                  │
+│      → (prompts, params, lora_requests)                         │
+│  - self._request_id = uuid4()                                   │
+│  - self._generator = vllm_entrypoint.generate(prompts[0], …)    │
+│  - tracer.mediators.clear()                                     │
 └──────┬──────────────────────────────────────────────────────────┘
        │
-       v
+       v (on `async for output in tracer.backend`)
 ┌─────────────────────────────────────────────────────────────────┐
-│  AsyncVLLMBackend                                               │
-│  __call__(tracer): Reads tracer.prepared                        │
-│  __call__():       Returns _stream() async generator            │
-│                                                                 │
-│  _stream():                                                     │
-│    async for output in AsyncLLM.generate(...):                  │
-│      collective_rpc("collect_nnsight", ...)  # get saves        │
-│      output.saves = saves                                       │
+│  AsyncVLLMBackend.__aiter__()                                   │
+│    async for output in self._generator:                         │
+│      if output.finished:                                        │
+│        results = await collective_rpc("collect_nnsight", …)     │
+│        output.saves = pickle.loads(zstd.decompress(…))[req_id]  │
 │      yield output                                               │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -584,38 +582,47 @@ The async path introduces three new components that work together to defer gener
 | Aspect | Sync | Async |
 |--------|------|-------|
 | Engine class | `vllm.LLM` | `vllm.v1.engine.async_llm.AsyncLLM` |
-| Tracer | `RemoteInterleavingTracer` | `AsyncInterleavingTracer` |
+| Tracer | `RemoteInterleavingTracer` | `RemoteInterleavingTracer` (same; async behavior lives in the backend) |
 | Backend | Default (runs `model.interleave()`) | `AsyncVLLMBackend` |
-| Generation trigger | `VLLM.__call__()` via `model.interleave()` | `AsyncLLM.generate()` via `tracer.backend()` |
-| Save collection | On finished requests only (`NNsightLLMEngine.step()`) | On finished requests only (`AsyncVLLMBackend._stream()` gates on `output.finished`) via `collective_rpc` |
+| Generation trigger | `VLLM.__call__()` via `model.interleave()` | `AsyncLLM.generate()` invoked inside `AsyncVLLMBackend.__call__(tracer)` on trace `__exit__` |
+| Save collection | On finished requests only (`NNsightLLMEngine.step()`) | On finished requests only (`AsyncVLLMBackend.__aiter__()` gates on `output.finished`) via `collective_rpc` |
 | Engine patching | `NNsightLLMEngine` replaces engine class | No engine patching (async path uses `collective_rpc` directly) |
 | Result delivery | Saves pushed to user's local variables | Saves attached as `output.saves` on each `RequestOutput` |
 | Ray support | Yes (executor swap in `_load()`) | Yes (executor swap + pre-`ray.init()` in `_load()`) |
 
 ### Streaming Saves
 
-The async path currently collects saves only on the **final** streamed output (when `output.finished == True`). `AsyncVLLMBackend._stream()` checks `output.finished` and skips the `collective_rpc("collect_nnsight", ...)` call for intermediate outputs. This matches the sync path's behavior — saves are delivered once per request, after generation completes.
+The async path currently collects saves only on the **final** streamed output (when `output.finished == True`). `AsyncVLLMBackend.__aiter__()` checks `output.finished` and skips the `collective_rpc("collect_nnsight", ...)` call for intermediate outputs. This matches the sync path's behavior — saves are delivered once per request, after generation completes.
 
 Streaming intermediate saves on every output (for real-time monitoring of intervention state during generation) is a planned future option. The worker-side `collect_nnsight` already supports both modes via its parameters:
 
 - `req_ids`: All request IDs to collect current saves from
 - `finished_req_ids`: Subset that are finished and should be finalized
 
-If `finished_req_ids` is empty / does not contain the request ID, saves are collected from frame locals but the mediator is not finalized and its saves are not removed from `Globals.saves` (so they can be re-collected on the next step). When the request ID is in `finished_req_ids`, the mediator is finalized (result handler + cancel) and cleaned up. Re-enabling intermediate-output collection is therefore a backend-side change in `AsyncVLLMBackend._stream()` — drop the `output.finished` gate and pass `[]` (or `None`-equivalent) for `finished_req_ids` on intermediate outputs.
+If `finished_req_ids` is empty / does not contain the request ID, saves are collected from frame locals but the mediator is not finalized and its saves are not removed from `Globals.saves` (so they can be re-collected on the next step). When the request ID is in `finished_req_ids`, the mediator is finalized (result handler + cancel) and cleaned up. Re-enabling intermediate-output collection is therefore a backend-side change in `AsyncVLLMBackend.__aiter__()` — drop the `output.finished` gate and pass `[]` (or `None`-equivalent) for `finished_req_ids` on intermediate outputs.
 
-### Why AsyncInterleavingTracer Bypasses RemoteableMixin
+### How VLLM.trace() Routes the Async Path
 
-`RemoteableMixin.trace()` hard-codes `tracer_cls=RemoteInterleavingTracer`. The async path needs `AsyncInterleavingTracer` instead, so `VLLM.trace()` bypasses it by calling `Envoy.trace()` directly:
+`RemoteableMixin.trace()` uses `kwargs.setdefault("tracer_cls", RemoteInterleavingTracer)`, so the default tracer applies unless overridden. `VLLM.trace()` just injects the backend and delegates to `super().trace()`:
 
 ```python
 def trace(self, *inputs, **kwargs):
-    if self._async_engine and kwargs.get('backend') is None and not kwargs.get('remote'):
-        kwargs['backend'] = AsyncVLLMBackend(self)
-        return Envoy.trace(self, *inputs, tracer_cls=AsyncInterleavingTracer, **kwargs)
+    serve = kwargs.pop("serve", None)
+    if serve is not None and kwargs.get("backend") is None:
+        # serve path — see Serve Mode below
+        ...
+    else:
+        if (
+            self._async_engine
+            and kwargs.get("backend") is None
+            and not kwargs.get("remote")
+        ):
+            from .async_backend import AsyncVLLMBackend
+            kwargs["backend"] = AsyncVLLMBackend(self)
     return super().trace(*inputs, **kwargs)
 ```
 
-This preserves the `remote=True` path unchanged (still uses `RemoteInterleavingTracer`).
+The async path keeps `RemoteInterleavingTracer` and lets the backend do all the deferral. The `remote=True` and `serve=` paths are preserved unchanged.
 
 ---
 
