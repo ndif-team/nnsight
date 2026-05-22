@@ -1,0 +1,163 @@
+<mxfile host="65bd71144e">
+    <diagram id="tp-compare" name="TP: Column-parallel vs Row-parallel">
+        <mxGraphModel dx="786" dy="827" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1020" pageHeight="660" background="#FFFFFF" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="worker" value="vLLM worker process &amp;nbsp;&lt;font style=&quot;font-size:10px;color:#666666;font-weight:normal&quot;&gt;(tensor_parallel_size = 2)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#999999;spacingTop=6;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="40" width="960" height="555" as="geometry"/>
+                </mxCell>
+                <mxCell id="sep" style="endArrow=none;html=1;dashed=1;strokeColor=#999999;sketch=1;curveFitting=1;jiggle=2;" parent="1" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="500" y="75" as="sourcePoint"/>
+                        <mxPoint x="500" y="590" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="c-title" value="ColumnParallelLinear &amp;nbsp;&lt;font style=&quot;color:#666666;font-weight:normal&quot;&gt;(all-gather)&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontStyle=1;fontSize=12;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="80" width="460" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-title" value="RowParallelLinear &amp;nbsp;&lt;font style=&quot;color:#666666;font-weight:normal&quot;&gt;(all-reduce)&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontStyle=1;fontSize=12;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="505" y="80" width="480" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-hdr" value="Rank 0" style="text;html=1;align=center;fontStyle=1;fontSize=11;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="95" y="115" width="140" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-hdr" value="Rank 1" style="text;html=1;align=center;fontStyle=1;fontSize=11;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="305" y="115" width="140" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-hdr" value="Rank 0" style="text;html=1;align=center;fontStyle=1;fontSize=11;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="555" y="115" width="140" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-hdr" value="Rank 1" style="text;html=1;align=center;fontStyle=1;fontSize=11;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="765" y="115" width="140" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-in" value="X (replicated)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#888888;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="105" y="150" width="120" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-in" value="X (replicated)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eeeeee;strokeColor=#888888;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="315" y="150" width="120" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-in" value="X₀" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="593" y="150" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-in" value="X₁" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="803" y="150" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-w" value="ColumnParallelLinear&#xa;W[:, 0:d/2]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="185" width="130" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-w" value="ColumnParallelLinear&#xa;W[:, d/2:d]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="310" y="185" width="130" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-w" value="RowParallelLinear&#xa;W[0:d/2, :]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="185" width="130" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-w" value="RowParallelLinear&#xa;W[d/2:d, :]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="185" width="130" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-out" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="133" y="235" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-lbl" value="out[:, 0:d/2]" style="text;html=1;align=center;fontSize=10;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="95" y="263" width="140" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-out" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="343" y="235" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-lbl" value="out[:, d/2:d]" style="text;html=1;align=center;fontSize=10;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="305" y="263" width="140" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-out" value="P₀" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;opacity=50;fontSize=11;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="235" width="130" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-lbl" value="P₀ (partial sum, full shape)" style="text;html=1;align=center;fontSize=10;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="555" y="263" width="140" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-out" value="P₁" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=50;fontSize=11;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="235" width="130" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-lbl" value="P₁ (partial sum, full shape)" style="text;html=1;align=center;fontSize=10;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="765" y="263" width="140" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-plus" value="+" style="text;html=1;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#b85450;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="230" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-band" value="batcher: all-gather (concat along output dim)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef9c2;strokeColor=#d6b656;fontSize=11;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="45" y="285" width="445" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-band" value="batcher: all-reduce (sum partials across ranks)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef9c2;strokeColor=#d6b656;fontSize=11;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="515" y="285" width="465" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-f0" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="325" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-f1" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="165" y="325" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-f0" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="310" y="325" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-f1" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="375" y="325" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-full" value="&lt;font&gt;P₀ + P₁&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=#674172;fontColor=#FFFFFF;fontSize=10;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="325" width="130" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-full" value="&lt;font&gt;P₀ + P₁&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=#674172;fontColor=#FFFFFF;fontSize=10;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="325" width="130" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-full-lbl" value="full output [:, 0:d] — same on every rank" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="355" width="460" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-full-lbl" value="full output (sum) — same on every rank" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="505" y="355" width="480" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-med" value="mediator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="375" width="130" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-med" value="mediator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="310" y="375" width="130" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-med" value="mediator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="375" width="130" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-med" value="mediator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="375" width="130" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-med-note" value="same code, same view, same result on every rank" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="415" width="460" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-med-note" value="same code, same view, same result on every rank" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="505" y="415" width="480" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-post" value="post-hook: re-shard (split back to per-rank slices)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef9c2;strokeColor=#d6b656;dashed=1;fontSize=10;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="45" y="435" width="445" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-post" value="post-hook: pass full output forward (no re-shard needed)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;fontSize=10;fontStyle=2;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="515" y="435" width="465" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r0-out2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="133" y="475" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-r1-out2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="343" y="475" width="65" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r0-out2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=#674172;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="475" width="130" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-r1-out2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;strokeColor=#674172;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="475" width="130" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c-next" value="↓ next layer continues on sharded copy" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="35" y="505" width="460" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r-next" value="↓ next layer consumes the full output" style="text;html=1;align=center;fontSize=10;fontStyle=2;fontColor=#666666;rounded=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="505" y="505" width="480" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="note" value="Column-parallel shards the &lt;b&gt;output&lt;/b&gt; dim → each rank holds a slice → concat (all-gather).&amp;nbsp;&amp;nbsp;Row-parallel shards the &lt;b&gt;input&lt;/b&gt; dim → each rank holds a partial sum → add (all-reduce)." style="text;html=1;align=center;fontSize=11;fontStyle=2;fontColor=#444444;rounded=1;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="30" y="610" width="960" height="30" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

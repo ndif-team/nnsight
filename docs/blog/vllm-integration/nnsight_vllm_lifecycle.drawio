@@ -1,0 +1,127 @@
+<mxfile host="65bd71144e">
+    <diagram id="nnsight-vllm-lifecycle" name="nnsight-vLLM">
+        <mxGraphModel dx="1209" dy="1272" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="720" background="#FFFFFF" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="user-proc" value="User process" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#f5f5f5;strokeColor=#666666;spacingTop=8;sketch=1;curveFitting=1;jiggle=2;fontColor=#333333;" vertex="1" parent="1">
+                    <mxGeometry x="40" y="40" width="320" height="600" as="geometry"/>
+                </mxCell>
+                <mxCell id="worker-proc" value="vLLM worker process" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=13;fillColor=#f5f5f5;strokeColor=#999999;spacingTop=8;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="420" y="40" width="740" height="600" as="geometry"/>
+                </mxCell>
+                <mxCell id="boundary" value="process boundary" style="endArrow=none;html=1;dashed=1;strokeColor=#666666;fontSize=10;labelBackgroundColor=#FFFFFF;sketch=1;curveFitting=1;jiggle=2;" parent="1" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="390" y="60" as="sourcePoint"/>
+                        <mxPoint x="390" y="630" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="u-actor" value="User" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;fontSize=11;sketch=1;curveFitting=1;jiggle=2;rounded=1;" vertex="1" parent="1">
+                    <mxGeometry x="180" y="80" width="30" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="u-trace" value="&lt;b&gt;with model.trace(prompt) as tracer:&lt;/b&gt;&lt;br&gt;&amp;nbsp;&amp;nbsp;hs = model.layers[5].output.save()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6c8ebf;fontFamily=Courier New;fontSize=10;align=left;spacingLeft=8;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="70" y="170" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="u-mediator" value="&lt;b&gt;mediator&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 9px&quot;&gt;compiled intervention + saves slots&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="120" y="280" width="160" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="u-saves" value="&lt;b&gt;saves&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 9px&quot;&gt;{&quot;hs&quot;: Tensor[...], ...}&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="120" y="535" width="160" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="u-e1" value="compile" style="endArrow=classic;html=1;fontSize=10;labelBackgroundColor=#FFFFFF;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="u-trace" target="u-mediator">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="w-engine" value="vLLM engine" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=12;fillColor=#e8f5e8;strokeColor=#82b366;spacingTop=6;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="450" y="80" width="690" height="430" as="geometry"/>
+                </mxCell>
+                <mxCell id="w-medA" value="mediator A" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="475" y="135" width="100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="w-medB" value="mediator B" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="630" y="135" width="100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="w-medC" value="mediator C" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="785" y="135" width="100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="w-medD" value="mediator D" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="940" y="135" width="100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="t-label" value="flat batched tensor &amp;nbsp;&lt;font style=&quot;color:#999999&quot;&gt;[total_tokens, hidden]&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;fontSize=10;sketch=1;curveFitting=1;jiggle=2;rounded=1;" vertex="1" parent="1">
+                    <mxGeometry x="655" y="240" width="400" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="t-segA" value="A&#39;s tokens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="475" y="205" width="140" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="t-segB" value="B&#39;s tokens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="615" y="205" width="140" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="t-segC" value="C&#39;s tokens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="755" y="205" width="140" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="t-segD" value="D&#39;s tokens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="895" y="205" width="140" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="ms-A" style="endArrow=classic;html=1;strokeColor=#b85450;dashed=0;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="w-medA" target="t-segA">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ms-B" style="endArrow=classic;html=1;strokeColor=#82b366;dashed=0;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="w-medB" target="t-segB">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ms-C" style="endArrow=classic;html=1;strokeColor=#6c8ebf;dashed=0;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="w-medC" target="t-segC">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ms-D" style="endArrow=classic;html=1;strokeColor=#d6b656;dashed=0;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="w-medD" target="t-segD">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="t-note" value="each mediator sees only its own slice" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontStyle=2;fontColor=#666666;sketch=1;curveFitting=1;jiggle=2;rounded=1;" vertex="1" parent="1">
+                    <mxGeometry x="585" y="110" width="350" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="m-stack" value="model forward (eager)" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;rounded=1;" vertex="1" parent="1">
+                    <mxGeometry x="475" y="285" width="180" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="m-L0" value="Layer 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="500" y="310" width="120" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="m-L1" value="Layer 1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="500" y="340" width="120" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="m-Lx" value="..." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="500" y="370" width="120" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="m-LN" value="Layer N" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="500" y="400" width="120" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="hook-note" value="hooks fire at each module forward (mediator threads observe / modify)" style="text;html=1;align=left;verticalAlign=middle;fontSize=10;fontColor=#666666;fontStyle=2;sketch=1;curveFitting=1;jiggle=2;rounded=1;" vertex="1" parent="1">
+                    <mxGeometry x="650" y="345" width="350" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="hook-arrow" style="endArrow=open;html=1;dashed=1;strokeColor=#999999;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="m-L1" target="hook-note">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ph-logits" value="Logits&#xa;(model.logits)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="700" y="392.5" width="120" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="ph-sample" value="Sampling&#xa;(model.samples)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82b366;fontSize=10;sketch=1;curveFitting=1;jiggle=2;" vertex="1" parent="1">
+                    <mxGeometry x="850" y="392.5" width="120" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="ph-e1" style="endArrow=classic;html=1;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="m-LN" target="ph-logits">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ph-e2" style="endArrow=classic;html=1;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="ph-logits" target="ph-sample">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="step-loop" value="↻ repeats per scheduler step until request finishes" style="text;html=1;align=center;verticalAlign=middle;fontSize=10;fontStyle=2;fontColor=#666666;sketch=1;curveFitting=1;jiggle=2;rounded=1;" vertex="1" parent="1">
+                    <mxGeometry x="475" y="460" width="500" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="w-collect" value="&lt;b&gt;collect_nnsight&lt;/b&gt; on request finish&lt;br&gt;&lt;font style=&quot;font-size: 9px&quot;&gt;pulls saves from the finishing mediator&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="535" width="280" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="x-ship" value="ride SamplingParams.extra_args" style="endArrow=classic;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;labelBackgroundColor=#FFFFFF;strokeWidth=1.5;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="u-mediator" target="w-medA">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="x-saves" value="saves return" style="endArrow=classic;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;fontSize=10;labelBackgroundColor=#FFFFFF;strokeWidth=1.5;sketch=1;curveFitting=1;jiggle=2;" edge="1" parent="1" source="w-collect" target="u-saves">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
