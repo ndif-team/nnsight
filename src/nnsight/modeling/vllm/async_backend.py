@@ -82,16 +82,18 @@ class AsyncVLLMBackend(Backend):
                     "collect_nnsight",
                     args=([output.request_id], finished),
                 )
-                saves_bytes = next((r for r in results if r is not None), None)
-                if saves_bytes:
-                    # Worker returns ``{base_id: {var_name: value}}``.
-                    # Pull THIS request's sub-dict — the outer layer
-                    # exists to keep concurrent independent traces from
-                    # colliding at shared variable names.
-                    saves_by_req = pickle.loads(
-                        _ZSTD_DECOMPRESSOR.decompress(saves_bytes)
-                    )
-                    per_req = saves_by_req.get(output.request_id)
-                    if per_req:
-                        output.saves = per_req
+                # Worker returns ``{base_id: {var_name: value}}``. Without
+                # PP only TP-rank-0 returns data; with PP > 1 every PP
+                # stage's TP-rank-0 contributes — merge per-request
+                # sub-dicts so saves from different stages accumulate.
+                merged: dict = {}
+                for r in results:
+                    if r is None:
+                        continue
+                    rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
+                    for base_id, per_req in rank_saves.items():
+                        merged.setdefault(base_id, {}).update(per_req)
+                per_req = merged.get(output.request_id)
+                if per_req:
+                    output.saves = per_req
             yield output

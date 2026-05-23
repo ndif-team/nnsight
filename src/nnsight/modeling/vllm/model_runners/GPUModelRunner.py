@@ -1,4 +1,6 @@
 import pickle
+import threading
+import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import torch
@@ -6,15 +8,15 @@ import zstandard as _zstd
 
 _ZSTD_COMPRESSOR = _zstd.ZstdCompressor(level=1)
 
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.distributed.parallel_state import get_tp_group
 
 from ....intervention.serialization import load
 from ....intervention.tracing.globals import Globals
 from ..batching import VLLMBatcher
+from ..lazy_remote_tensor import LazyRemoteTensor
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -33,6 +35,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
     mediators from incoming :class:`NNsightSamplingParams`, and manages
     batch group mappings so each invoke's intervention code sees the
     correct slice of the batch.
+
+    When :data:`pipeline_parallel_size` > 1 the runner also owns the PP
+    plumbing: shared per-module metadata, the per-rank ``pp_hook_buffer``,
+    the cross-rank :class:`~..pp_listener.PPListener` thread, and the
+    per-step readiness gate that waits for every mediator to park at a
+    local-module access before firing forward-pass hooks.
     """
 
     class NNsightRequestHelper:
@@ -40,21 +48,58 @@ class NNsightGPUModelRunner(GPUModelRunner):
         Helper class for batching requests in the GPUModelRunner.
 
         Attributes:
-            ids_to_batch_group (Dict[str, int]): Dictionary mapping request IDs to their assigned batch group indices.
-            interleaver_to_ids (Dict[Interleaver, Set[str]]): Dictionary mapping interleavers to sets of request IDs.
-            flat_batch_groups (Dict[Interleaver, List[Tuple[int, int]]]): Dictionary mapping interleavers to their flattened batch groups.
-
-        Methods:
-            process_new_reqs(new_reqs: List[NewRequestData]) -> None: Process new requests and compute the flat batch groups.
-            process_finished_req(req_id: str, interleaver: Interleaver) -> None: Process a finished request,
-                by updating batch groups and cleaning up mappings.
+            req_id_to_batch_group_idx: req_id → batch group index
+            mediators: req_id → :class:`Mediator`
+            trace_contexts: trace_id → context dict (canonical_globals, saved_names, pending_req_ids)
         """
 
         def __init__(self):
 
             self.req_id_to_batch_group_idx: Dict[str, int] = {}
-            self.mediators: Dict[str, Any] = {}  # req_id -> Mediator
-            self.trace_contexts: Dict[str, dict] = {}  # trace_id -> context
+            self.mediators: Dict[str, Any] = {}
+            self.trace_contexts: Dict[str, dict] = {}
+
+        def _pp_aware_load(self, data: bytes, model: VLLM):
+            """Deserialize a mediator with PP-aware persistent ID resolution.
+
+            When PP is enabled the serialized mediator references full-model
+            module paths (e.g. ``model.transformer.h.6.ln_1``). On PP
+            workers, layers on other stages are :class:`PPMissingLayer`
+            stubs with no children, so a direct lookup fails. This unpickler
+            walks up the dotted path until it finds an ancestor
+            :class:`PPMissingLayer` and returns that — far enough up the
+            tree that one of the lazy-tensor-returning Envoys is at the
+            access path the user wrote.
+            """
+            import io
+
+            persistent_objects = model._remoteable_persistent_objects()
+            pp_enabled = get_pp_group().world_size > 1
+
+            if not pp_enabled:
+                return load(data, persistent_objects)
+
+            from ..pp import is_pp_missing
+            from ....intervention.serialization import CustomCloudUnpickler
+
+            class _PPUnpickler(CustomCloudUnpickler):
+                def persistent_load(self, pid):
+                    if pid in self.persistent_objects:
+                        return self.persistent_objects[pid]
+                    if isinstance(pid, str) and pid.startswith("Module:"):
+                        path = pid[len("Module:"):]
+                        parts = path.split(".")
+                        for i in range(len(parts) - 1, 0, -1):
+                            ancestor_pid = "Module:" + ".".join(parts[:i])
+                            if ancestor_pid in self.persistent_objects:
+                                ancestor = self.persistent_objects[ancestor_pid]
+                                if is_pp_missing(ancestor):
+                                    return ancestor
+                    raise pickle.UnpicklingError(
+                        f"Unknown persistent id: {pid}"
+                    )
+
+            return _PPUnpickler(io.BytesIO(data), persistent_objects).load()
 
         def process_new_reqs(
             self, new_reqs: List["NewRequestData"], model: VLLM
@@ -68,9 +113,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             Subsequent arrivals graft the saved variable entries from the
             canonical globals into their own ``__globals__``, so all mediators
             share the same Python objects for cross-invoke state.
-
-            Args:
-                new_reqs (List[NewRequestData]): List of new request data objects to process.
             """
 
             for new_req in new_reqs:
@@ -81,18 +123,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 trace_id = extra_args.get("nnsight_trace_id")
                 if trace_id is None:
-                    # Non-NNsight request, skip
                     continue
 
-                mediator = load(
-                    extra_args["nnsight_mediator"],
-                    model._remoteable_persistent_objects(),
+                mediator = self._pp_aware_load(
+                    extra_args["nnsight_mediator"], model,
                 )
 
                 saved_names = extra_args.get("nnsight_saved_names", [])
 
-                # First mediator for this trace: create context and register
-                # its __globals__ as canonical for shared variable grafting.
                 if trace_id not in self.trace_contexts:
                     canonical_globals = mediator.intervention.__globals__
 
@@ -108,8 +146,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         "pending_req_ids": set(),
                     }
                 else:
-                    # Subsequent mediator: graft saved vars from canonical
-                    # globals so all mediators share the same Python objects.
                     ctx = self.trace_contexts[trace_id]
                     canonical = ctx["canonical_globals"]
                     med_globals = mediator.intervention.__globals__
@@ -119,9 +155,24 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 ctx = self.trace_contexts[trace_id]
 
-                mediator.idx = len(model.interleaver.mediators)
-                model.interleaver.mediators.append(mediator)
-                mediator.start(model.interleaver)
+                # Tag the mediator with its stable cross-rank request id
+                # BEFORE ``mediator.start(...)`` — the worker thread spawned
+                # by ``start()`` may immediately run user code that hits
+                # the pp_eproperty short-circuit and captures ``pp_req_id``
+                # into the pull closure. Setting it after ``start()`` races:
+                # the closure may capture ``None`` and cross-rank pulls fail
+                # to look up the composite ``(provider, req_id)`` key.
+                mediator.pp_req_id = new_req.req_id
+
+                # Reset the iteration gate for the new request so mediators
+                # are not blocked by a previous stop signal.
+                interleaver = model.interleaver
+                if getattr(interleaver, "_generation_done", False):
+                    interleaver._generation_done = False
+
+                mediator.idx = len(interleaver.mediators)
+                interleaver.mediators.append(mediator)
+                mediator.start(interleaver)
 
                 self.mediators[new_req.req_id] = mediator
                 ctx["pending_req_ids"].add(new_req.req_id)
@@ -148,8 +199,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 mediator = self.mediators.get(req_id)
 
                 if mediator is None or id(mediator) not in mediator_set:
-                    # Non-NNsight request or already-finished mediator —
-                    # still occupies a row in the logits tensor.
                     batch_start += 1
                     continue
 
@@ -176,11 +225,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             mediators = []
 
-            # Iterate in input_batch order (batch_req_ids) rather than
-            # scheduler dict order, because input_batch.condense() and
-            # _may_reorder_batch() can reorder requests after the scheduler
-            # builds num_scheduled_tokens.  The model's tensors (including
-            # sampled_token_ids) follow input_batch order.
             for req_id in batch_req_ids:
 
                 num_tokens = num_tokens_scheduled.get(req_id)
@@ -209,11 +253,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
             """Match engine-reported request IDs to stored mediators.
 
             vLLM appends a hash suffix to request IDs (e.g. ``"0-abc123"``
-            or ``"uuid-abc123"``).  This method strips the suffix with
-            ``rsplit`` and falls back to an exact match.
-
-            Returns:
-                List of ``(base_id, mediator, internal_key)`` tuples.
+            or ``"uuid-abc123"``). Strip the suffix with ``rsplit`` and
+            fall back to an exact match.
             """
             matched = []
             for req_id, mediator in self.mediators.items():
@@ -225,11 +266,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             return matched
 
         def finalize_mediators(self, matched, finished_req_id_set, model: VLLM) -> set:
-            """Run result handler and cancel finished mediators.
-
-            Returns:
-                Set of internal keys for mediators that were finalized.
-            """
+            """Run result handler and cancel finished mediators."""
             finished_internal_keys = set()
             for base_id, mediator, internal_key in matched:
                 if base_id not in finished_req_id_set:
@@ -245,8 +282,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         mediator.cancel()
                         model.interleaver.handle()
                 # Always remove persistent cache hooks when the request
-                # finishes — even if the mediator thread died early (e.g.
-                # intervention code was just tracer.cache(); nns.save(c)
+                # finishes — even if the mediator thread died early
+                # (e.g. intervention code was just tracer.cache(); nns.save(c)
                 # with no blocking access). Otherwise hooks pile up on the
                 # module and keep firing with stale batch_groups from dead
                 # mediators.
@@ -260,12 +297,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
             Gathers per-invoke saves from frame locals and trace-shared
             saves from canonical globals (only when a trace is fully done).
 
+            Filters out unmaterialized :class:`LazyRemoteTensor` instances —
+            those belong to a different rank and should not be shipped from
+            this rank's saves.
+
             Returns:
                 ``(saves_by_req, removals)`` —
                 ``saves_by_req`` is ``{base_id: {var_name: value}}`` so
                 concurrent requests whose user code uses the same
                 variable name (``logits``, ``x``, …) don't collide at
-                the outer flat-dict layer.  The caller (engine / server)
+                the outer flat-dict layer. The caller (engine / server)
                 routes each sub-dict to the matching request output.
                 ``removals`` is a list of ``id`` values to discard from
                 ``Globals.saves`` after collection.
@@ -273,8 +314,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             saves_by_req: dict = {}
             removals = []
 
-            # Map internal_key -> base_id so trace-shared saves from a
-            # finished internal_key can be attached to the right bucket.
             base_by_internal = {ik: b for b, _, ik in matched}
 
             for base_id, mediator, internal_key in matched:
@@ -282,13 +321,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 frame = mediator.info.frame
                 for key, value in frame.f_locals.items():
                     if id(value) in Globals.saves:
+                        if isinstance(value, LazyRemoteTensor):
+                            continue
                         per_req[key] = value
                         if internal_key in finished_internal_keys:
                             removals.append(id(value))
 
-            # Trace-shared saves: collect when ALL mediators for a trace
-            # have been received AND completed.  Attach to the base_id
-            # whose finishing triggered the trace completion.
             for internal_key in finished_internal_keys:
                 owning_base = base_by_internal.get(internal_key, internal_key)
                 for _, ctx in self.trace_contexts.items():
@@ -305,6 +343,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
                                 if name in canonical:
                                     value = canonical[name]
                                     if id(value) in Globals.saves:
+                                        if isinstance(value, LazyRemoteTensor):
+                                            continue
                                         per_req[name] = value
                                         removals.append(id(value))
                         break
@@ -374,9 +414,286 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # gather/split of sharded tensors and CUDA synchronization
         # for TP-parallel modules.  With TP == 1 nothing is sharded
         # so wrapping is pure overhead.
-
         if get_tp_group().world_size > 1:
             self.nnsight_model.interleaver.batcher.wrap(self.nnsight_model)
+
+        # ----- Pipeline-parallel setup -----
+        pp_world_size = get_pp_group().world_size
+        self.pp_enabled = pp_world_size > 1
+        self.pp_hook_buffer: Dict[Any, Any] = {}
+        self.pp_buffer_condition = threading.Condition()
+
+        if self.pp_enabled:
+            from ..pp import PPModuleMap
+            from ..pp_listener import PPListener
+            import torch.distributed as dist
+
+            num_layers = self.model_config.hf_config.num_hidden_layers
+            self.pp_module_map = PPModuleMap(num_layers, pp_world_size)
+
+            # Graft children of meta-model PPMissingLayer stubs onto the
+            # worker Envoy tree so users can access ``model.layers[5].attn.output``
+            # on a stage that doesn't own layer 5. The meta model was built in
+            # ``GPUWorker.__init__`` before distributed init (PP=1, TP=1, full
+            # architecture). The lazy-tensor short-circuit kicks in on those
+            # grafted envoys via :func:`pp_envoy._is_pp_missing`.
+            meta_model = getattr(self, "_pp_meta_model", None)
+            if meta_model is not None:
+                self._graft_pp_missing_envoys(meta_model)
+                del self._pp_meta_model
+
+            # Probe output shapes via a FakeTensorMode forward pass on the
+            # real (TP-sharded) model, then allgather across PP ranks so
+            # every rank can pre-compute pull recv-buffer sizes without
+            # shape on the wire.
+            shape_meta = self._probe_pp_output_shapes()
+            self.pp_module_meta = self._exchange_pp_module_meta(shape_meta)
+
+            # Dedicated gloo group for pull requests — separate from
+            # vLLM's own PP groups so the listener thread's recv() doesn't
+            # conflict with vLLM's PP communication. ``new_group`` is
+            # collective: ALL ranks in the default group must call it the
+            # same number of times. With TP > 1 we have multiple PP groups
+            # (one per TP slice), and we must call ``new_group`` once per
+            # PP-rank list, mirroring vLLM's ``GroupCoordinator.__init__``.
+            tp_size = get_tp_group().world_size
+            my_pull_group = None
+            for tp_offset in range(tp_size):
+                pp_ranks_for_tp = [
+                    pp_rank * tp_size + tp_offset
+                    for pp_rank in range(pp_world_size)
+                ]
+                g = dist.new_group(ranks=pp_ranks_for_tp, backend="gloo")
+                if dist.get_rank() in pp_ranks_for_tp:
+                    my_pull_group = g
+            self.pp_pull_group = my_pull_group
+
+            local_rank = get_pp_group().rank_in_group
+
+            self.pp_listener = PPListener(
+                buffer=self.pp_hook_buffer,
+                condition=self.pp_buffer_condition,
+                pull_group=self.pp_pull_group,
+                local_rank=local_rank,
+                device=torch.device(f"cuda:{torch.cuda.current_device()}"),
+                meta_map=self.pp_module_meta,
+            )
+            self.pp_listener.start()
+
+            # Pin PP fields on the interleaver instance so ``pp_eproperty``
+            # and ``Mediator.handle_value_event`` can find them without
+            # passing them through every call.
+            interleaver = self.nnsight_model.interleaver
+            interleaver.pp_enabled = True
+            interleaver.pp_local_rank = local_rank
+            interleaver.pp_module_map = self.pp_module_map
+            interleaver.pp_hook_buffer = self.pp_hook_buffer
+            interleaver.pp_buffer_condition = self.pp_buffer_condition
+            interleaver.pp_module_meta = self.pp_module_meta
+            interleaver.pp_listener = self.pp_listener
+        else:
+            self.pp_module_map = None
+            self.pp_module_meta = {}
+            self.pp_listener = None
+
+    def _graft_pp_missing_envoys(self, meta_model: torch.nn.Module) -> None:
+        """Graft child envoys from meta model onto PPMissing layer envoys.
+
+        :class:`PPMissingLayer` stubs have no children, so the worker's
+        Envoy tree is missing sub-module envoys for non-local layers.
+        Grafting the meta model's children (full architecture, PP=1)
+        onto each PPMissing envoy lets users access e.g.
+        ``model.layers[5].attn.output`` even when layer 5 lives on
+        another stage.
+
+        The grafted child envoys wrap meta-device modules.
+        :func:`pp_envoy._is_pp_missing` detects them as non-local via
+        ``pp_module_map`` and returns LazyRemoteTensors on access.
+        """
+        from ..pp import is_pp_missing
+        from ....intervention.envoy import Envoy
+
+        meta_modules = dict(meta_model.named_modules())
+
+        def graft(envoy):
+            if is_pp_missing(envoy._module):
+                meta_module = meta_modules.get(envoy.path)
+                if meta_module is not None:
+                    for name, child_module in meta_module.named_children():
+                        child_envoy = Envoy(
+                            child_module,
+                            path=f"{envoy.path}.{name}",
+                            rename=envoy._alias.rename if envoy._alias is not None else None,
+                            interleaver=envoy._interleaver,
+                        )
+                        if hasattr(Envoy, name):
+                            envoy._handle_overloaded_mount(child_envoy, name)
+                        else:
+                            object.__setattr__(envoy, name, child_envoy)
+            for child_envoy in envoy._children:
+                graft(child_envoy)
+
+        graft(self.nnsight_model)
+
+    def _probe_pp_output_shapes(self) -> dict:
+        """Probe output shapes of local modules via FakeTensorMode forward.
+
+        Runs the real (TP-sharded) model forward once with fake tensors,
+        captures each module's raw output, and records dtype + shape
+        suffix metadata that the pull protocol uses to size recv buffers
+        without putting shape on the wire.
+        """
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from ..pp import is_pp_missing
+
+        captured: Dict[str, Any] = {}
+        hooks = []
+
+        for name, module in self.model.named_modules():
+            if is_pp_missing(module):
+                continue
+            _name = name
+
+            def _hook(mod, _input, output, n=_name):
+                captured[n] = output
+
+            hooks.append(module.register_forward_hook(_hook))
+
+        hidden_size = self.model_config.hf_config.hidden_size
+        device = next(self.model.parameters()).device
+
+        # Inner vLLM helpers (e.g. ``vocab_parallel_embedding``'s
+        # ``get_masked_input_and_mask``) are decorated with
+        # ``@torch.compile``. Under our outer FakeTensorMode, those
+        # wrappers still invoke dynamo/inductor, which creates its OWN
+        # FakeTensorMode and fails a ``fake_mode is m`` assertion in
+        # ``torch._guards.detect_fake_mode``. ``torch._dynamo.disable``
+        # on the outer call does NOT propagate to ``@torch.compile``
+        # wrappers — those always trigger compilation on call. Flip
+        # the dynamo global-disable flag instead; each ``@torch.compile``
+        # wrapper checks it and falls back to eager.
+        import torch._dynamo as _dynamo
+        prev_disable = _dynamo.config.disable
+        _dynamo.config.disable = True
+
+        try:
+            with FakeTensorMode(allow_non_fake_inputs=True):
+                input_ids = torch.zeros(1, dtype=torch.long, device=device)
+                positions = torch.zeros(1, dtype=torch.long, device=device)
+
+                pp_group = get_pp_group()
+                if pp_group.is_first_rank:
+                    intermediate_tensors = None
+                else:
+                    intermediate_tensors = IntermediateTensors({
+                        "hidden_states": torch.zeros(
+                            1, hidden_size,
+                            dtype=self.model_config.dtype, device=device,
+                        ),
+                        "residual": torch.zeros(
+                            1, hidden_size,
+                            dtype=self.model_config.dtype, device=device,
+                        ),
+                    })
+
+                with torch.no_grad():
+                    self.model(input_ids, positions, intermediate_tensors)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        finally:
+            _dynamo.config.disable = prev_disable
+            for h in hooks:
+                h.remove()
+
+        meta = {}
+        for path, raw_output in captured.items():
+            try:
+                tensors = list(raw_output) if isinstance(raw_output, (tuple, list)) else [raw_output]
+                tensor_list = [t for t in tensors if isinstance(t, torch.Tensor)]
+                if tensor_list:
+                    meta[path] = {
+                        "dtype": tensor_list[0].dtype,
+                        "num_outputs": len(tensor_list),
+                        "static_suffixes": [tuple(t.shape[1:]) for t in tensor_list],
+                    }
+            except Exception:
+                continue
+
+        return meta
+
+    def _exchange_pp_module_meta(self, shape_meta: dict) -> dict:
+        """Allgather per-module metadata across PP ranks.
+
+        Each rank contributes ``{path: {dtype, num_outputs, static_suffixes}}``
+        for its local (non-PPMissing) modules. The merged map is identical
+        on every rank and lets the listener pre-compute pull recv-buffer
+        sizes without shape on the wire.
+        """
+        import torch.distributed as dist
+        from ..pp import is_pp_missing
+
+        pp_group = get_pp_group()
+
+        local_meta = {}
+        for name, module in self.model.named_modules():
+            if not is_pp_missing(module):
+                param = next(module.parameters(recurse=False), None)
+                dtype = param.dtype if param is not None else self.model_config.dtype
+                if name in shape_meta:
+                    entry = shape_meta[name].copy()
+                    entry["dtype"] = dtype
+                    local_meta[name] = entry
+                else:
+                    local_meta[name] = {
+                        "dtype": dtype,
+                        "num_outputs": 1,
+                        "static_suffixes": [],
+                    }
+
+        local_bytes = pickle.dumps(local_meta)
+        local_tensor = torch.tensor(
+            list(local_bytes), dtype=torch.uint8, device="cpu"
+        )
+        size_tensor = torch.tensor([len(local_bytes)], dtype=torch.int64)
+
+        all_sizes = [
+            torch.zeros(1, dtype=torch.int64)
+            for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_sizes, size_tensor, group=pp_group.cpu_group)
+
+        max_size = max(s.item() for s in all_sizes)
+        padded = torch.zeros(max_size, dtype=torch.uint8)
+        padded[: len(local_bytes)] = local_tensor
+
+        all_padded = [
+            torch.zeros(max_size, dtype=torch.uint8)
+            for _ in range(pp_group.world_size)
+        ]
+        dist.all_gather(all_padded, padded, group=pp_group.cpu_group)
+
+        merged = {}
+        for buf, size in zip(all_padded, all_sizes):
+            rank_meta = pickle.loads(buf[: size.item()].numpy().tobytes())
+            merged.update(rank_meta)
+
+        return merged
+
+    def _pp_wait_for_mediator_readiness(self):
+        """Wait until all mediators have a pending event for a local module.
+
+        Mediators run freely for PPMissing accesses (the pp_eproperty
+        short-circuit returns a LazyRemoteTensor without posting to
+        ``event_queue``). Before firing forward-pass hooks, every
+        mediator must have finished all PPMissing processing and be
+        parked on a local-module ``request()`` — otherwise the hook
+        would fire with no consumer waiting and the value would slip
+        past the iteration.
+        """
+        for mediator in self.nnsight_model.interleaver.mediators:
+            while mediator.alive and not mediator.event_queue.has_value:
+                time.sleep(0.0001)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
@@ -388,7 +705,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         # Use input_batch.req_ids for the actual batch order after
         # condense()/reorder, not the scheduler dict order.
-        # Store these for unflatten() which needs the same ordering.
         self.nnsight_request_helper._batch_req_ids = list(self.input_batch.req_ids)
         self.nnsight_request_helper._num_scheduled_tokens = dict(
             scheduler_output.num_scheduled_tokens
@@ -415,6 +731,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         with interleaver:
 
+            # Wait until every mediator is parked at a local module before
+            # firing forward-pass hooks. Cheap when all mediators have
+            # already reached their first local access (the common case).
+            if self.pp_enabled and interleaver.mediators:
+                self._pp_wait_for_mediator_readiness()
+
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
@@ -439,7 +761,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         with interleaver:
 
-            # Provide logits from execute_model state before sampling.
             if self.execute_model_state is not None:
 
                 logits = type(self.nnsight_model).logits.provide(
@@ -478,18 +799,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
     ) -> Optional[bytes]:
         """Collect saved values from mediators, optionally finalizing finished requests.
 
-        Called on every streamed output (async) or on finished requests (sync).
-        Saves are collected for ALL ``req_ids``.  Mediators listed in
-        ``finished_req_ids`` are additionally finalized (result handler,
-        cancel) and cleaned up.
-
-        Args:
-            req_ids: Request IDs to collect current saves from.
-            finished_req_ids: Subset of request IDs that are finished and
-                should be finalized and cleaned up.  ``None`` means no
-                requests are finished.
+        Called on every streamed output (async) or on finished requests
+        (sync). Saves are collected for ALL ``req_ids``. Mediators listed
+        in ``finished_req_ids`` are additionally finalized (result handler,
+        cancel) and cleaned up. With PP > 1, every PP stage contributes
+        its rank's saves; the engine merges across stages.
         """
-        if get_pp_group().rank != 0:
+        # Only TP-rank-0 of each PP stage returns data — TP siblings
+        # carry replicated mediator state and would duplicate. PP-non-zero
+        # ranks still contribute saves when PP > 1 (engine merges).
+        if get_tp_group().rank != 0:
             return None
 
         if finished_req_ids is None:
@@ -500,19 +819,36 @@ class NNsightGPUModelRunner(GPUModelRunner):
         finished_req_id_set = set(finished_req_ids)
 
         matched = helper.match_req_ids(req_id_set)
+
+        # Signal mediators to exit their iteration loops and wait for
+        # their worker threads to die. Ensures all in-flight pulls finish
+        # before we finalize or clear the buffer.
+        if finished_req_ids and self.pp_enabled:
+            interleaver = self.nnsight_model.interleaver
+            if hasattr(interleaver, "stop_iteration"):
+                interleaver.stop_iteration()
+            for _, mediator, _ in matched:
+                if mediator.worker is not None:
+                    mediator.worker.join(timeout=5.0)
+
         finished_keys = helper.finalize_mediators(
             matched, finished_req_id_set, self.nnsight_model
         )
         saves_by_req, removals = helper.collect_saves(matched, finished_keys)
         helper.cleanup_finished(finished_keys, removals)
 
-        # Collect deferred exceptions.  Each mediator has its own —
-        # nest the typed envelope inside THAT request's sub-dict under
+        # Scoped clear: drop this request's composite-key entries ONLY.
+        # A blanket clear would also wipe concurrent in-flight requests'
+        # slices and break their cross-rank pulls.
+        if self.pp_enabled and finished_keys and self.pp_listener is not None:
+            self.pp_listener.clear_buffer(req_ids=finished_keys)
+
+        # Collect deferred exceptions. Each mediator has its own — nest the
+        # typed envelope inside THAT request's sub-dict under
         # ``__nnsight_exceptions__`` in the ``{base_id: DeferredError}``
-        # shape the client's ``surface_server_errors`` understands.
-        # The dynamic NNsightException subclass can't be pickled, so the
-        # helper ships plain strings (type_name, message, traceback,
-        # is_control_flow).
+        # shape the client's ``surface_server_errors`` understands. The
+        # dynamic NNsightException subclass can't be pickled, so the helper
+        # ships plain strings (type_name, message, traceback, is_control_flow).
         from ....intervention.errors import capture_deferred
 
         for base_id, mediator, _internal_key in matched:

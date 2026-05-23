@@ -30,6 +30,7 @@ from ...intervention.serialization import save as serialize
 from ... import save
 from ... import CONFIG
 from .engines.engine import NNsightLLMEngine
+from .pp_envoy import PPEnvoy, pp_eproperty
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
 
@@ -43,11 +44,18 @@ if TYPE_CHECKING:
 class VLLM(RemoteableMixin):
     """NNsight wrapper to conduct interventions on a vLLM inference engine.\
 
+    Uses :class:`~.pp_envoy.PPEnvoy` as the default Envoy class so every
+    descendant module is wrapped in a pipeline-parallel-aware Envoy.
+    With ``pipeline_parallel_size=1`` (the default) the only overhead is
+    one ``getattr(interleaver, 'pp_enabled', False)`` per eproperty
+    access; with PP > 1 the same wiring transparently short-circuits
+    cross-stage accesses to :class:`~.lazy_remote_tensor.LazyRemoteTensor`.
+
     Attributes:
         - vllm_entrypoint (vllm.LLM): vLLM language model.
         - tokenizer (vllm.transformers_utils.tokenizer.AnyTokenizer): tokenizer.
-        - logits (eproperty): logit tensor.
-        - samples (eproperty): sampled token ids.
+        - logits (pp_eproperty): logit tensor.
+        - samples (pp_eproperty): sampled token ids.
 
     .. code-block:: python
         from nnsight.models.VLLM import VLLM
@@ -64,6 +72,13 @@ class VLLM(RemoteableMixin):
 
         print(model.tokenizer.decode(output.value.argmax(dim=-1)[-1]))
     """
+
+    # Class-level default: every descendant module envoy is a PPEnvoy.
+    # ``Envoy._resolve_envoy_class`` treats a single class as "use for
+    # every descendant". The check inside ``pp_eproperty.__get__`` is
+    # gated on ``interleaver.pp_enabled`` so PP=1 stays a cheap
+    # ``getattr`` check per access.
+    envoys = PPEnvoy
 
     def __init__(self, *args, **kwargs) -> None:
 
@@ -110,7 +125,7 @@ class VLLM(RemoteableMixin):
 
         super().__init__(*args, **kwargs)
 
-    @eproperty(description="Logits", iterate=True)
+    @pp_eproperty(description="Logits", iterate=True)
     def logits(self):
         """The logit tensor produced by the model before sampling.
 
@@ -118,9 +133,12 @@ class VLLM(RemoteableMixin):
 
             with model.trace("Hello", temperature=0.0, top_p=1):
                 logits = model.logits.save()
+
+        With PP > 1 only the last pipeline stage produces logits; access
+        on other ranks returns a :class:`LazyRemoteTensor`.
         """
 
-    @eproperty(description="Sampled token ids", iterate=True)
+    @pp_eproperty(description="Sampled token ids", iterate=True)
     def samples(self):
         """The sampled token IDs produced by the sampler after logits.
 
@@ -176,6 +194,13 @@ class VLLM(RemoteableMixin):
         return model
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
+
+        # Disable prefix caching by default. Prefix caching reuses KV
+        # values from previous requests, which can skip the forward pass
+        # for cached tokens — hooks then don't fire and interventions on
+        # those tokens are silently dropped. Users can opt in explicitly
+        # with ``enable_prefix_caching=True``.
+        kwargs.setdefault("enable_prefix_caching", False)
 
         meta_model = self._load_meta(repo_id, **kwargs)
 

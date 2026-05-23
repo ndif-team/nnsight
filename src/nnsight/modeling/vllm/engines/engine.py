@@ -26,21 +26,23 @@ class NNsightLLMEngine(LLMEngine):
                 "collect_nnsight",
                 args=(finished_req_ids, finished_req_ids),
             )
-            # results is a list (one per worker). Rank-0 returns pickled bytes, others None.
-            saves_bytes = next((r for r in results if r is not None), None)
-            if saves_bytes:
-                # Worker returns ``{base_id: {var_name: value}}`` so the
-                # step attaches each request's OWN saves sub-dict to its
-                # OWN RequestOutput.  The previous flat-dict shape bound
-                # the same dict to every finished output and entangled
-                # concurrent independent traces whose user code used
-                # overlapping variable names — one winner clobbered all.
-                saves_by_req = pickle.loads(
-                    _ZSTD_DECOMPRESSOR.decompress(saves_bytes)
-                )
+            # Worker returns ``{base_id: {var_name: value}}``. Without PP
+            # only TP-rank-0 returns data and the merge is a single dict.
+            # With PP > 1 every PP stage's TP-rank-0 contributes — merge
+            # per-request sub-dicts so saves from different stages
+            # accumulate. Later-rank-wins on duplicate names matches the
+            # design's "owning rank wins" rule for cross-stage values.
+            merged: dict = {}
+            for r in results:
+                if r is None:
+                    continue
+                rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
+                for base_id, per_req in rank_saves.items():
+                    merged.setdefault(base_id, {}).update(per_req)
+            if merged:
                 for ro in request_outputs:
                     if ro.finished:
-                        per_req = saves_by_req.get(ro.request_id)
+                        per_req = merged.get(ro.request_id)
                         if per_req:
                             ro.saves = per_req
 

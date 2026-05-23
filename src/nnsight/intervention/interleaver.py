@@ -447,6 +447,31 @@ class Interleaver:
         # mediator instead of bubbling up and killing the engine.
         self.defer_exceptions = False
 
+        # Iteration gate (set by engine backends with their own per-step
+        # lifecycle, e.g. vLLM PP): a mediator's ``IteratorTracer`` loop
+        # waits on ``_iter_condition`` between iterations until the next
+        # forward pass begins (``_interleaving`` flips to True) or the
+        # request finishes (``_generation_done`` set via
+        # :meth:`stop_iteration`). Always present so the IteratorTracer
+        # body can be one code path that becomes a no-op when no engine
+        # opts in.
+        from threading import Condition
+        self._iter_condition = Condition()
+        self._generation_done = False
+
+    def stop_iteration(self):
+        """Signal all mediators to exit their iteration loops.
+
+        Mediators gated at an iteration boundary (waiting on
+        ``_iter_condition``) wake up, see ``_generation_done``, and
+        break out of their loop. Call this before joining mediator
+        threads to ensure clean shutdown — used by the vLLM model
+        runner in ``collect_nnsight`` when finishing a request.
+        """
+        self._generation_done = True
+        with self._iter_condition:
+            self._iter_condition.notify_all()
+
     def initialize(
         self,
         mediators: List[Mediator],
@@ -620,6 +645,12 @@ class Interleaver:
         # Used by a variety of functioanlities that interact with the interleaver.
         # Often to raise an error when one of these functionalities is called outside interleaving.
         self._interleaving = True
+
+        # Wake any mediator gated at an iteration boundary (waiting for
+        # the next forward pass). They check ``_interleaving`` and
+        # continue. No-op when no IteratorTracer is waiting.
+        with self._iter_condition:
+            self._iter_condition.notify_all()
 
         try:
             # Start all the mediators to begin their intervention threads amd wait for their first event.
@@ -1113,6 +1144,23 @@ class Mediator:
                 self.interleaver.batcher.swap(self.batch_group, value)
 
                 self.transform = None
+
+            # Pipeline-parallel sidecar: clone the narrowed (per-mediator)
+            # value into the rank's ``pp_hook_buffer`` and notify the
+            # listener so concurrent cross-rank pulls unblock. Keyed by
+            # ``(provider, req_id)`` so multiple mediators in the same
+            # forward pass each get their own slice. All wiring is on the
+            # interleaver: PP-disabled stays a single attribute check.
+            if getattr(self.interleaver, "pp_enabled", False):
+                cond = self.interleaver.pp_buffer_condition
+                req_id = getattr(self, "pp_req_id", None)
+                key = (provider, req_id)
+                with cond:
+                    with torch.inference_mode():
+                        self.interleaver.pp_hook_buffer[key] = (
+                            value.clone() if isinstance(value, torch.Tensor) else value
+                        )
+                    cond.notify_all()
         else:
             # If the requester has been seen before, respond with an out of order error.
             if requester in self.history:
