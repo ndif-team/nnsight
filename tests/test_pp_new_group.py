@@ -17,9 +17,11 @@ if __name__ == '__main__':
 
     print("Model loaded successfully — new_group did not hang!")
 
-    # Quick sanity: run a trace
+    # Quick sanity: run a trace. ``model.logits`` is an eproperty on
+    # ``VLLM`` itself in dev, not a WrapperModule — call ``.save()``
+    # directly on it instead of ``.output.save()``.
     with model.trace("Hello world", temperature=0.0, top_p=1):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     print(f"Logits shape: {logits.shape}")
     print("PASS")

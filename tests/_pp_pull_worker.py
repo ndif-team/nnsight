@@ -29,7 +29,7 @@ PROMPT = "The Eiffel Tower is located in the city of"
 def scenario_basic_trace(model, args):
     """Basic trace — just get logits, no interventions."""
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
     logits_cpu = logits.float().cpu()
     argmax = int(logits_cpu.argmax(dim=-1).item())
     return {
@@ -41,7 +41,7 @@ def scenario_basic_trace(model, args):
 def scenario_logits(model, args):
     """Save logits and return top token."""
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
     logits_cpu = logits.float().cpu()
     argmax = int(logits_cpu.argmax(dim=-1).item())
     return {
@@ -69,7 +69,7 @@ def scenario_multigen(model, args):
     with model.trace(PROMPT, temperature=0.0, top_p=1, max_tokens=max_tokens) as tracer:
         logit_list = list().save()
         for step in tracer.iter[0:max_tokens]:
-            logit_list.append(model.logits.output)
+            logit_list.append(model.logits)
 
     tokens = []
     argmaxes = []
@@ -103,7 +103,7 @@ def scenario_cross_stage_read(model, args):
         # This accesses layer 0 — on stage 0 it's real, on stage 1 it's
         # PPMissing. The .save() should trigger materialization on stage 1.
         h0 = model.transformer.h[0].output[0].save()
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     h0_cpu = h0.float().cpu()
     logits_cpu = logits.float().cpu()
@@ -130,7 +130,7 @@ def scenario_cross_stage_write(model, args):
     with model.trace(PROMPT, temperature=0.0, top_p=1):
         h2 = model.transformer.h[2].output[0]
         model.transformer.h[8].output[0][:] = h2
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
     argmax = int(logits_cpu.argmax(dim=-1).item())
@@ -156,7 +156,7 @@ def scenario_cross_stage_multigen(model, args):
         for step in tracer.iter[0:max_tokens]:
             h0_list.append(model.transformer.h[0].output[0])
             h11_list.append(model.transformer.h[11].output[0])
-            logit_list.append(model.logits.output)
+            logit_list.append(model.logits)
 
     tokens = []
     for logit in logit_list:
@@ -181,7 +181,7 @@ def scenario_save_all_layers(model, args):
         hiddens = []
         for i in range(12):
             hiddens.append(model.transformer.h[i].output[0].save())
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     return {
         "num_layers": len(hiddens),
@@ -203,7 +203,7 @@ def scenario_cross_stage_clone_modify(model, args):
         h2 = model.transformer.h[2].output[0].clone()
         modified = h2 * 0.5
         model.transformer.h[8].output[0][:] = modified
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
     argmax = int(logits_cpu.argmax(dim=-1).item())
@@ -223,17 +223,17 @@ def scenario_ablation(model, args):
 
     # Baseline
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        baseline = model.logits.output.save()
+        baseline = model.logits.save()
 
     # Ablate layer 3 (stage 0)
     with model.trace(PROMPT, temperature=0.0, top_p=1):
         model.transformer.h[3].output[0][:] = 0
-        ablated_l3 = model.logits.output.save()
+        ablated_l3 = model.logits.save()
 
     # Ablate layer 8 (stage 1)
     with model.trace(PROMPT, temperature=0.0, top_p=1):
         model.transformer.h[8].output[0][:] = 0
-        ablated_l8 = model.logits.output.save()
+        ablated_l8 = model.logits.save()
 
     base_am = int(baseline.argmax(dim=-1).item())
     l3_am = int(ablated_l3.argmax(dim=-1).item())
@@ -259,7 +259,7 @@ def scenario_steering(model, args):
     with model.trace(PROMPT, temperature=0.0, top_p=1):
         h2_mean = model.transformer.h[2].output[0].mean(dim=0, keepdim=True)
         model.transformer.h[8].output[0][:] = model.transformer.h[8].output[0] + h2_mean * 0.1
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
     argmax = int(logits_cpu.argmax(dim=-1).item())
@@ -282,7 +282,7 @@ def scenario_cross_compare(model, args):
         h5 = model.transformer.h[5].output[0].save()
         h6 = model.transformer.h[6].output[0].save()
         h11 = model.transformer.h[11].output[0].save()
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     return {
         "h0_mean": float(h0.float().mean().item()),
@@ -307,7 +307,7 @@ def scenario_multigen_cross_write(model, args):
         for step in tracer.iter[0:max_tokens]:
             h2 = model.transformer.h[2].output[0]
             model.transformer.h[8].output[0][:] = model.transformer.h[8].output[0] + h2 * 0.01
-            logit_list.append(model.logits.output)
+            logit_list.append(model.logits)
 
     tokens = []
     for logit in logit_list:

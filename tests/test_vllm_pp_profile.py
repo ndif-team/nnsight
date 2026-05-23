@@ -597,7 +597,7 @@ def scenario_baseline(model, prompt, n_runs):
 def scenario_save_logits(model, prompt, n_runs):
     def fn():
         with model.trace(prompt, temperature=0.0, top_p=1):
-            logits = model.logits.output.save()
+            logits = model.logits.save()
     return {"times": timed(fn, n_runs=n_runs)}
 
 
@@ -646,7 +646,7 @@ def scenario_multigen(model, prompt, n_runs, max_tokens=3):
         with model.trace(prompt, temperature=0.0, top_p=1, max_tokens=max_tokens) as tracer:
             logit_list = list().save()
             for step in tracer.iter[:]:
-                logit_list.append(model.logits.output)
+                logit_list.append(model.logits)
     return {"times": timed(fn, n_warmup=1, n_runs=n_runs)}
 
 
@@ -658,7 +658,7 @@ def scenario_long_distance(model, prompt, n_runs):
             wte_out = model.transformer.wte.output
             # Use the embedding to modify the last layer output
             model.transformer.h[11].output[0][:] = wte_out
-            logits = model.logits.output.save()
+            logits = model.logits.save()
     return {"times": timed(fn, n_runs=n_runs)}
 
 
@@ -667,9 +667,9 @@ def scenario_long_distance(model, prompt, n_runs):
 def scenario_multi_trace(model, prompt, n_runs):
     def fn():
         with model.trace(prompt, temperature=0.0, top_p=1):
-            logits1 = model.logits.output.save()
+            logits1 = model.logits.save()
         with model.trace("Hello world", temperature=0.0, top_p=1):
-            logits2 = model.logits.output.save()
+            logits2 = model.logits.save()
     return {"times": timed(fn, n_runs=n_runs)}
 
 

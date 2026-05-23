@@ -33,7 +33,7 @@ Root cause chain:
 Secondary issue (would hit after fixing deserialization):
   - `model.logits` and `model.samples` are WrapperModules, not PPMissingLayer.
     The Envoy `_is_pp_missing` check uses `type(module).__name__ == "PPMissingLayer"`
-    which won't match WrapperModules. Accessing `model.logits.output` on rank 0
+    which won't match WrapperModules. Accessing `model.logits` on rank 0
     would deadlock because the logits hook never fires on non-last ranks.
 """
 

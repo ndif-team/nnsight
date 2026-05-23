@@ -34,7 +34,7 @@ def run_scenarios(model, label):
     # B: Save logits
     def save_logits():
         with model.trace(prompt, temperature=0.0, top_p=1):
-            _ = model.logits.output.save()
+            _ = model.logits.save()
     results['B: save_logits'] = timed(save_logits)
 
     # C: Save early layer
@@ -67,9 +67,9 @@ def run_scenarios(model, label):
     # K: Two traces back-to-back
     def two_traces():
         with model.trace("Hello", temperature=0.0, top_p=1):
-            _ = model.logits.output.save()
+            _ = model.logits.save()
         with model.trace("World", temperature=0.0, top_p=1):
-            _ = model.logits.output.save()
+            _ = model.logits.save()
     results['K: two_traces'] = timed(two_traces)
 
     # L: Save all 12 layers

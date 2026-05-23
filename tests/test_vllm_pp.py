@@ -124,40 +124,32 @@ class TestPPListener:
 class TestEnvoyPPMissingShortCircuit:
 
     def _make_pp_envoy(self):
-        """Create a minimal Envoy-like setup to test PPMissing short-circuit."""
-        from nnsight.intervention.envoy import Envoy
-        from nnsight.intervention.interleaver import Interleaver, Mediator
+        """Create a minimal PPEnvoy setup to test PPMissing short-circuit."""
+        from nnsight.intervention.interleaver import Interleaver
+        from nnsight.modeling.vllm.pp_envoy import PPEnvoy
 
-        # Create a PPMissingLayer module
         module = PPMissingLayer()
-
-        # Create interleaver with PP state
         interleaver = Interleaver()
         interleaver.pp_enabled = True
+        interleaver.pp_local_rank = 0
+        interleaver.pp_listener = None
 
         mock_map = MagicMock()
         mock_map.get_owning_rank.return_value = 1
         mock_map.is_local.return_value = False
         interleaver.pp_module_map = mock_map
-        interleaver.pp_module_meta = {"model.layers.50": torch.float32}
+        interleaver.pp_module_meta = {"model.layers.50": {"dtype": torch.float32}}
 
-        # Create a mock mediator with iteration tracker
         mediator = MagicMock()
         mediator.iteration_tracker = defaultdict(int)
         mediator.iteration = None
+        mediator.batch_group = None
+        mediator.pp_req_id = None
         interleaver.current = mediator
-
-        # Simulate interleaving state
         interleaver._interleaving = True
         interleaver.mediators = [mediator]
 
-        envoy = Envoy.__new__(Envoy)
-        envoy._module = module
-        envoy.path = "model.layers.50"
-        envoy._interleaver = interleaver
-        envoy._fake_output = inspect._empty
-        envoy._fake_inputs = inspect._empty
-
+        envoy = PPEnvoy(module, path="model.layers.50", interleaver=interleaver)
         return envoy, mediator
 
     def test_output_returns_lazy_tensor(self):

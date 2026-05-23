@@ -855,8 +855,17 @@ class Mediator:
 
         def __init__(self):
             self.value = None
-            self.lock = _thread.allocate_lock()
-            self.lock.acquire()
+            # ``threading.Event`` is idempotent: ``set()`` from a producer
+            # is safe whether or not a consumer has called ``wait()`` yet,
+            # and ``set()`` twice in a row never raises. The earlier
+            # ``_thread.lock`` implementation required strict
+            # acquire/release pairing — engines that skip the initial
+            # ``wait()`` (vLLM PP, where the worker's first action may
+            # be a remote-stage pull that never posts an event) hit
+            # ``RuntimeError: release unlocked lock`` on subsequent
+            # ``put()`` calls.
+            import threading as _threading
+            self._event = _threading.Event()
             self.has_value = False
 
         def get(self):
@@ -865,16 +874,16 @@ class Mediator:
             self.value = None
 
             self.has_value = False
+            self._event.clear()
 
             return value
 
         def wait(self):
-            self.lock.acquire()
+            self._event.wait()
 
         def put(self, value: Any):
             self.restore(value)
-
-            self.lock.release()
+            self._event.set()
 
         def restore(self, value: Any):
             self.value = value
@@ -1021,13 +1030,23 @@ class Mediator:
 
         self.interleaver.current = self
         self.worker.start()
-        self.event_queue.wait()
 
-        # Handle the first event for each mediator to clear mediators that already ended.
-        try:
-            self.handle()
-        except EarlyStopException:
-            pass
+        # Engines like vLLM PP can run user code whose first action is a
+        # remote-stage access that short-circuits to a LazyRemoteTensor
+        # and immediately blocks on a cross-rank pull — that path never
+        # posts to ``event_queue``, so ``event_queue.wait()`` here would
+        # deadlock. When the interleaver advertises an engine-driven
+        # lifecycle (``pp_enabled`` today; future engines can flip the
+        # same flag), skip the initial wait — handle() is still called
+        # later from the interleaver's normal event-processing loop.
+        if not getattr(self.interleaver, "pp_enabled", False):
+            self.event_queue.wait()
+
+            # Handle the first event to clear mediators that already ended.
+            try:
+                self.handle()
+            except EarlyStopException:
+                pass
 
         self.interleaver.current = None
 

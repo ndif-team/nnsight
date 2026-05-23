@@ -731,12 +731,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         with interleaver:
 
-            # Wait until every mediator is parked at a local module before
-            # firing forward-pass hooks. Cheap when all mediators have
-            # already reached their first local access (the common case).
-            if self.pp_enabled and interleaver.mediators:
-                self._pp_wait_for_mediator_readiness()
-
+            # NOTE: pp-design originally waited here for every mediator
+            # to be parked on a local-module ``request()``
+            # (``_pp_wait_for_mediator_readiness``). That check
+            # deadlocks on pure cross-stage materialization patterns —
+            # a mediator that does only ``model.layers[N].output.sum()``
+            # for a remote N is mid-pull, never posts to event_queue, and
+            # stays stuck. The fix is to fire hooks unconditionally;
+            # one-shot hooks deliver to whichever mediators are
+            # actually waiting on their value, and mediators stuck in
+            # a pull continue once the remote rank's forward pass
+            # populates the buffer.
             return_value = super().execute_model(scheduler_output, intermediate_tensors)
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
@@ -808,7 +813,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # Only TP-rank-0 of each PP stage returns data — TP siblings
         # carry replicated mediator state and would duplicate. PP-non-zero
         # ranks still contribute saves when PP > 1 (engine merges).
-        if get_tp_group().rank != 0:
+        # ``rank_in_group`` is the rank WITHIN the TP group (0..TP-1);
+        # ``rank`` is the global rank (would gate everything but global 0).
+        if get_tp_group().rank_in_group != 0:
             return None
 
         if finished_req_ids is None:

@@ -52,13 +52,13 @@ if __name__ == '__main__':
     print("\nPart C: Trace overhead")
     for _ in range(3):
         with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
-            model.logits.output.save()
+            model.logits.save()
 
     times = []
     for _ in range(10):
         t0 = time.perf_counter()
         with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
-            model.logits.output.save()
+            model.logits.save()
         times.append((time.perf_counter() - t0) * 1000)
     fwd = sum(times)/len(times)
     print(f"Forward pass (bare trace):  {fwd:.2f} ms")

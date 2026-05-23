@@ -41,7 +41,7 @@ def run_trace(model, intervention_name):
     try:
         if intervention_name == "logits":
             with model.trace(PROMPT, temperature=0.0, top_p=1, serve=SERVER_URL):
-                logits = model.logits.output.save()
+                logits = model.logits.save()
             return ("logits", {"logits": logits}, (time.perf_counter() - t0) * 1000)
 
         elif intervention_name == "hidden_l0":
@@ -57,14 +57,14 @@ def run_trace(model, intervention_name):
         elif intervention_name == "cross_read":
             with model.trace(PROMPT, temperature=0.0, top_p=1, serve=SERVER_URL):
                 h0 = model.transformer.h[0].output[0].save()
-                logits = model.logits.output.save()
+                logits = model.logits.save()
             return ("cross_read", {"h0": h0, "logits": logits}, (time.perf_counter() - t0) * 1000)
 
         elif intervention_name == "multigen":
             with model.trace(PROMPT, temperature=0.0, top_p=1, max_tokens=3, serve=SERVER_URL) as tracer:
                 logit_list = list().save()
                 for step in tracer.iter[0:3]:
-                    logit_list.append(model.logits.output)
+                    logit_list.append(model.logits)
             return ("multigen", {"logit_list": logit_list}, (time.perf_counter() - t0) * 1000)
 
         else:

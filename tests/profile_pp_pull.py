@@ -103,24 +103,24 @@ if __name__ == '__main__':
 
     def bare_trace():
         with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
-            model.logits.output.save()
+            model.logits.save()
 
     def trace_1save():
         with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
             model.transformer.h[0].output[0].save()
-            model.logits.output.save()
+            model.logits.save()
 
     def trace_6save():
         with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1):
             for i in range(6):
                 model.transformer.h[i].output[0].save()
-            model.logits.output.save()
+            model.logits.save()
 
     def trace_multigen():
         with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1, max_tokens=3) as tracer:
             logit_list = list().save()
             for step in tracer.iter[0:3]:
-                logit_list.append(model.logits.output)
+                logit_list.append(model.logits)
 
     t_bare = bench_trace("Bare trace (logits only)", bare_trace)
     t_1save = bench_trace("Trace + 1 in-stage save", trace_1save)

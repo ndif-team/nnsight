@@ -25,7 +25,7 @@ def run_pp(pp_size):
 
     # A: Logits
     with model.trace('The Eiffel Tower is in', temperature=0.0, top_p=1):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
     results['logits'] = logits.detach().cpu().float()
     results['argmax'] = int(logits.argmax(dim=-1).item())
 

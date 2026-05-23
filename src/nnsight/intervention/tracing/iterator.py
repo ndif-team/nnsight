@@ -306,18 +306,16 @@ class IteratorTracer(Tracer):
 
                     yield i
 
-                    # Iteration gate: if the interleaver is not active
-                    # (between ``execute_model`` calls in vLLM), wait for
-                    # the next forward pass to start or generation to end.
-                    # In standard ``LanguageModel`` ``_interleaving`` stays
-                    # True throughout generation — this loop is a no-op.
-                    il = mediator.interleaver
-                    if not il._interleaving:
-                        with il._iter_condition:
-                            while not il._interleaving and not il._generation_done:
-                                il._iter_condition.wait()
-                            if il._generation_done:
-                                break
+                    # Iteration gate: only check ``_generation_done``
+                    # for early termination. Per-iteration ``_interleaving``
+                    # waits would over-synchronize on dev's multi-session
+                    # pattern (execute_model / sample_tokens / _sample each
+                    # open the interleaver). Natural blocking via
+                    # ``request()`` on local-module access and the
+                    # listener Condition on PP pulls is sufficient to
+                    # pace iterations with forward passes.
+                    if mediator.interleaver._generation_done:
+                        break
 
                     if stop is None:
                         if mediator.all_stop is not None:
@@ -434,13 +432,8 @@ class IteratorTracer(Tracer):
                     do_iteration(i)
 
                     # Iteration gate (see __iter__ for full comment).
-                    il = mediator.interleaver
-                    if not il._interleaving:
-                        with il._iter_condition:
-                            while not il._interleaving and not il._generation_done:
-                                il._iter_condition.wait()
-                            if il._generation_done:
-                                break
+                    if mediator.interleaver._generation_done:
+                        break
 
                     if stop is None:
                         if mediator.all_stop is not None:

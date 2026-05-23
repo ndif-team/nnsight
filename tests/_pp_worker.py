@@ -42,7 +42,7 @@ def make_model(pp_size):
 def scenario_logits(model, prompt):
     """Get logits for a prompt."""
     with model.trace(prompt, temperature=0.0, top_p=1):
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
     argmax = int(logits_cpu.argmax(dim=-1).item())
@@ -61,7 +61,7 @@ def scenario_hidden(model, prompt, layer):
 
     with model.trace(prompt, temperature=0.0, top_p=1):
         hidden = layers[layer].output[0].save()
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     hidden_cpu = hidden.float().cpu()
     logits_cpu = logits.float().cpu()
@@ -96,7 +96,7 @@ def scenario_cross_stage(model, prompt):
     with model.trace(prompt, temperature=0.0, top_p=1):
         h2 = model.transformer.h[2].output[0]
         model.transformer.h[8].output[0][:] = h2
-        logits = model.logits.output.save()
+        logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
     argmax = int(logits_cpu.argmax(dim=-1).item())
@@ -132,7 +132,7 @@ def scenario_multigen(model, prompt, max_tokens):
     ) as tracer:
         logit_list = list().save()
         with tracer.iter[0:max_tokens]:
-            logit_list.append(model.logits.output)
+            logit_list.append(model.logits)
 
     tokens = []
     argmaxes = []
