@@ -57,12 +57,17 @@ def _is_pp_missing(obj, key: str) -> bool:
     if local_rank is None:
         return False
 
-    # Resolve the lookup path. Module-level Envoys have a non-empty
-    # ``path``; root-level hosts like ``VLLM`` have ``path=""`` and rely
-    # on the eproperty ``key`` (e.g. ``"logits"`` / ``"samples"``) to
-    # find their owning rank — :class:`PPModuleMap` recognizes both
-    # layer paths and the last-rank module names.
-    lookup = getattr(obj, "path", None) or key
+    # Resolve the lookup path. ``PPModuleMap`` walks dotted parts to
+    # find layer indices or first/last-rank module names (``logits``,
+    # ``samples``, ``norm``, ``lm_head``, ``embed_tokens``, …). The
+    # eproperty ``key`` is the trailing path component that names the
+    # access target, so the right thing to look up is
+    # ``path.key`` when ``path`` is non-empty, else ``key`` alone.
+    # Examples: ``VLLM.path='model'`` + ``key='logits'`` → ``model.logits``
+    # (last rank); ``Envoy.path='model.layers.5'`` + ``key='output'`` →
+    # ``model.layers.5.output`` (layer-5's owning rank).
+    obj_path = getattr(obj, "path", None) or ""
+    lookup = f"{obj_path}.{key}" if obj_path else key
     if not pp_map.is_local(lookup, local_rank):
         return True
 

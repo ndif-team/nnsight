@@ -878,8 +878,8 @@ class Mediator:
 
             return value
 
-        def wait(self):
-            self._event.wait()
+        def wait(self, timeout: Optional[float] = None) -> bool:
+            return self._event.wait(timeout=timeout)
 
         def put(self, value: Any):
             self.restore(value)
@@ -1031,15 +1031,34 @@ class Mediator:
         self.interleaver.current = self
         self.worker.start()
 
-        # Engines like vLLM PP can run user code whose first action is a
-        # remote-stage access that short-circuits to a LazyRemoteTensor
-        # and immediately blocks on a cross-rank pull — that path never
-        # posts to ``event_queue``, so ``event_queue.wait()`` here would
-        # deadlock. When the interleaver advertises an engine-driven
-        # lifecycle (``pp_enabled`` today; future engines can flip the
-        # same flag), skip the initial wait — handle() is still called
-        # later from the interleaver's normal event-processing loop.
-        if not getattr(self.interleaver, "pp_enabled", False):
+        # Wait for the worker to post its first event (a ``request()``
+        # against a local module, or the body finishing) before returning.
+        # This protects two invariants:
+        # 1) one-shot intervention hooks must be registered BEFORE the
+        #    forward pass fires them — the worker registers them inside
+        #    its first ``eproperty.__get__`` call;
+        # 2) the user-frame ``interleaver.current`` is the worker's
+        #    handle on its own mediator — clearing it before the worker
+        #    has reached a stable point races against
+        #    ``pp_eproperty._pp_lazy_access``.
+        #
+        # Engines whose worker code may legitimately produce no event
+        # (vLLM PP: the first action is a remote-stage pull that
+        # short-circuits to ``LazyRemoteTensor`` and blocks in
+        # ``listener.pull_from_remote``) advertise ``pp_enabled`` and
+        # get a short bounded wait instead of an infinite one. After the
+        # timeout we conclude the worker has stabilized (either in a
+        # pull or done) and proceed — its later events are picked up by
+        # the interleaver's normal event-processing loop.
+        if getattr(self.interleaver, "pp_enabled", False):
+            posted = self.event_queue.wait(timeout=5.0)
+            if posted:
+                try:
+                    self.handle()
+                except EarlyStopException:
+                    pass
+                self.interleaver.current = None
+        else:
             self.event_queue.wait()
 
             # Handle the first event to clear mediators that already ended.
@@ -1048,7 +1067,7 @@ class Mediator:
             except EarlyStopException:
                 pass
 
-        self.interleaver.current = None
+            self.interleaver.current = None
 
     ### Provider Methods ###
 
