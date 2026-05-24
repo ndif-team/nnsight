@@ -893,3 +893,82 @@ class TestAsyncRayExecutor:
             assert corrupted_token != " Paris"
 
         async_ray_loop.run_until_complete(run())
+
+
+# =============================================================================
+# Configurable enforce_eager / enable_prefix_caching
+# =============================================================================
+
+
+@pytest.fixture(scope="module")
+def vllm_gpt2_graphs(tp: int):
+    """GPT-2 with CUDA graphs ON (enforce_eager=False).
+
+    Before the worker-side CUDAGraphWrapper unwrap fix, constructing this
+    crashed at engine init with a bare AttributeError, because vLLM replaces
+    ``runner.model`` with a (non-nn.Module) ``CUDAGraphWrapper`` that was then
+    fed back into ``VLLM(...)`` and routed down the from-scratch load path.
+    """
+    return VLLM(
+        "gpt2", tensor_parallel_size=tp, gpu_memory_utilization=0.1,
+        dispatch=True, enforce_eager=False,
+    )
+
+
+class TestConfigurableEngineKnobs:
+    """enforce_eager / enable_prefix_caching are caller-configurable and a
+    logits-only (post-forward) intervention is correct with CUDA graphs ON."""
+
+    @torch.no_grad()
+    def test_logits_only_trace_with_cuda_graphs(self, vllm_gpt2_graphs, ET_prompt: str):
+        """A logits-only trace must run with enforce_eager=False and be correct."""
+        with vllm_gpt2_graphs.trace(ET_prompt, temperature=0.0, top_p=1):
+            logits = vllm_gpt2_graphs.logits.save()
+
+        next_token = vllm_gpt2_graphs.tokenizer.decode(logits.argmax(dim=-1))
+        assert next_token == " Paris"
+
+    @torch.no_grad()
+    def test_first_token_parity_eager_vs_graphs(
+        self, vllm_gpt2, vllm_gpt2_graphs, ET_prompt: str
+    ):
+        """First-token greedy logits match between eager and CUDA-graph modes.
+
+        (Multi-token greedy sequences may diverge later due to floating-point
+        non-associativity at near-ties; the first decode step does not.)"""
+        with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+            eager_logits = vllm_gpt2.logits.save()
+        with vllm_gpt2_graphs.trace(ET_prompt, temperature=0.0, top_p=1):
+            graph_logits = vllm_gpt2_graphs.logits.save()
+
+        assert int(eager_logits.argmax(dim=-1).flatten()[0]) == int(
+            graph_logits.argmax(dim=-1).flatten()[0]
+        )
+
+    @torch.no_grad()
+    def test_logits_write_with_cuda_graphs(self, vllm_gpt2_graphs, ET_prompt: str):
+        """A logits WRITE (block-list mask via replacement) takes effect with
+        CUDA graphs ON, since sampling happens post-forward."""
+        # Save the tensor and compute the id OUTSIDE the trace; values computed
+        # inside a trace body must be .save()d to survive deferred execution.
+        with vllm_gpt2_graphs.trace(ET_prompt, temperature=0.0, top_p=1):
+            top_logits = vllm_gpt2_graphs.logits.save()
+        top_id = int(top_logits.argmax(dim=-1).flatten()[0].item())
+        with vllm_gpt2_graphs.trace(ET_prompt, temperature=0.0, top_p=1):
+            masked = vllm_gpt2_graphs.logits.clone()
+            masked[..., top_id] = float("-inf")
+            vllm_gpt2_graphs.logits = masked
+            s = vllm_gpt2_graphs.samples.save()
+        assert int(torch.as_tensor(s).flatten()[0].item()) != top_id
+
+    @torch.no_grad()
+    def test_prefix_caching_toggle_loads(self, tp: int, ET_prompt: str):
+        """enable_prefix_caching is forwarded; both settings load and trace."""
+        for flag in (True, False):
+            model = VLLM(
+                "gpt2", tensor_parallel_size=tp, gpu_memory_utilization=0.1,
+                dispatch=True, enforce_eager=True, enable_prefix_caching=flag,
+            )
+            with model.trace(ET_prompt, temperature=0.0, top_p=1):
+                logits = model.logits.save()
+            assert model.tokenizer.decode(logits.argmax(dim=-1)) == " Paris"

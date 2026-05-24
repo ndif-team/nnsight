@@ -11,6 +11,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 
 from ....intervention.serialization import load
 from ....intervention.tracing.globals import Globals
@@ -350,7 +351,22 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         super().load_model(*args, **kwargs)
 
-        self.nnsight_model = VLLM(self.model)
+        # When enforce_eager=False, vLLM replaces ``self.model`` with a
+        # ``CUDAGraphWrapper`` (FULL cudagraph mode), which is NOT an
+        # ``nn.Module``. Passing it to ``VLLM(...)`` would fail the
+        # ``isinstance(..., nn.Module)`` guard in ``MetaMixin.__init__`` and
+        # send it down the from-scratch ``_load_meta`` path, which then calls
+        # ``create_engine_config()`` and dereferences string-only attributes on
+        # the wrapper (e.g. ``.lower()`` in ``is_cloud_storage``), raising
+        # ``AttributeError`` at engine init. Unwrap to the underlying module so
+        # the wrap-existing-model path is taken. vLLM still calls ``self.model``
+        # (the wrapper) for capture/replay; nnsight only needs the module to
+        # build its envoy tree and the post-forward logits/samples interleaving.
+        runner_model = self.model
+        while isinstance(runner_model, CUDAGraphWrapper):
+            runner_model = runner_model.unwrap()
+
+        self.nnsight_model = VLLM(runner_model)
 
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
 

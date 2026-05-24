@@ -177,6 +177,22 @@ class VLLM(RemoteableMixin):
 
     def _load(self, repo_id: str, **kwargs) -> "Module":
 
+        # ``enforce_eager`` defaults to True because arbitrary intra-forward
+        # interventions register PyTorch hooks *inside* the region vLLM
+        # captures as a CUDA graph, and graph replay does not run those hooks.
+        # A trace that only reads/modifies ``model.logits`` / ``model.samples``
+        # registers no hooks inside the forward (those values are provided at
+        # the post-forward sample stage), so such workloads can pass
+        # ``enforce_eager=False`` to keep CUDA graphs and full vLLM decode
+        # throughput. Caller-supplied value wins; otherwise force eager.
+        enforce_eager = kwargs.pop("enforce_eager", True)
+
+        # ``enable_prefix_caching`` is forwarded as-is. ``None`` (the default)
+        # leaves vLLM's own default in place (on, for the v1 engine), which is
+        # what makes prefix-sharing search workloads cheap. Pop it here so it
+        # is documented/first-class rather than an opaque passthrough kwarg.
+        enable_prefix_caching = kwargs.pop("enable_prefix_caching", None)
+
         meta_model = self._load_meta(repo_id, **kwargs)
 
         destroy_model_parallel()
@@ -205,7 +221,8 @@ class VLLM(RemoteableMixin):
             engine_args = AsyncEngineArgs(
                 model=repo_id,
                 worker_cls="nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker",
-                enforce_eager=True,
+                enforce_eager=enforce_eager,
+                enable_prefix_caching=enable_prefix_caching,
                 **kwargs,
             )
             async_llm = AsyncLLM.from_engine_args(engine_args)
@@ -214,7 +231,8 @@ class VLLM(RemoteableMixin):
             llm = LLM(
                 repo_id,
                 worker_cls="nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker",
-                enforce_eager=True,
+                enforce_eager=enforce_eager,
+                enable_prefix_caching=enable_prefix_caching,
                 **kwargs,
             )
 
