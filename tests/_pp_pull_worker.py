@@ -176,11 +176,19 @@ def scenario_save_all_layers(model, args):
 
     Tests iteration tracker across the PP boundary — layers 0-5 are
     on stage 0, layers 6-11 on stage 1.
+
+    Uses ``list().save()`` (CLAUDE.md gotcha 12 — ``.save()`` inside
+    ``.append()`` is broken because the list itself is never
+    registered in ``Globals.saves``). Each appended value is
+    ``.clone()``-ed inside the trace, which forces materialization of
+    any cross-stage ``LazyRemoteTensor`` so the saved list contains
+    only real tensors (otherwise the client would receive lazy proxies
+    whose ``_pull_fn`` is stripped during pickling).
     """
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        hiddens = []
+        hiddens = list().save()
         for i in range(12):
-            hiddens.append(model.transformer.h[i].output[0].save())
+            hiddens.append(model.transformer.h[i].output.clone())
         logits = model.logits.save()
 
     return {
@@ -194,15 +202,23 @@ def scenario_save_all_layers(model, args):
 def scenario_cross_stage_clone_modify(model, args):
     """Clone a stage-0 tensor, modify it, write to stage-1.
 
-    h2 (stage 0) → clone → multiply by 0.5 → write to h8 (stage 1).
-    Tests that materialized LazyRemoteTensor works with torch ops.
+    Uses two traces because combining a cross-stage RHS with a
+    cross-stage write in a single trace races against the forward
+    pass: rank-1's mediator finishes its pull AFTER rank-1's forward
+    has already produced layer 8, so the swap arrives too late.
+
+    Trace 1 captures h2 (cross-stage read materialized via pull).
+    Trace 2 writes the modified value to h8 (stage-1 self-write).
     """
     import torch
 
+    # Trace 1: capture h2 from stage 0 (rank 1 pulls).
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        h2 = model.transformer.h[2].output[0].clone()
-        modified = h2 * 0.5
-        model.transformer.h[8].output[0][:] = modified
+        h2 = model.transformer.h[2].output.save()
+
+    # Trace 2: intervene on stage-1 layer 8 with the cached value.
+    with model.trace(PROMPT, temperature=0.0, top_p=1):
+        model.transformer.h[8].output = h2 * 0.5
         logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
@@ -218,6 +234,10 @@ def scenario_ablation(model, args):
 
     Zero layer 3 (stage 0) and check effect on logits (stage 1).
     Also zero layer 8 (stage 1) directly. Both should change output.
+
+    Uses dev's documented vLLM pattern (replacement assignment) per
+    ``intervention-gaps/VLLM_GUIDE.md`` — HF-style ``output[0][:] = 0``
+    indexing does not apply to vLLM's flat 2D tensor format.
     """
     import torch
 
@@ -225,14 +245,16 @@ def scenario_ablation(model, args):
     with model.trace(PROMPT, temperature=0.0, top_p=1):
         baseline = model.logits.save()
 
-    # Ablate layer 3 (stage 0)
+    # Ablate layer 3 (stage 0) via replacement assignment
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        model.transformer.h[3].output[0][:] = 0
+        out3 = model.transformer.h[3].output
+        model.transformer.h[3].output = out3 * 0
         ablated_l3 = model.logits.save()
 
-    # Ablate layer 8 (stage 1)
+    # Ablate layer 8 (stage 1) via replacement assignment
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        model.transformer.h[8].output[0][:] = 0
+        out8 = model.transformer.h[8].output
+        model.transformer.h[8].output = out8 * 0
         ablated_l8 = model.logits.save()
 
     base_am = int(baseline.argmax(dim=-1).item())
@@ -251,14 +273,21 @@ def scenario_ablation(model, args):
 def scenario_steering(model, args):
     """Add a steering vector to a cross-stage layer.
 
-    Capture layer 2 mean (stage 0), use it as a steering vector
-    added to layer 8 (stage 1).
+    Two traces: capture layer 2 mean from stage 0 first, then apply
+    it as a steering vector to layer 8 on stage 1. Single-trace
+    cross-stage write whose RHS depends on a cross-stage read races
+    against the forward pass — see ``scenario_cross_stage_clone_modify``.
     """
     import torch
 
+    # Trace 1: compute the steering vector from h2.
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        h2_mean = model.transformer.h[2].output[0].mean(dim=0, keepdim=True)
-        model.transformer.h[8].output[0][:] = model.transformer.h[8].output[0] + h2_mean * 0.1
+        h2_mean = model.transformer.h[2].output.mean(dim=0, keepdim=True).save()
+
+    # Trace 2: apply the steering vector to layer 8.
+    with model.trace(PROMPT, temperature=0.0, top_p=1):
+        out8 = model.transformer.h[8].output
+        model.transformer.h[8].output = out8 + h2_mean * 0.1
         logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
