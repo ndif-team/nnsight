@@ -480,6 +480,15 @@ class NNsightGPUModelRunner(GPUModelRunner):
             )
             self.pp_listener.start()
 
+            # Belt-and-braces shutdown: if the worker is torn down without
+            # a graceful ``collect_nnsight`` finish path, atexit fires and
+            # signals the listener to break out of its ``dist.recv`` loop.
+            # Without this, the daemon listener thread can busy-loop at
+            # 100% CPU after the dist context dies — orphaned worker
+            # processes that ignore SIGKILL.
+            import atexit
+            atexit.register(self.pp_listener.stop)
+
             # Pin PP fields on the interleaver instance so ``pp_eproperty``
             # and ``Mediator.handle_value_event`` can find them without
             # passing them through every call.

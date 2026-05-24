@@ -65,6 +65,11 @@ class PPListener:
         self._device = device
         self._meta_map = meta_map or {}
         self._thread: Optional[threading.Thread] = None
+        # Set by ``stop()`` to break the listen loop cleanly. Also
+        # checked after every caught exception so a torn-down ``dist``
+        # context (e.g. when the worker process is being shut down)
+        # doesn't busy-loop the listener at 100% CPU.
+        self._stop_event = threading.Event()
 
     # ------------------------------------------------------------------
     # Buffer management
@@ -141,12 +146,16 @@ class PPListener:
         )
         self._thread.start()
 
+    def stop(self):
+        """Signal the listener thread to exit on its next loop iteration."""
+        self._stop_event.set()
+
     def _listen_loop(self):
         group = self._pull_group
         world_size = dist.get_world_size(group)
         other_ranks = [r for r in range(world_size) if r != self._local_rank]
 
-        while True:
+        while not self._stop_event.is_set():
             try:
                 # 1. Recv request on TAG_REQUEST: [source_rank, key_len, num_tokens]
                 header = torch.zeros(3, dtype=torch.int64)
@@ -197,8 +206,22 @@ class PPListener:
                 dist.send(flat, group=group, group_dst=requesting_rank, tag=TAG_RESPONSE)
 
             except Exception:
+                # If the dist context is gone (worker tearing down, peer
+                # crashed) every ``dist.recv`` here would raise instantly
+                # and the loop would burn CPU at 100% printing tracebacks
+                # forever. Detect that case and exit cleanly. Genuine
+                # transient errors still get logged and retried after a
+                # short backoff so the listener stays responsive without
+                # spinning.
+                if not dist.is_initialized() or self._stop_event.is_set():
+                    return
                 import traceback
                 traceback.print_exc()
+                # Wait with timeout so ``stop()`` from the main thread
+                # wakes us promptly; expire-then-retry on its own keeps
+                # the listener alive through transient failures.
+                if self._stop_event.wait(timeout=0.5):
+                    return
 
     # ------------------------------------------------------------------
     # Consumer: pull tensor from remote rank
