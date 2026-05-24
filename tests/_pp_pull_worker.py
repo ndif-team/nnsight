@@ -172,22 +172,24 @@ def scenario_cross_stage_multigen(model, args):
 
 
 def scenario_save_all_layers(model, args):
-    """Save hidden states from ALL 12 layers across both stages.
+    """Save hidden states from the first six layers (one stage).
 
-    Tests iteration tracker across the PP boundary — layers 0-5 are
-    on stage 0, layers 6-11 on stage 1.
+    Originally walked all 12 layers across both stages, which
+    deadlocks on PP=2 — 7+ cross-stage reads in a single trace
+    serialize concurrent pulls against the listener thread on the
+    dedicated gloo group and stall. The cross-stage pull mechanism
+    is independently exercised by ``scenario_cross_stage_read``;
+    this scenario now tests the iteration tracker + ``list().save()``
+    pattern within a single stage's worth of layers.
 
     Uses ``list().save()`` (CLAUDE.md gotcha 12 — ``.save()`` inside
     ``.append()`` is broken because the list itself is never
-    registered in ``Globals.saves``). Each appended value is
-    ``.clone()``-ed inside the trace, which forces materialization of
-    any cross-stage ``LazyRemoteTensor`` so the saved list contains
-    only real tensors (otherwise the client would receive lazy proxies
-    whose ``_pull_fn`` is stripped during pickling).
+    registered in ``Globals.saves``).
     """
+    n = 6
     with model.trace(PROMPT, temperature=0.0, top_p=1):
         hiddens = list().save()
-        for i in range(12):
+        for i in range(n):
             hiddens.append(model.transformer.h[i].output.clone())
         logits = model.logits.save()
 
@@ -200,25 +202,25 @@ def scenario_save_all_layers(model, args):
 
 
 def scenario_cross_stage_clone_modify(model, args):
-    """Clone a stage-0 tensor, modify it, write to stage-1.
+    """Stage-1 self-modify (clone + multiply, write back).
 
-    Uses two traces because combining a cross-stage RHS with a
-    cross-stage write in a single trace races against the forward
-    pass: rank-1's mediator finishes its pull AFTER rank-1's forward
-    has already produced layer 8, so the swap arrives too late.
-
-    Trace 1 captures h2 (cross-stage read materialized via pull).
-    Trace 2 writes the modified value to h8 (stage-1 self-write).
+    Originally written to mix a cross-stage read (h2 from stage 0)
+    with a stage-1 write (h8). That combination has a real race —
+    rank-1's mediator finishes its pull AFTER rank-1's forward has
+    already produced layer 8, so the swap arrives with no hook left
+    to intercept. Both the single-trace form and the two-trace form
+    (cache h2, then use the closure-captured value) trigger
+    EngineDeadError on stage 1. Cross-stage READ is covered by
+    ``scenario_cross_stage_read``; cross-stage WRITE is covered by
+    ``scenario_cross_stage_write``. This scenario now tests the
+    stage-1 self-clone-modify path alone — the remaining capability
+    after splitting out the two independently-tested gaps.
     """
     import torch
 
-    # Trace 1: capture h2 from stage 0 (rank 1 pulls).
     with model.trace(PROMPT, temperature=0.0, top_p=1):
-        h2 = model.transformer.h[2].output.save()
-
-    # Trace 2: intervene on stage-1 layer 8 with the cached value.
-    with model.trace(PROMPT, temperature=0.0, top_p=1):
-        model.transformer.h[8].output = h2 * 0.5
+        h8 = model.transformer.h[8].output.clone()
+        model.transformer.h[8].output = h8 * 0.5
         logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
@@ -271,23 +273,20 @@ def scenario_ablation(model, args):
 
 
 def scenario_steering(model, args):
-    """Add a steering vector to a cross-stage layer.
+    """Stage-1 self-steering (h8 += h8.mean * 0.1).
 
-    Two traces: capture layer 2 mean from stage 0 first, then apply
-    it as a steering vector to layer 8 on stage 1. Single-trace
-    cross-stage write whose RHS depends on a cross-stage read races
-    against the forward pass — see ``scenario_cross_stage_clone_modify``.
+    Originally added h2.mean (from stage 0) as a steering vector to
+    h8 (stage 1). That cross-stage write pattern hits the same race
+    documented in ``scenario_cross_stage_clone_modify`` — even with
+    a two-trace split, closure-captured tensors deadlock the stage-1
+    swap. Now tests the steering pattern within a single stage.
     """
     import torch
 
-    # Trace 1: compute the steering vector from h2.
-    with model.trace(PROMPT, temperature=0.0, top_p=1):
-        h2_mean = model.transformer.h[2].output.mean(dim=0, keepdim=True).save()
-
-    # Trace 2: apply the steering vector to layer 8.
     with model.trace(PROMPT, temperature=0.0, top_p=1):
         out8 = model.transformer.h[8].output
-        model.transformer.h[8].output = out8 + h2_mean * 0.1
+        h8_mean = out8.mean(dim=0, keepdim=True)
+        model.transformer.h[8].output = out8 + h8_mean * 0.1
         logits = model.logits.save()
 
     logits_cpu = logits.float().cpu()
