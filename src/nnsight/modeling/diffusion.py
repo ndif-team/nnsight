@@ -40,7 +40,7 @@ def _resolve_component_cls(lib_name: str, cls_name: str):
     # Normalize Flax/TF class names to their PyTorch equivalents
     for prefix in ("Flax", "TF"):
         if cls_name.startswith(prefix):
-            cls_name = cls_name[len(prefix):]
+            cls_name = cls_name[len(prefix) :]
             break
 
     if lib_name == "diffusers":
@@ -151,8 +151,7 @@ def _build_pipeline_from_config(
     # constructor doesn't accept (e.g. torch_dtype, variant, device_map).
     init_sig = inspect.signature(pipe_cls.__init__)
     has_var_keyword = any(
-        p.kind == inspect.Parameter.VAR_KEYWORD
-        for p in init_sig.parameters.values()
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values()
     )
     if not has_var_keyword:
         valid_params = set(init_sig.parameters.keys()) - {"self"}
@@ -190,7 +189,9 @@ class Diffuser(util.WrapperModule):
         pipeline (DiffusionPipeline): The underlying diffusers pipeline.
     """
 
-    def __init__(self, automodel_or_pipeline=DiffusionPipeline, *args, config=None,**kwargs) -> None:
+    def __init__(
+        self, automodel_or_pipeline=DiffusionPipeline, *args, config=None, **kwargs
+    ) -> None:
         super().__init__()
 
         if isinstance(automodel_or_pipeline, DiffusionPipeline):
@@ -297,7 +298,9 @@ class DiffusionModel(HuggingFaceModel):
             revision: Git revision of the repository.
         """
         if self.config is None:
-            self.__dict__["config"] = self.automodel.load_config(repo_id, revision=revision)
+            self.__dict__["config"] = self.automodel.load_config(
+                repo_id, revision=revision
+            )
 
     def _load_meta(self, repo_id: str, revision: Optional[str] = None, **kwargs):
         """Load a meta (placeholder) version of the diffusion model.
@@ -343,63 +346,113 @@ class DiffusionModel(HuggingFaceModel):
         self._load_config(repo_id, revision=revision)
 
         model = Diffuser(
-            self.automodel, repo_id, revision=revision, device_map=device_map, config=self.config, **kwargs
+            self.automodel,
+            repo_id,
+            revision=revision,
+            device_map=device_map,
+            config=self.config,
+            **kwargs,
         )
 
         return model
 
-    def _prepare_input(self, *inputs, **kwargs):
+    def _prepare_input(self, *inputs, prompt=None, prompt_embeds=None, **kwargs):
         """Normalize raw user input into a consistent format for batching.
 
-        Accepts a single string prompt or a list of string prompts.
-        Returns ``(args, kwargs, batch_size)`` where args is a tuple
-        containing the prompt list.
+        Accepts either a string prompt (or list of strings) or a
+        ``prompt_embeds`` tensor (or list of tensors). The input can be
+        passed as the first positional argument or via the ``prompt=``
+        / ``prompt_embeds=`` keyword. The final value lands in
+        ``kwargs`` under its canonical key; the returned positional
+        args tuple is always empty.
 
         Args:
-            *inputs: A single string or list of strings.
+            *inputs: Optional single positional input — a string,
+                list of strings, tensor, or list of tensors.
+            prompt: Optional string or list of strings.
+            prompt_embeds: Optional tensor or list of tensors.
             **kwargs: Additional keyword arguments (passed through).
 
         Returns:
-            Tuple of ``((prompts,), kwargs, batch_size)``.
+            Tuple of ``((), kwargs, batch_size)`` where ``kwargs``
+            contains either ``prompt`` or ``prompt_embeds``.
         """
-        if len(inputs) == 0:
+        if len(inputs) > 0:
+            assert len(inputs) == 1
+            assert prompt is None and prompt_embeds is None, (
+                "Pass the prompt as either a positional arg or `prompt=`/"
+                "`prompt_embeds=`, not both."
+            )
+            value = inputs[0]
+            if isinstance(value, torch.Tensor) or (
+                isinstance(value, list)
+                and len(value) > 0
+                and isinstance(value[0], torch.Tensor)
+            ):
+                prompt_embeds = value
+            else:
+                prompt = value
+
+        if prompt is not None and prompt_embeds is not None:
+            raise ValueError("Provide either `prompt` or `prompt_embeds`, not both.")
+
+        if prompt is None and prompt_embeds is None:
             return tuple(), kwargs, 0
 
-        assert len(inputs) == 1
-        prompt = inputs[0]
+        if prompt is not None:
+            if isinstance(prompt, str):
+                prompt = [prompt]
+            kwargs["prompt"] = prompt
+            batch_size = len(prompt)
+        else:
+            if isinstance(prompt_embeds, list):
+                prompt_embeds = torch.stack(prompt_embeds, dim=0)
+            elif prompt_embeds.ndim == 2:
+                prompt_embeds = prompt_embeds.unsqueeze(0)
+            kwargs["prompt_embeds"] = prompt_embeds
+            batch_size = prompt_embeds.shape[0]
 
-        if isinstance(prompt, str):
-            prompt = [prompt]
-
-        return (prompt,), kwargs, len(prompt)
+        return tuple(), kwargs, batch_size
 
     def _batch(self, batched_input, *args, **kwargs):
         """Combine a new invoke's prepared prompts with already-batched prompts.
 
-        Merges prompt lists from multiple invokes into a single list
-        for batched pipeline execution.
+        Merges ``prompt`` lists or ``prompt_embeds`` tensors from
+        multiple invokes into a single batched value for pipeline
+        execution.
 
         Args:
             batched_input: A tuple of ``(batched_args, batched_kwargs)``
                 from all previous invokes.
-            *args: The new invoke's prepared positional arguments.
+            *args: The new invoke's prepared positional arguments
+                (always empty after :meth:`_prepare_input`).
             **kwargs: The new invoke's prepared keyword arguments.
 
         Returns:
-            Tuple of ``(combined_args, combined_kwargs)``.
+            Tuple of ``((), combined_kwargs)``.
         """
-        batched_args, batched_kwargs = batched_input
+        _, batched_kwargs = batched_input
+        combined_kwargs = {**batched_kwargs}
 
-        if len(args) > 0:
-            combined_prompts = (list(batched_args[0]) if len(batched_args) > 0 else []) + list(args[0])
-        else:
-            combined_prompts = list(batched_args[0])
+        new_prompt = kwargs.pop("prompt", None)
+        if new_prompt is not None:
+            existing = list(combined_kwargs.get("prompt", []))
+            combined_kwargs["prompt"] = existing + list(new_prompt)
 
-        combined_kwargs = {**batched_kwargs, **kwargs}
+        new_embeds = kwargs.pop("prompt_embeds", None)
+        if new_embeds is not None:
+            existing = combined_kwargs.get("prompt_embeds")
+            combined_kwargs["prompt_embeds"] = (
+                torch.cat([existing, new_embeds], dim=0)
+                if existing is not None
+                else new_embeds
+            )
 
-        return (combined_prompts,), combined_kwargs
+        combined_kwargs.update(kwargs)
 
-    def _run_pipeline(self, prepared_inputs, *args, seed=None, **kwargs):
+        return tuple(), combined_kwargs
+
+    def _run_pipeline(self, *args, seed=None, **kwargs):
         """Shared pipeline execution logic for both trace and generate.
 
         Sets up iteration step counting on the interleaver, handles
@@ -408,12 +461,13 @@ class DiffusionModel(HuggingFaceModel):
         ``default_all`` afterward.
 
         Args:
-            prepared_inputs: The prompt list from ``_prepare_input``.
-            *args: Additional positional arguments for the pipeline.
+            *args: Additional positional arguments for the pipeline
+                (typically empty — prompts land in ``kwargs``).
             seed: Random seed for reproducibility. If provided with
                 multiple prompts, each prompt gets ``seed + offset``.
-            **kwargs: Keyword arguments forwarded to the pipeline
-                (e.g. ``num_inference_steps``, ``guidance_scale``).
+            **kwargs: Keyword arguments forwarded to the pipeline,
+                including ``prompt`` or ``prompt_embeds`` and any of
+                ``num_inference_steps``, ``guidance_scale``, etc.
 
         Returns:
             The pipeline output passed through the wrapper module.
@@ -431,22 +485,29 @@ class DiffusionModel(HuggingFaceModel):
                     steps = 50
             self.interleaver.default_all = steps
 
+        prompt = kwargs.get("prompt")
+        prompt_embeds = kwargs.get("prompt_embeds")
+        if prompt is not None:
+            batch_size = len(prompt)
+        elif prompt_embeds is not None:
+            batch_size = prompt_embeds.shape[0]
+        else:
+            batch_size = 0
+
         generator = torch.Generator(self.device)
 
         if seed is not None:
-            if isinstance(prepared_inputs, list) and len(prepared_inputs) > 1:
+            if batch_size > 1:
                 generator = [
                     torch.Generator(self.device).manual_seed(seed + offset)
                     for offset in range(
-                        len(prepared_inputs) * kwargs.get("num_images_per_prompt", 1)
+                        batch_size * kwargs.get("num_images_per_prompt", 1)
                     )
                 ]
             else:
                 generator = generator.manual_seed(seed)
 
-        output = self._model.pipeline(
-            prepared_inputs, *args, generator=generator, **kwargs
-        )
+        output = self._model.pipeline(*args, generator=generator, **kwargs)
 
         if self.interleaver is not None:
             self.interleaver.default_all = None
@@ -455,24 +516,25 @@ class DiffusionModel(HuggingFaceModel):
 
         return output
 
-    def __call__(self, prepared_inputs, *args, **kwargs):
+    def __call__(self, *args, **kwargs):
         """Run the full diffusion pipeline with a 1-step default.
 
         Used by ``.trace()`` — defaults to ``num_inference_steps=1``
         for fast single-step tracing unless the user overrides it.
 
         Args:
-            prepared_inputs: The prompt list from ``_prepare_input``.
-            *args: Additional positional arguments for the pipeline.
-            **kwargs: Keyword arguments forwarded to the pipeline.
+            *args: Additional positional arguments for the pipeline
+                (typically empty).
+            **kwargs: Keyword arguments forwarded to the pipeline,
+                including ``prompt`` or ``prompt_embeds``.
 
         Returns:
             The pipeline output passed through the wrapper module.
         """
         kwargs.setdefault("num_inference_steps", 1)
-        return self._run_pipeline(prepared_inputs, *args, **kwargs)
+        return self._run_pipeline(*args, **kwargs)
 
-    def __nnsight_generate__(self, prepared_inputs, *args, **kwargs):
+    def __nnsight_generate__(self, *args, **kwargs):
         """Run the full diffusion pipeline for ``.generate()`` contexts.
 
         Unlike ``__call__``, this does not set a default for
@@ -480,14 +542,15 @@ class DiffusionModel(HuggingFaceModel):
         (or the user's explicit value) to take effect.
 
         Args:
-            prepared_inputs: The prompt list from ``_prepare_input``.
-            *args: Additional positional arguments for the pipeline.
-            **kwargs: Keyword arguments forwarded to the pipeline.
+            *args: Additional positional arguments for the pipeline
+                (typically empty).
+            **kwargs: Keyword arguments forwarded to the pipeline,
+                including ``prompt`` or ``prompt_embeds``.
 
         Returns:
             The pipeline output passed through the wrapper module.
         """
-        return self._run_pipeline(prepared_inputs, *args, **kwargs)
+        return self._run_pipeline(*args, **kwargs)
 
     def _remoteable_model_key(self) -> str:
         return super()._remoteable_model_key()
