@@ -11,6 +11,29 @@ from typing import Optional
 import torch.nn as nn
 
 
+def resolve_meta(meta_map: dict, path: str):
+    """Look up per-module PP metadata, tolerant of the nnsight root prefix.
+
+    The metadata map (``pp_module_meta``) is keyed by vLLM's raw
+    ``named_modules()`` names (e.g. ``"transformer.h.8"``), but cross-stage
+    accesses look it up by the **nnsight envoy path**, which carries a root
+    prefix (e.g. ``"model.transformer.h.8"``). A plain ``dict.get`` therefore
+    misses and the pull silently falls back to its ``float32`` default — which
+    then corrupts the dtype of any pulled value written back into the (bf16)
+    model. Strip leading path components until a key matches.
+
+    Returns the metadata dict, or ``None`` if no prefix variant matches.
+    """
+    if path in meta_map:
+        return meta_map[path]
+    parts = path.split(".")
+    for i in range(1, len(parts)):
+        cand = ".".join(parts[i:])
+        if cand in meta_map:
+            return meta_map[cand]
+    return None
+
+
 def is_pp_missing(module: nn.Module) -> bool:
     """Check whether *module* is a vLLM ``PPMissingLayer`` stub.
 

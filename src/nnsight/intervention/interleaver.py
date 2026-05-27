@@ -7,7 +7,7 @@ import weakref
 from collections import defaultdict
 from enum import Enum
 from functools import partial, wraps
-from threading import Thread
+from threading import Thread, local as _thread_local
 from types import FrameType
 from typing import (
     TYPE_CHECKING,
@@ -355,6 +355,21 @@ class Events(Enum):
     EXCEPTION = "exception"  # Signal that an exception occurred
     SKIP = "skip"  # Signal that an operation should be skipped
     BARRIER = "barrier"  # Signal that a barrier should be set
+    RELEASE = "release"  # Mediator left local modules for a remote (PP) access
+
+
+# Thread-local handle on the mediator whose worker thread is currently
+# running. Set by ``Mediator._worker_target`` so PP-missing accesses can
+# find their own mediator without the shared ``Interleaver.current`` slot —
+# which is only valid under strict lockstep and becomes stale once a
+# mediator releases the forward (see ``Events.RELEASE`` / ``go_remote``)
+# and runs concurrently with it.
+_active_mediator = _thread_local()
+
+
+def current_mediator() -> Optional["Mediator"]:
+    """Return the mediator running on the calling worker thread, if any."""
+    return getattr(_active_mediator, "value", None)
 
 
 class Cancelation(Exception):
@@ -950,6 +965,10 @@ class Mediator:
 
         self._prev = None
 
+        # PP: set once when this mediator makes its first cross-stage
+        # (PP-missing) access, so ``go_remote`` is emitted exactly once.
+        self._gone_remote = False
+
         # One-shot transform callback for the next value event. Set by
         # :meth:`eproperty.__get__` when an eproperty with a registered
         # ``transform`` is accessed (already bound to the preprocessed value
@@ -1017,6 +1036,11 @@ class Mediator:
         _args = (self, self.info, *self.args)
 
         def _worker_target():
+            # Publish this mediator as the thread's active one so PP-missing
+            # eproperty accesses resolve it even after this worker releases
+            # the forward and runs concurrently (when ``Interleaver.current``
+            # is no longer pointing here).
+            _active_mediator.value = self
             if _caller_stream is not None:
                 torch.cuda.set_stream(_caller_stream)
             _intervention(*_args)
@@ -1042,32 +1066,23 @@ class Mediator:
         #    has reached a stable point races against
         #    ``pp_eproperty._pp_lazy_access``.
         #
-        # Engines whose worker code may legitimately produce no event
-        # (vLLM PP: the first action is a remote-stage pull that
-        # short-circuits to ``LazyRemoteTensor`` and blocks in
-        # ``listener.pull_from_remote``) advertise ``pp_enabled`` and
-        # get a short bounded wait instead of an infinite one. After the
-        # timeout we conclude the worker has stabilized (either in a
-        # pull or done) and proceed — its later events are picked up by
-        # the interleaver's normal event-processing loop.
-        if getattr(self.interleaver, "pp_enabled", False):
-            posted = self.event_queue.wait(timeout=5.0)
-            if posted:
-                try:
-                    self.handle()
-                except EarlyStopException:
-                    pass
-                self.interleaver.current = None
-        else:
-            self.event_queue.wait()
+        # A worker always posts an event before it can block: a local
+        # access posts a request, a finished body posts END, and — under
+        # PP — the first PP-missing access posts a RELEASE before the
+        # (blocking) cross-stage pull (see ``go_remote``). So an
+        # unconditional wait is safe even under PP; this replaces the
+        # earlier racy 5 s timeout that existed because a pure-pull worker
+        # used to block with no event posted.
+        self.event_queue.wait()
 
-            # Handle the first event to clear mediators that already ended.
-            try:
-                self.handle()
-            except EarlyStopException:
-                pass
+        # Handle the first event to clear mediators that already ended
+        # (END) or that have gone straight to remote access (RELEASE).
+        try:
+            self.handle()
+        except EarlyStopException:
+            pass
 
-            self.interleaver.current = None
+        self.interleaver.current = None
 
     ### Provider Methods ###
 
@@ -1141,6 +1156,8 @@ class Mediator:
                 process = self.handle_barrier_event(provider, data)
             elif event == Events.END:
                 process = self.handle_end_event()
+            elif event == Events.RELEASE:
+                process = self.handle_release_event()
 
         value = self.interleaver.batcher.current_value
 
@@ -1344,6 +1361,22 @@ class Mediator:
 
         return False
 
+    def handle_release_event(self):
+        """Handle a RELEASE event — the mediator has left local modules for a
+        cross-stage (remote) access.
+
+        Stop holding the forward pass: return ``False`` so :meth:`handle`
+        exits *without* re-blocking in :meth:`respond`. The mediator's worker
+        thread keeps running (daemon) and completes its remote pull off to the
+        side while the forward runs to completion — including, under PP, the
+        inter-stage activation send the remote rank needs to produce the value
+        being pulled. The worker is rejoined later in ``collect_nnsight``.
+
+        Note: unlike END this does NOT cancel the mediator — it is still alive
+        and will post its own END when its body finishes.
+        """
+        return False
+
     def handle_skip_event(self, provider: Any, requester: Any, value: Any):
         """Handle a skip event by appending the replacement value into kwargs.
 
@@ -1474,6 +1507,21 @@ class Mediator:
         self.push()
 
         self.event_queue.put((Events.END, None))
+
+    def go_remote(self):
+        """Signal that this mediator has left local modules for a cross-stage
+        (remote) access, so the forward pass may proceed past its current
+        freeze.
+
+        Fire-and-forget (like :meth:`end`): posts RELEASE and returns
+        immediately, so the worker continues into the blocking cross-stage
+        pull while the released forward runs to completion. Emitted at most
+        once per mediator, on its first PP-missing access (guarded by
+        ``_gone_remote`` at the call site in ``pp_envoy``), because once the
+        forward finishes the interleaver context closes and later accesses
+        must not post into it.
+        """
+        self.event_queue.put((Events.RELEASE, None))
 
     def exception(self, exception: Exception):
         """

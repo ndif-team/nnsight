@@ -20,6 +20,8 @@ from typing import Any, Dict, Optional
 import torch
 import torch.distributed as dist
 
+from .pp import resolve_meta as _resolve_meta
+
 TAG_REQUEST = 0
 TAG_RESPONSE = 1
 _META_SLOTS = 32  # legacy metadata buffer size
@@ -255,7 +257,7 @@ class PPListener:
 
         group = self._pull_group
         module_path = _provider_to_module_path(provider_string)
-        meta = self._meta_map.get(module_path)
+        meta = _resolve_meta(self._meta_map, module_path)
 
         # Decide protocol mode: optimized (pre-computed shapes) or legacy.
         use_precomputed = (

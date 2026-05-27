@@ -18,9 +18,52 @@ import torch
 
 from ...intervention.envoy import Envoy
 from ...intervention.hooks import requires_input, requires_output
-from ...intervention.interleaver import eproperty
+from ...intervention.interleaver import current_mediator, eproperty
 from .lazy_remote_tensor import LazyRemoteTensor
-from .pp import is_pp_missing
+from .pp import is_pp_missing, resolve_meta
+
+
+def _pp_signal_remote(obj, key: str) -> None:
+    """Release the forward pass when this mediator reaches a *downstream*
+    cross-stage access, so it can run to completion (and perform the
+    inter-stage activation send) instead of staying frozen at the last local
+    hook while the mediator blocks on a pull the downstream rank can't satisfy
+    until this rank advances.
+
+    Only **downstream** accesses (owner computes later in the pipeline) trigger
+    the release, and only once per mediator (``_gone_remote`` guard):
+
+    * **Downstream** reads are last in forward-pass order, so no local hook
+      follows — releasing is safe, and necessary (the value can't exist until
+      this rank's forward finishes and sends).
+    * **Upstream** reads are produced independently by an earlier rank, so the
+      pull resolves on its own; the entry gate (``Mediator.start``'s wait for
+      the first event) already holds the forward until the mediator finishes
+      those and reaches its first local hook. Releasing on an upstream access
+      would let the forward skip that later local hook.
+
+    Subsequent PP-missing accesses skip this entirely — by then the forward
+    may have finished and closed the interleaver, and the pull rides the
+    listener thread, not the interleaver.
+    """
+    mediator = current_mediator()
+    if mediator is None or getattr(mediator, "_gone_remote", False):
+        return
+
+    interleaver = obj.interleaver
+    pp_map = getattr(interleaver, "pp_module_map", None)
+    local_rank = getattr(interleaver, "pp_local_rank", None)
+    if pp_map is None or local_rank is None:
+        return
+
+    obj_path = getattr(obj, "path", None) or ""
+    lookup = f"{obj_path}.{key}" if obj_path else key
+    owner = pp_map.get_owning_rank(lookup)
+    if owner is None or owner <= local_rank:
+        return  # upstream / same / unknown — do not release
+
+    mediator._gone_remote = True
+    mediator.go_remote()
 
 
 def _is_pp_missing(obj, key: str) -> bool:
@@ -88,7 +131,10 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
     same forward pass each get their own slice.
     """
     interleaver = obj.interleaver
-    mediator = interleaver.current
+    # Resolve via the worker's thread-local, not ``interleaver.current``:
+    # after this mediator releases the forward it runs concurrently with
+    # (and after) the interleaver, so the shared ``current`` slot is stale.
+    mediator = current_mediator() or interleaver.current
 
     path = getattr(obj, "path", "") or ""
     module_key = f"{path}.{key}" if path else key
@@ -99,7 +145,7 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
     pp_map = interleaver.pp_module_map
     source_rank = pp_map.get_owning_rank(path or key)
 
-    meta = getattr(interleaver, "pp_module_meta", {}).get(path, {})
+    meta = resolve_meta(getattr(interleaver, "pp_module_meta", {}), path) or {}
     dtype = (
         meta.get("dtype", torch.float32)
         if isinstance(meta, dict)
@@ -140,11 +186,13 @@ class pp_eproperty(eproperty):
         if obj is None:
             return self
         if obj.interleaver.interleaving and _is_pp_missing(obj, self.key):
+            _pp_signal_remote(obj, self.key)
             return _pp_lazy_access(obj, self.key)
         return super().__get__(obj, owner)
 
     def __set__(self, obj, value):
         if obj.interleaver.interleaving and _is_pp_missing(obj, self.key):
+            _pp_signal_remote(obj, self.key)
             return
         super().__set__(obj, value)
 
