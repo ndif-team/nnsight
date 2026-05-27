@@ -931,3 +931,62 @@ class TestAsyncRayExecutor:
             assert corrupted_token != " Paris"
 
         async_ray_loop.run_until_complete(run())
+
+
+# =============================================================================
+# Batcher axis handling (regression for Transformers-backend interventions)
+# =============================================================================
+
+
+class TestVLLMBatcherAxis:
+    """Unit tests for VLLMBatcher narrow/swap axis selection.
+
+    Native vLLM models emit 2D activations ``[total_tokens, hidden]`` (token
+    axis = dim 0). Models routed through vLLM's Transformers backend (e.g.
+    SmolLM3, which has no native vLLM definition) run the wrapped HF model
+    with a leading singleton batch dim, so decoder-layer activations are 3D
+    ``[1, total_tokens, hidden]`` (token axis = dim 1).
+
+    Before the fix, ``_narrow``/``_swap`` hard-assumed the token axis was dim
+    0 and gated on ``shape[0] == total_batch_size``; for the 3D case that gate
+    was ``1 == total_tokens`` (False), so reads returned the full batch and
+    writes were silently discarded — every intervention became a no-op once
+    ``needs_batching`` (2+ prompts) kicked in. See GitHub #661/#662.
+
+    These are CPU-only and don't load a model.
+    """
+
+    @staticmethod
+    def _batcher():
+        from nnsight.modeling.vllm.batching import VLLMBatcher
+
+        # Two prompts: A = tokens [0:3], B = tokens [3:8]; total_batch_size = 8.
+        batcher = VLLMBatcher()
+        batcher.needs_batching = True
+        batcher.last_batch_group = [3, 5]
+        return batcher
+
+    def test_native_2d_swap_lands(self):
+        batcher = self._batcher()
+        H = 4
+        batcher.current_value = torch.zeros(8, H)
+        batcher.swap([0, 3], torch.full((3, H), 9.0))  # corrupt prompt A
+        assert (batcher.current_value[:3] == 9.0).all()
+        assert (batcher.current_value[3:] == 0.0).all()
+
+    def test_transformers_backend_3d_swap_lands(self):
+        batcher = self._batcher()
+        H = 4
+        batcher.current_value = torch.zeros(1, 8, H)
+        batcher.swap([0, 3], torch.full((1, 3, H), 9.0))  # corrupt prompt A
+        assert (batcher.current_value[:, :3] == 9.0).all()
+        assert (batcher.current_value[:, 3:] == 0.0).all()
+
+    def test_transformers_backend_3d_narrow_slices_token_axis(self):
+        batcher = self._batcher()
+        H = 4
+        full = torch.arange(8, dtype=torch.float32).reshape(1, 8, 1).expand(1, 8, H)
+        batcher.current_value = full.contiguous()
+        narrowed = batcher.narrow([3, 5])  # prompt B
+        assert narrowed.shape == (1, 5, H)
+        assert torch.equal(narrowed[0, :, 0], torch.arange(3, 8, dtype=torch.float32))

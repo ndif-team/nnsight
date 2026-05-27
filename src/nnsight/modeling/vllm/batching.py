@@ -155,6 +155,35 @@ class VLLMBatcher(Batcher):
 
             self.gathered = True
 
+    def _batch_dim(self, acts: torch.Tensor):
+        """Locate the token axis, accounting for the Transformers backend.
+
+        Native vLLM models emit 2D activations ``[total_tokens, hidden]`` —
+        the token axis is dim 0, handled by the base implementation.
+
+        Models without a native vLLM definition (e.g. SmolLM3) run through
+        vLLM's Transformers backend, which wraps the HuggingFace model and
+        adds a leading singleton batch dim (``inputs_embeds[None, ...]`` in
+        ``vllm/model_executor/models/transformers/base.py``). Their
+        decoder-layer activations are ``[1, total_tokens, hidden]``, so the
+        token axis is dim 1. Without this, ``_narrow``/``_swap`` see
+        ``shape[0] == 1 != total_batch_size``, silently pass the tensor
+        through, and every intervention becomes a no-op once
+        ``needs_batching`` (2+ prompts) is active.
+        """
+        dim = super()._batch_dim(acts)
+        if dim is not None:
+            return dim
+
+        if (
+            acts.ndim >= 2
+            and acts.shape[0] == 1
+            and acts.shape[1] == self.total_batch_size
+        ):
+            return 1
+
+        return None
+
     def narrow(self, batch_group: Union[int, None]):
 
         self.check_gathered()

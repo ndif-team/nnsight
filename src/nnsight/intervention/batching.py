@@ -255,6 +255,24 @@ class Batcher:
             torch.Tensor,
         )
 
+    def _batch_dim(self, acts: torch.Tensor) -> Optional[int]:
+        """Return the axis of ``acts`` indexed by the batch group, or ``None``.
+
+        The batch group's ``[start, size]`` indexes whichever tensor axis
+        carries the batched samples (for vLLM: the flattened token axis).
+        By default that is dimension 0 — a tensor is considered batched only
+        when ``acts.shape[0] == total_batch_size``. Tensors that don't match
+        (e.g. per-step scalars, shape-mismatched buffers) return ``None`` and
+        are passed through untouched.
+
+        Subclasses override this when the batched axis isn't dim 0 (see
+        :class:`~nnsight.modeling.vllm.batching.VLLMBatcher`, whose
+        Transformers-backend activations are ``[1, total_tokens, hidden]``).
+        """
+        if acts.shape[0] == self.total_batch_size:
+            return 0
+        return None
+
     def _narrow(
         self, batch_group: Optional[List[int]], acts: torch.Tensor
     ) -> torch.Tensor:
@@ -263,18 +281,19 @@ class Batcher:
 
         Args:
             batch_group (List[int]): The [start_idx, batch_size] of the batch group to extract.
-            acts (torch.Tensor): The input tensor to narrow. The first dimension should
-                correspond to the batch dimension.
+            acts (torch.Tensor): The input tensor to narrow, batched along the
+                axis reported by :meth:`_batch_dim`.
 
         Returns:
             torch.Tensor: The narrowed tensor containing only the specified batch group.
         """
         batch_start, batch_size = batch_group
 
-        if acts.shape[0] == self.total_batch_size:
-            return acts.narrow(0, batch_start, batch_size)
+        dim = self._batch_dim(acts)
+        if dim is None:
+            return acts
 
-        return acts
+        return acts.narrow(dim, batch_start, batch_size)
 
     def _swap(
         self,
@@ -296,36 +315,37 @@ class Batcher:
         """
         batch_start, batch_size = batch_group
 
-        if current_value.shape[0] == self.total_batch_size:
+        dim = self._batch_dim(current_value)
+        if dim is None:
+            return current_value
 
-            needs_concat = (
-                current_value.requires_grad and current_value.is_leaf
-            ) or current_value._base is not None
+        needs_concat = (
+            current_value.requires_grad and current_value.is_leaf
+        ) or current_value._base is not None
 
-            # When ``swap_value`` is itself a view of ``current_value``
-            # (e.g. user read a narrow slice from the batcher and assigned
-            # it back), in-place assignment ``current_value[start:end] =
-            # swap_value`` creates a self-referential autograd graph and
-            # segfaults during backward.  Force the concat path instead.
-            if not needs_concat and swap_value._base is current_value:
-                needs_concat = True
+        # When ``swap_value`` is itself a view of ``current_value``
+        # (e.g. user read a narrow slice from the batcher and assigned
+        # it back), in-place assignment ``current_value[start:end] =
+        # swap_value`` creates a self-referential autograd graph and
+        # segfaults during backward.  Force the concat path instead.
+        if not needs_concat and swap_value._base is current_value:
+            needs_concat = True
 
-            if needs_concat:
-                pre = current_value.narrow(0, 0, batch_start)
-                post = (
-                    current_value.narrow(
-                        0,
-                        batch_start + batch_size,
-                        current_value.shape[0] - batch_start - batch_size,
-                    )
-                    if self.total_batch_size == current_value.shape[0]
-                    else current_value
-                )
+        if needs_concat:
+            pre = current_value.narrow(dim, 0, batch_start)
+            post = current_value.narrow(
+                dim,
+                batch_start + batch_size,
+                current_value.shape[dim] - batch_start - batch_size,
+            )
 
-                return torch.cat([pre, swap_value, post], dim=0)
+            return torch.cat([pre, swap_value, post], dim=dim)
 
-            else:
-                current_value[batch_start : batch_start + batch_size] = swap_value
+        # Index-assign along ``dim`` (== dim 0 by default; the Transformers
+        # backend uses dim 1 — see VLLMBatcher._batch_dim).
+        index = [slice(None)] * current_value.ndim
+        index[dim] = slice(batch_start, batch_start + batch_size)
+        current_value[tuple(index)] = swap_value
 
         return current_value
 
