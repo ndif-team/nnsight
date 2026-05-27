@@ -141,6 +141,38 @@ def scenario_cross_stage_write(model, args):
     }
 
 
+def scenario_cross_stage_write_multi(model, args):
+    """One cross-stage pull reused across multiple downstream writes.
+
+    Reads layer 2 (stage 0) ONCE into ``h2``, then writes it in-place
+    into layers 7 and 9 (stage 1) in forward-pass order.
+
+    The value must be read once and reused — re-accessing
+    ``model.transformer.h[2].output`` for the second write would be an
+    out-of-order access (the forward has already advanced past layer 2
+    to the layer-7 write), so the upstream value would never be produced
+    under the second access's provider and the pull would hang. Reusing
+    the variable is the correct idiom (CLAUDE.md: access modules in
+    forward-pass order; clone/keep a reference instead of re-accessing).
+
+    Exercises a single upstream pull feeding several downstream consumers.
+    """
+    import torch
+
+    with model.trace(PROMPT, temperature=0.0, top_p=1):
+        h2 = model.transformer.h[2].output[0]      # single cross-stage pull
+        model.transformer.h[7].output[0][:] = h2    # forward order: 7 before 9
+        model.transformer.h[9].output[0][:] = h2
+        logits = model.logits.save()
+
+    logits_cpu = logits.float().cpu()
+    argmax = int(logits_cpu.argmax(dim=-1).item())
+    return {
+        "argmax": argmax,
+        "top_token": model.tokenizer.decode(argmax),
+    }
+
+
 def scenario_cross_stage_multigen(model, args):
     """Cross-stage read during multi-token generation.
 
@@ -355,6 +387,7 @@ def main():
         "cross_stage_read", "cross_stage_write", "cross_stage_multigen",
         "save_all_layers", "cross_clone_modify", "ablation",
         "steering", "cross_compare", "multigen_cross_write",
+        "cross_stage_write_multi",
     ])
     parser.add_argument("--pp", type=int, required=True)
     parser.add_argument("--tp", type=int, default=1)
@@ -380,6 +413,7 @@ def main():
             "steering": scenario_steering,
             "cross_compare": scenario_cross_compare,
             "multigen_cross_write": scenario_multigen_cross_write,
+            "cross_stage_write_multi": scenario_cross_stage_write_multi,
         }
         result = scenarios[args.scenario](model, args)
         result["status"] = "ok"

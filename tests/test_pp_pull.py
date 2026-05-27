@@ -109,6 +109,11 @@ if __name__ == '__main__':
     print("Test 9: cross-stage WRITE (layer 2 → layer 8)")
     test("cross_write", run("cross_stage_write", PP2, pp=2))
 
+    print("Test 9b: cross-stage WRITE, one pull reused (layer 2 → layers 7 & 9)")
+    test("cross_write_multi", run("cross_stage_write_multi", PP2, pp=2),
+         lambda r: (r.get("top_token") == " Paris",
+                     f"got {r.get('top_token')!r}"))
+
     print("Test 10: cross-stage multi-token (3 steps)")
     test("cross_multigen", run("cross_stage_multigen", PP2, pp=2, max_tokens=3),
          lambda r: (r["num_steps"] == 3 and len(r["h0_shapes"]) == 3,
