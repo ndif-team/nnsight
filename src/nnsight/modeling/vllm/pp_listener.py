@@ -260,12 +260,7 @@ class PPListener:
         meta = _resolve_meta(self._meta_map, module_path)
 
         # Decide protocol mode: optimized (pre-computed shapes) or legacy.
-        use_precomputed = (
-            num_tokens > 0
-            and meta is not None
-            and isinstance(meta, dict)
-            and meta.get("static_suffixes")
-        )
+        use_precomputed = self._should_use_precomputed(meta, num_tokens)
         header_num_tokens = num_tokens if use_precomputed else 0
 
         # Wire-encode the key with req_id if available (Bug B composite
@@ -291,18 +286,28 @@ class PPListener:
             return self._recv_precomputed(group, source_rank, meta, num_tokens)
         else:
             dtype = meta.get("dtype", torch.float32) if isinstance(meta, dict) else (meta if isinstance(meta, torch.dtype) else torch.float32)
-            return self._recv_legacy(group, source_rank, dtype)
+            return self._recv_legacy(
+                group, source_rank, dtype,
+                module_path=module_path, meta=meta,
+            )
 
     def _recv_precomputed(self, group, source_rank, meta, num_tokens):
-        """Recv flat data using pre-computed buffer size from metadata."""
+        """Recv flat data using the learned module output shape — no shape
+        on the wire.
+
+        The producer's tensor is ``[num_tokens, *features]`` (vLLM's flat
+        token-major layout). We keep the learned per-feature shape and
+        substitute this request's ``num_tokens`` for the leading dim, since
+        the token count is the only part that varies between requests.
+        """
         dtype = meta["dtype"]
         num_outputs = meta["num_outputs"]
-        static_suffixes = meta["static_suffixes"]
+        module_shapes = meta["module_shapes"]
 
         shapes = []
         total_numel = 0
-        for suffix in static_suffixes:
-            shape = (num_tokens, *suffix)
+        for learned_shape in module_shapes:
+            shape = (num_tokens, *learned_shape[1:])
             numel = 1
             for s in shape:
                 numel *= s
@@ -322,8 +327,14 @@ class PPListener:
             return results[0]
         return tuple(results)
 
-    def _recv_legacy(self, group, source_rank, dtype):
-        """Recv shape metadata then data (legacy fallback)."""
+    def _recv_legacy(self, group, source_rank, dtype,
+                     module_path=None, meta=None):
+        """Recv shape metadata then data (legacy fallback).
+
+        Also learns the module's output shape from the wire so subsequent
+        pulls of the same module use the precomputed path — see
+        :meth:`_cache_module_shapes`.
+        """
         shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
         dist.recv(shape_meta, group=group, group_src=source_rank, tag=TAG_RESPONSE)
 
@@ -351,9 +362,52 @@ class PPListener:
             results.append(flat[offset:offset + numel].reshape(shape).to(self._device))
             offset += numel
 
+        self._cache_module_shapes(module_path, meta, shapes, dtype)
+
         if num_elements == 1:
             return results[0]
         return tuple(results)
+
+    @staticmethod
+    def _should_use_precomputed(meta, num_tokens) -> bool:
+        """Whether a pull can skip shape-on-wire (precomputed recv buffer).
+
+        Requires this request's token count (to size the buffer) and a
+        metadata entry whose ``module_shapes`` have been learned. Shapes
+        start empty at init and are filled by :meth:`_cache_module_shapes`
+        on the first legacy pull, so the first pull of each module is
+        legacy and subsequent pulls are precomputed.
+        """
+        return bool(
+            num_tokens > 0
+            and isinstance(meta, dict)
+            and meta.get("module_shapes")
+        )
+
+    def _cache_module_shapes(self, module_path, meta, shapes, dtype):
+        """Learn a module's output shape(s) from a real legacy response.
+
+        Records the per-element output shape so the next pull of this
+        module takes the precomputed path. The token (leading) dimension
+        is overridden per request at recv time, so what matters here is
+        the trailing feature shape — we keep the whole observed shape and
+        let :meth:`_recv_precomputed` substitute the live token count.
+        """
+        if module_path is None:
+            return
+
+        module_shapes = [tuple(shape) for shape, _ in shapes]
+
+        # Mutate the resolved entry in place when it exists (keeps the
+        # allgather-provided dtype and is agnostic to the prefix-tolerant
+        # key under which it was found); otherwise create a fresh entry.
+        if isinstance(meta, dict):
+            entry = meta
+        else:
+            entry = {"dtype": dtype}
+            self._meta_map[module_path] = entry
+        entry["module_shapes"] = module_shapes
+        entry["num_outputs"] = len(shapes)
 
 
 def _provider_to_module_path(provider_string: str) -> str:

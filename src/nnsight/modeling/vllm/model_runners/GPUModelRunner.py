@@ -442,12 +442,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 self._graft_pp_missing_envoys(meta_model)
                 del self._pp_meta_model
 
-            # Probe output shapes via a FakeTensorMode forward pass on the
-            # real (TP-sharded) model, then allgather across PP ranks so
-            # every rank can pre-compute pull recv-buffer sizes without
-            # shape on the wire.
-            shape_meta = self._probe_pp_output_shapes()
-            self.pp_module_meta = self._exchange_pp_module_meta(shape_meta)
+            # Allgather per-module dtype across PP ranks so every rank can
+            # size pull recv-buffers and build LazyRemoteTensor placeholders.
+            # The module output shape is learned lazily from the first legacy
+            # pull of each module (see ``PPListener._cache_module_shapes``)
+            # rather than probed up front — a FakeTensorMode forward over the
+            # real TP-sharded model collides with vLLM's ``BasevLLMParameter``
+            # ``__torch_function__`` on ``aten.t`` and never completes.
+            self.pp_module_meta = self._exchange_pp_module_meta()
 
             # Dedicated gloo group for pull requests — separate from
             # vLLM's own PP groups so the listener thread's recv() doesn't
@@ -544,100 +546,16 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         graft(self.nnsight_model)
 
-    def _probe_pp_output_shapes(self) -> dict:
-        """Probe output shapes of local modules via FakeTensorMode forward.
+    def _exchange_pp_module_meta(self) -> dict:
+        """Allgather per-module dtype across PP ranks.
 
-        Runs the real (TP-sharded) model forward once with fake tensors,
-        captures each module's raw output, and records dtype + shape
-        suffix metadata that the pull protocol uses to size recv buffers
-        without putting shape on the wire.
-        """
-        from torch._subclasses.fake_tensor import FakeTensorMode
-        from ..pp import is_pp_missing
-
-        captured: Dict[str, Any] = {}
-        hooks = []
-
-        for name, module in self.model.named_modules():
-            if is_pp_missing(module):
-                continue
-            _name = name
-
-            def _hook(mod, _input, output, n=_name):
-                captured[n] = output
-
-            hooks.append(module.register_forward_hook(_hook))
-
-        hidden_size = self.model_config.hf_config.hidden_size
-        device = next(self.model.parameters()).device
-
-        # Inner vLLM helpers (e.g. ``vocab_parallel_embedding``'s
-        # ``get_masked_input_and_mask``) are decorated with
-        # ``@torch.compile``. Under our outer FakeTensorMode, those
-        # wrappers still invoke dynamo/inductor, which creates its OWN
-        # FakeTensorMode and fails a ``fake_mode is m`` assertion in
-        # ``torch._guards.detect_fake_mode``. ``torch._dynamo.disable``
-        # on the outer call does NOT propagate to ``@torch.compile``
-        # wrappers — those always trigger compilation on call. Flip
-        # the dynamo global-disable flag instead; each ``@torch.compile``
-        # wrapper checks it and falls back to eager.
-        import torch._dynamo as _dynamo
-        prev_disable = _dynamo.config.disable
-        _dynamo.config.disable = True
-
-        try:
-            with FakeTensorMode(allow_non_fake_inputs=True):
-                input_ids = torch.zeros(1, dtype=torch.long, device=device)
-                positions = torch.zeros(1, dtype=torch.long, device=device)
-
-                pp_group = get_pp_group()
-                if pp_group.is_first_rank:
-                    intermediate_tensors = None
-                else:
-                    intermediate_tensors = IntermediateTensors({
-                        "hidden_states": torch.zeros(
-                            1, hidden_size,
-                            dtype=self.model_config.dtype, device=device,
-                        ),
-                        "residual": torch.zeros(
-                            1, hidden_size,
-                            dtype=self.model_config.dtype, device=device,
-                        ),
-                    })
-
-                with torch.no_grad():
-                    self.model(input_ids, positions, intermediate_tensors)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-        finally:
-            _dynamo.config.disable = prev_disable
-            for h in hooks:
-                h.remove()
-
-        meta = {}
-        for path, raw_output in captured.items():
-            try:
-                tensors = list(raw_output) if isinstance(raw_output, (tuple, list)) else [raw_output]
-                tensor_list = [t for t in tensors if isinstance(t, torch.Tensor)]
-                if tensor_list:
-                    meta[path] = {
-                        "dtype": tensor_list[0].dtype,
-                        "num_outputs": len(tensor_list),
-                        "static_suffixes": [tuple(t.shape[1:]) for t in tensor_list],
-                    }
-            except Exception:
-                continue
-
-        return meta
-
-    def _exchange_pp_module_meta(self, shape_meta: dict) -> dict:
-        """Allgather per-module metadata across PP ranks.
-
-        Each rank contributes ``{path: {dtype, num_outputs, static_suffixes}}``
-        for its local (non-PPMissing) modules. The merged map is identical
-        on every rank and lets the listener pre-compute pull recv-buffer
-        sizes without shape on the wire.
+        Each rank contributes ``{path: {dtype, num_outputs, module_shapes}}``
+        for its local (non-PPMissing) modules. ``dtype`` comes from the
+        module's own parameters (no forward needed); ``module_shapes``
+        starts empty and is filled in lazily on the first legacy pull of
+        each module (``PPListener._cache_module_shapes``). The merged map
+        is identical on every rank and lets the listener size pull
+        recv-buffers and build LazyRemoteTensor placeholders.
         """
         import torch.distributed as dist
         from ..pp import is_pp_missing
@@ -649,16 +567,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if not is_pp_missing(module):
                 param = next(module.parameters(recurse=False), None)
                 dtype = param.dtype if param is not None else self.model_config.dtype
-                if name in shape_meta:
-                    entry = shape_meta[name].copy()
-                    entry["dtype"] = dtype
-                    local_meta[name] = entry
-                else:
-                    local_meta[name] = {
-                        "dtype": dtype,
-                        "num_outputs": 1,
-                        "static_suffixes": [],
-                    }
+                local_meta[name] = {
+                    "dtype": dtype,
+                    "num_outputs": 1,
+                    "module_shapes": [],
+                }
 
         local_bytes = pickle.dumps(local_meta)
         local_tensor = torch.tensor(
