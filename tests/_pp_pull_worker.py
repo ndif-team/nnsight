@@ -173,6 +173,33 @@ def scenario_cross_stage_write_multi(model, args):
     }
 
 
+def scenario_cross_stage_save_all(model, args):
+    """Save EVERY layer's output into one list — a mixed-stage container.
+
+    GPT-2 PP=2: layers 0-5 live on stage 0, 6-11 on stage 1. The single
+    saved list therefore holds real tensors on some slots and
+    LazyRemoteTensors on others on *each* rank — no rank has a complete
+    real list. Each rank ships only the slots it owns (foreign slots become
+    NOT_ON_THIS_RANK), and the engine merges position-wise into a full list.
+    Exercises the cross-stage saved-container merge end to end.
+    """
+    n = model.config.n_layer  # 12 for gpt2
+    with model.trace(PROMPT, temperature=0.0, top_p=1):
+        all_layers = list().save()
+        for i in range(n):
+            all_layers.append(model.transformer.h[i].output[0])
+        logits = model.logits.save()
+
+    argmax = int(logits.float().cpu().argmax(dim=-1).item())
+    return {
+        "num_layers": len(all_layers),
+        # All slots must have materialized to real tensors (no lazy leaked).
+        "all_real": all(hasattr(h, "shape") and len(list(h.shape)) >= 1
+                        for h in all_layers),
+        "top_token": model.tokenizer.decode(argmax),
+    }
+
+
 def scenario_cross_stage_multigen(model, args):
     """Cross-stage read during multi-token generation.
 
@@ -387,7 +414,7 @@ def main():
         "cross_stage_read", "cross_stage_write", "cross_stage_multigen",
         "save_all_layers", "cross_clone_modify", "ablation",
         "steering", "cross_compare", "multigen_cross_write",
-        "cross_stage_write_multi",
+        "cross_stage_write_multi", "cross_stage_save_all",
     ])
     parser.add_argument("--pp", type=int, required=True)
     parser.add_argument("--tp", type=int, default=1)
@@ -414,6 +441,7 @@ def main():
             "cross_compare": scenario_cross_compare,
             "multigen_cross_write": scenario_multigen_cross_write,
             "cross_stage_write_multi": scenario_cross_stage_write_multi,
+            "cross_stage_save_all": scenario_cross_stage_save_all,
         }
         result = scenarios[args.scenario](model, args)
         result["status"] = "ok"

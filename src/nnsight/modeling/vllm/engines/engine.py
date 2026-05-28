@@ -4,6 +4,8 @@ import zstandard as _zstd
 
 from vllm.v1.engine.llm_engine import LLMEngine
 
+from ..lazy_remote_tensor import merge_saved
+
 _ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
 
 
@@ -28,17 +30,22 @@ class NNsightLLMEngine(LLMEngine):
             )
             # Worker returns ``{base_id: {var_name: value}}``. Without PP
             # only TP-rank-0 returns data and the merge is a single dict.
-            # With PP > 1 every PP stage's TP-rank-0 contributes — merge
-            # per-request sub-dicts so saves from different stages
-            # accumulate. Later-rank-wins on duplicate names matches the
-            # design's "owning rank wins" rule for cross-stage values.
+            # With PP > 1 every PP stage's TP-rank-0 contributes — each ships
+            # only the slots it owns (others are NOT_ON_THIS_RANK sentinels),
+            # so same-named saves are merged position-wise to assemble one
+            # complete result (``merge_saved``). For scalars this reduces to
+            # the prior "later-rank-wins" behavior.
             merged: dict = {}
             for r in results:
                 if r is None:
                     continue
                 rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
                 for base_id, per_req in rank_saves.items():
-                    merged.setdefault(base_id, {}).update(per_req)
+                    dst = merged.setdefault(base_id, {})
+                    for name, value in per_req.items():
+                        dst[name] = (
+                            merge_saved(dst[name], value) if name in dst else value
+                        )
             if merged:
                 for ro in request_outputs:
                     if ro.finished:

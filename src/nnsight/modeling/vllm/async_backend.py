@@ -8,6 +8,7 @@ _ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
 
 from ...intervention.backends.base import Backend
 from ...intervention.tracing.util import wrap_exception
+from .lazy_remote_tensor import merge_saved
 
 if TYPE_CHECKING:
     from .vllm import VLLM
@@ -84,15 +85,21 @@ class AsyncVLLMBackend(Backend):
                 )
                 # Worker returns ``{base_id: {var_name: value}}``. Without
                 # PP only TP-rank-0 returns data; with PP > 1 every PP
-                # stage's TP-rank-0 contributes — merge per-request
-                # sub-dicts so saves from different stages accumulate.
+                # stage's TP-rank-0 contributes — each ships only the slots
+                # it owns (others are NOT_ON_THIS_RANK sentinels), so
+                # same-named saves are merged position-wise into one complete
+                # result (``merge_saved``).
                 merged: dict = {}
                 for r in results:
                     if r is None:
                         continue
                     rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
                     for base_id, per_req in rank_saves.items():
-                        merged.setdefault(base_id, {}).update(per_req)
+                        dst = merged.setdefault(base_id, {})
+                        for name, value in per_req.items():
+                            dst[name] = (
+                                merge_saved(dst[name], value) if name in dst else value
+                            )
                 per_req = merged.get(output.request_id)
                 if per_req:
                     output.saves = per_req

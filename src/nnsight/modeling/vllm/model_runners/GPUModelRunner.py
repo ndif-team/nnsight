@@ -16,7 +16,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from ....intervention.serialization import load
 from ....intervention.tracing.globals import Globals
 from ..batching import VLLMBatcher
-from ..lazy_remote_tensor import LazyRemoteTensor
+from ..lazy_remote_tensor import strip_lazy
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -297,9 +297,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
             Gathers per-invoke saves from frame locals and trace-shared
             saves from canonical globals (only when a trace is fully done).
 
-            Filters out unmaterialized :class:`LazyRemoteTensor` instances —
-            those belong to a different rank and should not be shipped from
-            this rank's saves.
+            Cross-stage handling: each saved value may hold tensors owned by
+            other PP ranks (as :class:`LazyRemoteTensor`). :func:`strip_lazy`
+            replaces those with the ``NOT_ON_THIS_RANK`` sentinel and reports
+            whether this rank owns any real data. A value owned *entirely*
+            elsewhere is skipped (its owner ships it); a partially-owned
+            value (e.g. a list of activations split across stages) is shipped
+            with sentinels in the foreign slots, and the engine merges the
+            per-rank contributions position-wise (:func:`merge_saved`).
 
             Returns:
                 ``(saves_by_req, removals)`` —
@@ -321,9 +326,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 frame = mediator.info.frame
                 for key, value in frame.f_locals.items():
                     if id(value) in Globals.saves:
-                        if isinstance(value, LazyRemoteTensor):
+                        stripped, has_real, has_lazy = strip_lazy(value)
+                        # Purely owned by another rank — that rank ships the
+                        # real data; contribute nothing (engine merges).
+                        if has_lazy and not has_real:
                             continue
-                        per_req[key] = value
+                        per_req[key] = stripped
                         if internal_key in finished_internal_keys:
                             removals.append(id(value))
 
@@ -343,9 +351,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                                 if name in canonical:
                                     value = canonical[name]
                                     if id(value) in Globals.saves:
-                                        if isinstance(value, LazyRemoteTensor):
+                                        stripped, has_real, has_lazy = strip_lazy(value)
+                                        if has_lazy and not has_real:
                                             continue
-                                        per_req[name] = value
+                                        per_req[name] = stripped
                                         removals.append(id(value))
                         break
 

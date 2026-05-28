@@ -114,6 +114,11 @@ if __name__ == '__main__':
          lambda r: (r.get("top_token") == " Paris",
                      f"got {r.get('top_token')!r}"))
 
+    print("Test 9c: cross-stage save ALL layers (mixed-stage container merge)")
+    test("cross_save_all", run("cross_stage_save_all", PP2, pp=2),
+         lambda r: (r.get("num_layers", 0) >= 12 and r.get("all_real") is True,
+                     f"n={r.get('num_layers')}, all_real={r.get('all_real')}"))
+
     print("Test 10: cross-stage multi-token (3 steps)")
     test("cross_multigen", run("cross_stage_multigen", PP2, pp=2, max_tokens=3),
          lambda r: (r["num_steps"] == 3 and len(r["h0_shapes"]) == 3,

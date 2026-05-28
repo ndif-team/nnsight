@@ -170,3 +170,93 @@ class LazyRemoteTensor:
             f"src=rank{self._meta['source_rank']}, "
             f"key={self._meta['provider_string']!r})"
         )
+
+
+class _NotOnThisRankType:
+    """Placeholder for a saved value (or container slot) owned by a different
+    PP rank.
+
+    When a saved value contains a :class:`LazyRemoteTensor` — e.g. a list of
+    per-step activations where some elements live on another stage — the
+    non-owning rank cannot ship a real tensor for that slot. Instead of
+    shipping an un-materializable lazy (whose ``_pull_fn`` is dropped on
+    pickle), it ships this sentinel. The engine then merges the per-rank
+    saves position-wise (:func:`merge_saved`), filling each slot from the
+    rank that actually owns it. Singleton so identity checks and pickling
+    round-trip cleanly across the worker→engine boundary.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __reduce__(self):
+        return (_NotOnThisRankType, ())
+
+    def __repr__(self):
+        return "NOT_ON_THIS_RANK"
+
+
+NOT_ON_THIS_RANK = _NotOnThisRankType()
+
+
+def strip_lazy(value):
+    """Replace every :class:`LazyRemoteTensor` in ``value`` with the
+    :data:`NOT_ON_THIS_RANK` sentinel, recursing into lists/tuples/dicts.
+
+    Returns ``(stripped, has_real, has_lazy)``:
+      * ``stripped`` — same structure with lazies swapped for the sentinel,
+      * ``has_real`` — whether any non-lazy leaf is present (this rank owns
+        at least one slot),
+      * ``has_lazy`` — whether any lazy was found (some slot is owned
+        elsewhere).
+
+    Callers ship ``stripped`` only when the value isn't *purely* owned by
+    another rank (``has_lazy and not has_real``); in that case the owning
+    rank ships the real data and this rank contributes nothing.
+    """
+    if isinstance(value, LazyRemoteTensor):
+        return NOT_ON_THIS_RANK, False, True
+    if isinstance(value, (list, tuple)):
+        stripped, has_real, has_lazy = [], False, False
+        for item in value:
+            s, r, l = strip_lazy(item)
+            stripped.append(s)
+            has_real |= r
+            has_lazy |= l
+        return type(value)(stripped), has_real, has_lazy
+    if isinstance(value, dict):
+        stripped, has_real, has_lazy = {}, False, False
+        for k, item in value.items():
+            s, r, l = strip_lazy(item)
+            stripped[k] = s
+            has_real |= r
+            has_lazy |= l
+        return stripped, has_real, has_lazy
+    # Leaf that isn't lazy (real tensor, scalar, str, …): owned by this rank.
+    return value, True, False
+
+
+def merge_saved(a, b):
+    """Position-wise merge of two same-shaped saved values from different PP
+    ranks, preferring the non-:data:`NOT_ON_THIS_RANK` leaf at each slot.
+
+    Used by the engine to assemble one complete result from each rank's
+    partial contribution. If both sides are real leaves (or the structures
+    don't line up), ``b`` wins — preserving the previous "later-rank-wins"
+    merge semantics for scalars and degrading safely on mismatch.
+    """
+    if a is NOT_ON_THIS_RANK:
+        return b
+    if b is NOT_ON_THIS_RANK:
+        return a
+    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        return [merge_saved(x, y) for x, y in zip(a, b)]
+    if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
+        return tuple(merge_saved(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys():
+        return {k: merge_saved(a[k], b[k]) for k in a}
+    return b
