@@ -399,6 +399,28 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         super().load_model(*args, **kwargs)
 
+        # vLLM's LlamaForCausalLM gates ``logits_processor`` inside
+        # ``if get_pp_group().is_last_rank:`` without an else-branch
+        # ``PPMissingLayer()`` stub — unlike Qwen2/GPT2/OPT/Pythia/
+        # Bloom/Gemma2, which construct it unconditionally. On a non-last
+        # PP rank the attribute is therefore simply absent, so the
+        # dumper-side meta model (built without a real PP group, hence
+        # ``is_last_rank`` defaults True and the attribute exists) ships a
+        # ``Module:model.logits_processor`` persistent id that this rank
+        # cannot resolve → ``UnpicklingError`` on the first request.
+        # Inserting the stub here (BEFORE the envoy tree is built on the
+        # next line) makes the envoy walk register
+        # ``Module:model.logits_processor`` symmetrically. The forward
+        # returns early on non-last ranks before the logits_processor call
+        # site, so the stub is functionally inert at runtime.
+        # See vllm/model_executor/models/llama.py:538-553 (vllm 0.19.1).
+        if get_pp_group().world_size > 1:
+            from vllm.model_executor.models.llama import LlamaForCausalLM
+            from vllm.model_executor.models.utils import PPMissingLayer
+            if (isinstance(self.model, LlamaForCausalLM)
+                    and not hasattr(self.model, "logits_processor")):
+                self.model.logits_processor = PPMissingLayer()
+
         self.nnsight_model = VLLM(self.model)
 
         self.nnsight_model.tokenizer = cached_tokenizer_from_config(self.model_config)
