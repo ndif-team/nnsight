@@ -185,14 +185,44 @@ class pp_eproperty(eproperty):
     def __get__(self, obj, owner):
         if obj is None:
             return self
-        if obj.interleaver.interleaving and _is_pp_missing(obj, self.key):
-            _pp_signal_remote(obj, self.key)
+        # A read of a PP-non-local module returns a LazyRemoteTensor that
+        # materializes via the listener-thread pull — independent of
+        # ``interleaving``. This must hold REGARDLESS of ``interleaving``
+        # for the same reason as ``__set__``: a downstream access (e.g.
+        # ``model.logits`` after a cross-stage write) runs on the mediator
+        # thread *after* ``go_remote`` released this rank's forward and the
+        # interleaver tore down. Gating the lazy short-circuit on
+        # ``interleaving`` (the old behavior) let that case fall through to
+        # ``super().__get__``, which raises ``Cannot access ... outside of
+        # interleaving``. The pull rides the listener thread and the lazy's
+        # ``.save()`` is a no-op merged from the owning rank, so returning a
+        # lazy post-teardown is correct.
+        if _is_pp_missing(obj, self.key):
+            if obj.interleaver.interleaving:
+                # Only meaningful while the forward is live.
+                _pp_signal_remote(obj, self.key)
             return _pp_lazy_access(obj, self.key)
         return super().__get__(obj, owner)
 
     def __set__(self, obj, value):
-        if obj.interleaver.interleaving and _is_pp_missing(obj, self.key):
-            _pp_signal_remote(obj, self.key)
+        # A write to a PP-non-local module is always a no-op on this rank:
+        # the real swap lands on the *owning* rank, where the same lockstep
+        # trace line runs ``super().__set__`` during that rank's own forward.
+        # This must hold REGARDLESS of ``interleaving`` — a downstream write
+        # (e.g. ``model.layers[-1].output = ...``) runs on the mediator thread
+        # *after* ``go_remote`` released this rank's forward and the
+        # interleaver tore down (``interleaving`` → False). Gating the no-op
+        # on ``interleaving`` (the old behavior) let that case fall through to
+        # ``super().__set__``, which raises ``Cannot set ... outside of
+        # interleaving``. ``_is_pp_missing`` reads only PP topology state
+        # (pp_enabled / pp_module_map / pp_local_rank), none of which depend
+        # on ``interleaving``, so it is safe to evaluate post-teardown.
+        if _is_pp_missing(obj, self.key):
+            if obj.interleaver.interleaving:
+                # Only meaningful while the forward is live: release it so a
+                # downstream cross-stage access can complete. Skipped once the
+                # forward is already torn down.
+                _pp_signal_remote(obj, self.key)
             return
         super().__set__(obj, value)
 
