@@ -102,5 +102,17 @@ class AsyncVLLMBackend(Backend):
                             )
                 per_req = merged.get(output.request_id)
                 if per_req:
+                    # Surface server-side deferred exceptions before exposing
+                    # saves — otherwise the caller sees UnboundLocalError on
+                    # saves the mediator never produced, with no hint of the
+                    # real cause. Mirrors ``vllm.py:__call__`` and
+                    # ``intervention/backends/local_serve.py:146``.
+                    exc_map = per_req.pop("__nnsight_exceptions__", None)
+                    if exc_map:
+                        from ...intervention.errors import surface_server_errors
+                        surface_server_errors(
+                            list(exc_map.values()),
+                            context="[vLLM async]",
+                        )
                     output.saves = per_req
             yield output

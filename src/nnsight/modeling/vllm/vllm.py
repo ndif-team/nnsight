@@ -466,6 +466,15 @@ class VLLM(RemoteableMixin):
             if hasattr(output, "saves"):
                 saves.update(output.saves)
 
+        # Surface server-side deferred exceptions before pushing variables —
+        # otherwise the caller sees UnboundLocalError on saves that the
+        # mediator never produced, with no hint of the real cause. Mirrors
+        # ``intervention/backends/local_serve.py:146``.
+        exc_map = saves.pop("__nnsight_exceptions__", None)
+        if exc_map:
+            from ...intervention.errors import surface_server_errors
+            surface_server_errors(list(exc_map.values()), context="[vLLM dispatch]")
+
         # Save the variables in our local environment
         for value in saves.values():
 
