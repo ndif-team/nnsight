@@ -699,6 +699,23 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
             self.nnsight_request_helper.unflatten(self.nnsight_model)
 
+            # Bound GPU memory: after each forward pass, migrate this rank's
+            # pp_hook_buffer clones from GPU to CPU. The buffer accumulates
+            # one (hidden, residual) clone per (accessed module, iteration)
+            # until the request finishes (collect_nnsight clears it), so on
+            # GPU it would grow O(modules x tokens) for long generations and
+            # OOM. Moving to CPU after the forward keeps GPU resident to a
+            # single forward's worth of clones; CPU RAM absorbs the
+            # accumulation. Correctness is preserved for every cross-stage
+            # pull — the listener already .cpu()s buffer values when serving
+            # (pp_listener.py), so a CPU-resident entry serves pulls
+            # unchanged (and skips the pull-time D2H). Migration is off the
+            # forward's compute critical path (the forward has returned) and
+            # held under the buffer condition so a concurrent listener read
+            # isn't torn.
+            if self.pp_enabled:
+                self._migrate_pp_buffer_to_cpu()
+
         # Safety net: if ``__enter__`` raised or the forward pass was
         # interrupted before ``return_value`` was assigned, ship back a
         # minimal valid ``ModelRunnerOutput`` so vLLM does not segfault.
@@ -712,6 +729,32 @@ class NNsightGPUModelRunner(GPUModelRunner):
             )
 
         return return_value
+
+    def _migrate_pp_buffer_to_cpu(self):
+        """Move accumulated pp_hook_buffer entries from GPU to CPU.
+
+        Called once per forward pass (after the forward returns). Recurses
+        into the ``(hidden, residual)`` tuples that layer ``.output`` values
+        are. Held under ``pp_buffer_condition`` so the listener thread does
+        not read a half-migrated dict; a listener that already obtained a
+        value keeps its own tensor reference across the dict reassignment, so
+        in-flight pulls are unaffected.
+        """
+        def _to_cpu(v):
+            if isinstance(v, torch.Tensor):
+                return v.cpu() if v.is_cuda else v
+            if isinstance(v, tuple):
+                return tuple(_to_cpu(x) for x in v)
+            if isinstance(v, list):
+                return [_to_cpu(x) for x in v]
+            if isinstance(v, dict):
+                return {k: _to_cpu(x) for k, x in v.items()}
+            return v
+
+        buf = self.pp_hook_buffer
+        with self.pp_buffer_condition:
+            for k in list(buf.keys()):
+                buf[k] = _to_cpu(buf[k])
 
     def sample_tokens(self, *args, **kwargs):
 
