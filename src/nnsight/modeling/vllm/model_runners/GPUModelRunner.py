@@ -844,7 +844,53 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # A blanket clear would also wipe concurrent in-flight requests'
         # slices and break their cross-rank pulls.
         if self.pp_enabled and finished_keys and self.pp_listener is not None:
-            self.pp_listener.clear_buffer(req_ids=finished_keys)
+            # Diagnostic (env-gated, inert otherwise): report buffer size
+            # before/after the scoped clear so we can distinguish a real
+            # cross-request leak (post-clear size grows over time) from
+            # benign allocator caching, and measure the intra-request peak
+            # (pre-clear size for a long-generation request).
+            import os as _os
+            if _os.environ.get("NNSIGHT_PP_BUFFER_DEBUG"):
+                def _nbytes(v):
+                    # Recurse: layer .output is a (hidden, residual) tuple, so
+                    # bare-tensor counting undercounts to zero.
+                    if isinstance(v, torch.Tensor):
+                        return v.element_size() * v.nelement()
+                    if isinstance(v, (tuple, list)):
+                        return sum(_nbytes(x) for x in v)
+                    if isinstance(v, dict):
+                        return sum(_nbytes(x) for x in v.values())
+                    return 0
+                def _devs(d):
+                    out = set()
+                    def walk(v):
+                        if isinstance(v, torch.Tensor):
+                            out.add(str(v.device))
+                        elif isinstance(v, (tuple, list)):
+                            for x in v:
+                                walk(x)
+                        elif isinstance(v, dict):
+                            for x in v.values():
+                                walk(x)
+                    for v in d.values():
+                        walk(v)
+                    return ",".join(sorted(out)) or "-"
+                buf = self.pp_hook_buffer
+                _pre_n = len(buf)
+                _pre_b = sum(_nbytes(v) for v in buf.values())
+                _pre_dev = _devs(buf)
+                _rank = get_pp_group().rank_in_group
+                self.pp_listener.clear_buffer(req_ids=finished_keys)
+                _post_n = len(buf)
+                _post_b = sum(_nbytes(v) for v in buf.values())
+                print(
+                    f"[PPBUF rank{_rank}] pre n={_pre_n} {_pre_b/1e6:.2f}MB "
+                    f"dev=[{_pre_dev}] -> post n={_post_n} {_post_b/1e6:.2f}MB "
+                    f"(finished {len(finished_keys)} reqs)",
+                    flush=True,
+                )
+            else:
+                self.pp_listener.clear_buffer(req_ids=finished_keys)
 
         # Collect deferred exceptions. Each mediator has its own — nest the
         # typed envelope inside THAT request's sub-dict under
