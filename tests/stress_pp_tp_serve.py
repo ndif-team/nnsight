@@ -388,6 +388,204 @@ def phase_C2(model, server_url: str, num_hidden_layers: int) -> PhaseResult:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Memory-pressure helpers (Phase E)
+# --------------------------------------------------------------------------- #
+
+def _server_rss_mb(pid: int) -> float | None:
+    """Read ``VmRSS`` for the given pid from /proc. Returns MB or None."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    # "VmRSS:    123456 kB"
+                    return int(line.split()[1]) / 1024.0
+    except FileNotFoundError:
+        return None
+    return None
+
+
+def _server_pid_tree_rss_mb(pid: int) -> float | None:
+    """Sum VmRSS for the server pid and every child / descendant.
+
+    The vLLM server forks an EngineCore subprocess (and TP/PP worker procs
+    underneath). pp_hook_buffer lives in worker memory, so the parent's
+    RSS alone can miss the leak we are probing for.
+    """
+    try:
+        rss = _server_rss_mb(pid) or 0.0
+        out = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True, text=True, check=False,
+        )
+        for child in (out.stdout or "").split():
+            try:
+                cpid = int(child)
+            except ValueError:
+                continue
+            r = _server_pid_tree_rss_mb(cpid)
+            if r is not None:
+                rss += r
+        return rss
+    except Exception:
+        return None
+
+
+def _gpu_mem_used_mb(devices: str) -> dict[int, int]:
+    """Per-GPU used memory in MB (one entry per device in ``devices``)."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=index,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+    except Exception:
+        return {}
+    want = {int(x) for x in devices.split(",") if x.strip().isdigit()}
+    out_map: dict[int, int] = {}
+    for line in out.stdout.strip().splitlines():
+        idx_s, used_s = (s.strip() for s in line.split(","))
+        idx = int(idx_s)
+        if idx in want:
+            out_map[idx] = int(used_s)
+    return out_map
+
+
+def trace_multilayer(
+    model,
+    prompt: str,
+    layers: list[int],
+    server_url: str,
+    max_tokens: int = 8,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """Multi-layer + multi-token trace: stresses pp_hook_buffer.
+
+    Saves the last-token hidden of ``len(layers)`` layers per step over
+    ``max_tokens`` generation steps. Each (layer, step) pair becomes a key
+    in the worker's pp_hook_buffer, so peak keys per request scale as
+    ``len(layers) * max_tokens``.
+    """
+    import torch
+    t0 = time.perf_counter()
+    try:
+        with model.trace(
+            prompt, temperature=0.0, top_p=1.0,
+            max_tokens=max_tokens, serve=server_url,
+        ) as tracer:
+            saved = list().save()
+            for _ in tracer.iter[0:max_tokens]:
+                for l in layers:
+                    saved.append(model.model.layers[l].output[0])
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        n_real = sum(1 for x in saved if isinstance(x, torch.Tensor))
+        return {
+            "ok": True,
+            "elements": len(saved),
+            "real": n_real,
+            "ms": elapsed_ms,
+        }
+    except Exception as e:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return {"ok": False, "err": str(e)[:240], "ms": elapsed_ms}
+
+
+def phase_E(
+    model, server_url: str, num_hidden_layers: int,
+    server_pid: int, devices: str,
+) -> PhaseResult:
+    """Burst-and-drain memory pressure: surfaces pp_hook_buffer growth.
+
+    Five bursts of 20 concurrent multi-layer multi-token traces. Each
+    trace saves 4 layers x 8 steps = 32 (layer,step) pairs => 32 keys
+    in pp_hook_buffer per request. Per burst: 20 * 32 = 640 keys.
+
+    Between bursts we wait for the drain (all futures resolved) and sample
+    server RSS + per-GPU memory. A correct implementation cleans buffers
+    on request finish, so RSS should return to a flat baseline; a leak
+    would show monotonic growth burst-over-burst.
+    """
+    n_bursts = 5
+    per_burst = 20
+    n_layers_per_trace = min(4, num_hidden_layers)
+    layers_used = _choose_layers(n_layers_per_trace, num_hidden_layers)
+    max_tokens = 8
+
+    print(f"[E] {n_bursts} bursts x {per_burst} concurrent, "
+          f"layers={layers_used} max_tokens={max_tokens}", flush=True)
+
+    # Establish baseline by sampling before any traces fire.
+    base_rss = _server_pid_tree_rss_mb(server_pid)
+    base_gpu = _gpu_mem_used_mb(devices)
+    print(f"[E] baseline RSS={base_rss}MB GPU={base_gpu}", flush=True)
+
+    bursts_data: list[dict[str, Any]] = []
+    total_ok = 0
+    total_req = 0
+    t_overall = time.perf_counter()
+
+    for b in range(n_bursts):
+        # Use varied prompt lengths to keep input/output cost mixed.
+        cases = [
+            (i,
+             PROMPTS[(b * per_burst + i) % len(PROMPTS)]
+             + (" " + "x" * (10 * ((b * per_burst + i) % 5))).rstrip(),
+             layers_used)
+            for i in range(per_burst)
+        ]
+
+        t0 = time.perf_counter()
+        results: dict[int, dict] = {}
+        with ThreadPoolExecutor(max_workers=per_burst) as pool:
+            futs = {
+                pool.submit(
+                    trace_multilayer, model, prompt, layers,
+                    server_url, max_tokens,
+                ): idx
+                for (idx, prompt, layers) in cases
+            }
+            for f in as_completed(futs):
+                idx = futs[f]
+                results[idx] = f.result()
+        burst_wall = time.perf_counter() - t0
+        burst_ok = sum(1 for r in results.values() if r["ok"])
+        total_ok += burst_ok
+        total_req += per_burst
+
+        # Sample after each burst — give the server a moment to settle.
+        time.sleep(0.5)
+        rss = _server_pid_tree_rss_mb(server_pid)
+        gpu = _gpu_mem_used_mb(devices)
+        bursts_data.append({
+            "burst": b,
+            "ok": burst_ok,
+            "wall_s": burst_wall,
+            "rss_mb": rss,
+            "gpu_used_mb": gpu,
+        })
+        print(f"[E] burst {b}: {burst_ok}/{per_burst} ok, "
+              f"{burst_wall:.2f}s, RSS={rss}MB GPU={gpu}", flush=True)
+
+    wall = time.perf_counter() - t_overall
+
+    # Growth metric: RSS at burst N-1 minus RSS at burst 0.
+    rss_first = bursts_data[0]["rss_mb"] if bursts_data else None
+    rss_last = bursts_data[-1]["rss_mb"] if bursts_data else None
+    rss_growth = (rss_last - rss_first) if (rss_first and rss_last) else None
+    print(f"[E] RSS growth burst0->burstN: {rss_growth} MB", flush=True)
+
+    return PhaseResult(
+        name="E", ok=total_ok, total=total_req, wall_s=wall,
+        req_per_s=total_req / wall if wall > 0 else 0.0,
+        extra={
+            "rss_growth_mb": rss_growth,
+            "rss_baseline_mb": base_rss,
+            "bursts": bursts_data,
+        },
+    )
+
+
 def phase_D(model, server_url: str, num_hidden_layers: int) -> PhaseResult:
     """Throughput: 50 requests through 8 concurrent workers."""
     total = 50
@@ -434,7 +632,21 @@ ACCEPTANCE = {
     # Phase D: require BOTH acceptable throughput AND most requests
     # actually succeeding — a fast string of HTTP 500s is not a pass.
     "D":  dict(min_ok=45, min_req_s=7.0),
+    # Phase E: every burst-request should succeed and RSS growth across
+    # the five bursts should stay under a generous bound (200 MB ≫
+    # observed steady-state noise; a true buffer leak grows ~MB/request).
+    "E":  dict(min_ok=100),
 }
+
+
+def phase_E_passed(pr: PhaseResult, *, max_rss_growth_mb: float = 200.0) -> bool:
+    """Custom acceptance for phase E: ok-count AND RSS growth bound."""
+    if pr.ok < ACCEPTANCE["E"]["min_ok"]:
+        return False
+    g = pr.extra.get("rss_growth_mb")
+    if g is None:
+        return True  # missing measurement should not silently fail
+    return g <= max_rss_growth_mb
 
 
 def run_config(
@@ -464,6 +676,7 @@ def run_config(
             "C":  phase_C2,   # the summary uses "C" interchangeably with "C2"
             "C2": phase_C2,
             "D":  phase_D,
+            "E":  phase_E,    # needs (server_pid, devices) — see below
         }
 
         for ph in phases:
@@ -472,7 +685,10 @@ def run_config(
                 print(f"[{cfg.name}] unknown phase '{ph}' -- skipping", flush=True)
                 continue
             key = ph.upper() if ph.upper() in ACCEPTANCE else "C2" if ph.upper() == "C" else ph.upper()
-            pr = fn(model, server_url, num_layers)
+            if ph.upper() == "E":
+                pr = fn(model, server_url, num_layers, proc.pid, devices)
+            else:
+                pr = fn(model, server_url, num_layers)
             results[key] = pr
     finally:
         stop_server(proc)
@@ -484,10 +700,16 @@ def main() -> int:
     parser.add_argument("--configs", default="tp2pp2",
                         help="comma-separated config names (see CONFIGS)")
     parser.add_argument("--phases", default="A,C,D",
-                        help="comma-separated phase names (A, C or C2, D)")
+                        help="comma-separated phase names (A, C or C2, D, E)")
     parser.add_argument("--devices", default=os.environ.get("CUDA_VISIBLE_DEVICES", "4,5,6,7"),
                         help="CUDA_VISIBLE_DEVICES for the server process")
     parser.add_argument("--logs-dir", default="/tmp/stress_pp_tp")
+    parser.add_argument("--model", default=None,
+                        help="Override ServerConfig.model for every selected config")
+    parser.add_argument("--gpu-mem", type=float, default=None,
+                        help="Override ServerConfig.gpu_mem_util")
+    parser.add_argument("--max-model-len", type=int, default=None,
+                        help="Override ServerConfig.max_model_len")
     args = parser.parse_args()
 
     os.makedirs(args.logs_dir, exist_ok=True)
@@ -500,7 +722,14 @@ def main() -> int:
         if cfg is None:
             print(f"[main] unknown config '{name}' -- skipping", flush=True)
             continue
-        print(f"\n===== config {cfg.name} (tp={cfg.tp}, pp={cfg.pp}) =====", flush=True)
+        if args.model:
+            cfg.model = args.model
+        if args.gpu_mem is not None:
+            cfg.gpu_mem_util = args.gpu_mem
+        if args.max_model_len is not None:
+            cfg.max_model_len = args.max_model_len
+        print(f"\n===== config {cfg.name} (tp={cfg.tp}, pp={cfg.pp}, "
+              f"model={cfg.model}) =====", flush=True)
         overall[name] = run_config(cfg, phases, args.devices, args.logs_dir)
 
     # Summary & acceptance
@@ -510,7 +739,10 @@ def main() -> int:
         print(f"\n-- {name} --", flush=True)
         for key, pr in phase_results.items():
             crit = ACCEPTANCE.get(key if key in ACCEPTANCE else "C2", {})
-            passed = pr.passed(**crit)
+            if key == "E":
+                passed = phase_E_passed(pr)
+            else:
+                passed = pr.passed(**crit)
             tag = "PASS" if passed else "FAIL"
             line = f"  [{tag}] Phase {key}: {pr.ok}/{pr.total} OK, " \
                    f"{pr.req_per_s:.2f} req/s, wall={pr.wall_s:.2f}s"
