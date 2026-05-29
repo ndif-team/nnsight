@@ -145,7 +145,23 @@ class LazyRemoteTensor:
     def __getattr__(self, name: str):
         if name.startswith("_") or name in LazyRemoteTensor._OWN_ATTRS:
             raise AttributeError(name)
-        return getattr(self._materialize(), name)
+        real = self._materialize()
+        # Multi-output modules (e.g. Qwen2 / Llama decoder blocks) produce a
+        # ``(hidden, residual)`` tuple, not a tensor. Forwarding a tensor
+        # method like ``.mean`` onto the materialized tuple gives a confusing
+        # ``'tuple' object has no attribute 'mean'`` error. Detect the case
+        # and tell the caller to index first — ``lazy[0]`` already returns a
+        # deferred child lazy that pulls the indexed element.
+        if isinstance(real, tuple) and not hasattr(tuple, name):
+            raise AttributeError(
+                f"LazyRemoteTensor at "
+                f"{self._meta['provider_string']!r} materialized to a "
+                f"{len(real)}-tuple, not a tensor; cannot access tensor "
+                f"attribute {name!r}. This module's output is a tuple — "
+                f"index it first (e.g. ``lazy[0].{name}``) to operate on "
+                f"a single tuple element."
+            )
+        return getattr(real, name)
 
     # --- metadata (no materialization) ---
 
