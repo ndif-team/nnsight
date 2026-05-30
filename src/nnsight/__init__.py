@@ -56,6 +56,7 @@ except PackageNotFoundError:
 
 from .intervention.tracing.globals import save
 from .ndif import *
+from .login import login
 
 from IPython import get_ipython
 
