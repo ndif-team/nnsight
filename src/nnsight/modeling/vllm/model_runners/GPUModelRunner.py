@@ -719,7 +719,20 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # Safety net: if ``__enter__`` raised or the forward pass was
         # interrupted before ``return_value`` was assigned, ship back a
         # minimal valid ``ModelRunnerOutput`` so vLLM does not segfault.
-        if return_value is None:
+        #
+        # BUT a ``None`` return is also vLLM's *legitimate* deferred-sampling
+        # signal: ``super().execute_model`` returns ``None`` on the sampling
+        # rank after stashing ``self.execute_model_state``, expecting
+        # ``sample_tokens()`` to be called next (which our ``sample_tokens``
+        # override consumes). Masking that ``None`` with a synthetic output
+        # makes the Ray distributed executor treat it as terminal and skip
+        # ``sample_tokens()``, leaving ``execute_model_state`` unconsumed — the
+        # next ``execute_model`` then raises "sample_tokens() must be called
+        # after execute_model() returns None." (The multiproc executor calls
+        # ``sample_tokens`` regardless, so it tolerated the masking; Ray does
+        # not.) Only synthesize when there is NO pending deferral, i.e. a
+        # genuine error/interrupt where ``execute_model_state`` is unset.
+        if return_value is None and self.execute_model_state is None:
             from vllm.v1.outputs import ModelRunnerOutput
 
             req_ids = list(scheduler_output.num_scheduled_tokens.keys())
