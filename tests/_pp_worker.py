@@ -125,6 +125,42 @@ def scenario_cross_stage_no_logits(model, prompt):
     }
 
 
+def scenario_downstream_read(model, prompt):
+    """Read a DOWNSTREAM layer's output and MATERIALIZE it on the earlier
+    (non-owning) rank — forces a backward stage1->stage0 pull, no write.
+
+    Isolates the suspected cross-node-write hang mechanism: a raw lazy read
+    + .save() is a no-op (works), but using the value (``out * 2``) triggers
+    ``_materialize`` -> backward pull on stage 0 for a value stage 1 hasn't
+    produced yet. The ``go_remote`` machinery is supposed to release stage 0's
+    forward so the pull resolves; this probes whether it actually does.
+    """
+    with model.trace(prompt, temperature=0.0, top_p=1):
+        out8 = model.transformer.h[8].output[0]   # downstream under pp=2
+        used = (out8 * 2.0).sum().save()
+
+    return {"used": float(used.float().cpu().item())}
+
+
+def scenario_tuple_lazy(model, prompt):
+    """Iterate a slice of a DOWNSTREAM lazy output: ``tuple(out[1:])``.
+
+    On the non-owning (earlier) rank ``out`` is a LazyRemoteTensor with no
+    ``__iter__`` and a ``__getitem__`` that never raises ``IndexError``, so
+    ``tuple()`` spins forever -> that rank never finishes -> driver hangs.
+    Faithful minimal repro of the ``s_cross`` hang (its ``+ tuple(out[1:])``
+    term), without the gpt2 tuple-shape mismatch of cross_stage_replace.
+    """
+    with model.trace(prompt, temperature=0.0, top_p=1):
+        out = model.transformer.h[8].output
+        _ = tuple(out[1:])             # spun forever on the non-owning rank pre-fix
+        logits = model.logits.save()
+
+    # Reaching here at all is the regression signal: pre-fix the non-owning
+    # rank never finished and the driver timed out.
+    return {"argmax": int(logits.float().cpu().argmax(dim=-1).item())}
+
+
 def scenario_multigen(model, prompt, max_tokens):
     """Multi-token generation."""
     with model.trace(
@@ -175,6 +211,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", choices=[
         "logits", "hidden", "hidden_only", "cross_stage", "cross_stage_no_logits",
+        "downstream_read", "tuple_lazy",
         "multigen", "multigen_hidden",
     ])
     parser.add_argument("--pp", type=int, required=True)
@@ -197,6 +234,10 @@ def main():
             result = scenario_cross_stage(model, args.prompt)
         elif args.scenario == "cross_stage_no_logits":
             result = scenario_cross_stage_no_logits(model, args.prompt)
+        elif args.scenario == "downstream_read":
+            result = scenario_downstream_read(model, args.prompt)
+        elif args.scenario == "tuple_lazy":
+            result = scenario_tuple_lazy(model, args.prompt)
         elif args.scenario == "multigen":
             result = scenario_multigen(model, args.prompt, args.max_tokens)
         elif args.scenario == "multigen_hidden":

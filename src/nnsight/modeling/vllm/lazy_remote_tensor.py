@@ -130,6 +130,23 @@ class LazyRemoteTensor:
         child._pull_fn = _deferred_pull
         return child
 
+    def __iter__(self):
+        # Iteration is a real "consume the whole value" operation, so it must
+        # materialize — like arithmetic and ``__getattr__`` below. Without this,
+        # Python falls back to the sequence protocol over ``__getitem__``, which
+        # returns a fresh lazy for every index and never raises ``IndexError``,
+        # so ``tuple(lazy)`` / ``list(lazy)`` / ``for x in lazy`` / unpacking
+        # spin forever on the non-owning rank (the owning rank iterates the real
+        # value and terminates). That divergence hangs cross-stage replacement
+        # writes such as ``layer.output = (out[0] + d,) + tuple(out[1:])``.
+        return iter(self._materialize())
+
+    def __len__(self) -> int:
+        # Same rationale as ``__iter__``: ``len(lazy)`` must reflect the real
+        # value, not silently differ between ranks (or fall through to a
+        # confusing error on the non-owning rank).
+        return len(self._materialize())
+
     def save(self) -> "LazyRemoteTensor":
         return self  # no-op on non-owning rank
 
