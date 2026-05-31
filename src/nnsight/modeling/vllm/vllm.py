@@ -207,12 +207,14 @@ class VLLM(RemoteableMixin):
         destroy_model_parallel()
         destroy_distributed_environment()
 
-        # Swap Ray executor for both sync and async paths.
+        # Use vLLM's stock Ray executor (with our ``worker_cls`` below) rather
+        # than a custom executor. Forking vLLM's Ray bootstrap reimplemented its
+        # placement-group + worker-sort + rank-assignment, which intermittently
+        # broke the worker<->rank<->kv_cache-config invariant (PP-stage-swapped
+        # configs ~50% of runs => KeyError on a foreign layer at kv-cache init).
+        # ``worker_cls`` is vLLM's supported injection point and inherits vLLM's
+        # consistent placement, exactly as the multiproc path already does.
         _uses_ray = kwargs.get("distributed_executor_backend") == "ray"
-        if _uses_ray:
-            from .executors.ray_workaround import NNsightRayExecutor
-
-            kwargs["distributed_executor_backend"] = NNsightRayExecutor
 
         if self._async_engine:
             # AsyncLLM spawns EngineCore in a subprocess.  When using Ray,
