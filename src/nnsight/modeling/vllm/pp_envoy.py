@@ -160,7 +160,19 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
 
     listener = getattr(interleaver, "pp_listener", None)
     if listener is not None:
-        num_tokens = mediator.batch_group[1] if mediator.batch_group else 0
+        # Size the cross-rank pull from the request's *scheduled* token count,
+        # not batch_group[1]. After the forward pass ``unflatten`` rewrites
+        # batch_group to the prompt-level logits view ([start, 1]); a
+        # free-running mediator that reaches a remote-layer access post-
+        # unflatten would otherwise capture num_tokens=1 and under-size the
+        # recv buffer, while the producer ships the real N-token activation
+        # (gloo "data size doesn't match"). pp_num_tokens is set once per step
+        # alongside the token-level batch_group and never rewritten, so it
+        # always matches the producer's buffered leading dim. None (mediator
+        # not yet scheduled this step) falls back to 0 -> legacy shape-on-wire
+        # pull, which is correct regardless of token count.
+        # See tests/test_pp_num_tokens_unflatten.py.
+        num_tokens = getattr(mediator, "pp_num_tokens", None) or 0
         req_id = getattr(mediator, "pp_req_id", None)
 
         def _pull(src_rank, prov_str, _nt=num_tokens, _rid=req_id):

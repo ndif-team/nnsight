@@ -220,6 +220,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # (which would point out-of-range in the smaller current batch).
             for m in self.mediators.values():
                 m.batch_group = None
+                # pp_num_tokens is the authoritative per-request token count
+                # the cross-rank PP pull sizes its transfer from. Cleared here
+                # alongside batch_group so a mediator not scheduled this step
+                # never serves a stale count; re-set below for scheduled ones.
+                m.pp_num_tokens = None
 
             batch_start = 0
 
@@ -239,6 +244,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 mediators.append(mediator)
                 mediator.batch_group = [batch_start, num_tokens]
+                # Authoritative token count for the PP pull. Unlike
+                # batch_group (which unflatten later rewrites to the
+                # prompt-level [start, 1] logits view), this is set once per
+                # step and never rewritten, so it always equals the producer's
+                # buffered leading dim. See pp_envoy._pp_lazy_access and
+                # tests/test_pp_num_tokens_unflatten.py.
+                mediator.pp_num_tokens = num_tokens
 
                 batch_start += num_tokens
 
