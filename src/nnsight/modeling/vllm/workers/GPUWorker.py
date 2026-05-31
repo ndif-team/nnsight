@@ -74,19 +74,6 @@ class NNsightGPUWorker(gpu_worker.Worker):
 
         return model
 
-    def init_device(self):
-        # NNsightRayExecutor sets distributed_executor_backend to a class
-        # instead of the string "ray". vLLM's init_device skips
-        # local_world_size checks for "ray" backends, so normalize the
-        # value before calling super().
-        backend = self.parallel_config.distributed_executor_backend
-        if backend is not None and not isinstance(backend, str):
-            from vllm.v1.executor.ray_executor import RayDistributedExecutor
-
-            if issubclass(backend, RayDistributedExecutor):
-                self.parallel_config.distributed_executor_backend = "ray"
-        super().init_device()
-
     def load_model(self):
         # Pass meta model to model runner before loading so it can
         # graft PPMissing envoys during load_model().

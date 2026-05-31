@@ -4,37 +4,24 @@ Run NNsight interventions on vLLM models distributed across multiple nodes using
 
 ## How It Works
 
-When you pass `distributed_executor_backend="ray"` to `VLLM(...)`, NNsight replaces vLLM's default Ray executor with `NNsightRayExecutor`. This custom executor handles three scenarios automatically:
+When you pass `distributed_executor_backend="ray"` to `VLLM(...)`, nnsight uses
+**vLLM's own (stock) Ray executor** and injects its intervention logic through
+vLLM's supported `worker_cls` hook (`NNsightGPUWorker`) — the same mechanism the
+single-process / multiprocessing path uses. nnsight does **not** replace or
+reimplement vLLM's executor, placement, or rank assignment; vLLM owns all of
+that, which keeps the worker↔rank↔KV-cache-config mapping consistent.
 
-### 1. Remote Ray Cluster (`RAY_ADDRESS` is set)
+> Historical note: an earlier `NNsightRayExecutor` fork *did* replace vLLM's
+> executor (to add remote-driver support and work around a vLLM 0.15.1 actor
+> import crash). It reimplemented vLLM's placement/rank machinery and
+> intermittently mis-assigned per-stage KV-cache configs under PP (a ~50% flaky
+> `KeyError` at load). It was removed in favor of the stock executor; the
+> import-crash workaround is unnecessary on vLLM 0.19.1.
 
-```
-RAY_ADDRESS=head-node:6379 python my_script.py
-```
-
-The driver process joins the remote Ray cluster as a driver-only node (0 GPUs, 0 CPUs) and submits all GPU work to the cluster's existing nodes. The driver machine only needs network access to the Ray GCS port (6379) — it does **not** need to be on the head node or any cluster node.
-
-Under the hood:
-- `ray start --address=$RAY_ADDRESS --num-gpus=0 --num-cpus=0` joins the cluster
-- `ray.init(address="auto")` connects via the local session
-- vLLM placement groups and compiled DAGs run on the cluster's GPU nodes
-
-### 2. Existing Local Ray Cluster (no `RAY_ADDRESS`)
-
-```
-ray start --head
-python my_script.py
-```
-
-If a local Ray cluster is already running, the executor connects to it via `ray.init(address="auto")` and uses its GPUs.
-
-### 3. No Cluster (no `RAY_ADDRESS`, no local Ray)
-
-```
-python my_script.py
-```
-
-The executor starts a fresh local Ray cluster via `ray.init()` with all local GPUs available. This is the default single-machine behavior.
+Cluster connection is handled by vLLM/Ray natively:
+- **No cluster running:** vLLM starts a local Ray cluster using all local GPUs (default single-machine behavior).
+- **Existing local Ray cluster:** vLLM connects to it (`ray.init(address="auto")`).
+- **Remote cluster:** set `RAY_ADDRESS=head-node:6379` (or run the driver on a cluster node) and vLLM places workers across the cluster's nodes. (A driver on a machine with no GPUs is not exercised by this example; run the driver on a cluster node, as the Docker setup below does.)
 
 ## Quick Start with Docker (Simulated Multi-Node)
 

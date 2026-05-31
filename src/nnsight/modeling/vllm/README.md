@@ -50,9 +50,6 @@ vllm/
 ├── engines/
 │   ├── __init__.py
 │   └── engine.py                  # NNsightLLMEngine — collects saved results after requests finish (sync)
-├── executors/
-│   ├── __init__.py
-│   └── ray_workaround.py          # LazyRayWorkerWrapper + NNsightRayExecutor for Ray support
 ├── workers/
 │   ├── __init__.py
 │   └── GPUWorker.py               # NNsightGPUWorker — monkey-patches model runner at init
@@ -98,8 +95,6 @@ vllm/
 - Manages batch group mappings (flat token-level during forward, prompt-level after)
 - Enters the interleaver at three phases: forward pass, logit wrapping, and sampling
 - Collects saved values via `collect_nnsight()`, which delegates to helper methods on `NNsightRequestHelper`: `match_req_ids()`, `finalize_mediators()`, `collect_saves()`, `cleanup_finished()`
-
-**`executors/ray_workaround.py`** — Contains `LazyRayWorkerWrapper` and `NNsightRayExecutor` for Ray distributed executor support. See [Ray Distributed Executor](#ray-distributed-executor) for details.
 
 **`examples/multi_node_with_ray/`** — Docker-based example for multi-node tensor parallelism with Ray. Includes a Dockerfile, docker-compose config, test script, and detailed README. See [Multi-Node Support](#multi-node-support) for details.
 
@@ -172,10 +167,6 @@ Thin extension of vLLM's engine. Used by the sync path only. After each `step()`
 ### NNsightGPUWorker (workers/GPUWorker.py)
 
 Thin extension of vLLM's worker. Monkey-patches the model runner class before init, and exposes `collect_nnsight()` which delegates to the model runner.
-
-### NNsightRayExecutor (executors/ray_workaround.py)
-
-Custom `RayDistributedExecutor` subclass passed as `distributed_executor_backend` when Ray is requested. Swaps in `LazyRayWorkerWrapper` before creating Ray actors, and handles connecting to existing Ray clusters (including remote ones). See [Ray Distributed Executor](#ray-distributed-executor).
 
 ---
 
@@ -305,7 +296,7 @@ When `dispatch=False` (default), the model is loaded with meta tensors (no real 
 
 When `dispatch=True` or when `interleave()` auto-dispatches:
 - Destroys any existing distributed environment
-- If `distributed_executor_backend="ray"`, replaces it with `NNsightRayExecutor` class (see [Ray Distributed Executor](#ray-distributed-executor))
+- If `distributed_executor_backend="ray"`, uses vLLM's stock Ray executor with the worker injected via `worker_cls` (see [Ray Distributed Executor](#ray-distributed-executor))
 - If `mode="async"`: creates an `AsyncLLM` via `AsyncLLM.from_engine_args()` with `AsyncEngineArgs`. Pre-initializes Ray if using Ray backend.
 - If `mode="sync"` (default):
   - Creates a `vllm.LLM` instance with `enforce_eager=True`
@@ -630,159 +621,41 @@ This preserves the `remote=True` path unchanged (still uses `RemoteInterleavingT
 
 ## Ray Distributed Executor
 
-vLLM supports multiple executor backends for distributing tensor-parallel workers across GPUs. The default is `"mp"` (multiprocessing), which spawns workers as local subprocesses. The `"ray"` backend uses Ray actors instead, enabling multi-node inference where TP workers can run on different machines.
+vLLM supports multiple executor backends for distributing workers across GPUs.
+The default `"mp"` (multiprocessing) spawns workers as local subprocesses; the
+`"ray"` backend uses Ray actors, enabling multi-node inference where workers can
+run on different machines.
 
-### The Problem
+nnsight supports both **without a custom executor**. The intervention logic is
+injected through vLLM's supported `worker_cls` hook (`NNsightGPUWorker`, which in
+turn uses `NNsightGPUModelRunner`); vLLM itself owns worker creation, placement,
+the worker sort, rank assignment, and KV-cache config distribution. This is the
+same mechanism for `"mp"` and `"ray"`, and it preserves vLLM's invariant that the
+worker at list position `i` is global rank `i`, holds layer-slice `i`, and
+receives KV-cache config `i`.
 
-vLLM v0.15.1 + Ray 2.53.0 have a compatibility issue where Ray actor processes crash during construction. When Ray creates a `RayWorkerWrapper` actor, it imports the module `vllm.v1.executor.ray_utils` in the actor process. This triggers transitive module-level imports:
+### History: the removed `NNsightRayExecutor` fork
 
-```
-ray_utils.py
-  -> worker_base.py
-    -> from vllm.multimodal import MULTIMODAL_REGISTRY
-      -> (heavy initialization of multimodal registries, torch ops, etc.)
-```
+An earlier version replaced vLLM's Ray executor with a custom `NNsightRayExecutor`
+(plus a `LazyRayWorkerWrapper`) to (a) add remote-driver support and (b) work
+around a vLLM 0.15.1 Ray-actor import crash. That fork **reimplemented** vLLM's
+placement-group creation, worker sort, and rank assignment, and did not reliably
+preserve the position-rank-config invariant above: under pipeline parallelism it
+intermittently (~50% of fresh cluster starts) scattered each PP stage's KV-cache
+config to the *other* stage, crashing at load with
+`KeyError: model.layers.N.self_attn.attn`. It was removed in favor of the stock
+executor. (Control: vanilla vLLM on the same 2-node setup never failed; the
+import-crash workaround is unnecessary on vLLM 0.19.1 — stock `RayWorkerWrapper`
+loads fine.)
 
-These imports conflict with Ray's internal gRPC event engine (specifically grpcio's `cygrpc` C extension) during the actor construction phase, causing the actor process to die with a segfault before it is fully constructed. There is no Python traceback — the crash occurs at the C level.
+### Multi-node
 
-The same imports work fine when they happen during actor **method execution** (after the actor is fully constructed and Ray's gRPC connection is stable).
+Run the driver on a cluster node (or set `RAY_ADDRESS` to point at a running
+cluster) and vLLM places workers across the cluster's nodes. See `examples/ray/`
+for a Docker-based two-node simulation.
 
-### The Fix: LazyRayWorkerWrapper + NNsightRayExecutor
+### Known limitation
 
-`LazyRayWorkerWrapper` is a thin drop-in replacement for `RayWorkerWrapper` that has **no heavy module-level imports**. It defers all vLLM imports to `__init__` time, which runs during actor method execution rather than actor construction:
-
-```python
-class LazyRayWorkerWrapper:
-    def __init__(self, *args, **kwargs):
-        # This import happens AFTER actor construction,
-        # when Ray's gRPC connection is stable.
-        from vllm.v1.executor.ray_utils import RayWorkerWrapper
-        self._w = RayWorkerWrapper(*args, **kwargs)
-
-    # All methods explicitly defined (Ray actors can't use __getattr__)
-    def execute_method(self, method, *args, **kwargs):
-        return self._w.execute_method(method, *args, **kwargs)
-    # ... etc
-```
-
-`NNsightRayExecutor` is a subclass of `RayDistributedExecutor` that swaps in `LazyRayWorkerWrapper` and handles Ray cluster initialization before creating workers:
-
-```python
-class NNsightRayExecutor(RayDistributedExecutor):
-    def _init_executor(self) -> None:
-        import os, ray, subprocess
-        import vllm.v1.executor.ray_utils as ray_utils
-        import vllm.v1.executor.ray_executor as ray_exec
-
-        # Swap in lazy wrapper to avoid actor crash
-        ray_utils.RayWorkerWrapper = LazyRayWorkerWrapper
-        ray_exec.RayWorkerWrapper = LazyRayWorkerWrapper
-        self.forward_dag = None
-
-        # Three-way Ray initialization:
-        if not ray.is_initialized():
-            ray_address = os.environ.get("RAY_ADDRESS")
-            try:
-                ray.init(address="auto")           # (1) local Ray already running
-            except (ConnectionError, ValueError, RuntimeError):
-                if ray_address:
-                    subprocess.run(                 # (2) join remote cluster as driver-only node
-                        ["ray", "start", f"--address={ray_address}",
-                         "--num-gpus=0", "--num-cpus=0"],
-                        check=True, capture_output=True,
-                    )
-                    ray.init(address="auto")
-                else:
-                    ray.init()                      # (3) start fresh local cluster
-
-        # ... placement group creation, VLLM_HOST_IP fix, _init_workers_ray ...
-```
-
-### How It's Integrated
-
-When the user passes `distributed_executor_backend="ray"`, `VLLM._load()` replaces the string with the `NNsightRayExecutor` class before passing it to both sync (`LLM`) and async (`AsyncLLM`) entrypoints:
-
-```python
-_uses_ray = kwargs.get("distributed_executor_backend") == "ray"
-if _uses_ray:
-    from .executors.ray_workaround import NNsightRayExecutor
-    kwargs["distributed_executor_backend"] = NNsightRayExecutor
-
-if self._async_engine:
-    # AsyncLLM spawns EngineCore in a subprocess. Pre-initialize Ray
-    # so the subprocess can connect via ray.init(address="auto").
-    if _uses_ray:
-        import ray
-        if not ray.is_initialized():
-            ray.init()
-    # ... create AsyncLLM ...
-else:
-    # ... create LLM ...
-```
-
-vLLM's `EngineArgs.distributed_executor_backend` accepts `str | type[Executor]`, so passing a class directly is supported. This is cleaner than external monkey-patching because:
-
-1. **Works with multiprocessing mode**: vLLM pickles the executor class to the EngineCore subprocess. `NNsightRayExecutor._init_executor()` runs inside that subprocess, where it swaps in `LazyRayWorkerWrapper` before any Ray actors are created. No need to force `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
-2. **Self-contained**: The workaround is entirely within `NNsightRayExecutor` — no global state or env var overrides.
-3. **Transparent to users**: `VLLM("gpt2", distributed_executor_backend="ray")` just works.
-
-### Async + Ray
-
-The async engine (`mode="async"`) works with the Ray executor. The key difference is that `AsyncLLM` spawns the EngineCore as a subprocess via `multiprocessing`, and that subprocess creates the `NNsightRayExecutor`. For Ray to work in the subprocess, a Ray cluster must already be running — the subprocess connects to it via `ray.init(address="auto")`.
-
-`VLLM._load()` handles this automatically: when both `mode="async"` and `distributed_executor_backend="ray"` are set, it calls `ray.init()` in the main process before creating `AsyncLLM`, ensuring the subprocess has a cluster to connect to.
-
-```python
-model = VLLM(
-    "gpt2",
-    tensor_parallel_size=2,
-    distributed_executor_backend="ray",
-    gpu_memory_utilization=0.1,
-    dispatch=True,
-    mode="async",  # async + Ray
-)
-```
-
-### Ray Initialization Behaviors
-
-`NNsightRayExecutor._init_executor()` supports three scenarios:
-
-| Scenario | Condition | Behavior |
-|----------|-----------|----------|
-| **Local Ray running** | `ray.init(address="auto")` succeeds | Connect to it |
-| **Remote cluster** | `RAY_ADDRESS` env var set (e.g. `head:6379`) | Join as driver-only node via `ray start --num-gpus=0 --num-cpus=0`, then connect |
-| **Standalone** | No Ray running, no `RAY_ADDRESS` | `ray.init()` starts a fresh local cluster |
-
-**Important**: `RAY_ADDRESS` must be a GCS address (`host:port`), **not** a Ray Client address (`ray://host:port`). vLLM v1 uses compiled DAGs which require direct GCS access — Ray Client protocol does not support the `.bind()` method needed for compiled DAGs.
-
-When connecting to a remote cluster, the executor also sets `VLLM_HOST_IP` to the head node's IP. This prevents vLLM's IP validation from failing when the driver machine's IP differs from the cluster nodes' IPs.
-
-### Multi-Node Support
-
-For multi-node tensor parallelism (TP workers on different machines), the `NNsightRayExecutor` handles everything automatically — just set `RAY_ADDRESS` to point at an existing Ray cluster, and vLLM will place workers across the available nodes.
-
-See [`examples/multi_node_with_ray/`](examples/multi_node_with_ray/) for a complete Docker-based example that simulates multi-node on a single machine, including:
-- Docker Compose setup with separate head/worker containers
-- NCCL configuration for cross-node communication
-- Test script validating interventions across nodes
-
-### Why the Existing Integration Is Executor-Agnostic
-
-The NNsight hooks (`worker_cls`, `collective_rpc`, `execute_model`) work identically across Ray and multiprocessing:
-
-- **`worker_cls`**: Both `MultiprocExecutor` and `RayDistributedExecutor` resolve the `worker_cls` string (`"nnsight.modeling.vllm.workers.GPUWorker.NNsightGPUWorker"`) and instantiate it. The monkey-patching of `GPUModelRunner -> NNsightGPUModelRunner` happens inside each worker process/actor.
-- **`execute_model`**: `RayWorkerWrapper.execute_model_ray()` calls `self.worker.model_runner.execute_model()` — the same path as multiprocessing. Since the model runner is `NNsightGPUModelRunner`, interventions execute correctly.
-- **`collective_rpc("collect_nnsight")`**: `RayDistributedExecutor.collective_rpc()` calls `worker.execute_method.remote()` which delegates to `self.worker.collect_nnsight()`. Return values (pickled bytes) survive Ray serialization.
-- **Mediator transport**: `SamplingParams.extra_args` with serialized mediator bytes passes through Ray's compiled DAG via pickle.
-
-### NNsightGPUWorker `init_device()` Override
-
-When the executor backend is passed as a class (`NNsightRayExecutor`) rather than a string (`"ray"`), vLLM's worker-side `init_device()` encounters the class object in `parallel_config.distributed_executor_backend` instead of the expected `"ray"` string. This causes `local_world_size` assertions to fail.
-
-`NNsightGPUWorker.init_device()` normalizes this: if the backend is a class that's a subclass of `RayDistributedExecutor`, it replaces it with the string `"ray"` before calling `super().init_device()`.
-
-### Limitations
-
-- **Pipeline parallelism (PP > 1)** is not supported with Ray. `collect_nnsight` only collects saves from `get_pp_group().rank == 0` (first pipeline stage). With PP > 1, saves from later stages are lost.
-- **Version sensitivity**: The actor crash is a grpcio/Ray compatibility issue. Tested with vLLM 0.15.1 + Ray 2.53.0 + grpcio 1.76.0. Future versions may fix the underlying crash, at which point `ray_workaround.py` can be simplified.
-- **Ray Client protocol**: Not supported. Must use direct GCS connection (`host:port`) rather than `ray://host:port`.
+Cross-node *intervention writes* (read a layer on one node, write a modified
+value to a layer on another node) currently hang under true multi-node; cross-node
+reads work. This lives in the cross-rank communication path and is not yet resolved.
