@@ -23,7 +23,9 @@ model = VLLM("meta-llama/Llama-3.1-70B", tensor_parallel_size=4, dispatch=True)
 
 with model.trace("The Eiffel Tower is in", temperature=0.0):
     h5 = model.model.layers[5].output[0].save()        # observe
-    model.model.layers[40].output[0][:] = 0            # intervene
+    out = model.model.layers[40].output.clone()        # clone (vLLM activations are inference-mode)
+    out[0][:] = 0                                       # intervene
+    model.model.layers[40].output = out                # write the edit back
     logits = model.logits.save()                       # save final logits
 ```
 
@@ -181,7 +183,7 @@ The integration doesn't cover everything. Some of what's missing is design work 
 
 **Where intervention semantics diverge from Hugging Face.** vLLM is not Hugging Face Transformers under a different name. We documented several architectural choices showing up as behavioral differences the user has to know about:
 
-- **Fused CUDA kernels.** vLLM replaces many small Python operations with fused C/CUDA kernels: fused normalization (e.g., `fused_add_rms_norm`), fused activations (e.g., `SiluAndMul`), paged attention, and more across releases. Hooks fire on the surrounding module, but the value can be a tuple instead of a tensor, mutate in-place after the hook returns, or expose only a thin Python wrapper to `.source`. We patched the `.save()` method with auto-clone of inference-mode tensors to protect saved tensors from in-place mutations, and the rest is documented and patternized.
+- **Fused CUDA kernels.** vLLM replaces many small Python operations with fused C/CUDA kernels: fused normalization (e.g., `fused_add_rms_norm`), fused activations (e.g., `SiluAndMul`), paged attention, and more across releases. Hooks fire on the surrounding module, but the value can be a tuple instead of a tensor, mutate in-place after the hook returns, or expose only a thin Python wrapper to `.source`. We patched the `.save()` method with auto-clone of inference-mode tensors to protect saved tensors from in-place mutations. Writes hit the same inference-mode wall from the other side: an in-place edit (`layer.output[:] = 0`) raises on the worker, so interventions clone the activation, edit the clone, and assign it back (`out = layer.output.clone(); out[0][:] = 0; layer.output = out`) — or replace it outright (`layer.output = new_value`). The rest is documented and patternized.
 - **Dual residual stream.** Decoder layers return `(hidden_states, residual)` as separate tensors rather than the combined sum HF returns. The full hidden state is `layer.output[0] + layer.output[1]`, and positional input args (`.input`) are int64 position IDs rather than float activations.
 - **Merged linears.** vLLM merges projections that HF keeps separate: attention QKV becomes a single tensor (e.g., `QKVParallelLinear`), MLP gate and up become one (e.g., `MergedColumnParallelLinear`), and similar fusions show up wherever vLLM can amortize a matmul. Per-head or per-projection interventions need `.chunk()` or `.split()` against the merged tensor rather than separate accessors.
 - **Flat layout + inference_mode.** The activation shape is `[total_tokens, hidden]` rather than `[batch, seq, hidden]`. Position-based indexing like `[:, -1, :]` becomes `[-1, :]`. vLLM also wraps execution in `torch.inference_mode()`, which blocks gradient-based interventions (integrated gradients, GradCAM, probe training all require a different backend).
