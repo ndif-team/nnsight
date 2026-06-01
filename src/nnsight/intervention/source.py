@@ -233,9 +233,7 @@ def wrap_operation(
     def inner(*args, **kwargs):
 
         actual_fn = (
-            op_accessor.fn_replacement
-            if op_accessor.fn_replacement is not None
-            else fn
+            op_accessor.fn_replacement if op_accessor.fn_replacement is not None else fn
         )
 
         # Consume the one-shot replacement *now*, before invoking actual_fn.
@@ -263,6 +261,9 @@ def wrap_operation(
             result = hook(value)
             if result is not None:
                 value = result
+
+        for counter in list(op_accessor.counter_hooks):
+            counter()
 
         return value
 
@@ -295,11 +296,16 @@ class OperationAccessor:
     - ``fn_replacement`` — a one-shot fn replacement installed by
       :attr:`OperationEnvoy.source`. When set, :func:`wrap_operation` uses
       it in place of the original fn for one call, then clears it.
+    - ``counter_hooks`` — persistent per-mediator callbacks installed by an
+      active iter loop (:func:`register_op_counters`). Run after
+      ``post_hooks`` to advance each mediator's per-op iteration counter
+      once per fire; removed when the loop exits.
 
     All input/output/fn hooks are one-shot and self-remove when they
-    fire. The ``hooked`` property is True if any list is non-empty;
-    :class:`SourceAccessor.wrap` checks it to take the zero-overhead
-    fast path for unhooked sites.
+    fire; ``counter_hooks`` persist for the iter loop. The ``hooked``
+    property is True if any list is non-empty (including ``counter_hooks``);
+    :class:`SourceAccessor.wrap` checks it to take the zero-overhead fast
+    path for unhooked sites.
     """
 
     def __init__(self, name: str, source: str, line_number: int):
@@ -321,6 +327,10 @@ class OperationAccessor:
         self.fn_hooks: List[Callable] = []
         self.fn_replacement: Optional[Callable] = None
 
+        # Persistent per-fire iteration counters (see class docstring and
+        # ``register_op_counters`` in ``tracing/iterator.py``).
+        self.counter_hooks: List[Callable] = []
+
         # Nested SourceAccessor for recursive source tracing on this op's fn.
         # Built on first access in :attr:`OperationEnvoy.source` and reused
         # for the lifetime of the parent module (across Envoys / sessions).
@@ -328,11 +338,19 @@ class OperationAccessor:
 
     @property
     def hooked(self) -> bool:
-        """True if the op has any active hook or a pending fn replacement."""
+        """True if the op has any active hook or a pending fn replacement.
+
+        Includes ``counter_hooks`` so an op with *only* a counter attached
+        (inside an iter loop but not directly observed this step) still
+        routes through :func:`wrap_operation`. That is what lets the counter
+        advance the tracker on fires the user did not hook — required for
+        sparse iteration (e.g. ``iter[[0, 2]]``) and generation steps.
+        """
         return bool(
             self.pre_hooks
             or self.post_hooks
             or self.fn_hooks
+            or self.counter_hooks
             or self.fn_replacement is not None
         )
 
@@ -395,9 +413,7 @@ class SourceAccessor:
         self.operations: Dict[str, OperationAccessor] = {}
         for op_short_name, line in line_numbers.items():
             full_name = f"{path}.{op_short_name}" if path else op_short_name
-            self.operations[full_name] = OperationAccessor(
-                full_name, source, line
-            )
+            self.operations[full_name] = OperationAccessor(full_name, source, line)
 
     def wrap(self, fn: Callable, **kwargs) -> Callable:
         """Per-call-site dispatcher baked into the injected forward.
@@ -447,14 +463,10 @@ class SourceAccessor:
         self._forward = injected
 
         for op_short_name, line in line_numbers.items():
-            full_name = (
-                f"{self.path}.{op_short_name}" if self.path else op_short_name
-            )
+            full_name = f"{self.path}.{op_short_name}" if self.path else op_short_name
             existing = self.operations.get(full_name)
             if existing is None:
-                self.operations[full_name] = OperationAccessor(
-                    full_name, source, line
-                )
+                self.operations[full_name] = OperationAccessor(full_name, source, line)
             else:
                 existing.line_number = line
                 existing.source_code = source
@@ -486,9 +498,7 @@ class SourceAccessor:
         )
 
         source_lines = self.source.split("\n")
-        formatted_lines = [
-            " " * (max_name_length + 6) + "* " + source_lines[0]
-        ]
+        formatted_lines = [" " * (max_name_length + 6) + "* " + source_lines[0]]
 
         operations_by_line: Dict[int, List[str]] = {}
         for name, line_number in self.line_numbers.items():
@@ -645,6 +655,7 @@ class OperationEnvoy:
         """
         # Local import to avoid circular dependency at module import time.
         from .hooks import operation_fn_hook
+        from .tracing.iterator import register_counters_for_active_iters
 
         if self.interleaver is None or self.interleaver.current is None:
             raise ValueError(
@@ -672,6 +683,10 @@ class OperationEnvoy:
 
             nested = SourceAccessor(fn, self.path)
             accessor._source_accessor = nested
+
+            # Wire the nested accessor's operations into any in-progress iter
+            # loop so recursive `.source` ops count per-fire like top-level ones.
+            register_counters_for_active_iters(self.interleaver, nested)
 
             # Substitute the injected fn into the currently-running op
             # (handled by :meth:`Mediator.handle_swap_event` and the
@@ -722,9 +737,7 @@ class SourceEnvoy:
         self._operations_by_name: Dict[str, OperationEnvoy] = {}
 
         for short_name in accessor.line_numbers.keys():
-            full_name = (
-                f"{accessor.path}.{short_name}" if accessor.path else short_name
-            )
+            full_name = f"{accessor.path}.{short_name}" if accessor.path else short_name
             op_accessor = accessor.operations[full_name]
             op_envoy = OperationEnvoy(op_accessor, interleaver=interleaver)
             setattr(self, short_name, op_envoy)

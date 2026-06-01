@@ -887,6 +887,10 @@ class Mediator:
         self.hooks: List[Any] = list()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
+        # The live iter-loop handle list while this mediator is iterating
+        # (set by IteratorTracer); lets a `.source` first touched mid-loop
+        # register its op counters into the loop. None when not iterating.
+        self._active_iter_handles: Optional[List] = None
         self.all_stop: Optional[int] = stop
         self.args = list()
         self.cross_invoker = None
@@ -1503,6 +1507,7 @@ class Mediator:
         self.user_cache: "Cache" = list()
         self.hooks: List[Any] = list()
         self.iteration = 0
+        self._active_iter_handles: Optional[List] = None
         self.args = list()
         self.original_globals = {}
         self.cross_invoker = None
