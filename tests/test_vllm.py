@@ -219,6 +219,30 @@ class TestInterventions:
         assert torch.all(hs == 0)
 
     @torch.no_grad()
+    def test_inplace_inference_write_surfaces_error(self, vllm_gpt2, ET_prompt: str):
+        """A direct in-place write on a vLLM inference tensor must surface the
+        worker's deferred error at the trace boundary, not be silently dropped.
+
+        vLLM runs the forward under ``torch.inference_mode()``; intervention
+        code runs on a separate thread in normal mode, so ``output[:] = 0``
+        raises ``RuntimeError: Inplace update to inference tensor ...`` on the
+        worker. The interleaver runs in defer mode, so that exception is
+        captured rather than raised, and ``VLLM.__call__`` is responsible for
+        re-raising it. Before the fix it was bundled into the saves payload and
+        dropped, leaving the user with a silently incomplete trace (the
+        ``.save()`` after the failing line never ran). The supported pattern is
+        clone-then-assign — see ``test_basic_intervention``.
+        """
+        with pytest.raises(RuntimeError) as exc_info:
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1):
+                vllm_gpt2.transformer.h[-2].mlp.output[:] = 0
+                vllm_gpt2.logits.save()
+
+        msg = str(exc_info.value)
+        assert "[vLLM]" in msg
+        assert "inference tensor" in msg.lower()
+
+    @torch.no_grad()
     def test_generation_with_intervention(self, tp, vllm_gpt2, MSG_prompt: str):
         """Test intervention during multi-token generation."""
         with vllm_gpt2.trace(

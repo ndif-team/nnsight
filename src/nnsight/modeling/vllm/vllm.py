@@ -462,11 +462,36 @@ class VLLM(RemoteableMixin):
         )
 
         saves = {}
+        exceptions = {}
 
         # Some of the output objects will have a saves attribute, which contains the saved variables
         for output in outputs:
             if hasattr(output, "saves"):
-                saves.update(output.saves)
+                per_req = output.saves
+                # Pull each request's deferred-exception envelope out before
+                # merging saved vars. The vLLM interleaver always runs in defer
+                # mode (GPUModelRunner.load_model sets defer_exceptions=True),
+                # so an intervention that errored on the worker comes back as a
+                # captured DeferredError rather than a raised exception. Merge
+                # per request — a bare saves.update() would let one request's
+                # envelope clobber another's in a multi-invoke trace.
+                req_exc = per_req.get("__nnsight_exceptions__")
+                if req_exc:
+                    exceptions.update(req_exc)
+                saves.update(
+                    {k: v for k, v in per_req.items() if k != "__nnsight_exceptions__"}
+                )
+
+        # Surface any deferred intervention error before binding partial saves,
+        # so the user's ``with model.trace(...)`` boundary raises the original
+        # cause instead of silently dropping the failed intervention (and any
+        # saves after the failing line). Mirrors the serve path (local_serve.py)
+        # and the async backend. Control-flow signals (EarlyStopException from
+        # tracer.stop()) are filtered out inside surface_server_errors.
+        if exceptions:
+            from ...intervention.errors import surface_server_errors
+
+            surface_server_errors(list(exceptions.values()), context="[vLLM]")
 
         # Surface server-side deferred exceptions before pushing variables —
         # otherwise the caller sees UnboundLocalError on saves that the
