@@ -44,7 +44,7 @@ Module contents
 
 from functools import partial, wraps
 from typing import Any, Callable, List, Optional, TYPE_CHECKING, TypeVar
-from .interleaver import Mediator, eproperty
+from .interleaver import Mediator, current_mediator, eproperty
 import torch
 from torch.utils.hooks import RemovableHandle
 from ..util import apply
@@ -317,7 +317,11 @@ def requires_output(fn):
 
         interleaver = self.interleaver
 
-        mediator = interleaver.current
+        # Resolve via the worker thread-local — ``interleaver.current`` is
+        # stale (None) once a free-running PP worker resumes its body outside
+        # a ``handle`` (see eproperty.__get__). Falls back to ``current`` off
+        # the worker thread.
+        mediator = current_mediator() or interleaver.current
 
         iteration = (
             mediator.iteration
@@ -354,7 +358,11 @@ def requires_input(fn):
 
         interleaver = self.interleaver
 
-        mediator = interleaver.current
+        # Resolve via the worker thread-local — ``interleaver.current`` is
+        # stale (None) once a free-running PP worker resumes its body outside
+        # a ``handle`` (see eproperty.__get__). Falls back to ``current`` off
+        # the worker thread.
+        mediator = current_mediator() or interleaver.current
 
         iteration = (
             mediator.iteration
@@ -590,7 +598,7 @@ def requires_operation_output(fn):
 
     @wraps(fn)
     def wrapper(self: OperationEnvoy, *args, **kwargs):
-        mediator = self.interleaver.current
+        mediator = current_mediator() or self.interleaver.current
         iteration = (
             mediator.iteration
             if mediator.iteration is not None
@@ -616,7 +624,7 @@ def requires_operation_input(fn):
 
     @wraps(fn)
     def wrapper(self: OperationEnvoy, *args, **kwargs):
-        mediator = self.interleaver.current
+        mediator = current_mediator() or self.interleaver.current
         iteration = (
             mediator.iteration
             if mediator.iteration is not None

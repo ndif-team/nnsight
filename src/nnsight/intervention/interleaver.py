@@ -281,6 +281,17 @@ class eproperty(property):
 
         if interleaver.interleaving:
 
+            # Resolve the requesting mediator from the worker's thread-local,
+            # not the shared ``interleaver.current`` slot. ``current`` is only
+            # valid under strict lockstep (it is set/restored around each
+            # ``handle``); a free-running worker that resumed its body outside
+            # a handle — e.g. woken by the PP per-step rendezvous after a
+            # ``RELEASE`` cleared ``current`` to ``None`` — would otherwise hit
+            # ``None.iteration`` / ``None.request``. The thread-local is set per
+            # worker in ``Mediator._worker_target`` and is always this worker's
+            # own mediator (mirrors ``pp_envoy._pp_lazy_access``).
+            mediator = current_mediator() or interleaver.current
+
             requester = self._build_requester(obj)
 
             # Run the decorated stub. We don't care about its return value —
@@ -292,9 +303,9 @@ class eproperty(property):
             self._hook(obj)
 
             if self.iterate:
-                requester = interleaver.iterate_requester(requester)
+                requester = interleaver.iterate_requester(requester, mediator)
 
-            value = interleaver.current.request(requester)
+            value = mediator.request(requester)
 
             if self._preprocess is not None:
                 value = self._preprocess(obj, value)
@@ -306,7 +317,7 @@ class eproperty(property):
                 # so any in-place mutations are visible when the mediator later
                 # invokes `self.transform()` and swaps the result back into the
                 # model. See :meth:`Mediator.handle_value_event`.
-                interleaver.current.transform = partial(self._transform, value)
+                mediator.transform = partial(self._transform, value)
 
         else:
             label = self._build_requester(obj)
@@ -323,14 +334,18 @@ class eproperty(property):
 
         if interleaver.interleaving:
 
+            # See ``__get__``: resolve via the worker thread-local, not the
+            # shared ``interleaver.current`` (stale after a PP RELEASE).
+            mediator = current_mediator() or interleaver.current
+
             requester = self._build_requester(obj)
 
             self._hook(obj)
 
             if self.iterate:
-                requester = interleaver.iterate_requester(requester)
+                requester = interleaver.iterate_requester(requester, mediator)
 
-            interleaver.current.swap(requester, value)
+            mediator.swap(requester, value)
 
         else:
             label = self._build_requester(obj)
@@ -525,7 +540,7 @@ class Interleaver:
 
         self.current = None
 
-    def iterate_requester(self, requester: str):
+    def iterate_requester(self, requester: str, mediator: "Mediator" = None):
         """Append the current mediator's iteration index to a requester string.
 
         The iteration is determined by one of two sources:
@@ -546,11 +561,19 @@ class Interleaver:
         Args:
             requester: The base requester string (e.g. ``"model.layer.0.output"``).
 
+        Args:
+            mediator: The requesting mediator. Defaults to ``self.current`` for
+                backward compatibility, but callers on a worker thread should
+                pass the thread-local ``current_mediator()`` — ``self.current``
+                is stale once a free-running (PP) worker resumes outside a
+                ``handle`` (see :meth:`eproperty.__get__`).
+
         Returns:
             The requester with iteration suffix (e.g. ``"model.layer.0.output.i0"``).
         """
 
-        mediator = self.current
+        if mediator is None:
+            mediator = self.current
 
         iteration = (
             mediator.iteration
@@ -965,9 +988,24 @@ class Mediator:
 
         self._prev = None
 
-        # PP: set once when this mediator makes its first cross-stage
-        # (PP-missing) access, so ``go_remote`` is emitted exactly once.
+        # PP: set once per generation step when this mediator makes its first
+        # cross-stage (PP-missing) access, so ``go_remote`` is emitted exactly
+        # once per step (reset each iteration by the IteratorTracer).
         self._gone_remote = False
+
+        # PP rendezvous: True while a value-injection ``respond`` (logits /
+        # samples, delivered in sample_tokens/_sample) is blocked waiting for
+        # this worker's next event. The iteration boundary reads it to know it
+        # must post a RELEASE before parking for the next forward. Set/cleared
+        # in :meth:`respond`.
+        self._respond_pending = False
+
+        # PP rendezvous: how many times THIS mediator's request has been
+        # scheduled into a forward (bumped in ``process_batch_groups``). The
+        # iteration gate waits on this — NOT a global per-rank forward count,
+        # which climbs on pipeline bubbles / steps that schedule other requests
+        # and would desync this worker from its own forwards.
+        self._pp_scheduled_count = 0
 
         # One-shot transform callback for the next value event. Set by
         # :meth:`eproperty.__get__` when an eproperty with a registered
@@ -1427,9 +1465,21 @@ class Mediator:
             value (Optional[Any]): The value to provide
         """
 
+        # Mark that we have handed a value to the worker and are now blocked
+        # waiting for its next event. A worker that, after consuming this
+        # value, reaches an iteration boundary reads ``_respond_pending`` to
+        # know it must post a RELEASE before parking for the next forward —
+        # otherwise this ``event_queue.wait`` wedges (the multi-token
+        # cross-stage hang). Set BEFORE ``put`` so the woken worker can never
+        # observe a stale ``False`` and skip the release. Cleared once the
+        # worker posts its next event and this wait returns.
+        self._respond_pending = True
+
         # Respond and resume the mediator thread.
         self.response_queue.put(value)
         self.event_queue.wait()
+
+        self._respond_pending = False
 
     ### Requester Methods ###
 
