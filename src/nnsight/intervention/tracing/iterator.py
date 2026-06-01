@@ -51,7 +51,7 @@ import warnings
 from typing import TYPE_CHECKING, Any, Callable, List, Union
 from .base import Tracer
 from ..interleaver import Interleaver
-from ..hooks import add_ordered_hook, OperationHookHandle
+from ..hooks import add_ordered_hook, add_ordered_op_hook
 
 if TYPE_CHECKING:
     from ..envoy import Envoy
@@ -84,18 +84,19 @@ def register_op_counters(mediator, accessor) -> List:
 
     Op-iteration counts **invocations**, not forward passes: an operation
     inside a loop (e.g. a Mixture-of-Experts expert loop) fires many times
-    within a single forward, and each fire is its own iteration. A counter
-    is appended to every :class:`OperationAccessor`'s ``counter_hooks`` list;
-    :func:`wrap_operation` calls them after the op's ``post_hooks`` so the
-    bump lands *after* any one-shot user hook for the current fire has
-    compared against the tracker. The recursion descends through
-    ``OperationAccessor._source_accessor`` so nested ``.source`` chains stay
-    in sync.
+    within a single forward, and each fire is its own iteration. The counter
+    is a persistent ``post_hook`` registered with ``mediator_idx = inf`` so
+    (via :func:`add_ordered_op_hook`) it always fires **after** any one-shot
+    user hook for the current fire has compared against the tracker — the op
+    analog of the module iter hook's ``mediator_idx = inf``. The recursion
+    descends through ``OperationAccessor._source_accessor`` so nested
+    ``.source`` chains stay in sync.
 
-    Because ``counter_hooks`` keep ``OperationAccessor.hooked`` True, the op
-    routes through :func:`wrap_operation` and is counted **even on fires the
-    user did not hook** — this is what makes sparse iteration (``iter[[0, 2]]``)
-    and generation steps work, replacing the old once-per-forward bump.
+    Because the counter is a ``post_hook``, it keeps
+    ``OperationAccessor.hooked`` True, so the op routes through
+    :func:`wrap_operation` and is counted **even on fires the user did not
+    hook** — this is what makes sparse iteration (``iter[[0, 2]]``) and
+    generation steps work, replacing the old once-per-forward bump.
 
     Args:
         mediator: The mediator whose ``iteration_tracker`` to bump.
@@ -107,12 +108,14 @@ def register_op_counters(mediator, accessor) -> List:
     handles = []
     for op_path, op_accessor in accessor.operations.items():
         # _path binds this op's path so each closure bumps its own counter.
-        def counter(_path=op_path):
+        # Takes (and ignores) the op value since it runs as a post_hook;
+        # returning None leaves the value unchanged.
+        def counter(value, _path=op_path):
             mediator.iteration_tracker[f"{_path}.input"] += 1
             mediator.iteration_tracker[f"{_path}.output"] += 1
 
-        op_accessor.counter_hooks.append(counter)
-        handle = OperationHookHandle(op_accessor.counter_hooks, counter)
+        counter.mediator_idx = float("inf")
+        handle = add_ordered_op_hook(op_accessor.post_hooks, counter)
         handles.append(handle)
         mediator.hooks.append(handle)
 

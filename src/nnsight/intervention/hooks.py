@@ -89,6 +89,29 @@ class OperationHookHandle:
         self._target = None
 
 
+def _mediator_idx(hook: Callable) -> float:
+    """A hook's ``mediator_idx`` ordering key (``-inf`` if unset)."""
+    return getattr(hook, "mediator_idx", float("-inf"))
+
+
+def _ordered_position(existing: List[Callable], hook: Callable) -> int:
+    """Index at which to insert ``hook`` to keep ``existing`` in ascending
+    ``mediator_idx`` order.
+
+    Stable for equal indices — a new hook is placed *after* existing hooks
+    with the same ``mediator_idx``. This is the shared ordering used for both
+    module hooks (:func:`add_ordered_hook`) and operation hooks
+    (:func:`add_ordered_op_hook`), so persistent ``inf`` hooks (iter
+    tracker-bumpers / op counters) always fire last and per-mediator hooks
+    fire in invoke order.
+    """
+    idx = _mediator_idx(hook)
+    for i, other in enumerate(existing):
+        if idx < _mediator_idx(other):
+            return i
+    return len(existing)
+
+
 def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
     """Register a hook on a module, inserted in mediator-index order.
 
@@ -126,29 +149,31 @@ def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
         )
         hook_dict = module._forward_hooks
 
-    if len(hook_dict) == 0:
-        hook_dict[handle.id] = hook
-        return handle
-
-    # Insert the hook into the dict at the position corresponding to its mediator_idx.
-    # The dict is kept sorted by .mediator_idx so hooks fire in the correct order.
-    hook_mediator_idx = getattr(hook, "mediator_idx", float("-inf"))
-
+    # Rebuild the dict with the new hook spliced in at its mediator_idx
+    # position (PyTorch fires hooks in dict-insertion order).
     items = list(hook_dict.items())
-    inserted = False
-    new_items = []
-    for k, v in items:
-        existing_idx = getattr(v, "mediator_idx", float("-inf"))
-        if not inserted and hook_mediator_idx < existing_idx:
-            new_items.append((handle.id, hook))
-            inserted = True
-        new_items.append((k, v))
-    if not inserted:
-        new_items.append((handle.id, hook))
+    pos = _ordered_position([v for _, v in items], hook)
+    items.insert(pos, (handle.id, hook))
     hook_dict.clear()
-    hook_dict.update(new_items)
+    hook_dict.update(items)
 
     return handle
+
+
+def add_ordered_op_hook(hook_list: List[Callable], hook: Callable) -> OperationHookHandle:
+    """Insert ``hook`` into an operation hook list in mediator-index order.
+
+    The list-based analog of :func:`add_ordered_hook`. Operation hooks live on
+    plain lists (``pre_hooks`` / ``post_hooks``) fired in list order by
+    :func:`wrap_operation`, so the same ``mediator_idx`` ordering that keeps
+    module hooks in invoke order — and persistent ``inf`` hooks (op counters)
+    last — applies here. ``hook`` should carry a ``mediator_idx`` attribute.
+
+    Returns:
+        An :class:`OperationHookHandle` whose ``.remove()`` pops the hook.
+    """
+    hook_list.insert(_ordered_position(hook_list, hook), hook)
+    return OperationHookHandle(hook_list, hook)
 
 
 def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
@@ -680,8 +705,8 @@ def operation_output_hook(mediator: Mediator, op_accessor: OperationAccessor):
         handle.remove()
         return mediator.handle(f"{path}.i{iteration}", value)
 
-    op_accessor.post_hooks.append(hook)
-    handle = OperationHookHandle(op_accessor.post_hooks, hook)
+    hook.mediator_idx = mediator.idx
+    handle = add_ordered_op_hook(op_accessor.post_hooks, hook)
     mediator.hooks.append(handle)
     return handle
 
@@ -720,8 +745,8 @@ def operation_input_hook(mediator: Mediator, op_accessor: OperationAccessor):
         handle.remove()
         return mediator.handle(f"{path}.i{iteration}", inputs)
 
-    op_accessor.pre_hooks.append(hook)
-    handle = OperationHookHandle(op_accessor.pre_hooks, hook)
+    hook.mediator_idx = mediator.idx
+    handle = add_ordered_op_hook(op_accessor.pre_hooks, hook)
     mediator.hooks.append(handle)
     return handle
 

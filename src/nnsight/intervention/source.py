@@ -262,9 +262,6 @@ def wrap_operation(
             if result is not None:
                 value = result
 
-        for counter in list(op_accessor.counter_hooks):
-            counter()
-
         return value
 
     return inner
@@ -289,23 +286,21 @@ class OperationAccessor:
     - ``pre_hooks`` — appended by :func:`operation_input_hook`. Each is
       called with ``(args, kwargs)``; non-``None`` return replaces them.
     - ``post_hooks`` — appended by :func:`operation_output_hook`. Each is
-      called with the return value; non-``None`` return replaces it.
+      called with the return value; non-``None`` return replaces it. Also
+      holds the persistent per-mediator iteration counter installed by an
+      active iter loop (:func:`register_op_counters`), ordered last via
+      ``mediator_idx = inf`` so it bumps the tracker after the user hooks.
     - ``fn_hooks`` — appended by :func:`operation_fn_hook` for recursive
       source tracing. Each receives the current fn and returns a
       (possibly replaced) fn.
     - ``fn_replacement`` — a one-shot fn replacement installed by
       :attr:`OperationEnvoy.source`. When set, :func:`wrap_operation` uses
       it in place of the original fn for one call, then clears it.
-    - ``counter_hooks`` — persistent per-mediator callbacks installed by an
-      active iter loop (:func:`register_op_counters`). Run after
-      ``post_hooks`` to advance each mediator's per-op iteration counter
-      once per fire; removed when the loop exits.
 
-    All input/output/fn hooks are one-shot and self-remove when they
-    fire; ``counter_hooks`` persist for the iter loop. The ``hooked``
-    property is True if any list is non-empty (including ``counter_hooks``);
-    :class:`SourceAccessor.wrap` checks it to take the zero-overhead fast
-    path for unhooked sites.
+    User input/output/fn hooks are one-shot and self-remove when they fire;
+    the iter counter persists for the loop. The ``hooked`` property is True
+    if any list is non-empty; :class:`SourceAccessor.wrap` checks it to take
+    the zero-overhead fast path for unhooked sites.
     """
 
     def __init__(self, name: str, source: str, line_number: int):
@@ -327,10 +322,6 @@ class OperationAccessor:
         self.fn_hooks: List[Callable] = []
         self.fn_replacement: Optional[Callable] = None
 
-        # Persistent per-fire iteration counters (see class docstring and
-        # ``register_op_counters`` in ``tracing/iterator.py``).
-        self.counter_hooks: List[Callable] = []
-
         # Nested SourceAccessor for recursive source tracing on this op's fn.
         # Built on first access in :attr:`OperationEnvoy.source` and reused
         # for the lifetime of the parent module (across Envoys / sessions).
@@ -340,17 +331,15 @@ class OperationAccessor:
     def hooked(self) -> bool:
         """True if the op has any active hook or a pending fn replacement.
 
-        Includes ``counter_hooks`` so an op with *only* a counter attached
-        (inside an iter loop but not directly observed this step) still
-        routes through :func:`wrap_operation`. That is what lets the counter
-        advance the tracker on fires the user did not hook — required for
-        sparse iteration (e.g. ``iter[[0, 2]]``) and generation steps.
+        An active iter loop's persistent counter lives in ``post_hooks``, so
+        an op being iterated stays hooked even on fires the user did not
+        directly observe — that is what lets the counter advance the tracker
+        for sparse iteration (e.g. ``iter[[0, 2]]``) and generation steps.
         """
         return bool(
             self.pre_hooks
             or self.post_hooks
             or self.fn_hooks
-            or self.counter_hooks
             or self.fn_replacement is not None
         )
 
