@@ -6,10 +6,10 @@ Each test+backend runs in its own subprocess on its own GPU, so vLLM and HF
 can run in parallel without interfering.
 
 Usage:
-    python vllm-intervention-gaps/run_all.py --vllm-gpu 2 --hf-gpu 4
-    python vllm-intervention-gaps/run_all.py --vllm-gpu 2 --hf-gpu 4 --test 1_1
-    python vllm-intervention-gaps/run_all.py --vllm-gpu 2  # vLLM only
-    python vllm-intervention-gaps/run_all.py --hf-gpu 4    # HF only
+    python tests/manual/intervention_gaps/run_all.py --vllm-gpu 2 --hf-gpu 4
+    python tests/manual/intervention_gaps/run_all.py --vllm-gpu 2 --hf-gpu 4 --test 1_1
+    python tests/manual/intervention_gaps/run_all.py --vllm-gpu 2  # vLLM only
+    python tests/manual/intervention_gaps/run_all.py --hf-gpu 4    # HF only
 """
 
 import argparse

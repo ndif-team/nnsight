@@ -78,6 +78,13 @@ class LanguageModel(TransformersModel):
         super().__init__(*args, automodel=automodel, **kwargs)
 
         self.generator: Envoy = LanguageModel.Generator()
+        # Hookpoints for server-controlled generation: ``logits`` is fed
+        # the post-LM-head tensor before sampling, ``samples`` the
+        # sampled token IDs after. Mirrors the eproperty hookpoints on
+        # ``VLLM`` so HF-serve interventions can target the same logical
+        # values that vLLM-serve users target.
+        self.logits: Envoy = WrapperModule()
+        self.samples: Envoy = WrapperModule()
 
     def _check_is_text_only(self, repo_id: str) -> None:
         """Raise a friendly error if ``self.config`` belongs to a multimodal model.
@@ -177,6 +184,42 @@ class LanguageModel(TransformersModel):
             compile_config.dynamic = True
 
             setattr(generation_config, "compile_config", compile_config)
+
+    def trace(self, *inputs, **kwargs):
+        """Open a tracing context, optionally routing to ``nnsight-serve``.
+
+        When ``serve=URL`` is set, the trace is sent to a running
+        nnsight-serve instance via :class:`LocalServeBackend` and a
+        :class:`ServeInterleavingTracer` is selected so the in-flight
+        future for non-blocking requests has a typed home (and
+        :meth:`ServeInterleavingTracer.collect` is available).
+
+        Args:
+            serve: URL of the nnsight-serve instance. If ``None``,
+                falls back to local / remote behavior from
+                :class:`RemoteableMixin`.
+            blocking: When ``serve=`` is set, controls whether the
+                client blocks on the HTTP response (``True``, default)
+                or returns immediately so the caller can
+                ``tracer.collect()`` later.
+            api_key: Optional API key forwarded to the server. Requires
+                ``serve=`` to be set.
+        """
+        serve = kwargs.pop("serve", None)
+        if serve is not None and kwargs.get("backend") is None:
+            from ..intervention.backends.local_serve import LocalServeBackend
+            from .mixins.serve_tracer import ServeInterleavingTracer
+            blocking = kwargs.pop("blocking", True)
+            api_key = kwargs.pop("api_key", None)
+            kwargs["backend"] = LocalServeBackend(
+                self, host=serve, blocking=blocking, api_key=api_key,
+            )
+            kwargs.setdefault("tracer_cls", ServeInterleavingTracer)
+        elif "api_key" in kwargs:
+            raise ValueError(
+                "api_key= requires serve= to specify the server URL"
+            )
+        return super().trace(*inputs, **kwargs)
 
     def __nnsight_generate__(self, *args, **kwargs):
         """Custom generation entry point used when ``.generate()`` is called as a tracing context.

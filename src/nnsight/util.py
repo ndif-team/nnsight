@@ -60,6 +60,30 @@ def apply(
             apply(data.step, fn, cls, inplace=inplace),
         )
 
+    elif isinstance(data, dict):
+        # Dict subclass — e.g. HuggingFace's ``ModelOutput`` /
+        # ``CausalLMOutputWithPast``, which inherits from ``OrderedDict``.
+        # Without this branch, ``type(data) == dict`` is False and we'd
+        # fall through to ``return data``, leaving nested tensors
+        # un-narrowed — the root-envoy logits bug where
+        # ``model.output.logits`` comes back as the full batched tensor
+        # instead of the per-request row. Reconstruct the same subclass
+        # so downstream attribute access (``output.logits``) keeps
+        # working; fall back to a shallow-copy-and-mutate if the
+        # constructor doesn't accept ``**kwargs``.
+        narrowed = {
+            key: apply(value, fn, cls, inplace=inplace)
+            for key, value in data.items()
+        }
+        try:
+            return data_type(**narrowed)
+        except TypeError:
+            import copy as _copy
+            new = _copy.copy(data)
+            for k, v in narrowed.items():
+                new[k] = v
+            return new
+
     return data
 
 
@@ -103,6 +127,23 @@ def applyn(
             key: applyn([_data[key] for _data in data], fn, cls, inplace=inplace)
             for key in data[0].keys()
         }
+
+    elif isinstance(data[0], dict):
+        # Dict subclass (e.g. HF ``ModelOutput``). Same rationale as
+        # ``apply``: preserve the subclass so downstream attribute
+        # access keeps working on the swapped value.
+        swapped = {
+            key: applyn([_data[key] for _data in data], fn, cls, inplace=inplace)
+            for key in data[0].keys()
+        }
+        try:
+            return data_type(**swapped)
+        except TypeError:
+            import copy as _copy
+            new = _copy.copy(data[0])
+            for k, v in swapped.items():
+                new[k] = v
+            return new
 
     # elif data_type == slice:
     #     return slice(

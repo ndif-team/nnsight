@@ -1,0 +1,1706 @@
+"""Tests for vanilla batch server and HF continuous batching integration.
+
+Run with:
+    conda activate ndif-dev
+    pytest tests/test_hf_serve.py -x -v
+"""
+
+import pytest
+import torch
+from transformers import GenerationConfig
+
+# Skip CB-specific tests if transformers doesn't have CB support
+try:
+    from transformers.generation.continuous_batching import ContinuousBatchingManager
+    HAS_CB = True
+except ImportError:
+    HAS_CB = False
+
+
+def _deliver_saves(tracer, saves):
+    """Mirror the real serve boundary: re-mark, then push.
+
+    The server's ``collect_saves``/``cleanup_finished`` discards the saved
+    values' ids from ``Globals.saves`` once a request finishes, and the real
+    client re-creates them via ``torch.load`` (fresh ids). Either way the
+    values reach the client unmarked, so ``local_serve``/``remote`` re-mark
+    each one before ``tracer.push`` (see ``local_serve.py``'s ``_send``) or
+    push's ``id(v) in Globals.saves`` root-filter would drop them. These
+    in-process test backends skip the serialize/deserialize hop, so they must
+    re-mark explicitly to honor the same contract.
+    """
+    from nnsight.intervention.tracing.globals import save as _mark_saved
+
+    for value in saves.values():
+        _mark_saved(value)
+    tracer.push(saves)
+
+
+# ------------------------------------------------------------------
+# Fixtures
+# ------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def model():
+    """Load GPT-2 as LanguageModel — same as users would."""
+    from nnsight import LanguageModel
+    m = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
+    yield m
+
+
+# ------------------------------------------------------------------
+# LanguageModel trace tests (baseline — these always worked)
+# ------------------------------------------------------------------
+
+class TestLanguageModelTrace:
+    """Verify LanguageModel trace works as expected (sanity baseline)."""
+
+    def test_trace_forward_pass(self, model):
+        with model.trace("Hello"):
+            output = model.lm_head.output.save()
+        assert output.dim() == 3  # [batch, seq, vocab]
+
+    def test_hidden_states_standard_shape(self, model):
+        # transformers 5.x: GPT2Block.forward returns the hidden_states
+        # tensor directly (3-D), not the legacy (hidden_states, ...) tuple.
+        with model.trace("Hello"):
+            hs = model.transformer.h[0].output.save()
+        assert hs.dim() == 3
+        assert hs.shape[0] == 1
+        assert hs.shape[-1] == 768
+
+    def test_trace_matches_direct_forward(self, model):
+        with model.trace("Hello world"):
+            output_trace = model.lm_head.output.save()
+
+        tokens = model.tokenizer("Hello world", return_tensors="pt")
+        input_ids = tokens["input_ids"].to(model.device)
+        with torch.no_grad():
+            direct_out = model._model(input_ids=input_ids)
+
+        assert output_trace.shape == direct_out.logits.shape
+        assert torch.allclose(output_trace, direct_out.logits, atol=1e-5)
+
+
+# ------------------------------------------------------------------
+# Vanilla batch server tests
+# ------------------------------------------------------------------
+
+class TestVanillaServer:
+    """Test VanillaBatchServer wrapping a LanguageModel."""
+
+    def test_import(self):
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer, VanillaRequest
+        assert VanillaBatchServer is not None
+        assert VanillaRequest is not None
+
+    def test_vanilla_request_dataclass(self):
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaRequest
+        req = VanillaRequest(
+            req_id="test_0",
+            token_ids=[1, 2, 3],
+            generation_config=GenerationConfig(max_new_tokens=5),
+            mediator=None,
+            trace_id="trace_0",
+            saved_names=[],
+            expected_count=1,
+        )
+        assert req.req_id == "test_0"
+        assert req.token_ids == [1, 2, 3]
+
+    def test_server_lifecycle(self, model):
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        server = VanillaBatchServer(model, max_batch_size=4)
+        assert not server.is_running()
+        server.start()
+        assert server.is_running()
+        server.stop()
+        assert not server.is_running()
+
+    def test_server_wraps_language_model(self, model):
+        """Server should accept a LanguageModel instance."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        server = VanillaBatchServer(model)
+        assert server.model is model
+        assert server.request_helper is not None
+
+    def test_scheduler_token_budget(self, model):
+        """Scheduler should respect the token budget."""
+        from nnsight.modeling.hf_serve.vanilla_server import (
+            VanillaBatchServer, VanillaRequest, ActiveRequest,
+        )
+
+        server = VanillaBatchServer(model, token_budget=10)
+
+        # Add a request with 25 prompt tokens (exceeds budget of 10)
+        req = VanillaRequest(
+            req_id="test_0", token_ids=list(range(25)),
+            generation_config=GenerationConfig(max_new_tokens=5), mediator=None,
+            trace_id="t0", saved_names=[], expected_count=1,
+        )
+        server._pending.append(req)
+
+        # Mock: skip mediator registration (no real mediator)
+        def mock_activate(vr):
+            eos_id = getattr(model._model.config, "eos_token_id", None)
+            if isinstance(eos_id, list):
+                eos_id = eos_id[0]
+            active = ActiveRequest(
+                req_id=vr.req_id,
+                prompt_ids=vr.token_ids,
+                generated_ids=[], max_new_tokens=5,
+                eos_token_ids={eos_id} if eos_id is not None else set(),
+                prefilled_len=0, cache_mask=[],
+            )
+            server._active[vr.req_id] = active
+            return active
+        server._activate_request = mock_activate
+
+        scheduled = server._schedule()
+        assert len(scheduled) == 1
+        # Should chunk: only 10 tokens (the budget), not all 25
+        assert scheduled[0].num_tokens == 10
+        assert scheduled[0].is_prefill is True
+        assert scheduled[0].token_ids == list(range(10))
+
+    def test_scheduler_decode_first(self, model):
+        """Decode requests should be scheduled before prefill."""
+        from nnsight.modeling.hf_serve.vanilla_server import (
+            VanillaBatchServer, VanillaRequest, ActiveRequest,
+        )
+
+        server = VanillaBatchServer(model, token_budget=5)
+
+        # Add a decoding request (already prefilled)
+        decode_req = ActiveRequest(
+            req_id="decode_0",
+            prompt_ids=[1, 2, 3],
+            generated_ids=[4], max_new_tokens=10,
+            eos_token_ids=set(),
+            prefilled_len=3, cache_mask=[1, 1, 1, 1],
+        )
+        server._active["decode_0"] = decode_req
+
+        # Add a pending prefill request
+        pending = VanillaRequest(
+            req_id="prefill_0", token_ids=list(range(20)),
+            generation_config=GenerationConfig(max_new_tokens=5), mediator=None,
+            trace_id="t1", saved_names=[], expected_count=1,
+        )
+        server._pending.append(pending)
+
+        def mock_activate(vr):
+            active = ActiveRequest(
+                req_id=vr.req_id,
+                prompt_ids=vr.token_ids,
+                generated_ids=[], max_new_tokens=5,
+                eos_token_ids=set(),
+                prefilled_len=0, cache_mask=[],
+            )
+            server._active[vr.req_id] = active
+            return active
+        server._activate_request = mock_activate
+
+        scheduled = server._schedule()
+        # Decode first (1 token), then prefill gets remaining 4 tokens
+        assert len(scheduled) == 2
+        assert scheduled[0].request.req_id == "decode_0"
+        assert scheduled[0].num_tokens == 1
+        assert scheduled[0].is_prefill is False
+        assert scheduled[1].request.req_id == "prefill_0"
+        assert scheduled[1].num_tokens == 4  # budget=5 minus 1 decode = 4
+        assert scheduled[1].is_prefill is True
+
+
+# ------------------------------------------------------------------
+# Model-type allowlist tests
+# ------------------------------------------------------------------
+
+class TestModelTypeAllowlist:
+    """``_check_model_type_supported`` gates on the validated allowlist.
+
+    The server is an opt-in accelerator for hot model families; unlisted
+    models fall back to plain ``model.trace`` / ``model.generate``. The
+    allowlist is the only gate (no protocol-introspection denylist) — its
+    incompleteness only costs the slow path, never silent corruption.
+    """
+
+    def _fake_model(self, model_type: str):
+        """Minimal model stub with a ``model_type`` config.
+
+        ``VanillaBatchServer.__init__`` only reads ``self.model._model``;
+        the check only reads ``model._model.config.model_type``. Anything
+        else can be a SimpleNamespace.
+        """
+        import types
+        return types.SimpleNamespace(
+            _model=types.SimpleNamespace(
+                config=types.SimpleNamespace(model_type=model_type),
+            ),
+        )
+
+    @pytest.mark.parametrize("mt", [
+        "llama", "qwen2", "qwen3", "mistral", "mixtral",
+        "gemma2", "gpt2", "gpt_neox", "phi3", "falcon",
+        "deepseek_v3",
+    ])
+    def test_default_allowlist_admits_validated_families(self, mt):
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        server = VanillaBatchServer(self._fake_model(mt))
+        server._check_model_type_supported()   # no raise
+
+    @pytest.mark.parametrize("mt", [
+        # Each of these would have been a separate denylist case under
+        # the previous design; the allowlist subsumes them by not listing.
+        "t5",          # encoder-decoder
+        "bart",        # encoder-decoder
+        "llava",       # vision-language
+        "qwen2_vl",    # vision-language
+        "mamba",       # SSM
+        "rwkv6",       # linear-attention
+        "whisper",     # audio + encoder-decoder
+        "some_unknown_future_arch",
+    ])
+    def test_default_allowlist_rejects_unvalidated_with_clear_message(self, mt):
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        server = VanillaBatchServer(self._fake_model(mt))
+        with pytest.raises(RuntimeError, match=r"does not support this model"):
+            server._check_model_type_supported()
+
+    def test_error_message_names_alternatives(self):
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        server = VanillaBatchServer(self._fake_model("t5"))
+        with pytest.raises(RuntimeError) as excinfo:
+            server._check_model_type_supported()
+        msg = str(excinfo.value)
+        # Operator must see what to do next: the supported list, the
+        # extension knob, and the fallback paths.
+        assert "model.trace" in msg or "model.generate" in msg
+        assert "extra_allowed_model_types" in msg
+        assert "'t5'" in msg or '"t5"' in msg
+
+    def test_extra_allowed_model_types_admits_custom(self):
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        server = VanillaBatchServer(
+            self._fake_model("my_company_llama_fork"),
+            extra_allowed_model_types={"my_company_llama_fork"},
+        )
+        server._check_model_type_supported()   # no raise
+
+    def test_extra_allowed_extends_does_not_replace(self):
+        # Adding an extra must NOT drop default entries.
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        server = VanillaBatchServer(
+            self._fake_model("llama"),
+            extra_allowed_model_types={"my_company_llama_fork"},
+        )
+        server._check_model_type_supported()   # llama still admitted
+
+    def test_extra_allowed_accepts_iterable(self):
+        # Common operator patterns: list, tuple, set.
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        for extras in [["custom_a"], ("custom_a",), {"custom_a"}]:
+            server = VanillaBatchServer(
+                self._fake_model("custom_a"),
+                extra_allowed_model_types=extras,
+            )
+            server._check_model_type_supported()
+
+    def test_real_gpt2_fixture_passes(self, model):
+        """The fixture every other test uses must be in the default allowlist."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+        VanillaBatchServer(model, max_batch_size=2)._check_model_type_supported()
+
+
+# ------------------------------------------------------------------
+# Batcher tests
+# ------------------------------------------------------------------
+
+class TestHFBatcher:
+    """Test HFBatcher narrow/swap on dim 1."""
+
+    def test_narrow_dim1(self):
+        from nnsight.modeling.hf_serve.batching import HFBatcher
+        b = HFBatcher(batch_dim=1)
+        b.needs_batching = True
+        b.last_batch_group = [3, 2]  # total = 5
+
+        b.current_value = torch.randn(1, 5, 768)
+        result = b.narrow([0, 3])
+        assert result.shape == (1, 3, 768)
+
+        result2 = b.narrow([3, 2])
+        assert result2.shape == (1, 2, 768)
+
+    def test_narrow_no_batching(self):
+        from nnsight.modeling.hf_serve.batching import HFBatcher
+        b = HFBatcher(batch_dim=1)
+        b.needs_batching = False
+        b.current_value = torch.randn(1, 5, 768)
+        result = b.narrow([0, 3])
+        assert result.shape == (1, 5, 768)  # full tensor returned
+
+    def test_swap_dim1(self):
+        from nnsight.modeling.hf_serve.batching import HFBatcher
+        b = HFBatcher(batch_dim=1)
+        b.needs_batching = True
+        b.last_batch_group = [3, 2]
+
+        b.current_value = torch.zeros(1, 5, 4)
+        new_val = torch.ones(1, 2, 4)
+        b.swap([3, 2], new_val)
+
+        assert torch.all(b.current_value[0, :3, :] == 0)
+        assert torch.all(b.current_value[0, 3:, :] == 1)
+
+    def test_swap_full_batch(self):
+        from nnsight.modeling.hf_serve.batching import HFBatcher
+        b = HFBatcher(batch_dim=1)
+        b.needs_batching = False
+        b.current_value = torch.zeros(1, 5, 4)
+        new_val = torch.ones(1, 5, 4)
+        b.swap(None, new_val)
+        assert torch.all(b.current_value == 1)
+
+    def test_total_batch_size(self):
+        from nnsight.modeling.hf_serve.batching import HFBatcher
+        b = HFBatcher(batch_dim=1)
+        b.last_batch_group = [10, 5]
+        assert b.total_batch_size == 15
+
+    def test_total_batch_size_none(self):
+        from nnsight.modeling.hf_serve.batching import HFBatcher
+        b = HFBatcher(batch_dim=1)
+        assert b.total_batch_size == 0
+
+
+# ------------------------------------------------------------------
+# NNsightCBManager (paged HF CB) mediator registration wiring
+# ------------------------------------------------------------------
+
+# Skip paged HF CB tests if the installed transformers doesn't
+# expose `ContinuousBatchingConfig` (manager.py imports fail). The
+# paged path is feature-gated on HF's continuous-batching API surface
+# existing; vanilla path is unaffected.
+_paged_skip_reason = None
+try:
+    from nnsight.modeling.hf_serve.manager import NNsightCBManager  # noqa: F401
+except Exception as _e:
+    _paged_skip_reason = f"paged HF CB unavailable: {_e}"
+
+
+@pytest.mark.skipif(
+    _paged_skip_reason is not None,
+    reason=_paged_skip_reason or "",
+)
+class TestNNsightCBManagerRegistration:
+    """Paged HF CB path: `add_request` stashes mediator data and
+    `_register_pending_mediators` calls `process_new_reqs_direct` for
+    IDs that enter the batch.
+
+    These tests exercise the registration wiring in isolation (no
+    actual forward pass — HF's paged CB needs a real HF
+    PreTrainedModel and scheduler setup that's beyond a unit test).
+    """
+
+    def test_add_request_stashes_mediator_data(self):
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+
+        # Skip HF base __init__ — we only exercise the nnsight-layer bookkeeping.
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+
+        # Patch super().add_request to bypass HF init path
+        def fake_super_add(input_ids, request_id=None, max_new_tokens=None):
+            return request_id or "req_auto"
+        import nnsight.modeling.hf_serve.manager as mgr_mod
+        original = mgr_mod.ContinuousBatchingManager.add_request
+        mgr_mod.ContinuousBatchingManager.add_request = (
+            lambda self, input_ids, request_id=None, max_new_tokens=None: fake_super_add(
+                input_ids, request_id, max_new_tokens,
+            )
+        )
+        try:
+            class FakeMediator:
+                pass
+            med = FakeMediator()
+            rid = mgr.add_request(
+                input_ids=[1, 2, 3],
+                request_id="rid_1",
+                max_new_tokens=5,
+                mediator=med,
+                trace_id="trace_xyz",
+                saved_names=["logits"],
+                expected_count=1,
+            )
+            assert rid == "rid_1"
+            assert "rid_1" in mgr._pending_nnsight_data
+            m, tid, names, count = mgr._pending_nnsight_data["rid_1"]
+            assert m is med
+            assert tid == "trace_xyz"
+            assert names == ["logits"]
+            assert count == 1
+        finally:
+            mgr_mod.ContinuousBatchingManager.add_request = original
+
+    def test_add_request_requires_trace_id_when_mediator_given(self):
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+
+        import nnsight.modeling.hf_serve.manager as mgr_mod
+        original = mgr_mod.ContinuousBatchingManager.add_request
+        mgr_mod.ContinuousBatchingManager.add_request = (
+            lambda self, input_ids, request_id=None, max_new_tokens=None: "rid_2"
+        )
+        try:
+            class FakeMediator:
+                pass
+            with pytest.raises(ValueError, match="trace_id"):
+                mgr.add_request(
+                    input_ids=[1],
+                    mediator=FakeMediator(),
+                    # trace_id missing
+                )
+        finally:
+            mgr_mod.ContinuousBatchingManager.add_request = original
+
+    def test_add_request_without_mediator_is_passthrough(self):
+        """Requests without a mediator don't touch _pending_nnsight_data."""
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+
+        import nnsight.modeling.hf_serve.manager as mgr_mod
+        original = mgr_mod.ContinuousBatchingManager.add_request
+        mgr_mod.ContinuousBatchingManager.add_request = (
+            lambda self, input_ids, request_id=None, max_new_tokens=None: "rid_plain"
+        )
+        try:
+            rid = mgr.add_request(input_ids=[1, 2])
+            assert rid == "rid_plain"
+            assert mgr._pending_nnsight_data == {}
+        finally:
+            mgr_mod.ContinuousBatchingManager.add_request = original
+
+    def test_register_pending_mediators_forwards_to_helper(self):
+        """`_register_pending_mediators` drains stashed data and calls
+        `process_new_reqs_direct` with the right tuple shape.
+        """
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+
+        class FakeMediator:
+            pass
+        med_a, med_b = FakeMediator(), FakeMediator()
+        mgr._pending_nnsight_data = {
+            "req_a": (med_a, "trace_a", ["x"], 1),
+            "req_b": (med_b, "trace_b", [], 2),
+            "req_c": (FakeMediator(), "trace_c", [], 1),  # not in this batch
+        }
+
+        # Use a real helper and intercept process_new_reqs_direct
+        mgr.request_helper = NNsightRequestHelper()
+        captured = {"entries": None, "model": None}
+
+        def fake_direct(entries, model):
+            captured["entries"] = list(entries)
+            captured["model"] = model
+        mgr.request_helper.process_new_reqs_direct = fake_direct
+
+        class FakeModel:
+            pass
+        mgr.nnsight_model = FakeModel()
+
+        # Only req_a and req_b are scheduled this step
+        mgr._register_pending_mediators(["req_a", "req_b"])
+
+        # Drained the two scheduled entries, left req_c alone
+        assert "req_a" not in mgr._pending_nnsight_data
+        assert "req_b" not in mgr._pending_nnsight_data
+        assert "req_c" in mgr._pending_nnsight_data
+
+        assert captured["model"] is mgr.nnsight_model
+        assert len(captured["entries"]) == 2
+        # Entry shape: (req_id, mediator, trace_id, saved_names, expected_count)
+        entries_by_id = {e[0]: e for e in captured["entries"]}
+        assert entries_by_id["req_a"] == ("req_a", med_a, "trace_a", ["x"], 1)
+        assert entries_by_id["req_b"] == ("req_b", med_b, "trace_b", [], 2)
+
+    def test_register_pending_mediators_is_noop_when_empty(self):
+        """No pending data → no helper call."""
+        from nnsight.modeling.hf_serve.manager import NNsightCBManager
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+
+        mgr = NNsightCBManager.__new__(NNsightCBManager)
+        mgr._pending_nnsight_data = {}
+        mgr.request_helper = NNsightRequestHelper()
+
+        called = [False]
+        def fake_direct(entries, model):
+            called[0] = True
+        mgr.request_helper.process_new_reqs_direct = fake_direct
+        mgr.nnsight_model = object()
+
+        mgr._register_pending_mediators(["req_x", "req_y"])
+        assert called[0] is False
+
+
+# ------------------------------------------------------------------
+# Request helper tests
+# ------------------------------------------------------------------
+
+class TestRequestHelper:
+    """Test shared NNsightRequestHelper."""
+
+    def test_import(self):
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+        h = NNsightRequestHelper()
+        assert h.mediators == {}
+        assert h.trace_contexts == {}
+
+    def test_process_batch_groups(self):
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+
+        h = NNsightRequestHelper()
+
+        # Create mock mediators
+        class MockMediator:
+            batch_group = None
+        class MockInterleaver:
+            mediators = []
+            class batcher:
+                last_batch_group = None
+                needs_batching = False
+        class MockModel:
+            interleaver = MockInterleaver()
+
+        m1 = MockMediator()
+        m2 = MockMediator()
+        h.mediators = {"req_0": m1, "req_1": m2}
+
+        num_tokens = {"req_0": 5, "req_1": 3}
+        batch_ids = ["req_0", "req_1"]
+
+        h.process_batch_groups(num_tokens, batch_ids, MockModel())
+
+        assert m1.batch_group == [0, 5]
+        assert m2.batch_group == [5, 3]
+        assert MockModel.interleaver.batcher.last_batch_group == [5, 3]
+
+    def test_match_req_ids_no_suffix(self):
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+
+        h = NNsightRequestHelper()
+
+        class MockMed:
+            pass
+
+        h.mediators = {"req_0": MockMed(), "req_1": MockMed()}
+
+        matched = h.match_req_ids({"req_0", "req_1"}, strip_suffix=False)
+        assert len(matched) == 2
+        ids = {m[0] for m in matched}
+        assert ids == {"req_0", "req_1"}
+
+    def test_match_req_ids_with_suffix(self):
+        from nnsight.modeling.common.request_helper import NNsightRequestHelper
+
+        h = NNsightRequestHelper()
+
+        class MockMed:
+            pass
+
+        h.mediators = {"req_0-abc123": MockMed()}
+
+        matched = h.match_req_ids({"req_0"}, strip_suffix=True)
+        assert len(matched) == 1
+        assert matched[0][0] == "req_0"
+
+
+# ------------------------------------------------------------------
+# LanguageModel logits/samples hook points
+# ------------------------------------------------------------------
+
+class TestLanguageModelHookPoints:
+    """Test that LanguageModel has logits and samples hook points."""
+
+    def test_logits_exists(self, model):
+        assert hasattr(model, 'logits')
+        assert model.logits is not None
+
+    def test_samples_exists(self, model):
+        assert hasattr(model, 'samples')
+        assert model.samples is not None
+
+
+# ------------------------------------------------------------------
+# Cross-request batching
+# ------------------------------------------------------------------
+
+class TestCrossRequestBatching:
+    """Prove that concurrent submissions end up in the same forward pass.
+
+    These tests drive the scheduler directly (not through FastAPI) to
+    avoid needing an HTTP server + GPU. We submit requests from two
+    concurrent async tasks and assert that at least one ``_step()`` call
+    processed tokens from both.
+    """
+
+    def test_concurrent_submit_batches_together(self, model):
+        """Two concurrent submit_async calls should share forward passes.
+
+        Instruments ``VanillaBatchServer._step`` with a batch-size tracker.
+        Submits requests from two concurrent asyncio tasks; after both
+        complete, verifies the scheduler saw them together at least once.
+        """
+        import asyncio
+        from transformers import DynamicCache
+        from nnsight.modeling.hf_serve.vanilla_server import (
+            VanillaBatchServer, VanillaRequest, ActiveRequest,
+        )
+
+        server = VanillaBatchServer(model, token_budget=256, max_batch_size=8)
+
+        # Instrument _step to track max batch size seen
+        max_batch_seen = {"n": 0}
+        original_step = server._step
+
+        def tracking_step(scheduled):
+            max_batch_seen["n"] = max(max_batch_seen["n"], len(scheduled))
+            return original_step(scheduled)
+
+        server._step = tracking_step
+
+        # Bypass mediator registration (no real nnsight tracing)
+        def mock_activate(vr):
+            eos_id = getattr(model._model.config, "eos_token_id", None)
+            if isinstance(eos_id, list):
+                eos_id = eos_id[0]
+            active = ActiveRequest(
+                req_id=vr.req_id,
+                prompt_ids=vr.token_ids,
+                generated_ids=[], max_new_tokens=vr.generation_config.max_new_tokens or 5,
+                eos_token_ids={eos_id} if eos_id is not None else set(),
+                prefilled_len=0, cache_mask=[],
+            )
+            server._active[vr.req_id] = active
+            return active
+        server._activate_request = mock_activate
+
+        server.start()
+
+        async def driver():
+            async def submit_and_wait(req_id, prompt):
+                tokens = model.tokenizer(prompt, return_tensors="pt")["input_ids"][0].tolist()
+                req = VanillaRequest(
+                    req_id=req_id, token_ids=tokens,
+                    generation_config=GenerationConfig(max_new_tokens=5), mediator=None,
+                    trace_id=f"trace_{req_id}", saved_names=[], expected_count=1,
+                )
+                return await server.submit_async(req)
+
+            task_a = asyncio.create_task(submit_and_wait("req_a", "The Eiffel Tower is in"))
+            task_b = asyncio.create_task(submit_and_wait("req_b", "Hello world"))
+            return await asyncio.gather(task_a, task_b)
+
+        try:
+            result_a, result_b = asyncio.run(driver())
+
+            assert result_a is not None
+            assert result_b is not None
+            assert max_batch_seen["n"] >= 2, (
+                f"Expected batch size >= 2 in at least one step, "
+                f"saw max {max_batch_seen['n']}"
+            )
+        finally:
+            server.stop()
+
+    def test_submit_async_returns_future(self, model):
+        """submit_async returns an awaitable asyncio.Future."""
+        import asyncio
+        from nnsight.modeling.hf_serve.vanilla_server import (
+            VanillaBatchServer, VanillaRequest,
+        )
+
+        server = VanillaBatchServer(model)
+
+        async def check():
+            req = VanillaRequest(
+                req_id="test_future", token_ids=[1, 2, 3],
+                generation_config=GenerationConfig(max_new_tokens=1), mediator=None,
+                trace_id="t", saved_names=[], expected_count=1,
+            )
+            future = server.submit_async(req)
+            assert isinstance(future, asyncio.Future)
+            assert future.get_loop() is asyncio.get_running_loop()
+
+        asyncio.run(check())
+
+    def test_submit_sync_returns_event(self, model):
+        """Sync submit() still returns a threading.Event."""
+        import threading
+        from nnsight.modeling.hf_serve.vanilla_server import (
+            VanillaBatchServer, VanillaRequest,
+        )
+
+        server = VanillaBatchServer(model)
+
+        req = VanillaRequest(
+            req_id="test_event", token_ids=[1, 2, 3],
+            generation_config=GenerationConfig(max_new_tokens=1), mediator=None,
+            trace_id="t", saved_names=[], expected_count=1,
+        )
+        event = server.submit(req)
+        assert isinstance(event, threading.Event)
+
+
+# ------------------------------------------------------------------
+# Mediator timeout
+# ------------------------------------------------------------------
+
+class TestMediatorTimeout:
+    """Per-mediator timeout prevents a hung intervention from wedging the batch."""
+
+    def test_value_wait_returns_false_on_timeout(self):
+        """Value.wait(timeout) returns False when no value arrives in time."""
+        import time
+        from nnsight.intervention.interleaver import Mediator
+
+        v = Mediator.Value()
+        t0 = time.perf_counter()
+        result = v.wait(timeout=0.1)
+        elapsed = time.perf_counter() - t0
+        assert result is False
+        assert 0.05 < elapsed < 0.5
+
+    def test_value_wait_returns_true_after_put(self):
+        """Value.wait(timeout) returns True when a value arrives before timeout."""
+        import threading, time
+        from nnsight.intervention.interleaver import Mediator
+
+        v = Mediator.Value()
+
+        def delayed_put():
+            time.sleep(0.05)
+            v.put("payload")
+
+        threading.Thread(target=delayed_put, daemon=True).start()
+        result = v.wait(timeout=1.0)
+        assert result is True
+        assert v.get() == "payload"
+
+    def test_value_wait_no_timeout_blocks_until_put(self):
+        """Without timeout, wait() blocks until a value arrives."""
+        import threading, time
+        from nnsight.intervention.interleaver import Mediator
+
+        v = Mediator.Value()
+
+        def delayed_put():
+            time.sleep(0.1)
+            v.put("ok")
+
+        threading.Thread(target=delayed_put, daemon=True).start()
+        t0 = time.perf_counter()
+        result = v.wait()  # no timeout → blocks
+        elapsed = time.perf_counter() - t0
+        assert result is True
+        assert 0.05 < elapsed < 0.5
+
+    def test_hung_intervention_times_out(self, model):
+        """A hung intervention times out with a warning, doesn't hang the trace.
+
+        Sets a short mediator_timeout on the interleaver, runs a trace where
+        the intervention sleeps past the timeout, and verifies the trace
+        completes (via warning) rather than hanging forever.
+        """
+        import time
+        import warnings as _warnings
+
+        original_timeout = model.interleaver.mediator_timeout
+        model.interleaver.mediator_timeout = 0.3
+
+        try:
+            with _warnings.catch_warnings(record=True) as caught:
+                _warnings.simplefilter("always")
+                t0 = time.perf_counter()
+
+                # A trace whose intervention hangs for 3s with a 0.3s timeout.
+                # Without the timeout mechanism, this test would hang forever.
+                with model.trace("Hello"):
+                    time.sleep(3.0)
+                    _ = model.lm_head.output.save()
+
+                elapsed = time.perf_counter() - t0
+
+            # Should have timed out within ~1s, not waited the full 3s
+            assert elapsed < 2.0, (
+                f"Expected trace to abort within ~1s via timeout; "
+                f"took {elapsed:.2f}s (timeout may not be firing)"
+            )
+            timeout_warnings = [
+                w for w in caught
+                if issubclass(w.category, RuntimeWarning)
+                and "timed out" in str(w.message)
+            ]
+            assert timeout_warnings, (
+                f"Expected RuntimeWarning about timeout; "
+                f"got: {[str(w.message) for w in caught]}"
+            )
+        finally:
+            model.interleaver.mediator_timeout = original_timeout
+
+
+class TestEndToEndTrace:
+    """Drive a real nnsight trace through VanillaBatchServer.
+
+    Catches the class of bugs where mediator workers execute user code
+    outside the interleaver context (``_interleaving=False``), which
+    surfaces as ``ValueError: The model did not execute`` from
+    ``envoy.output``. Previous tests mocked ``_activate_request``, so
+    that path was never exercised.
+    """
+
+    def _reset_interleaver(self, model):
+        """Clear any mediators the server left on the module-scoped model.
+
+        The server path intentionally leaves the interleaver live across
+        generation steps, but the ``model`` fixture is shared with tests
+        that use the default local trace path — stale mediators from a
+        server test would leak into the next local trace.
+        """
+        iv = model.interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def _make_server_backend(self, server):
+        """A local backend mirroring ``api/server.py``'s submission flow."""
+        from nnsight.intervention.backends import Backend
+
+        class VanillaServerBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                _args, kwargs = tracer._run_user_fn(interventions)
+                # Restore interleaver state for the bg thread. Production
+                # handlers skip this because the bg worker manages its own
+                # state, but test fixtures share ``model.interleaver``
+                # across tests — without a re-init, leftover state from a
+                # prior trace (e.g. ``batcher=None`` after a hung mediator)
+                # crashes ``_step`` in the bg thread.
+                tracer._init_shared_interleaver()
+                entries = self_inner.server.build_entries(kwargs, mediators=tracer.mediators)
+                tracer.mediators.clear()
+                pending = [
+                    (e, self_inner.server.submit(e)) for e in entries
+                ]
+                all_saves = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=30.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id)
+                    if saves and "__error__" in saves:
+                        raise RuntimeError(
+                            f"Server reported error for {entry.req_id}: "
+                            f"{saves['__error__']}"
+                        )
+                    if saves:
+                        all_saves.update(saves)
+                _deliver_saves(tracer, all_saves)
+
+        return VanillaServerBackend(server)
+
+    def test_real_trace_captures_activations(self, model):
+        """End-to-end: user code runs, saves come back as real tensors.
+
+        The server generates ``max_new_tokens`` decode steps after
+        prefill, so the captured tensor corresponds to whichever forward
+        pass satisfied the ``.output`` hook first (prefill's last-layer
+        activations). We assert shape + non-zero content, not
+        numerical equality against a direct forward — that comparison
+        would need to fix the generation step the save targets.
+        """
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello world", backend=backend):
+                hidden = model.transformer.h[0].output.save()
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        # User intervention code actually ran and produced real tensors.
+        assert hidden is not None and hidden.dim() == 3
+        assert logits is not None and logits.dim() == 3
+        assert hidden.shape[-1] == 768
+        assert logits.shape[-1] == model._model.config.vocab_size
+        # Not all zeros — real activations were captured, not a placeholder.
+        assert hidden.abs().max().item() > 0
+        assert logits.abs().max().item() > 0
+
+    def test_real_trace_intervention_applied(self, model):
+        """Interventions written against the server also mutate activations."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello world", backend=backend):
+                model.transformer.h[0].output[:] = 0
+                post_zero = model.transformer.h[0].output.save()
+                final = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert torch.all(post_zero == 0), (
+            "In-place zeroing did not take effect — intervention path broken"
+        )
+        # Logits must DIFFER from the un-patched forward now.
+        tokens = model.tokenizer("Hello world", return_tensors="pt")
+        input_ids = tokens["input_ids"].to(model.device)
+        with torch.no_grad():
+            direct = model._model(input_ids=input_ids)
+        assert not torch.allclose(final, direct.logits, atol=1e-3)
+
+
+class TestErrorIsolation:
+    """One failing intervention must not tank co-batched siblings.
+
+    Pre-fix bug: a user-code exception escaped ``_step`` via
+    ``handle_exception_event``, was caught by ``_generation_loop``'s
+    catch-all, which finalized every active request with the same
+    ``__error__``. Now exceptions are deferred per-mediator and
+    ``_step`` finalizes only the failing request.
+    """
+
+    def _reset_interleaver(self, model):
+        iv = model.interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def _make_collecting_backend(self, server):
+        """Submit + return saves verbatim — does NOT raise on ``__error__``.
+
+        Lets a test see the failed request's error payload alongside
+        the successful one's saves.
+        """
+        from nnsight.intervention.backends import Backend
+
+        class CollectingBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                _args, kwargs = tracer._run_user_fn(interventions)
+                # Restore interleaver state for the bg thread. Production
+                # handlers skip this because the bg worker manages its own
+                # state, but test fixtures share ``model.interleaver``
+                # across tests — without a re-init, leftover state from a
+                # prior trace (e.g. ``batcher=None`` after a hung mediator)
+                # crashes ``_step`` in the bg thread.
+                tracer._init_shared_interleaver()
+                entries = self_inner.server.build_entries(kwargs, mediators=tracer.mediators)
+                tracer.mediators.clear()
+                pending = [
+                    (e, self_inner.server.submit(e)) for e in entries
+                ]
+                merged = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=30.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id) or {}
+                    merged.update(saves)
+                _deliver_saves(tracer, merged)
+
+        return CollectingBackend(server)
+
+    def test_failing_request_isolated_per_mediator(self, model):
+        """A failing intervention returns ``__error__`` for that request only.
+
+        Pre-fix: the user-code exception escaped ``_step`` and tripped
+        ``_generation_loop``'s catch-all, which tanked every co-batched
+        sibling AND killed the bg generation thread state. Post-fix:
+        the exception is deferred on the mediator and ``_step``
+        finalizes only the failing request; a subsequent successful
+        trace through the same server completes normally.
+        """
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)
+        server.start()
+        backend = self._make_collecting_backend(server)
+
+        try:
+            # 1. Submit a trace whose intervention raises in the worker.
+            #    ``model.lm_head.output`` runs first (so the worker is
+            #    inside the interleaver). Then a hook on a non-existent
+            #    attribute throws inside the mediator's user-code frame.
+            err_seen = None
+            try:
+                with model.trace("Hello world", backend=backend):
+                    bad = model.lm_head.no_such_attr  # AttributeError in worker
+            except Exception as e:
+                err_seen = e
+            # The failing trace must surface SOME error to the caller —
+            # either via push() of {"__error__": ...} (no exception) or
+            # via wrap_exception re-raise from the local backend.
+            # Either way, the server must NOT be wedged.
+
+            # 2. Run a fresh successful trace through the same server.
+            #    Pre-fix the bg thread's catch-all corrupted helper state
+            #    (popped mediators from a defunct request id) and this
+            #    second trace would either hang or also return error.
+            with model.trace("Hello world", backend=backend):
+                hidden = model.transformer.h[0].output.save()
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        # Sibling trace must have produced real activations.
+        assert hidden is not None and logits is not None
+        h0 = hidden[0] if isinstance(hidden, tuple) else hidden
+        assert h0.abs().max().item() > 0, (
+            "Subsequent trace returned empty/zero activations — server "
+            "state was corrupted by the prior failing request."
+        )
+        assert logits.abs().max().item() > 0
+
+    def test_failing_request_error_payload_shape(self, model):
+        """Failed invoke's ``__error__`` payload is a ``DeferredError`` dict.
+
+        Validates the wire contract between ``_step`` and the HTTP
+        handler: the payload carries type_name / message / traceback /
+        is_control_flow, not a bare string. This is what
+        ``surface_server_errors`` expects on the client side.
+        """
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)
+        server.start()
+        backend = self._make_collecting_backend(server)
+
+        err_payload = None
+        try:
+            # Intercept the raw submit path to pull the saves dict before
+            # ``push`` discards the ``__error__`` key (which is not a
+            # user-saved variable name).
+            captured = {}
+
+            from nnsight.intervention.backends import Backend
+
+            class CapturingBackend(Backend):
+                def __call__(self_inner, tracer):
+                    if tracer is None:
+                        return
+                    interventions = Backend.__call__(self_inner, tracer)
+                    _args, kwargs = tracer._run_user_fn(interventions)
+                    # See note in _make_server_backend about why tests
+                    # call _init_shared_interleaver while production
+                    # handlers don't.
+                    tracer._init_shared_interleaver()
+                    entries = server.build_entries(kwargs, mediators=tracer.mediators)
+                    tracer.mediators.clear()
+                    pending = [(e, server.submit(e)) for e in entries]
+                    for entry, event in pending:
+                        event.wait(timeout=30.0)
+                        captured[entry.req_id] = server.get_result(entry.req_id)
+
+            with model.trace("Hello", backend=CapturingBackend()):
+                _ = model.lm_head.no_such_attr  # AttributeError in worker
+
+            assert captured, "capturing backend got no results"
+            for req_id, saves in captured.items():
+                if saves and "__error__" in saves:
+                    err_payload = saves["__error__"]
+                    break
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert err_payload is not None, (
+            "expected an __error__ payload on the failing request"
+        )
+        assert isinstance(err_payload, dict), (
+            f"__error__ must be a DeferredError dict, got {type(err_payload)}"
+        )
+        assert err_payload.get("type_name") == "AttributeError", (
+            f"expected type_name='AttributeError', got {err_payload.get('type_name')!r}"
+        )
+        assert "no_such_attr" in err_payload.get("message", ""), (
+            f"message should reference the bad attribute: {err_payload.get('message')!r}"
+        )
+        assert err_payload.get("traceback"), (
+            "traceback must be captured for debugging across the wire"
+        )
+        assert err_payload.get("is_control_flow") is False, (
+            "AttributeError is not control flow"
+        )
+
+
+# ------------------------------------------------------------------
+# Multi-GPU: cache merge/split must respect per-layer devices under
+# ``device_map``-sharded models. Runs only with ≥2 CUDA GPUs.
+# ------------------------------------------------------------------
+
+_HAS_2GPU = torch.cuda.is_available() and torch.cuda.device_count() >= 2
+
+
+@pytest.fixture(scope="module")
+def split_model():
+    """GPT-2 split across cuda:0 (layers 0-5) and cuda:1 (layers 6-11)."""
+    if not _HAS_2GPU:
+        pytest.skip(f"needs ≥2 GPUs, have {torch.cuda.device_count()}")
+    from nnsight import LanguageModel
+
+    # Tied weights: lm_head shares weight with transformer.wte, so they
+    # must co-locate. Put embedding + lm_head on cuda:0.
+    device_map = {
+        "transformer.wte": 0,
+        "transformer.wpe": 0,
+        "transformer.drop": 0,
+        "transformer.h.0": 0, "transformer.h.1": 0, "transformer.h.2": 0,
+        "transformer.h.3": 0, "transformer.h.4": 0, "transformer.h.5": 0,
+        "transformer.h.6": 1, "transformer.h.7": 1, "transformer.h.8": 1,
+        "transformer.h.9": 1, "transformer.h.10": 1, "transformer.h.11": 1,
+        "transformer.ln_f": 1,
+        "lm_head": 0,
+    }
+    m = LanguageModel(
+        "openai-community/gpt2",
+        device_map=device_map,
+        dispatch=True,
+    )
+    yield m
+
+
+@pytest.mark.skipif(not _HAS_2GPU, reason="needs ≥2 CUDA GPUs")
+class TestMultiGPUCache:
+    """Verify the persistent KV cache works under ``device_map``-split
+    models. Guards against the bug where cache rows are allocated on a
+    single ``model.device`` — attention on a layer that lives elsewhere
+    then crashes with ``Expected all tensors to be on the same device``
+    inside ``torch.cat``.
+    """
+
+    def _reset_interleaver(self, model):
+        iv = model.interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def _make_server_backend(self, server):
+        """Mirror ``api/server.py`` submission flow without HTTP."""
+        from nnsight.intervention.backends import Backend
+
+        class VanillaServerBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                _args, kwargs = tracer._run_user_fn(interventions)
+                # Restore interleaver state for the bg thread. Production
+                # handlers skip this because the bg worker manages its own
+                # state, but test fixtures share ``model.interleaver``
+                # across tests — without a re-init, leftover state from a
+                # prior trace (e.g. ``batcher=None`` after a hung mediator)
+                # crashes ``_step`` in the bg thread.
+                tracer._init_shared_interleaver()
+                entries = self_inner.server.build_entries(kwargs, mediators=tracer.mediators)
+                tracer.mediators.clear()
+                pending = [
+                    (e, self_inner.server.submit(e)) for e in entries
+                ]
+                all_saves = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=60.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id)
+                    if saves and "__error__" in saves:
+                        raise RuntimeError(
+                            f"Server reported error for {entry.req_id}: "
+                            f"{saves['__error__']}"
+                        )
+                    if saves:
+                        all_saves.update(saves)
+                _deliver_saves(tracer, all_saves)
+
+        return VanillaServerBackend(server)
+
+    def test_layers_actually_split_across_gpus(self, split_model):
+        """Sanity: sharding took effect; early and late layers are on
+        different CUDA devices."""
+        hf = split_model._model
+        early_dev = next(hf.transformer.h[2].parameters()).device
+        late_dev = next(hf.transformer.h[9].parameters()).device
+        assert early_dev.type == "cuda" and early_dev.index == 0
+        assert late_dev.type == "cuda" and late_dev.index == 1
+
+    # NOTE: ``test_merged_cache_layer_devices`` was removed alongside the
+    # ``_merge_caches`` / ``_split_cache`` helpers. Per-layer device
+    # placement is now an emergent property: HF's ``DynamicCache.update``
+    # is called by each layer's own forward, so the K/V it stores is
+    # already on the layer's own device. The behavioral equivalent is
+    # covered by ``test_prefill_decode_cycle_on_split_model`` below,
+    # which runs a real trace across both GPUs.
+
+    def test_prefill_decode_cycle_on_split_model(self, split_model):
+        """End-to-end trace over a device_map-split model.
+
+        Exercises the persistent batched cache on every decode step
+        across a multi-device shard. If the cache mishandled per-layer
+        device placement, attention on layer 9 (cuda:1) would crash
+        with a device-mismatch error inside ``torch.cat``.
+        """
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(split_model, max_batch_size=2)
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with split_model.trace("Hello world", backend=backend):
+                early = split_model.transformer.h[2].output.save()
+                late = split_model.transformer.h[9].output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(split_model)
+
+        assert early is not None and early.dim() == 3
+        assert late is not None and late.dim() == 3
+        assert early.shape[-1] == 768
+        assert late.shape[-1] == 768
+        # Saved tensors come back on their originating layer's device.
+        assert early.device.type == "cuda" and early.device.index == 0, (
+            f"early (layer 2) expected cuda:0, got {early.device}"
+        )
+        assert late.device.type == "cuda" and late.device.index == 1, (
+            f"late (layer 9) expected cuda:1, got {late.device}"
+        )
+        assert early.abs().max().item() > 0
+        assert late.abs().max().item() > 0
+
+
+# ------------------------------------------------------------------
+# worker_context: per-worker-thread sandbox for user intervention code
+# ------------------------------------------------------------------
+
+class TestWorkerContext:
+    """``worker_context`` wraps user intervention code on the worker
+    thread — the only thread that actually runs attacker-controlled
+    Python. Bg thread runs framework code (hook dispatch, cache
+    merge, finalize) and stays unsandboxed. Handler thread runs
+    compile+extract and is sandboxed by the caller (e.g. NDIF's
+    deserialization wrap).
+    """
+
+    def _make_server_backend(self, server):
+        """Mirror api/server.py submission flow in-process."""
+        from nnsight.intervention.backends import Backend
+
+        class VanillaServerBackend(Backend):
+            def __init__(self_inner, srv):
+                self_inner.server = srv
+
+            def __call__(self_inner, tracer):
+                if tracer is None:
+                    return
+                interventions = Backend.__call__(self_inner, tracer)
+                _args, kwargs = tracer._run_user_fn(interventions)
+                # Restore interleaver state for the bg thread. Production
+                # handlers skip this because the bg worker manages its own
+                # state, but test fixtures share ``model.interleaver``
+                # across tests — without a re-init, leftover state from a
+                # prior trace (e.g. ``batcher=None`` after a hung mediator)
+                # crashes ``_step`` in the bg thread.
+                tracer._init_shared_interleaver()
+                entries = self_inner.server.build_entries(kwargs, mediators=tracer.mediators)
+                tracer.mediators.clear()
+                pending = [
+                    (e, self_inner.server.submit(e)) for e in entries
+                ]
+                all_saves = {}
+                for entry, event in pending:
+                    got = event.wait(timeout=30.0)
+                    assert got, f"Timed out waiting on {entry.req_id}"
+                    saves = self_inner.server.get_result(entry.req_id)
+                    if saves and "__error__" in saves:
+                        raise RuntimeError(
+                            f"Server reported {entry.req_id} error: "
+                            f"{saves['__error__']}"
+                        )
+                    if saves:
+                        all_saves.update(saves)
+                _deliver_saves(tracer, all_saves)
+
+        return VanillaServerBackend(server)
+
+    def _reset_interleaver(self, model):
+        iv = model.interleaver
+        if iv.mediators:
+            for mediator in list(iv.mediators):
+                try:
+                    mediator.cancel()
+                except Exception:
+                    pass
+            iv.mediators = []
+
+    def test_factory_receives_intervention_globals_on_worker_thread(self, model):
+        """Factory is called inside the worker thread with the
+        intervention function's ``__globals__`` as its only argument."""
+        import threading as _th
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        calls = []
+
+        class RecordingCtx:
+            def __init__(self_inner, globals_):
+                self_inner.globals_ = globals_
+                self_inner.enter_thread = None
+                self_inner.exit_thread = None
+
+            def __enter__(self_inner):
+                self_inner.enter_thread = _th.current_thread()
+                calls.append(self_inner)
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc_val, exc_tb):
+                self_inner.exit_thread = _th.current_thread()
+                return False
+
+        def factory(target_globals):
+            return RecordingCtx(target_globals)
+
+        server = VanillaBatchServer(
+            model, max_batch_size=2, worker_context=factory,
+        )
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello world", backend=backend):
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert calls, "worker_context factory was never called"
+        ctx = calls[0]
+        assert isinstance(ctx.globals_, dict), (
+            f"factory arg should be a globals dict, got {type(ctx.globals_)}"
+        )
+        # Worker-thread name pattern is ``Mediator<id>`` (see Mediator.__init__).
+        assert ctx.enter_thread.name.startswith("Mediator"), (
+            f"worker_context entered on wrong thread: "
+            f"{ctx.enter_thread.name} (want Mediator*)"
+        )
+        assert ctx.exit_thread is ctx.enter_thread, (
+            f"enter/exit on different threads: "
+            f"{ctx.enter_thread.name} vs {ctx.exit_thread.name}"
+        )
+
+    def test_bg_generation_thread_is_not_wrapped(self, model):
+        """The bg thread running ``_schedule``/``_step`` must NOT enter
+        the worker_context — it runs only framework code."""
+        import threading as _th
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        bg_thread_seen = {"value": False}
+
+        class Ctx:
+            def __init__(self_inner, _globals):
+                pass
+
+            def __enter__(self_inner):
+                if _th.current_thread().name == "vanilla-cb-server":
+                    bg_thread_seen["value"] = True
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        server = VanillaBatchServer(
+            model, max_batch_size=2, worker_context=Ctx,
+        )
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello", backend=backend):
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert not bg_thread_seen["value"], (
+            "worker_context entered on the bg generation thread; "
+            "it should run only inside mediator worker threads."
+        )
+
+    def test_no_factory_runs_user_code_unwrapped(self, model):
+        """Default ``worker_context=None`` leaves the worker to run
+        the intervention directly (no wrap), matching pre-feature
+        behavior."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        server = VanillaBatchServer(model, max_batch_size=2)  # no worker_context
+        server.start()
+        backend = self._make_server_backend(server)
+
+        try:
+            with model.trace("Hello", backend=backend):
+                logits = model.lm_head.output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        # Interleaver.worker_context stayed None (or got reset to None on start()).
+        assert model.interleaver.worker_context is None
+
+    def test_context_exit_runs_even_on_intervention_exception(self, model):
+        """If user code raises, the worker's ``__exit__`` must still
+        fire — sandbox state restoration is a correctness requirement."""
+        import threading as _th
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        exits = []
+
+        class Ctx:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc_val, exc_tb):
+                exits.append(exc_type)
+                return False  # don't suppress
+
+        def factory(_globals):
+            return Ctx()
+
+        server = VanillaBatchServer(
+            model, max_batch_size=2, worker_context=factory,
+        )
+        server.start()
+        backend = self._make_server_backend(server)
+
+        # User code that raises: access an out-of-range layer index.
+        try:
+            with pytest.raises(Exception):
+                with model.trace("Hello", backend=backend):
+                    bad = model.transformer.h[999].output.save()
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+        assert exits, "worker_context __exit__ never fired on user exception"
+
+    def test_start_restart_updates_worker_context(self, model):
+        """``start()`` installs the current ``worker_context`` on the
+        interleaver. Stop + restart with a different factory picks up
+        the new one (important if a server instance is re-bound to a
+        different sandbox policy)."""
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        def factory_a(_globals):
+            class C:
+                def __enter__(s): return s
+                def __exit__(s, *exc): return False
+            C.__name__ = "Ctx_A"
+            return C()
+
+        server = VanillaBatchServer(model, max_batch_size=2, worker_context=factory_a)
+        server.start()
+        try:
+            assert model.interleaver.worker_context is factory_a
+        finally:
+            server.stop()
+
+        server.worker_context = None
+        server.start()
+        try:
+            assert model.interleaver.worker_context is None, (
+                "start() did not refresh worker_context to the current value"
+            )
+        finally:
+            server.stop()
+            self._reset_interleaver(model)
+
+    def test_per_request_allowlist_isolation(self, model):
+        """Per-request allowlists are honored — request A's permission
+        does not bleed into request B's check, even though A ran first
+        and populated ``sys.modules`` for the imported module.
+
+        Simulates NDIF's planned TLS-keyed Protector: a single
+        ``__import__`` dispatcher is installed in process builtins
+        (matches the planned NDIF design — CPython binds
+        ``__builtins__`` at function creation, so per-frame
+        ``__builtins__`` swaps have no effect on already-compiled
+        intervention functions). The dispatcher consults a TLS slot
+        that each per-request CM push/pops on
+        ``__enter__``/``__exit__``. Other threads (bg generation
+        thread, test framework) see ``_tls.active = None`` and pass
+        through unchanged.
+
+        Verifies:
+        - Request A (allowlist={'json'}): ``__import__('json')``
+          succeeds, real saves come back.
+        - Request B (allowlist=set()): ``__import__('json')`` raises
+          PermissionError, surfacing as ``__error__`` for that request
+          only — even though A's prior successful import populated
+          ``sys.modules['json']``.
+
+        Per-request allowlist data flows through the user code's
+        globals: ``backends/base.py`` builds ``intervention.__globals__``
+        as ``{frame.f_globals, frame.f_locals}``, so a local
+        ``__test_allowlist__`` in each helper's frame ends up in its
+        intervention's globals — the factory reads it from there.
+
+        Runs A then B sequentially. The intent is to prove per-request
+        scope, not cross-thread races (a separate concern covered by
+        the HTTP integration tests). Local ``with model.trace()`` calls
+        from two threads share the model envoy and are not a clean
+        concurrency test.
+        """
+        import builtins
+        import threading
+        from nnsight.modeling.hf_serve.vanilla_server import VanillaBatchServer
+
+        # Per-thread "active Protector" slot. Set by each worker's CM;
+        # every other thread sees ``getattr(_tls, 'active', None) is None``.
+        _tls = threading.local()
+        real_import = builtins.__import__
+
+        def dispatching_import(name, *args, **kwargs):
+            active = getattr(_tls, "active", None)
+            if active is not None:
+                top = name.split(".")[0]
+                if top not in active.allowlist:
+                    raise PermissionError(
+                        f"import of {name!r} blocked by per-request allowlist"
+                    )
+            return real_import(name, *args, **kwargs)
+
+        class TLSProtector:
+            """Per-call Protector — TLS-active for the duration of one
+            ``_intervention(*_args)`` call. Reads the per-request
+            allowlist from the user code's globals."""
+
+            def __init__(self, target_globals):
+                self.allowlist = target_globals.get(
+                    "__test_allowlist__", set()
+                )
+
+            def __enter__(self):
+                _tls.active = self
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                _tls.active = None
+                return False
+
+        # Install dispatcher process-globally for the test, restore on
+        # teardown. ``builtins.__import__`` is a normal attribute swap.
+        builtins.__import__ = dispatching_import
+
+        server = VanillaBatchServer(
+            model, max_batch_size=4, worker_context=TLSProtector,
+        )
+        server.start()
+
+        # Each helper has its own local ``__test_allowlist__`` — gets
+        # folded into intervention.__globals__ at trace compile time.
+        # Result reporting via shared dict so we can read errors without
+        # the auto-raising backend swallowing them.
+        results = {}
+
+        def run_a():
+            __test_allowlist__ = {"json"}  # noqa: F841 — captured by trace
+            backend = self._make_server_backend(server)
+            try:
+                with model.trace("Hello", backend=backend):
+                    __import__("json")  # allowed
+                    out = model.transformer.h[0].output.save()
+                results["A"] = ("ok", out)
+            except Exception as e:
+                results["A"] = ("err", repr(e))
+
+        def run_b():
+            __test_allowlist__ = set()  # noqa: F841 — captured by trace
+            backend = self._make_server_backend(server)
+            try:
+                with model.trace("Hello", backend=backend):
+                    __import__("json")  # blocked
+                    out = model.transformer.h[0].output.save()
+                results["B"] = ("ok", out)
+            except Exception as e:
+                results["B"] = ("err", repr(e))
+
+        try:
+            # Run sequentially first to verify per-request isolation
+            # without the additional variable of cross-thread races on
+            # shared model state. Concurrent submission is exercised by
+            # other tests in this class.
+            run_a()
+            run_b()
+        finally:
+            # Restore process-global __import__ before anything else —
+            # subsequent tests must run unsandboxed.
+            builtins.__import__ = real_import
+            server.stop()
+            self._reset_interleaver(model)
+
+        # A: allowlist permitted the import → real saves came back.
+        a_kind, a_value = results["A"]
+        assert a_kind == "ok", (
+            f"Request A (allowlist={{'json'}}) should succeed, got error: "
+            f"{a_value}"
+        )
+        assert a_value is not None
+
+        # B: allowlist rejected → PermissionError surfaced. The
+        # collecting backend re-raises ``__error__`` payloads as
+        # RuntimeError; either RuntimeError or PermissionError in the
+        # message is acceptable.
+        b_kind, b_value = results["B"]
+        assert b_kind == "err", (
+            f"Request B (empty allowlist) should fail, got: {b_value}"
+        )
+        assert "PermissionError" in b_value or "blocked" in b_value, (
+            f"B's error should mention the import block; got: {b_value}"
+        )

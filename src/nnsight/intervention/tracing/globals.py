@@ -23,6 +23,11 @@ def _ensure_mounted():
 
 def save(object: Any):
 
+    # Clone inference-mode tensors on save to protect against downstream
+    # in-place mutations by fused kernels (e.g. vLLM's fused_add_rms_norm).
+    if isinstance(object, torch.Tensor) and object.is_inference():
+        object = object.clone()
+
     Globals.saves.add(id(object))
 
     return object
@@ -42,9 +47,7 @@ class Object(torch.Tensor):
         >>> print(attn_0)
         """
 
-        save(self)
-
-        return self
+        return save(self)
 
     def __getattr__(self, name: str) -> Self:
 

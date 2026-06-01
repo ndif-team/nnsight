@@ -1,3 +1,4 @@
+import threading
 from types import MethodType
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union
 
@@ -45,6 +46,10 @@ class MetaMixin(LoadableMixin):
     ) -> None:
 
         self.dispatched = False
+        # Guards ``dispatch()`` so two concurrent callers can't both run
+        # ``_load`` → ``_update`` and leave the Envoy tree in whichever
+        # order the last ``_update`` happened to finish.
+        self._dispatch_lock = threading.Lock()
 
         if isinstance(args[0], torch.nn.Module) or dispatch:
 
@@ -82,22 +87,37 @@ class MetaMixin(LoadableMixin):
     def dispatch(self) -> None:
         """Load real weights into the model, replacing meta tensors.
 
+        Idempotent and thread-safe. If two callers race into
+        ``dispatch()`` concurrently, only the first loads and updates;
+        the second sees ``dispatched=True`` under the lock and returns
+        immediately. Prevents double-``_load`` / double-``_update``
+        from leaving the Envoy tree in whichever order the last
+        ``_update`` happened to finish — a hazard that would otherwise
+        manifest as corrupted envoy bindings under concurrent serve
+        traffic or interleaving auto-dispatch paths.
+
         Calls :meth:`_load` with the saved constructor arguments and
         updates the Envoy tree to reflect the newly loaded module.
         After this call, :attr:`dispatched` is ``True``.
-
-        No-op if the model is already dispatched.
         """
-
+        # Fast path — no lock contention when the common case (already
+        # dispatched) hits.
         if self.dispatched:
             return
 
-        model = self._load(*self.args, **self.kwargs)
-        self._update(model)
-        # TODO legacy
-        self.__dict__["_model"] = self._module
+        with self._dispatch_lock:
+            # Double-checked under the lock: another caller may have
+            # completed dispatch between our fast-path check and the
+            # acquire.
+            if self.dispatched:
+                return
 
-        self.dispatched = True
+            model = self._load(*self.args, **self.kwargs)
+            self._update(model)
+            # TODO legacy
+            self.__dict__["_model"] = self._module
+
+            self.dispatched = True
 
     def interleave(self, fn: Callable, *args, **kwargs):
         """Run *fn* with interleaved interventions, auto-dispatching if needed.
@@ -125,6 +145,19 @@ class MetaMixin(LoadableMixin):
 
         return super().interleave(fn, *args, **kwargs)
 
+    def __getstate__(self):
+        # ``threading.Lock`` can't be pickled, and cloudpickle walks the
+        # model's ``__dict__`` when serializing a ``RequestModel`` whose
+        # tracer references this model. Drop the lock from the state;
+        # ``__setstate__`` recreates it after unpickling.
+        state = super().__getstate__()
+        state.pop("_dispatch_lock", None)
+        return state
+
     def __setstate__(self, state):
         super().__setstate__(state)
         self.dispatched = True
+        # Locks can't be pickled — re-create after unpickling. The
+        # post-unpickle instance is single-reader until it's handed to
+        # multiple threads, so initializing here is safe.
+        self._dispatch_lock = threading.Lock()
