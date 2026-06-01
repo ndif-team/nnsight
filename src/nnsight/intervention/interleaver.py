@@ -279,18 +279,26 @@ class eproperty(property):
 
         interleaver = obj.interleaver
 
-        if interleaver.interleaving:
+        # A live forward is the normal case. Under PP a worker also runs AHEAD
+        # of its forward: it reaches its next local access while no forward
+        # session is live (in the gap between execute_model / sample_tokens),
+        # and must be allowed to register its one-shot hook and PARK there —
+        # the forward delivers when it arrives. Gated on a real worker thread
+        # (``current_mediator``) + PP, so genuine out-of-trace access still
+        # raises.
+        worker = current_mediator()
+        if interleaver.interleaving or (
+            worker is not None and getattr(interleaver, "pp_enabled", False)
+        ):
 
             # Resolve the requesting mediator from the worker's thread-local,
             # not the shared ``interleaver.current`` slot. ``current`` is only
             # valid under strict lockstep (it is set/restored around each
-            # ``handle``); a free-running worker that resumed its body outside
-            # a handle — e.g. woken by the PP per-step rendezvous after a
-            # ``RELEASE`` cleared ``current`` to ``None`` — would otherwise hit
-            # ``None.iteration`` / ``None.request``. The thread-local is set per
-            # worker in ``Mediator._worker_target`` and is always this worker's
-            # own mediator (mirrors ``pp_envoy._pp_lazy_access``).
-            mediator = current_mediator() or interleaver.current
+            # ``handle``); a worker that resumed its body outside a handle would
+            # otherwise hit ``None.iteration`` / ``None.request``. The
+            # thread-local is set per worker in ``Mediator._worker_target`` and
+            # is always this worker's own mediator (mirrors ``_pp_lazy_access``).
+            mediator = worker or interleaver.current
 
             requester = self._build_requester(obj)
 
@@ -332,11 +340,16 @@ class eproperty(property):
 
         interleaver = obj.interleaver
 
-        if interleaver.interleaving:
+        # See ``__get__``: a live forward, or a PP worker running ahead.
+        worker = current_mediator()
+        if interleaver.interleaving or (
+            worker is not None and getattr(interleaver, "pp_enabled", False)
+        ):
 
-            # See ``__get__``: resolve via the worker thread-local, not the
-            # shared ``interleaver.current`` (stale after a PP RELEASE).
-            mediator = current_mediator() or interleaver.current
+            # Resolve via the worker thread-local, not the shared
+            # ``interleaver.current`` (stale once a worker resumes outside a
+            # handle).
+            mediator = worker or interleaver.current
 
             requester = self._build_requester(obj)
 
@@ -988,24 +1001,50 @@ class Mediator:
 
         self._prev = None
 
-        # PP: set once per generation step when this mediator makes its first
-        # cross-stage (PP-missing) access, so ``go_remote`` is emitted exactly
-        # once per step (reset each iteration by the IteratorTracer).
+        # PP: set once per generation step on this mediator's first DOWNSTREAM
+        # cross-stage access, so the forward-releasing ``go_remote`` is emitted
+        # exactly once per step (reset each iteration by the IteratorTracer).
         self._gone_remote = False
 
-        # PP rendezvous: True while a value-injection ``respond`` (logits /
-        # samples, delivered in sample_tokens/_sample) is blocked waiting for
-        # this worker's next event. The iteration boundary reads it to know it
-        # must post a RELEASE before parking for the next forward. Set/cleared
-        # in :meth:`respond`.
+        # PP: True while a value-injection ``respond`` (logits / samples,
+        # delivered in sample_tokens/_sample) is blocked waiting for this
+        # worker's next event. A worker stepping into a remote access reads it
+        # to know it must post a RELEASE first, else that ``respond`` wedges.
+        # Set/cleared in :meth:`respond`.
         self._respond_pending = False
 
-        # PP rendezvous: how many times THIS mediator's request has been
-        # scheduled into a forward (bumped in ``process_batch_groups``). The
-        # iteration gate waits on this — NOT a global per-rank forward count,
-        # which climbs on pipeline bubbles / steps that schedule other requests
-        # and would desync this worker from its own forwards.
+        # PP readiness signal: True once this mediator has, in the current
+        # iteration, either reached its local part (parked at a local request,
+        # reflected by ``event_queue.has_value``) or moved PAST it via a
+        # downstream access. The forward's readiness gate waits until each
+        # mediator is "ahead" — parked at local OR past-local OR finished — and
+        # never waits for one with no local part this step. Reset per iteration
+        # by the IteratorTracer; set on a downstream access in
+        # ``pp_envoy._pp_signal_remote``.
+        self._pp_past_local = False
+
+        # PP readiness signal (gate-only): how many forwards have processed THIS
+        # request (bumped in ``process_batch_groups``). The worker never waits
+        # on this — it runs ahead freely — but the readiness gate reads it to
+        # know WHICH iteration the current forward is for (``count - 1``), so it
+        # compares against the worker's own ``iteration`` and can't be fooled by
+        # a stale ``_pp_past_local`` left from a previous step.
         self._pp_scheduled_count = 0
+
+        # PP readiness signal (gate-only): the highest iteration this worker
+        # will ever run (set by the IteratorTracer from the iter range;
+        # ``float('inf')`` for unbounded ``tracer.iter[:]``). Defaults to 0 — a
+        # single-shot ``model.trace`` intervenes once and is done, so the gate
+        # must NOT wait for it on later forwards (the engine may generate more
+        # tokens than the worker has iterations).
+        self._pp_max_iteration = 0
+
+        # PP readiness signal (gate-only): the iteration the worker is currently
+        # on. Unlike ``iteration`` (which a one-shot hook clears to ``None``
+        # after firing), this is set by the IteratorTracer at each iteration and
+        # never cleared, so the readiness gate can reliably tell which iteration
+        # the worker is at vs which the forward is for.
+        self._pp_worker_iteration = 0
 
         # One-shot transform callback for the next value event. Set by
         # :meth:`eproperty.__get__` when an eproperty with a registered
@@ -1699,3 +1738,13 @@ class Mediator:
         self._deferred_type_name = None
         self._deferred_traceback = None
         self._deferred_is_control_flow = False
+        # Runtime-only PP latches — not serialized, so initialize them here for
+        # worker-side (deserialized) mediators just as ``__init__`` does. A
+        # single-shot trace (no iter loop, no per-iteration reset) reads these
+        # on its first cross-stage access, so they must exist.
+        self._gone_remote = False
+        self._respond_pending = False
+        self._pp_past_local = False
+        self._pp_scheduled_count = 0
+        self._pp_max_iteration = 0
+        self._pp_worker_iteration = 0

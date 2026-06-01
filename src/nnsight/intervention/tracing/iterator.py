@@ -47,7 +47,6 @@ counters (:func:`register_op_counters`) bump the tracker once per fire
 instead of once per forward; see those functions for details.
 """
 
-import time
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, List, Union
 from .base import Tracer
@@ -60,72 +59,43 @@ else:
     Envoy = Any
 
 
-# Upper bound on how long a worker waits at an iteration boundary for its
-# rank's next forward to begin. A real cross-rank deadlock errors loudly
-# instead of hanging forever.
-_PP_ITER_GATE_TIMEOUT = 60.0
+def _pp_reset_iteration(mediator, iteration: int) -> None:
+    """Mark the start of a worker iteration for the PP readiness gate.
 
+    The worker is never gated on the forward — it runs ahead freely and the
+    forward's readiness gate waits for IT (see
+    ``GPUModelRunner._pp_wait_for_mediators``). Records the worker's current
+    iteration (``_pp_worker_iteration`` — distinct from ``iteration``, which a
+    one-shot hook clears mid-step) and clears the two per-iteration latches that
+    describe where the worker is within this iteration's
+    ``(remote)(local)(remote)`` lifecycle:
 
-def _pp_iteration_boundary(mediator, iteration: int) -> bool:
-    """Pipeline-parallel per-step rendezvous, run at each iteration boundary.
+    - ``_gone_remote`` — whether the forward-releasing downstream ``go_remote``
+      has already fired this step (emit it at most once).
+    - ``_pp_past_local`` — whether the worker has moved past its local part via
+      a downstream access (lets the readiness gate stop waiting for a mediator
+      with no local part this step).
 
-    Only active under PP (when the engine has pinned ``_pp_forward_condition``
-    on the interleaver) and only for ``iteration >= 1`` — iteration 0 is
-    covered by the entry gate (``Mediator.start`` waits for the worker's first
-    event before the first forward fires hooks).
-
-    Two responsibilities, in order:
-
-    1. **Release the previous step.** If a value-injection ``respond`` is still
-       blocked on this worker (e.g. ``logits`` delivered inside
-       ``sample_tokens``), post a RELEASE so that ``respond`` returns and the
-       engine can sample, finish the token, and schedule the next step. Without
-       this the forward we are about to wait for would never start (the classic
-       multi-token cross-stage wedge).
-
-    2. **Hold for the next forward.** Block until this rank's forward counter
-       shows the forward for ``iteration`` has begun, so the worker never runs
-       ahead into the next step's module accesses while no forward is live
-       (which would either error "outside of interleaving" on a local access or
-       issue a doomed cross-stage pull on a remote one). The forward side
-       (``_pp_advance_forward_and_wait`` in the model runner) bumps the counter
-       and then waits for this worker to park — together a deadlock-free
-       bidirectional rendezvous.
-
-    Returns ``True`` if generation finished while waiting (caller should stop
-    iterating), else ``False``.
+    No-op outside PP.
     """
-    interleaver = mediator.interleaver
-    cond = getattr(interleaver, "_pp_forward_condition", None)
-    if cond is None or iteration < 1:
-        return False
+    mediator._pp_worker_iteration = iteration
+    mediator._gone_remote = False
+    mediator._pp_past_local = False
 
-    # 1. Free any injection respond waiting on this worker.
-    if getattr(mediator, "_respond_pending", False):
-        mediator.go_remote()
 
-    # 2. Wait until THIS mediator's request has been scheduled into the forward
-    #    for `iteration` (its (iteration+1)-th scheduling). Gating on the
-    #    mediator's own scheduled count — not a global forward count — keeps the
-    #    worker in lockstep with the forwards that actually process its request,
-    #    so it never runs ahead through pipeline bubbles into a doomed pull.
-    target = iteration + 1
-    deadline = time.monotonic() + _PP_ITER_GATE_TIMEOUT
-    with cond:
-        while (
-            getattr(mediator, "_pp_scheduled_count", 0) < target
-            and not interleaver._generation_done
-        ):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"PP iteration gate: scheduling {target} did not arrive "
-                    f"within {_PP_ITER_GATE_TIMEOUT}s (iteration={iteration}, "
-                    f"scheduled={getattr(mediator, '_pp_scheduled_count', 0)})"
-                )
-            cond.wait(timeout=remaining)
+def _pp_max_iteration(iteration_range) -> float:
+    """Highest iteration the worker will run, from an iter range.
 
-    return interleaver._generation_done
+    Used by the readiness gate to skip a forward whose iteration is past what
+    this worker ever intervenes in. Unbounded ``iter[:]`` → ``inf``.
+    """
+    if isinstance(iteration_range, slice):
+        return float("inf") if iteration_range.stop is None else iteration_range.stop - 1
+    if isinstance(iteration_range, (list, tuple)):
+        return max(iteration_range) if iteration_range else 0
+    if isinstance(iteration_range, int):
+        return iteration_range
+    return float("inf")
 
 
 class IteratorProxy:
@@ -342,6 +312,7 @@ class IteratorTracer(Tracer):
 
         mediator = self.interleaver.current
         original_iteration = mediator.iteration
+        mediator._pp_max_iteration = _pp_max_iteration(self.iteration)
 
         # Register persistent hooks that increment mediator.iteration_tracker
         # on every forward pass for every module.  These are the sole source
@@ -373,13 +344,10 @@ class IteratorTracer(Tracer):
 
                     mediator.iteration = i
 
-                    # PP per-step rendezvous (see ``execute``/do_iteration).
-                    if _pp_iteration_boundary(mediator, i):
-                        break
-
-                    # Per-step reset of the cross-stage release latch (see the
-                    # deprecated ``execute`` path for the full rationale).
-                    mediator._gone_remote = False
+                    # The worker runs ahead freely; just record the iteration
+                    # and reset the per-step PP readiness latches (the forward
+                    # waits for the worker, not vice versa). No-op outside PP.
+                    _pp_reset_iteration(mediator, i)
 
                     yield i
 
@@ -417,8 +385,8 @@ class IteratorTracer(Tracer):
 
                     mediator.iteration = i
 
-                    # Per-step reset of the cross-stage release latch.
-                    mediator._gone_remote = False
+                    # Per-step reset of the PP readiness latches.
+                    _pp_reset_iteration(mediator, i)
 
                     yield i
 
@@ -477,6 +445,7 @@ class IteratorTracer(Tracer):
         )
 
         mediator = self.interleaver.current
+        mediator._pp_max_iteration = _pp_max_iteration(self.iteration)
 
         mediator.push()
 
@@ -492,17 +461,9 @@ class IteratorTracer(Tracer):
 
             mediator.iteration = iter
 
-            # PP per-step rendezvous: release the prior step's injection respond
-            # and wait for this rank's forward `iter` to begin (iter >= 1).
-            if _pp_iteration_boundary(mediator, iter):
-                return
-
-            # Reset the cross-stage release latch each step so the FIRST
-            # PP-missing access of every generation step can emit its RELEASE.
-            # ``go_remote`` is one-shot per latch; without a per-step reset
-            # only step 0 would release and every later step would wedge the
-            # value-injection ``respond``. No-op outside PP.
-            mediator._gone_remote = False
+            # The worker runs ahead freely; record the iteration and reset the
+            # per-step PP readiness latches. No-op outside PP.
+            _pp_reset_iteration(mediator, iter)
 
             fn(mediator, self.info, iter)
 

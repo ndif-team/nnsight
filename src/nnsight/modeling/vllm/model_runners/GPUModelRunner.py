@@ -252,10 +252,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # tests/test_pp_num_tokens_unflatten.py.
                 mediator.pp_num_tokens = num_tokens
 
-                # PP rendezvous: count this mediator's own scheduled forwards.
-                # Its iteration gate releases iteration k once this reaches
-                # k+1, keeping the worker in lockstep with the forwards that
-                # actually process its request (immune to pipeline bubbles).
+                # Gate-only: count forwards that actually process this request
+                # (immune to pipeline bubbles). The readiness gate uses
+                # ``count - 1`` as the iteration THIS forward is for; the worker
+                # never waits on it.
                 mediator._pp_scheduled_count = (
                     getattr(mediator, "_pp_scheduled_count", 0) + 1
                 )
@@ -553,13 +553,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             interleaver.pp_buffer_condition = self.pp_buffer_condition
             interleaver.pp_module_meta = self.pp_module_meta
             interleaver.pp_listener = self.pp_listener
-            # Per-step bidirectional-rendezvous primitives. ``_pp_forward_count``
-            # is bumped once per forward (per rank) in ``_pp_advance_forward_and_wait``
-            # (called at the tail of ``_update_states``); workers parked at an
-            # iteration boundary gate on it via ``_pp_forward_condition`` (see
-            # ``iterator._pp_iteration_boundary``).
-            interleaver._pp_forward_count = 0
-            interleaver._pp_forward_condition = threading.Condition()
         else:
             self.pp_module_map = None
             self.pp_module_meta = {}
@@ -660,44 +653,67 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         return merged
 
-    def _pp_advance_forward_and_wait(self):
-        """Per-step bidirectional rendezvous, run at the tail of ``_update_states``.
+    def _pp_wait_for_mediators(self):
+        """The one PP sync point: hold the forward until every scheduled mediator
+        is AHEAD of it.
 
-        Runs AFTER ``process_batch_groups`` has set this step's mediators and
-        token counts, and BEFORE ``super().execute_model`` fires module hooks.
+        Run at the tail of ``_update_states`` (after ``process_batch_groups``
+        set this step's mediators, before ``super().execute_model`` fires module
+        hooks). The worker is never made to wait for the forward — it runs ahead
+        freely; only the forward waits for the worker, so a local one-shot hook
+        is always registered before the forward reaches its module (otherwise
+        the monotonic iteration tracker would advance past it and the hook would
+        never fire — a permanent hang).
 
-        1. **Advance + wake.** Bump this rank's forward counter and wake any
-           worker parked at an iteration boundary waiting for this forward to
-           begin (see ``iterator._pp_iteration_boundary``).
-        2. **Readiness gate.** Hold the forward until every scheduled mediator
-           has parked at its next access (``event_queue.has_value``) or
-           finished. A worker mid upstream-pull posts no event yet — we wait for
-           the pull to resolve on the producing rank (which runs its own forward
-           independently of this gate, so no cross-rank cycle) and the worker to
-           reach its next local access. Downstream accesses post a RELEASE
-           (``has_value`` True), so they never stall the gate; a pure-remote
-           mediator reaches END (``not alive``). Bounded so a genuine deadlock
-           errors loudly instead of hanging.
+        This forward is for iteration ``k = _pp_scheduled_count - 1`` of the
+        request. A mediator is "ahead" for it when:
 
-        Together: the boundary makes the worker wait for the forward to start,
-        and this gate makes the forward wait for the worker to park — closing
-        both the run-ahead race and the park-vs-fire race without the
-        pure-remote deadlock that sank the original one-sided readiness check.
+        - it has already moved PAST iteration ``k`` (``mediator.iteration > k``
+          — the worker ran ahead, so its iteration-``k`` hooks were registered
+          and consumed), or
+        - it is ON iteration ``k`` and has reached its local part (parked at a
+          local request, ``event_queue.has_value``) or determined it has none
+          (``_pp_past_local``), or
+        - it has finished (``not alive``).
+
+        Comparing the worker's own ``iteration`` against ``k`` is what makes the
+        per-iteration ``_pp_past_local`` / ``has_value`` flags safe to read: a
+        stale flag from a previous step is ignored because the worker has
+        advanced past ``k``, and a not-yet-started next step is correctly waited
+        on (``iteration == k`` but not yet settled). We wait while the worker is
+        still in iteration ``k``'s leading-remote phase (or lagging behind),
+        which resolves on the producing rank independently of this gate.
+        Bounded so a genuine deadlock errors loudly instead of hanging.
         """
         interleaver = self.nnsight_model.interleaver
 
-        cond = interleaver._pp_forward_condition
-        with cond:
-            interleaver._pp_forward_count += 1
-            cond.notify_all()
+        def _ahead(m, k):
+            if not m.alive:
+                return True
+            # This worker never reaches iteration k (e.g. a single-shot
+            # ``model.trace`` once the engine generates past its one
+            # intervention) — don't wait for it.
+            if k > getattr(m, "_pp_max_iteration", 0):
+                return True
+            # ``_pp_worker_iteration`` (not ``iteration``, which a one-shot hook
+            # clears to None) reliably tells which iteration the worker is on.
+            it = getattr(m, "_pp_worker_iteration", 0)
+            if it > k:
+                return True
+            return it == k and (
+                m.event_queue.has_value or getattr(m, "_pp_past_local", False)
+            )
 
         deadline = time.monotonic() + 30.0
         for mediator in list(interleaver.mediators):
-            while mediator.alive and not mediator.event_queue.has_value:
+            k = getattr(mediator, "_pp_scheduled_count", 0) - 1
+            while not _ahead(mediator, k):
                 if time.monotonic() > deadline:
                     raise TimeoutError(
-                        f"PP readiness gate: mediator {mediator.name} did not "
-                        f"park within 30s (forward {interleaver._pp_forward_count})"
+                        f"PP readiness gate: mediator {mediator.name} not ahead "
+                        f"of forward (worker_iteration="
+                        f"{getattr(mediator, '_pp_worker_iteration', 0)}, k={k}) "
+                        f"within 30s"
                     )
                 time.sleep(0.0001)
 
@@ -726,12 +742,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
             len(self.nnsight_model.interleaver.mediators) > 1
         )
 
-        # Per-step rendezvous: bump the forward counter, wake any worker parked
-        # at an iteration boundary, then hold here until every scheduled
-        # mediator has parked — all AFTER process_batch_groups above so the
-        # woken workers see this step's token counts / batch groups.
+        # The one PP sync point: hold this forward until every scheduled
+        # mediator (which runs ahead on its own) has reached its local part or
+        # determined it has none. AFTER process_batch_groups so the gate sees
+        # this step's mediators.
         if self.pp_enabled:
-            self._pp_advance_forward_and_wait()
+            self._pp_wait_for_mediators()
 
     def execute_model(
         self,

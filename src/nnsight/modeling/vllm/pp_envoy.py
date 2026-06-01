@@ -24,30 +24,28 @@ from .pp import is_pp_missing, resolve_meta
 
 
 def _pp_signal_remote(obj, key: str) -> None:
-    """Release the forward pass when this mediator reaches a *downstream*
-    cross-stage access, so it can run to completion (and perform the
-    inter-stage activation send) instead of staying frozen at the last local
-    hook while the mediator blocks on a pull the downstream rank can't satisfy
-    until this rank advances.
+    """Bookkeep a cross-stage access against the mediator's per-step lifecycle
+    ``(leading-remote)(local)(trailing-remote)``, and post a RELEASE when a main
+    thread is blocked waiting for this worker's next event.
 
-    Only **downstream** accesses (owner computes later in the pipeline) trigger
-    the release, and only once per mediator (``_gone_remote`` guard):
+    Classifying by the owning rank relative to ours:
 
-    * **Downstream** reads are last in forward-pass order, so no local hook
-      follows — releasing is safe, and necessary (the value can't exist until
-      this rank's forward finishes and sends).
-    * **Upstream** reads are produced independently by an earlier rank, so the
-      pull resolves on its own; the entry gate (``Mediator.start``'s wait for
-      the first event) already holds the forward until the mediator finishes
-      those and reaches its first local hook. Releasing on an upstream access
-      would let the forward skip that later local hook.
-
-    Subsequent PP-missing accesses skip this entirely — by then the forward
-    may have finished and closed the interleaver, and the pull rides the
-    listener thread, not the interleaver.
+    * **Downstream** (owner later in the pipeline) — this is the *trailing*
+      remote phase: it comes after the local part in forward order, so the
+      worker has no more local hooks this step. Mark ``_pp_past_local`` (the
+      readiness gate then stops waiting for it) and release the forward once
+      (``_gone_remote`` guard) so it can run to completion and perform the
+      inter-stage send the downstream rank's value depends on.
+    * **Upstream** (owner earlier) — this is the *leading* remote phase, before
+      the local part; the pull resolves independently on the producing rank, so
+      we do NOT mark past-local (a local access may still follow). We DO post a
+      RELEASE if a value-injection ``respond`` is currently blocked on this
+      worker (``_respond_pending``) — otherwise that ``respond`` wedges when the
+      worker steps into the (event-less) pull. The flag self-clears once the
+      ``respond`` returns, so this fires at most once per blocked respond.
     """
     mediator = current_mediator()
-    if mediator is None or getattr(mediator, "_gone_remote", False):
+    if mediator is None:
         return
 
     interleaver = obj.interleaver
@@ -59,11 +57,19 @@ def _pp_signal_remote(obj, key: str) -> None:
     obj_path = getattr(obj, "path", None) or ""
     lookup = f"{obj_path}.{key}" if obj_path else key
     owner = pp_map.get_owning_rank(lookup)
-    if owner is None or owner <= local_rank:
-        return  # upstream / same / unknown — do not release
+    if owner is None:
+        return
 
-    mediator._gone_remote = True
-    mediator.go_remote()
+    if owner > local_rank:
+        # Downstream / trailing remote: past the local part.
+        mediator._pp_past_local = True
+        if not mediator._gone_remote:
+            mediator._gone_remote = True
+            mediator.go_remote()
+    elif owner < local_rank:
+        # Upstream / leading remote: free a blocked injection respond only.
+        if getattr(mediator, "_respond_pending", False):
+            mediator.go_remote()
 
 
 def _is_pp_missing(obj, key: str) -> bool:
