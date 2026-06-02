@@ -297,6 +297,33 @@ class TestBatching:
         assert len(ET_logits) == 6
         assert len(MSG_logits) == 5
 
+    @torch.no_grad()
+    def test_batched_trace_shared_saves(
+        self, vllm_gpt2, ET_prompt: str, MSG_prompt: str
+    ):
+        """Regression: two invokes each appending per-step to its OWN
+        trace-frame saved list. Both lists must come back populated.
+
+        The trace-shared saves are collected on the worker from
+        ``canonical_globals`` (seeded from the first invoke's globals). A
+        saved var referenced only by a *later* invoke (``b``) is absent
+        from the first invoke's globals, so before the fix it was dropped
+        entirely (``len(b) == 0``). Same ``max_tokens`` and the ``for``
+        form keep this focused on the save-collection path.
+        """
+        with vllm_gpt2.trace(max_tokens=6) as tracer:
+            a = list().save()
+            b = list().save()
+            with tracer.invoke(ET_prompt):
+                for _ in tracer.iter[0:6]:
+                    a.append(vllm_gpt2.logits)
+            with tracer.invoke(MSG_prompt):
+                for _ in tracer.iter[0:6]:
+                    b.append(vllm_gpt2.logits)
+
+        assert len(a) == 6, f"first invoke's saved list: {len(a)}"
+        assert len(b) == 6, f"later invoke's saved list dropped: {len(b)}"
+
 
 # =============================================================================
 # Tensor Parallelism

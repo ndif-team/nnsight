@@ -151,7 +151,21 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     med_globals = mediator.intervention.__globals__
                     for name in saved_names:
                         if name in canonical:
+                            # This invoke adopts the shared canonical object so
+                            # its appends land where the collector later reads.
                             med_globals[name] = canonical[name]
+                        elif name in med_globals:
+                            # A saved var referenced ONLY by this (non-first)
+                            # invoke is absent from canonical_globals (seeded
+                            # from the first invoke's globals, which capture
+                            # only the names that invoke references). Adopt it
+                            # INTO canonical — and register it in Globals.saves —
+                            # so collect_saves, which gathers trace-shared saves
+                            # from canonical only, finds it. Without this, every
+                            # saved var used solely by a later invoke is silently
+                            # dropped (the batched multi-invoke save bug).
+                            canonical[name] = med_globals[name]
+                            Globals.saves.add(id(med_globals[name]))
 
                 ctx = self.trace_contexts[trace_id]
 
