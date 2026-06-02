@@ -70,7 +70,16 @@ The mediator wants to read `model.layers[5].output` and get the activation for i
 
 Phases 1–3 happen on every scheduler step: `execute_model` runs, then `sample_tokens` calls `_sample`. Phase 4 happens on request completion. The mediator thread persists across all of them, so its program is one continuous trace even as the engine bounces between phases.
 
-**Shape.** The interleaver delivers an activation, but what's in it? vLLM concatenates every in-flight request's scheduled tokens into a single `[total_tokens, hidden]` tensor. Chunked prefill mixes stages freely: the same axis can carry a 200-token prefill chunk from one request alongside one-token decodes from several others already in flight. For each mediator to see only its own slice, we track a *batch group*: a `[start_index, count]` window. The batcher narrows the activation to that window before the user reads `.output`, and places the modified value back when the user writes. Batch groups recompute every scheduler tick to track in-flight requests. After forward, token-level windows collapse to prompt-level (`[start, 1]`), since logits and samples have one row per request rather than per token. This is also why per-prefill-token logits aren't directly available: vLLM only computes `lm_head` on the last token (enough to sample the next one), so logits for earlier prefill positions have to be derived manually from saved hidden states. The recipe is in [`intervention-gaps/VLLM_GUIDE.md`](https://github.com/ndif-team/nnsight/blob/main/src/nnsight/modeling/vllm/intervention-gaps/VLLM_GUIDE.md).
+**Shape.** The interleaver delivers an activation, but what's in it? vLLM concatenates every in-flight request's scheduled tokens into a single `[total_tokens, hidden]` tensor. Chunked prefill mixes stages freely: the same axis can carry a 200-token prefill chunk from one request alongside one-token decodes from several others already in flight. For each mediator to see only its own slice, we track a *batch group*: a `[start_index, count]` window. The batcher narrows the activation to that window before the user reads `.output`, and places the modified value back when the user writes. Batch groups recompute every scheduler tick to track in-flight requests. After forward, token-level windows collapse to prompt-level (`[start, 1]`), since logits and samples have one row per request rather than per token. This is also why per-prefill-token logits aren't directly available: vLLM only computes `lm_head` on the last token (enough to sample the next one), so logits for earlier prefill positions have to be recomputed manually — reapply the final norm and `lm_head` to the hidden states, inside the trace (vLLM's weights live in the worker, so the call has to run there):
+
+```python
+with model.trace(prompt):
+    hs = model.model.layers[-1].output[0] + model.model.layers[-1].output[1]  # combine dual residual streams
+    normed = model.model.norm(hs)
+    if isinstance(normed, tuple):              # fused norm returns (normalized, residual)
+        normed = normed[0]
+    prefill_logits = model.lm_head(normed).save()   # logits at every prefill position
+```
 
 **Steps.** A trace doesn't run through one forward pass. It runs through prefill, then decode after decode, each one a fresh `execute_model` call. Module hooks fire once per pass, so the same `model.model.layers[5].output` line means a different tensor each step. We track which step is firing per mediator. Intervention hooks consult that counter when deciding which forward pass's value to deliver, and the user expresses "run this on each step" through `tracer.iter[:]`:
 
@@ -189,7 +198,7 @@ The integration doesn't cover everything. Some of what's missing is design work 
 - **Flat layout + inference_mode.** The activation shape is `[total_tokens, hidden]` rather than `[batch, seq, hidden]`. Position-based indexing like `[:, -1, :]` becomes `[-1, :]`. vLLM also wraps execution in `torch.inference_mode()`, which blocks gradient-based interventions (integrated gradients, GradCAM, probe training all require a different backend).
 - **Prefix caching.** vLLM amortizes work by caching KV for previously-seen sequences. When the next request shares a prefix, those tokens skip the forward pass, and module hooks never fire for them, so an intervention can't read or modify their activations. We disable prefix caching by default (`enable_prefix_caching=False`). 
 
-These are vLLM's design choices that the user inherits, and they make `model.trace` behave slightly differently on vLLM than on Hugging Face. The full inventory of differences, plus the intervention pattern for each, lives in [`intervention-gaps/REPORT.md`](https://github.com/ndif-team/nnsight/blob/main/src/nnsight/modeling/vllm/intervention-gaps/REPORT.md).
+These are vLLM's design choices that the user inherits, and they make `model.trace` behave slightly differently on vLLM than on Hugging Face. These differences, plus the intervention pattern for each, are documented in the [vLLM model doc](https://github.com/ndif-team/nnsight/blob/main/docs/models/vllm.md).
 
 **What's planned.** Several extensions are in active design:
 
