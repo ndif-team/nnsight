@@ -147,18 +147,15 @@ The 13.2x cache speedup quoted in commit logs comes from making cache hooks lazy
 
 ### Persistent iter-tracker hooks
 
-`register_iter_hooks(mediator, model)` (`src/nnsight/intervention/tracing/iterator.py:95`) registers persistent output hooks on every wrapped module when the user enters a `for step in tracer.iter[...]:` loop. Each hook does exactly:
+`register_iter_hooks(mediator, model)` (`src/nnsight/intervention/tracing/iterator.py`) registers persistent output hooks on every wrapped module when the user enters a `for step in tracer.iter[...]:` loop. Each hook does exactly:
 
 ```python
 def hook(module, _, output, _path=path):
     mediator.iteration_tracker[f"{_path}.input"] += 1
     mediator.iteration_tracker[f"{_path}.output"] += 1
-    accessor = getattr(module, "__source_accessor__", None)
-    if accessor is not None:
-        bump_source_paths(mediator, accessor)
 ```
 
-These hooks are the **single source of truth** for "which generation step is this provider on?" Every other piece of the system reads `mediator.iteration_tracker` but only the iter hooks write to it (with one exception: `Interleaver.handle(..., iterate=True)` bumps the tracker for provider-pushed values).
+These hooks are the **source of truth** for "which generation step is this *module* provider on?" Every other piece of the system reads `mediator.iteration_tracker` but only the iter hooks (and the op counters below) write to it (with one exception: `Interleaver.handle(..., iterate=True)` bumps the tracker for provider-pushed values).
 
 Why `mediator_idx = inf`:
 
@@ -167,9 +164,13 @@ Why `mediator_idx = inf`:
 
 Both `.input` and `.output` paths are bumped from a single output hook because every forward pass runs the input pre-hook chain and the output post-hook chain in lockstep — the two counters stay synchronized.
 
-`bump_source_paths` (`tracing/iterator.py:75`) walks the module's `SourceAccessor` (if any) and bumps every operation-level path, recursing through nested `OperationAccessor._source_accessor` for recursive `.source` calls. This keeps op-level iteration counters in sync with the parent module.
-
 WrapperModules (`generator`, `streamer`, `samples`, `logits`) are skipped — they don't go through PyTorch's forward dispatch on every step. Their values flow through `eproperty.provide`, which bumps the tracker via `Interleaver.handle(..., iterate=True)`.
+
+### Per-fire op counters
+
+Operation-level paths are **not** bumped by the module iter hook. An op can fire many times within one forward pass (a Mixture-of-Experts expert loop) or once across many passes, so its iteration counts **invocations**, not forward passes. `register_op_counters(mediator, accessor)` (`tracing/iterator.py`) installs a persistent counter on each operation's `post_hooks` with `mediator_idx = inf` (via `add_ordered_op_hook`, so it fires after the user's one-shot op hooks), recursing through nested `OperationAccessor._source_accessor`. Each fire bumps that op's `.input`/`.output` tracker by one.
+
+`register_iter_hooks` installs these for accessors that already exist at loop entry. A `.source` accessor built **mid-loop** is wired in by `register_counters_for_active_iters` (called from `Envoy.source` / `OperationEnvoy.source`) using `mediator._active_iter_handles` — the live handle list the `IteratorTracer` publishes for the loop's duration.
 
 ### OperationHookHandle
 

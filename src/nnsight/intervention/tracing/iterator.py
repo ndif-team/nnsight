@@ -38,13 +38,20 @@ WrapperModules (``generator``, ``streamer``, etc.) are skipped because
 they don't participate in the normal forward-pass cadence — their
 values are pushed via :meth:`eproperty.provide`, which bumps the
 tracker itself through :meth:`Interleaver.handle`.
+
+Source operations are tracked differently. An operation inside a module's
+forward can fire many times in a single forward pass (e.g. a
+Mixture-of-Experts expert loop) or once across many passes, so its
+iteration counts **invocations**, not forward passes. Per-operation
+counters (:func:`register_op_counters`) bump the tracker once per fire
+instead of once per forward; see those functions for details.
 """
 
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, List, Union
 from .base import Tracer
 from ..interleaver import Interleaver
-from ..hooks import add_ordered_hook
+from ..hooks import add_ordered_hook, add_ordered_op_hook
 
 if TYPE_CHECKING:
     from ..envoy import Envoy
@@ -72,34 +79,87 @@ class IteratorProxy:
         return IteratorTracer(iteration, self.interleaver, self.model)
 
 
-def bump_source_paths(mediator, accessor) -> None:
-    """Recursively bump iteration trackers for every operation under a SourceAccessor.
+def register_op_counters(mediator, accessor) -> List:
+    """Install per-fire counter hooks on every operation under a SourceAccessor.
 
-    Operation-level paths (e.g. ``"...attn.split_1.output"``, plus any
-    nested ``"...attn.X.Y.output"`` under recursive ``.source``) need
-    their counters advanced in lockstep with the parent module so
-    one-shot operation hooks fire on the right step. The module-level
-    iter hook (see :func:`register_iter_hooks`) calls this to walk the
-    accessor tree after every forward pass.
+    Op-iteration counts **invocations**, not forward passes: an operation
+    inside a loop (e.g. a Mixture-of-Experts expert loop) fires many times
+    within a single forward, and each fire is its own iteration. The counter
+    is a persistent ``post_hook`` registered with ``mediator_idx = inf`` so
+    (via :func:`add_ordered_op_hook`) it always fires **after** any one-shot
+    user hook for the current fire has compared against the tracker — the op
+    analog of the module iter hook's ``mediator_idx = inf``. The recursion
+    descends through ``OperationAccessor._source_accessor`` so nested
+    ``.source`` chains stay in sync.
 
-    The recursion descends through ``OperationAccessor._source_accessor``
-    so deeply nested ``.source`` chains stay in sync.
+    Because the counter is a ``post_hook``, it keeps
+    ``OperationAccessor.hooked`` True, so the op routes through
+    :func:`wrap_operation` and is counted **even on fires the user did not
+    hook** — this is what makes sparse iteration (``iter[[0, 2]]``) and
+    generation steps work, replacing the old once-per-forward bump.
+
+    Args:
+        mediator: The mediator whose ``iteration_tracker`` to bump.
+        accessor: The :class:`SourceAccessor` whose operations to count.
+
+    Returns:
+        A list of :class:`OperationHookHandle` to remove on loop exit.
     """
+    handles = []
     for op_path, op_accessor in accessor.operations.items():
-        mediator.iteration_tracker[f"{op_path}.input"] += 1
-        mediator.iteration_tracker[f"{op_path}.output"] += 1
+        # _path binds this op's path so each closure bumps its own counter.
+        # Takes (and ignores) the op value since it runs as a post_hook;
+        # returning None leaves the value unchanged.
+        def counter(value, _path=op_path):
+            mediator.iteration_tracker[f"{_path}.input"] += 1
+            mediator.iteration_tracker[f"{_path}.output"] += 1
+
+        counter.mediator_idx = float("inf")
+        handle = add_ordered_op_hook(op_accessor.post_hooks, counter)
+        handles.append(handle)
+        mediator.hooks.append(handle)
+
         if op_accessor._source_accessor is not None:
-            bump_source_paths(mediator, op_accessor._source_accessor)
+            handles.extend(
+                register_op_counters(mediator, op_accessor._source_accessor)
+            )
+
+    return handles
+
+
+def register_counters_for_active_iters(interleaver, accessor) -> None:
+    """Hook a freshly-built SourceAccessor into any in-progress iter loops.
+
+    Called from ``Envoy.source`` / ``OperationEnvoy.source`` the first time
+    an accessor is created. If a mediator is currently iterating
+    (``mediator._active_iter_handles`` is not None), its counter hooks are
+    installed on the new accessor's operations and the handles are appended
+    to that loop's handle list so they're removed when the loop exits.
+
+    Op trackers start at 0. If ``.source`` is first touched mid-loop at a
+    step N>0 of a *multi-forward* (generation) loop, that step's first op
+    access misses because the counter starts behind the loop step; touch
+    ``.source`` before the loop to avoid this. (For single-forward in-loop
+    iteration — the common MoE case — the loop is at step 0, so 0 is right.)
+    """
+    if interleaver is None:
+        return
+
+    for mediator in interleaver.mediators:
+        if mediator._active_iter_handles is not None:
+            mediator._active_iter_handles.extend(
+                register_op_counters(mediator, accessor)
+            )
 
 
 def register_iter_hooks(mediator, model) -> List:
     """Register persistent hooks that bump ``mediator.iteration_tracker``
     for every module after each forward pass.
 
-    These hooks are the single source of truth for the per-mediator
-    iteration counter used by :func:`hooks.input_hook`,
-    :func:`hooks.output_hook`, and the operation-level equivalents.
-    See the module docstring for the full architecture.
+    These module hooks are the source of truth for the per-mediator
+    iteration counter used by :func:`hooks.input_hook` and
+    :func:`hooks.output_hook`. See the module docstring for the full
+    architecture.
 
     Key properties:
 
@@ -112,28 +172,18 @@ def register_iter_hooks(mediator, model) -> List:
       single output hook.  This works because every forward pass runs
       the input pre-hook chain and the output post-hook chain in
       lockstep — the two counters stay synchronized.
-    - When the module has a :class:`SourceAccessor`, the hook also bumps
-      every operation-level path under it (recursing into nested
-      accessors for recursive ``.source``). The accessor is looked up
-      *per fire* (via ``module.__source_accessor__``), so an accessor
-      built mid-loop is picked up from its first forward pass onward.
     - WrapperModules (``generator``, ``streamer``, etc.) are skipped.
       They don't go through PyTorch's forward dispatch on every step;
       their values flow through :meth:`eproperty.provide` which bumps
       the tracker itself.
 
-    Known limitation
-    ----------------
-
-    If a :class:`SourceAccessor` is built **for the first time** in step
-    N>0 of the iter loop (i.e. the user's first ``.source`` access on
-    that module happens mid-loop), op-path trackers start at 0 instead
-    of N. The user's first hook registered against that accessor
-    captures ``iteration=N`` but checks against ``tracker[op]=0``, so
-    that one access misses. Subsequent steps work because per-fire
-    bumping advances both counters together. A future fix may seed
-    op-path trackers from the parent module's tracker at
-    ``Envoy.source`` access time.
+    Operation-level paths are **not** bumped here. They count invocations
+    (fires), not forward passes — an op may fire many times in one forward
+    (e.g. an expert loop) or once across many forwards — so they are counted
+    per-fire by the counter hooks installed via :func:`register_op_counters`,
+    which this function calls for any accessor that already exists at loop
+    entry. Accessors built later are handled by
+    :func:`register_counters_for_active_iters`.
 
     Args:
         mediator: The mediator whose tracker to increment.
@@ -141,8 +191,8 @@ def register_iter_hooks(mediator, model) -> List:
             walked to find every wrapped submodule.
 
     Returns:
-        A list of :class:`~torch.utils.hooks.RemovableHandle` objects to
-        remove in the iter loop's ``finally`` block.
+        A list of handle objects to remove in the iter loop's ``finally``
+        block (module bumpers + entry-time op counters).
     """
     handles = []
 
@@ -162,13 +212,6 @@ def register_iter_hooks(mediator, model) -> List:
             mediator.iteration_tracker[f"{_path}.input"] += 1
             mediator.iteration_tracker[f"{_path}.output"] += 1
 
-            # Op-path tracker bumping — only relevant if the module has
-            # had ``.source`` touched at some point. Looked up per fire so
-            # accessors built mid-loop are picked up.
-            accessor = getattr(module, "__source_accessor__", None)
-            if accessor is not None:
-                bump_source_paths(mediator, accessor)
-
         hook.mediator_idx = float("inf")
 
         handle = add_ordered_hook(envoy._module, hook, "output")
@@ -177,6 +220,13 @@ def register_iter_hooks(mediator, model) -> List:
         # these up if the iter loop is abandoned via an exception that
         # bypasses its own finally block.
         mediator.hooks.append(handle)
+
+        # Op counters for accessors that already exist at loop entry.
+        # Accessors built mid-loop are handled separately by
+        # ``register_counters_for_active_iters``.
+        accessor = getattr(envoy._module, "__source_accessor__", None)
+        if accessor is not None:
+            handles.extend(register_op_counters(mediator, accessor))
 
     return handles
 
@@ -229,6 +279,12 @@ class IteratorTracer(Tracer):
         # of truth for "which step am I on" inside one-shot hooks.  Removed
         # in the finally block below so they don't leak outside the loop.
         iter_handles = register_iter_hooks(mediator, self.model)
+
+        # Publish the live handle list so a `.source` first touched mid-loop
+        # can append its op counters here (see register_counters_for_active_iters).
+        # Saved/restored rather than nulled so nested iter loops compose.
+        prev_active_handles = mediator._active_iter_handles
+        mediator._active_iter_handles = iter_handles
 
         try:
             if isinstance(self.iteration, slice):
@@ -286,7 +342,10 @@ class IteratorTracer(Tracer):
         finally:
             mediator.iteration = original_iteration
 
-            # Remove the iteration-tracking hooks.
+            # Stop accepting mid-loop counter registrations, then remove the
+            # iteration-tracking hooks (module bumpers + op counters, plus any
+            # appended mid-loop for accessors built inside the loop).
+            mediator._active_iter_handles = prev_active_handles
             for handle in iter_handles:
                 handle.remove()
 
@@ -331,6 +390,9 @@ class IteratorTracer(Tracer):
         mediator.push()
 
         iter_handles = register_iter_hooks(mediator, self.model)
+
+        prev_active_handles = mediator._active_iter_handles
+        mediator._active_iter_handles = iter_handles
 
         def do_iteration(iter: int):
 
@@ -383,6 +445,7 @@ class IteratorTracer(Tracer):
         finally:
             mediator.iteration = original_iteration
 
+            mediator._active_iter_handles = prev_active_handles
             for handle in iter_handles:
                 handle.remove()
 

@@ -32,7 +32,7 @@ from .source import (
 from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.globals import Object
-from .tracing.iterator import IteratorProxy
+from .tracing.iterator import IteratorProxy, register_counters_for_active_iters
 from .tracing.tracer import InterleavingTracer, ScanningTracer
 from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
 from .hooks import (
@@ -233,7 +233,14 @@ class Envoy(Batchable):
             A :class:`SourceEnvoy` exposing operation-level access.
         """
         if self._source is None:
+            # Detect first-ever build so we can wire it into any in-progress
+            # iter loop (see register_counters_for_active_iters). The accessor
+            # is cached on the module, so "newly built" is module-global, not
+            # per-Envoy.
+            newly_built = getattr(self._module, "__source_accessor__", None) is None
             accessor = get_or_create_source_accessor(self._module)
+            if newly_built:
+                register_counters_for_active_iters(self.interleaver, accessor)
             self._source = SourceEnvoy(accessor, interleaver=self.interleaver)
         return self._source
 

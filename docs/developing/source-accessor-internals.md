@@ -174,7 +174,9 @@ Three hook lists, each with different semantics:
 
 - **`fn_hooks`** — receive the current fn, return the (possibly replaced) fn. Used by `operation_fn_hook` for recursive `.source` to substitute the AST-injected version of the op's own fn.
 - **`pre_hooks`** — receive `(args, kwargs)`, return the (possibly replaced) tuple or `None` to leave unchanged. Used by `requires_operation_input` for `.input` access.
-- **`post_hooks`** — receive the return value, return the (possibly replaced) value or `None`. Used by `requires_operation_output` for `.output` access.
+- **`post_hooks`** — receive the return value, return the (possibly replaced) value or `None`. Used by `requires_operation_output` for `.output` access. Also holds the persistent per-fire iteration counter installed by an active `tracer.iter[...]` loop (`register_op_counters`), ordered last via `mediator_idx = inf`.
+
+`pre_hooks` / `post_hooks` are kept in `mediator_idx` order by `add_ordered_op_hook` (the list analog of `add_ordered_hook` for module hooks), so per-mediator hooks fire in invoke order and the `inf` iter counter fires last.
 
 Plus `fn_replacement`, which is a one-shot replacement consumed *before* invoking the hooks. The order matters: `fn_replacement` is consumed first because clearing it later would race with the worker thread, which might set `fn_replacement` for the next forward pass while `actual_fn` is still running. See the comment in source.py:238.
 
@@ -381,7 +383,7 @@ For `model.transformer.h[0].attn.source.attention_interface_0.output.save()` ins
 2. `.attention_interface_0` returns the `OperationEnvoy` for that op.
 3. `.output` is an `eproperty` with `requires_operation_output`:
    - `requires_operation_output` runs; current_provider doesn't match; calls `operation_output_hook(mediator, self.accessor)`.
-   - `operation_output_hook` builds a one-shot closure with `iteration=0`, appends to `accessor.post_hooks`, builds an `OperationHookHandle`, appends to `mediator.hooks`.
+   - `operation_output_hook` builds a one-shot closure with `iteration=0`, tags it with `mediator_idx` and inserts it into `accessor.post_hooks` in order via `add_ordered_op_hook` (which returns the `OperationHookHandle`), and appends the handle to `mediator.hooks`.
    - `eproperty.__get__` calls `mediator.request("model.transformer.h.0.attn.attention_interface_0.output.i0")`. Worker blocks.
 4. Main thread runs the model. PyTorch enters `attn.forward`:
    - `nnsight_forward` checks `__source_accessor__`, finds it, invokes `source_accessor(module, ...)` -> the AST-rewritten fn.
@@ -395,7 +397,7 @@ For `model.transformer.h[0].attn.source.attention_interface_0.output.save()` ins
 
 ## Extension points
 
-- **Custom op-level eproperty.** Subclass `OperationEnvoy` and add new eproperties decorated with `requires_operation_input` / `requires_operation_output`, or write your own decorator that registers a hook on `accessor.pre_hooks` / `post_hooks`. Be sure to wrap the handle in `OperationHookHandle` and append to `mediator.hooks`.
+- **Custom op-level eproperty.** Subclass `OperationEnvoy` and add new eproperties decorated with `requires_operation_input` / `requires_operation_output`, or write your own decorator that registers a hook on `accessor.pre_hooks` / `post_hooks`. Tag the hook with a `mediator_idx` and register it with `add_ordered_op_hook` (which returns the `OperationHookHandle`), then append the handle to `mediator.hooks`.
 - **Alternative AST transforms.** `FunctionCallWrapper` only wraps `Call` nodes. If you want to expose other constructs (e.g. attribute reads, comprehensions), you can build a parallel `NodeTransformer` and integrate it into `convert`. The hook list pattern (`pre_hooks`/`post_hooks`/`fn_hooks`) generalizes to whatever runtime hook semantics you need.
 - **Source for non-PyTorch fns.** `convert` works on any `Callable` whose `inspect.getsource` succeeds. Use `SourceAccessor(fn, path)` directly to AST-rewrite arbitrary functions. The vLLM integration uses this to instrument scheduler-side callbacks.
 - **Forward shim integration.** If you add a new forward shim (analogous to accelerate's `_old_forward` or nnsight's `__nnsight_forward__`), extend `resolve_true_forward` to detect it. Otherwise `.source` will instrument your shim instead of the user's actual code.

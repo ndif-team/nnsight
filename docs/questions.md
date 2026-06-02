@@ -560,7 +560,7 @@ A: The resposibility of the code being interleaved with. in the case of vllm its
 ## docs/developing/source-accessor-internals.md
 
 1. The known limitation in `register_iter_hooks` (op-path trackers start at 0 if a `SourceAccessor` is built mid-loop) is called out. Is this fix planned for `refactor/transform` before merge, or is it acceptable as-is and documented for users?
-A: acceptable. 
+A: Largely fixed. Op iteration now counts invocations via per-fire counters (`register_op_counters`), and accessors built mid-loop are wired in by `register_counters_for_active_iters`. The limitation now only remains for a `.source` first touched mid-loop at step N>0 of a *multi-forward (generation)* loop; single-forward in-loop iteration (the MoE case) works.
 2. The AST rewriter strips all decorators from rewritten functions. Are there cases (e.g. `@staticmethod`, `@classmethod`) where stripping breaks behavior, and should there be a whitelist of decorators to keep?
 A: It does? can you confirm?
 3. `resolve_true_forward` checks `_old_forward` (accelerate) and `__nnsight_forward__` (nnsight). For models wrapped in `torch.compile`, is the unwrap-to-source path still functional, or does `torch.compile` need its own branch?

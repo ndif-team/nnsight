@@ -128,10 +128,10 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 
 `tracer.iter` returns an `IteratorProxy`; subscripting returns an `IteratorTracer` (`src/nnsight/intervention/tracing/iterator.py:55`). On `__iter__`:
 
-1. **Persistent iter hooks register**, one per wrapped module, with `mediator_idx = float('inf')` so they fire AFTER any intervention or cache hook (`src/nnsight/intervention/tracing/iterator.py:172`).
+1. **Persistent iter hooks register**, one per wrapped module, with `mediator_idx = float('inf')` so they fire AFTER any intervention or cache hook. **Per-fire op counters** also register on any existing `SourceAccessor`'s operations (`register_op_counters`).
 2. For each step `i`: set `mediator.iteration = i`, yield `i` to the loop body, then advance.
-3. After the body runs and the model executes for the step, the iter hooks bump `iteration_tracker[<path>.input]` and `iteration_tracker[<path>.output]` for every module — and recursively for every operation under any `SourceAccessor`.
-4. On exit (normal or exception), iter hooks are removed in `finally` and `mediator.iteration` is restored.
+3. After the body runs and the model executes for the step, the iter hooks bump `iteration_tracker[<path>.input]` and `iteration_tracker[<path>.output]` for every module. Source **operations** are bumped separately — once per invocation by their op counter, not once per forward — so an op that loops within a forward gets a distinct `iter[i]` per fire.
+4. On exit (normal or exception), iter hooks and op counters are removed in `finally` and `mediator.iteration` is restored.
 
 `tracer.all()` is implemented as `tracer.iter[:]` (`src/nnsight/intervention/tracing/tracer.py:457`).
 
@@ -140,7 +140,8 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 - **`tracer.iter[:]` and `tracer.all()` are unbounded — code AFTER the loop is skipped.** The unbounded iterator never receives a "stop" signal once generation finishes; it sits waiting for the next iteration that never comes. nnsight emits a warning, but the lines after the loop never execute. Either pass the input to a separate empty `tracer.invoke()` after the loop, use bounded iteration (`tracer.iter[:N]`), or use `tracer.next()`. See [docs/gotchas/iteration.md](../gotchas/iteration.md).
 - **Iter loops cannot be entered with `with`.** `with tracer.iter[...]:` is deprecated and emits a `DeprecationWarning`. Always use `for step in tracer.iter[...]:` (`src/nnsight/intervention/tracing/iterator.py:320`).
 - **Negative iteration values raise `ValueError`** — there is no "last step" shorthand.
-- **First-time `.source` access mid-loop misses one step.** If the first ever `.source` access on a module happens at step N>0, that step's operation hooks miss because the operation tracker is still at 0. Touch `.source` before the loop. See [source.md § Gotchas](source.md#gotchas).
+- **`iter[i]` over a source op counts invocations, not forward passes.** An op that loops within one forward (e.g. an MoE expert loop) is indexed per fire (`0, 1, 2, …`); an op that fires once per forward is indexed per generation step, same as a module.
+- **First-time `.source` access mid-loop only misses a step in *generation* loops.** If the first ever `.source` access on a module happens at step N>0 of a multi-forward loop, that step's operation hooks miss because the op counter starts at 0. Touch `.source` before the loop. Single-forward in-loop iteration is unaffected. See [source.md § Gotchas](source.md#gotchas).
 - **`WrapperModule`s (e.g. `generator`, `streamer`) are skipped** by the iter hooks. Their values are pushed via `eproperty.provide`, which bumps the tracker itself.
 - **`module.next()` is deprecated; prefer `tracer.next()`.** `model.transformer.h[-1].next()` still works but emits `DeprecationWarning` (`src/nnsight/intervention/envoy.py:440`). The behavior is identical — both bump the same `mediator.iteration`.
 - **`.next()` only advances the iteration counter.** It does not block until the model has actually run that step. The model still runs forward in lockstep with hook resolution; `.next()` just tells the mediator which step's hooks to register next.

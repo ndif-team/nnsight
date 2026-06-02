@@ -5,6 +5,7 @@ These tests exercise iteration boundaries that aren't covered by the
 class in ``test_source.py``:
 
 A. Recurrent inner modules called multiple times per outer step
+A2. Source operation looped within a single forward pass (MoE-style)
 B. Branching modules where a sub-module isn't called on some steps
 C. ``tracer.iter[N]`` past the actual generation length
 D. ``tracer.iter[:]`` (unbounded) trailing-code skip
@@ -53,6 +54,35 @@ class RecurrentInner(nn.Module):
         return x
 
 
+class SourceOpLoop(nn.Module):
+    """A module whose forward loops over an internal *operation* — a method
+    call, not a submodule — N times within a SINGLE forward pass.
+
+    This mirrors a Mixture-of-Experts expert loop (e.g. OLMoE), where the
+    interesting op fires many times inside one forward. Unlike a repeated
+    submodule (see :class:`RecurrentInner`), there is only one forward pass,
+    so the op's iteration counts *invocations* and is advanced by the
+    per-fire op counter, not the per-forward module hook. Each iteration's
+    value is distinct (``+ i``) so per-invocation capture can be verified.
+
+    Source op name for ``self.step(x, i)`` is ``self_step_0``.
+    """
+
+    def __init__(self, dim: int = 4, inner_calls: int = 5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(dim, dim))
+        self.inner_calls = inner_calls
+
+    def step(self, x, i):
+        return x @ self.weight + i
+
+    def forward(self, x):
+        out = torch.zeros_like(x)
+        for i in range(self.inner_calls):
+            out = out + self.step(x, i)
+        return out
+
+
 class Branched(nn.Module):
     """Conditional path — only one of the two sub-modules fires."""
 
@@ -76,6 +106,12 @@ class Branched(nn.Module):
 def recurrent_model(device: str):
     torch.manual_seed(0)
     return NNsight(RecurrentInner(dim=4, inner_calls=3)).to(device)
+
+
+@pytest.fixture
+def source_op_loop_model(device: str):
+    torch.manual_seed(0)
+    return NNsight(SourceOpLoop(dim=4, inner_calls=5)).to(device)
 
 
 @pytest.fixture
@@ -153,6 +189,107 @@ class TestRecurrentInnerIter:
 
         # Final output should differ because the 3rd call sees zeros as input
         assert not torch.allclose(baseline_out, modified_out)
+
+
+# ---------------------------------------------------------------------------
+# A2. Source operation looped within a SINGLE forward pass (MoE-style)
+# ---------------------------------------------------------------------------
+
+
+class TestSourceOpLoopIter:
+    """``tracer.iter[...]`` over a ``.source`` op that loops inside one forward.
+
+    Unlike :class:`TestRecurrentInnerIter` (a submodule called N times = N
+    forward passes), here a single forward pass invokes the source op
+    ``self_step_0`` ``inner_calls`` times. Op iteration counts invocations,
+    advanced per-fire by the op counter installed by the iter loop — so the
+    valid indices are 0..inner_calls-1 within one ``trace()``.
+    """
+
+    @torch.no_grad()
+    def test_iter_source_op_all_invocations(
+        self, source_op_loop_model: NNsight, small_input: torch.Tensor
+    ):
+        """``iter[:5]`` captures all 5 in-forward op invocations, in order.
+
+        ``.source`` is first touched *inside* the loop, so its accessor is
+        built mid-loop and wired in via ``register_counters_for_active_iters``.
+        """
+        m = source_op_loop_model
+        captured = []
+        with m.trace(small_input) as tracer:
+            captured = list().save()
+            for step in tracer.iter[:5]:
+                captured.append(m.source.self_step_0.output.clone())
+
+        assert len(captured) == 5
+        # step(x, i) == x @ weight + i, so each invocation differs by exactly i.
+        base = captured[0]
+        for i, t in enumerate(captured):
+            assert torch.allclose(t, base + i)
+
+    @torch.no_grad()
+    def test_iter_source_op_sparse(
+        self, source_op_loop_model: NNsight, small_input: torch.Tensor
+    ):
+        """``iter[[0, 2, 4]]`` captures only those invocations — but the
+        counter must still advance on the *unhooked* fires (1, 3) for index 2
+        and 4 to match. This is the case that requires the counter to fire on
+        every invocation, not just observed ones.
+        """
+        m = source_op_loop_model
+        with m.trace(small_input) as tracer:
+            captured = list().save()
+            for step in tracer.iter[[0, 2, 4]]:
+                captured.append((step, m.source.self_step_0.output.clone()))
+
+        assert [s for s, _ in captured] == [0, 2, 4]
+        base = captured[0][1]
+        for step, t in captured:
+            assert torch.allclose(t, base + step)
+
+    @torch.no_grad()
+    def test_iter_source_op_specific_invocation(
+        self, source_op_loop_model: NNsight, small_input: torch.Tensor
+    ):
+        """``iter[2]`` fires on the 3rd invocation of the op."""
+        m = source_op_loop_model
+        with m.trace(small_input) as tracer:
+            captured = list().save()
+            for step in tracer.iter[2]:
+                captured.append(m.source.self_step_0.output.clone())
+        assert len(captured) == 1
+
+    @torch.no_grad()
+    def test_iter_source_op_built_pre_loop(
+        self, source_op_loop_model: NNsight, small_input: torch.Tensor
+    ):
+        """Touching ``.source`` before the loop (accessor exists at entry, so
+        counters register via ``register_iter_hooks``) also captures all 5.
+        """
+        m = source_op_loop_model
+        m.source  # build accessor pre-loop
+        with m.trace(small_input) as tracer:
+            captured = list().save()
+            for step in tracer.iter[:5]:
+                captured.append(m.source.self_step_0.output.clone())
+        assert len(captured) == 5
+
+    @torch.no_grad()
+    def test_iter_source_op_modify_specific_invocation(
+        self, source_op_loop_model: NNsight, small_input: torch.Tensor
+    ):
+        """Modifying one invocation's op output changes the final result."""
+        m = source_op_loop_model
+        with m.trace(small_input):
+            baseline = m.output.clone().save()
+
+        with m.trace(small_input) as tracer:
+            for step in tracer.iter[2]:
+                m.source.self_step_0.output[:] = 0
+            modified = m.output.clone().save()
+
+        assert not torch.allclose(baseline, modified)
 
 
 # ---------------------------------------------------------------------------
