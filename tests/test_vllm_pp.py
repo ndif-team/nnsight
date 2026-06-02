@@ -2,7 +2,7 @@ import inspect
 import threading
 import time
 from collections import defaultdict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -119,6 +119,75 @@ class TestPPListener:
 
         with pytest.raises(TimeoutError):
             listener.local_lookup("missing.key", timeout=0.1)
+
+    def test_concurrent_pulls_routed_by_tag(self):
+        """Many consumer threads pulling at once each get exactly their own
+        reply — routed by the per-pull response tag, with no lock.
+
+        gloo routes point-to-point traffic by ``(peer, tag)``, never by content,
+        so concurrent consumers can only be disambiguated by giving each pull its
+        own response tag (carried in the request). This drives N real threads
+        through ``pull_from_remote`` with a mocked ``dist`` standing in for a
+        producer that serves replies **out of arrival order**: the request send
+        records the per-pull tag → expected value, and the response recv fills
+        the buffer with the value for *that tag*. The test asserts every caller
+        gets its own value back. If responses ever shared one tag (the old bug),
+        the mock could not tell them apart and the values would cross.
+        """
+        N = 12
+        prov = "decoder.blocks.7.output.i0"          # non-standard naming on purpose
+        mod = "decoder.blocks.7"
+        # Precomputed-path metadata so each response is a single flat recv.
+        meta_map = {mod: {"dtype": torch.float32, "module_shapes": [(1,)], "num_outputs": 1}}
+        listener = PPListener(
+            buffer={}, condition=threading.Condition(), pull_group=MagicMock(),
+            local_rank=0, device=torch.device("cpu"), meta_map=meta_map,
+        )
+
+        import nnsight.modeling.vllm.pp_listener as L
+
+        pending = {}                     # response_tag -> value the producer will return
+        request_tags = []                # every tag seen on a request send
+        lock = threading.Lock()
+
+        def fake_send(tensor, group=None, group_dst=None, tag=None):
+            if tag == L.TAG_REQUEST:
+                _rank, rtag, _hnt, key = L._decode_request(tensor)
+                idx = int(key.split("|", 1)[0][3:])     # "req<idx>" -> idx
+                with lock:
+                    pending[rtag] = float(idx)
+                    request_tags.append(rtag)
+
+        def fake_recv(tensor, group=None, group_src=None, tag=None):
+            # Precomputed path: one flat recv on the pull's private tag.
+            with lock:
+                val = pending.get(tag)
+            assert val is not None, f"recv on tag {tag!r} with no matching request"
+            tensor.fill_(val)
+
+        fake_dist = MagicMock()
+        fake_dist.send.side_effect = fake_send
+        fake_dist.recv.side_effect = fake_recv
+
+        got = {}
+
+        def pull(i):
+            out = listener.pull_from_remote(
+                source_rank=1, provider_string=prov, num_tokens=1, req_id=f"req{i}",
+            )
+            got[i] = float(out.reshape(-1)[0].item())
+
+        with patch.object(L, "dist", fake_dist):
+            threads = [threading.Thread(target=pull, args=(i,)) for i in range(N)]
+            for t in threads: t.start()
+            for t in threads: t.join(timeout=5.0)
+            assert all(not t.is_alive() for t in threads)
+
+        # Every caller got ITS OWN value — no cross-delivery.
+        assert got == {i: float(i) for i in range(N)}, got
+        # Each pull used a distinct response tag, all ≥ base, none aliasing TAG_REQUEST.
+        assert len(set(request_tags)) == N, request_tags
+        assert all(t >= L.TAG_RESPONSE_BASE for t in request_tags)
 
 
 class TestEnvoyPPMissingShortCircuit:
