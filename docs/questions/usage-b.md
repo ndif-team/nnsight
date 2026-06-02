@@ -5,7 +5,7 @@
 2. Should the index group by category (as I did) or be a flat alphabetical list? I went with category headings since this is the routing surface for AI agents.
 
 ## docs/usage/source.md
-1. The "first-time `.source` access mid-iter-loop misses one step" limitation has a noted future fix ("seed op-path trackers from the parent module's tracker at `Envoy.source` access time"). If that lands before docs ship, this gotcha goes away — flag for re-check before release.
+1. The "first-time `.source` access mid-iter-loop misses one step" limitation is now largely fixed — but not via the originally-noted seeding approach. Op iteration counts invocations via per-fire counters (`register_op_counters`), and accessors built mid-loop are wired in by `register_counters_for_active_iters` (no seeding). The gotcha now only applies to a `.source` first touched mid-loop at step N>0 of a *multi-forward (generation)* loop; single-forward in-loop iteration works. Docs updated accordingly.
 2. `SourceAccessor.__iter__` deduplicates by line number, so if two operations sit on the same line only the first is yielded by iteration but both are still callable by name. I didn't surface this — confirm that's the right call or whether it deserves a one-line note.
 3. Operation naming uses `_<index>` to disambiguate repeated calls. I gave the rule but didn't enumerate every edge case (e.g. attribute chains like `self.a.b.c(...)` flatten to `self_a_b_c_0`). Worth a more exhaustive table?
 

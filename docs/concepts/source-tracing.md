@@ -199,9 +199,13 @@ The fn-hook + swap dance is critical: by the time the user accesses `.source`, t
 
 ## Iteration tracking for source
 
-The persistent iter-tracker hooks (registered by `IteratorTracer`) bump operation-level paths in lockstep with the parent module via `bump_source_paths` (`tracing/iterator.py:75`). The recursion descends through `OperationAccessor._source_accessor` so deeply nested `.source` chains stay in sync.
+Operation iteration counts **invocations (fires)**, not forward passes. An op inside a loop (e.g. a Mixture-of-Experts expert loop) fires many times within one forward pass, and each fire is its own `iter[...]` index; an op that fires once per forward (across generation steps) counts the same as the module. This differs from module-level tracking, which is bumped once per forward pass.
 
-**Known limitation**: if a `SourceAccessor` is built for the first time mid-iter-loop (step N>0), op-path trackers start at 0 instead of N — the user's first hook captures `iteration=N` but checks against `tracker[op]=0`, so that one access misses. Subsequent steps work because per-fire bumping advances both counters together.
+The counting is done by **per-fire counter hooks** (`register_op_counters`, `tracing/iterator.py`). When an iter loop is entered, a persistent counter is installed on every operation's `post_hooks` with `mediator_idx = float('inf')` — the op analog of the module iter hook — so (via `add_ordered_op_hook`) it always fires *after* the user's one-shot op hooks have compared against the tracker, then advances it. Because the counter is a `post_hook`, the op stays `hooked` and is counted **even on fires the user didn't observe** (so sparse `iter[[0, 2]]` and skipped generation steps stay aligned). The recursion descends through `OperationAccessor._source_accessor` so nested `.source` chains stay in sync.
+
+Accessors that already exist at loop entry get their counters from `register_iter_hooks`; accessors built **mid-loop** (first `.source` access inside the loop) are wired in by `register_counters_for_active_iters` via `mediator._active_iter_handles`.
+
+**Narrow remaining limitation**: if `.source` is first built mid-loop at step N>0 of a *multi-forward* (generation) loop, that step's first op access can miss because the counter starts at 0 rather than N. Touch `.source` before the loop to avoid it. (Single-forward in-loop iteration — the common MoE case — is at step 0, so this doesn't arise.)
 
 ## Lifetimes
 
@@ -216,10 +220,11 @@ The persistent iter-tracker hooks (registered by `IteratorTracer`) bump operatio
 - **Forward must be a real Python function.** `inspect.getsource` is required. Compiled extensions (custom CUDA kernels exposed as functions) won't work.
 - **Decorators on the forward are stripped.** This is intentional — re-executing a decorator outside its class context can fail (e.g. transformers' `@auto_docstring`). If a decorator was load-bearing (changing behavior beyond docstrings), source tracing will diverge from the original.
 - **Operation names depend on parsing.** `self.c_proj(x)` becomes `self_c_proj_0`. If the module's source changes (e.g. a transformers version bump renames an internal call), the operation name changes too.
-- **First-time source accessor mid-iter-loop misses one step** (see Known limitation above). Build accessors before entering the loop if you need step 0 — usually by accessing `.source` once before `for step in tracer.iter[:]`.
+- **`iter[i]` over a source op counts invocations, not forward passes.** An op that loops within one forward is indexed `0, 1, 2, …` per fire (see [Iteration tracking for source](#iteration-tracking-for-source)).
+- **Mid-loop first-`.source` access only misses a step in *generation* loops** (step N>0); single-forward in-loop iteration is unaffected. Touch `.source` before the loop if you hit this.
 
 ## Related
 
 - [Envoy and eproperty](envoy-and-eproperty.md) — `OperationEnvoy` is an `IEnvoy` like `Envoy`.
 - [Interleaver and Hooks](interleaver-and-hooks.md) — operation hook registration and `OperationHookHandle`.
-- Source: `src/nnsight/intervention/source.py` (full module), `src/nnsight/intervention/hooks.py` (`operation_input_hook`, `operation_output_hook`, `operation_fn_hook`, `requires_operation_*`), `src/nnsight/intervention/tracing/iterator.py` (`bump_source_paths`).
+- Source: `src/nnsight/intervention/source.py` (full module), `src/nnsight/intervention/hooks.py` (`operation_input_hook`, `operation_output_hook`, `operation_fn_hook`, `requires_operation_*`, `add_ordered_op_hook`), `src/nnsight/intervention/tracing/iterator.py` (`register_op_counters`, `register_counters_for_active_iters`).
