@@ -151,6 +151,8 @@ with model.trace("The Eiffel Tower is in", temperature=0.0, top_p=1) as tracer:
 print(model.tokenizer.decode(logits.argmax(dim=-1)))
 ```
 
+Assign through `.output` to replace a value — do **not** write in place (`output[...] = ...`), which raises on vLLM's inference-mode tensors. For decoder layers (which return a `(stream, residual)` tuple), ablation, steering, logit lens, and patching, see [Intervention recipes](#intervention-recipes) below.
+
 ### Continuous batching: invoke loop
 
 vLLM batches requests at the engine level. Each `tracer.invoke(prompt)` becomes **one** vLLM request (one prompt per invoke is enforced by `_prepare_input` at `vllm.py:266`). Multiple invokes within a single trace are submitted as separate requests but processed together by vLLM's continuous batcher.
@@ -295,9 +297,9 @@ See `vllm/README.md:629` for the full Ray section, and `vllm/examples/multi_node
 The Envoy tree mirrors vLLM's internal model layout. For Llama-style models you'll typically write:
 
 ```python
-model.model.layers[i].self_attn.qkv_proj.output       # ColumnParallelLinear
+model.model.layers[i].self_attn.qkv_proj.output       # ColumnParallelLinear (merged Q,K,V)
 model.model.layers[i].self_attn.o_proj.output         # RowParallelLinear
-model.model.layers[i].mlp.gate_up_proj.output         # ColumnParallelLinear
+model.model.layers[i].mlp.gate_up_proj.output         # ColumnParallelLinear (merged gate,up)
 model.model.layers[i].mlp.down_proj.output            # RowParallelLinear
 model.model.norm.output
 ```
@@ -311,16 +313,107 @@ model.transformer.h[i].mlp.output
 
 Print `model` to see the actual tree for your model.
 
+#### What each module returns
+
+vLLM's fused kernels, dual residual stream, and tensor-parallel layers change what a module returns relative to HuggingFace. Reading the wrong thing usually **runs without error but is silently wrong**, so check this before intervening:
+
+| Access | Returns | Read it as |
+|--------|---------|-----------|
+| `model.model.layers[i].output` | `(sub_layer_output, residual)` 2-tuple — **not** a combined hidden state | full residual stream = `output[0] + output[1]` |
+| `model.model.layers[i].input` | int64 **position IDs** (the first positional arg) | hidden states are `.inputs[0][1]` (args[1]); residual is `args[2]` |
+| `model.model.norm.output` / any fused RMSNorm | `(normalized, residual)` 2-tuple | `norm.output[0]` |
+| `o_proj` / `down_proj` `.output` (`RowParallelLinear`) | `(output, bias)` 2-tuple | `.output[0]` |
+| `qkv_proj` / `gate_up_proj` `.output` (merged) | one concatenated tensor | `q, k, v = out.split([q_size, kv_size, kv_size], dim=-1)` / `gate, up = out.chunk(2, dim=-1)` — the separate `q_proj`/`gate_proj`/… don't exist |
+| any activation | flat `[total_tokens, hidden]` — **no batch dimension** | select the last token with `[-1, :]`, not `[:, -1, :]` |
+
+The dual residual stream is the most common trap: a decoder layer keeps `hidden_states` and `residual` as **separate** tensors (the next layer's fused `add_rms_norm` operates on their sum), so `layer.output[0]` alone is just one stream. Tensor parallelism stays transparent here — sub-module reads (`qkv_proj`, etc.) return the **full gathered** tensor at any `tensor_parallel_size`, not a shard.
+
+## Intervention recipes
+
+The vLLM-specific parts of every recipe below are the same two facts: outputs are read-only (clone-and-replace, never mutate in place) and decoder layers carry a `(stream, residual)` tuple. The research methodology is identical to `LanguageModel` — see the [patterns cookbook](../patterns/index.md).
+
+### Writing activations — replace, don't mutate in place
+
+vLLM executes inside `torch.inference_mode()`, so module outputs are **read-only**: an in-place write (`layer.output[0][:] = 0`, `+=`, …) raises `RuntimeError: Inplace update to inference tensor outside InferenceMode is not allowed`. Clone, mutate the clone, and assign the whole value back through `.output`:
+
+```python
+import torch
+
+with model.trace("The Eiffel Tower is in the city of", temperature=0.0, top_p=1):
+    # Ablate a decoder layer — zero BOTH streams (zeroing one leaves the residual)
+    layer = model.model.layers[6]
+    layer.output = (torch.zeros_like(layer.output[0]),
+                    torch.zeros_like(layer.output[1]))
+
+with model.trace("The Eiffel Tower is in the city of", temperature=0.0, top_p=1):
+    # Steer the residual stream at the last token
+    layer = model.model.layers[10]
+    res = layer.output[1].clone()
+    res[-1, :] += steering_vector            # [hidden], matching dtype/device
+    layer.output = (layer.output[0], res)
+```
+
+### Logit lens
+
+vLLM runs `lm_head` only on each request's **final token**, and `lm_head` is a `VocabParallelEmbedding` (an embedding table) — calling `model.lm_head(hidden)` does an index gather and crashes the engine. To read logits at an earlier layer or position, apply the final norm and unembed **inside the trace** with an explicit matmul against `lm_head.weight`:
+
+```python
+with model.trace("The Eiffel Tower is in the city of", temperature=0.0, top_p=1):
+    layer = model.model.layers[6]
+    hs = layer.output[0] + layer.output[1]            # combined residual stream
+    normed = model.model.norm(hs)                      # final RMSNorm; a tensor when called with one arg
+    if isinstance(normed, tuple):
+        normed = normed[0]
+    lens_logits = normed @ model.lm_head.weight.T      # [tokens, vocab] — do NOT call lm_head(...)
+    top = lens_logits[-1].argmax(dim=-1).save()
+```
+
+Applied at the **last** layer this reproduces `model.logits` exactly. Reference `lm_head.weight` inside the matmul; don't `.save()` the parameter itself (saving the wrapped Parameter fails to serialize).
+
+### Activation patching across prompts
+
+vLLM's scheduler doesn't guarantee any execution order across invokes, so the robust way to copy an activation from one prompt into another is **two separate traces** — the second reuses the first's saved tensor:
+
+```python
+# 1. extract the clean activation
+with model.trace("The Eiffel Tower is in the city of", temperature=0.0, top_p=1):
+    clean = (model.model.layers[5].output[0] + model.model.layers[5].output[1])[-1, :].save()
+
+# 2. patch it into the other prompt (separate trace = deterministic ordering)
+with model.trace("The Colosseum is in the city of", temperature=0.0, top_p=1):
+    layer = model.model.layers[5]
+    h0, h1 = layer.output[0].clone(), layer.output[1].clone()
+    h0[-1, :] = clean.to(h0.device)        # put the clean vector in one stream...
+    h1[-1, :] = 0                          # ...and zero the other so the sum equals `clean`
+    layer.output = (h0, h1)
+    logits = model.logits.save()
+```
+
+A shared trace-scope list that each invoke `.append`s to works fine within one trace; it's ordered *value passing between* invokes that two traces make reliable.
+
+### Activation caching with `tracer.cache()`
+
+`tracer.cache()` works on the vLLM path — it hooks each target module and collects activations into a `CacheDict` keyed by Envoy path:
+
+```python
+with model.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=8) as tracer:
+    cache = tracer.cache(modules=[model.model.layers[6]]).save()
+
+entry = cache["model.model.layers.6"]
+```
+
+A module that fires on prefill **and** each decode step yields a **list** of `Entry` objects; sum the dual streams (`e.output[0] + e.output[1]`) and concatenate across entries for every captured token. `include_inputs=`, `device=`, and `dtype=` work as in [cache](../usage/cache.md).
+
 ## Limitations
 
 - **`enforce_eager=True` is forced.** vLLM's CUDA graph optimization is incompatible with arbitrary PyTorch hooks. This costs you some throughput on decode-heavy workloads (see `DISCUSSION.md` for context).
 - **Pipeline parallelism (PP > 1) is not supported.** A single mediator thread can't span multiple PP stages because each stage has only its own modules. Future work — see `IDEAS.md`.
 - **One prompt per invoke.** Unlike `LanguageModel`, you cannot pass `tracer.invoke(["a", "b"])`. Each invoke = one vLLM request. Use a loop of invokes for multiple prompts (`vllm.py:267`).
 - **No backward / gradients.** Backward tracing is not supported in vLLM workers (`IDEAS.md`).
-- **No `.scan()`, no `tracer.cache()`, no module editing yet.** These work at the tracing layer but haven't been validated on the vLLM path. See `IDEAS.md` for the parity gap table.
+- **No `.scan()` or module editing yet.** These work at the tracing layer but haven't been validated on the vLLM path. See `IDEAS.md` for the parity gap table. (`tracer.cache()` **is** supported — see [Intervention recipes](#intervention-recipes).)
 - **No source tracing on fused CUDA kernels.** vLLM uses custom CUDA ops for attention and other hot paths; `.source` only works on Python-level forward methods.
 - **Multi-tenant isolation is on you.** `Globals.saves` is process-global. For multi-user serving with isolation, use NDIF or build your own layer.
-- **Version sensitivity.** Currently pinned to vLLM 0.15.1, Ray 2.53.0, grpcio 1.76.0. The Ray actor workaround is a vLLM-version-specific hack.
+- **Version sensitivity.** Currently developed against vLLM 0.19.1. The Ray actor workaround is a vLLM-version-specific hack.
 - **vLLM v1 only.** The integration targets vLLM's v1 architecture (the `AsyncLLM` import path is `vllm.v1.engine.async_llm`).
 - **Multi-modal models are not yet integrated.** vLLM supports VLMs but the NNsight `VLLM` wrapper is text-only for now (`IDEAS.md`).
 
@@ -352,6 +445,12 @@ Print `model` to see the actual tree for your model.
 - **`gpu_memory_utilization` defaults to 0.9.** For small models or shared GPUs, lower it explicitly. The test suite uses `0.1`.
 - **CUDA graphs are not the only thing forbidden.** Speculative decoding, custom CUDA samplers, and certain attention backends may also break hooks. Stick with the default attention backend if interventions misbehave.
 - **Async streaming saves are collected only when `output.finished == True`.** As of `async_backend.py:77`, `__aiter__` calls `collect_nnsight` on the final output only — intermediate yields don't trigger collection. If you want per-step saves, accumulate them inside `tracer.iter[:]` (saves end up on the final output's `.saves`).
+- **Outputs are read-only — replace, don't mutate.** In-place writes (`layer.output[0][:] = ...`) raise `RuntimeError: Inplace update to inference tensor...`. Clone and assign through `.output`. See [Intervention recipes](#intervention-recipes).
+- **`.save()` is mutation-safe.** vLLM's fused kernels mutate buffers in place after hooks fire; `.save()` auto-clones inference-mode tensors so the value you keep isn't corrupted by later ops (`intervention/tracing/globals.py`). No-op on the HF path.
+- **Prefix caching is off by default.** `VLLM(...)` sets `enable_prefix_caching=False` (`vllm.py`) so interventions see every token — with it on, tokens served from a cached prefix skip the forward pass and your hooks silently don't fire. Only pass `enable_prefix_caching=True` if you don't hook prefill tokens.
+- **Errors don't kill the engine.** An exception inside a trace (e.g. a bad layer index) is deferred and surfaced at the trace boundary; the engine survives and subsequent traces work. `tracer.stop()` similarly only stops the calling invoke.
+- **No attention weights.** PagedAttention runs in C/CUDA, so there's no Python-level attention-weight tensor — attention-pattern / head-knockout patterns aren't available (use `LanguageModel`).
+- **vLLM ≠ transformers numerically.** Fused kernels, quantization defaults, and batching make outputs differ from `LanguageModel` for the same input. Compare intervention *effects* (deltas from a baseline), not absolute values.
 
 ## Future work (NOT yet supported)
 
@@ -359,7 +458,6 @@ The vLLM integration's `IDEAS.md` lists features explicitly **not** implemented 
 
 - **Pipeline parallelism (PP > 1)** — needs per-stage mediator copies and rank-guarded interventions
 - **Scan mode** — works at the tracing layer, hasn't been wired to vLLM
-- **`tracer.cache()`** — same
 - **Module renaming** — config forwarding only
 - **Model editing (`model.edit()`)** — Envoy already wraps the model, but persistence isn't tested
 - **Module skipping (`module.skip(...)`)** — needs testing with flat tensor format
