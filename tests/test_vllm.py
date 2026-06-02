@@ -282,16 +282,27 @@ class TestBatching:
     def test_batched_multi_token_with_iter(
         self, vllm_gpt2, ET_prompt: str, MSG_prompt: str
     ):
-        """Test batched generation with different iteration ranges."""
-        with vllm_gpt2.trace(max_tokens=10) as tracer:
+        """Test batched generation with different iteration ranges.
+
+        Greedy decoding (``temperature=0.0``) keeps the iteration counts
+        deterministic: under sampling the longer invoke can hit
+        ``<|endoftext|>`` early and stop before its iteration range completes
+        (this is what made the test flaky). Uses the supported
+        ``for step in tracer.iter[...]`` form (``with tracer.iter[...]`` is
+        deprecated) and declares the saved lists in the trace body before the
+        invokes — a list ``.save()``-ed inside an ``invoke`` block is not
+        reliably pushed back to the caller's frame under pytest.
+        """
+        with vllm_gpt2.trace(max_tokens=10, temperature=0.0, top_p=1) as tracer:
+            ET_logits = list().save()
+            MSG_logits = list().save()
+
             with tracer.invoke(ET_prompt):
-                ET_logits = list().save()
-                with tracer.iter[1:7]:
+                for _ in tracer.iter[1:7]:
                     ET_logits.append(vllm_gpt2.logits)
 
             with tracer.invoke(MSG_prompt, max_tokens=5):
-                MSG_logits = list().save()
-                with tracer.iter[:5]:
+                for _ in tracer.iter[:5]:
                     MSG_logits.append(vllm_gpt2.logits)
 
         assert len(ET_logits) == 6
