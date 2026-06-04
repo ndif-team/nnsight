@@ -260,6 +260,26 @@ def register_iter_hooks(mediator, model) -> List:
         # hook closure captures its own path rather than sharing the
         # loop variable.
         def hook(module, _, output, _path=path):
+            # Bump this mediator's tracker only when the CURRENT forward is
+            # processing this mediator's request. The persistent hook fires on
+            # every forward through the module (request-blind). In non-PP all
+            # requests share one forward, so every mediator bumps once and the
+            # counters stay in sync. Under PP, requests run as SEPARATE forwards
+            # (microbatches); without this guard a mediator's tracker would also
+            # count OTHER requests' forwards and desync from ``mediator.iteration``
+            # — the one-shot intervention hook (which captures ``mediator.iteration``
+            # but fires on ``iteration_tracker[path] == iteration``) would then
+            # never match, so the value is never produced and a cross-stage pull
+            # hangs (the multinode batched cross-stage deadlock). ``interleaver``
+            # ``.mediators`` is the current forward's scheduled batch. Guard is
+            # PP-only so non-PP behavior is byte-identical.
+            interleaver = mediator.interleaver
+            if (
+                getattr(interleaver, "pp_enabled", False)
+                and mediator not in interleaver.mediators
+            ):
+                return
+
             mediator.iteration_tracker[f"{_path}.input"] += 1
             mediator.iteration_tracker[f"{_path}.output"] += 1
 

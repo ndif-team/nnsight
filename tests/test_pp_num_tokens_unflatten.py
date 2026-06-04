@@ -38,9 +38,9 @@ Helper = NNsightGPUModelRunner.NNsightRequestHelper
 class _Med:
     """Stand-in for a Mediator: only the attributes the helper touches.
 
-    Mirrors the real ``Mediator``'s unconditionally-initialized PP gate
-    field ``_pp_scheduled_count`` (set to 0 in ``Mediator.__init__``); the
-    helper increments it per scheduled step via direct attribute access.
+    Mirrors the real ``Mediator``'s unconditionally-initialized PP gate field
+    ``_pp_scheduled_count`` (0 in ``Mediator.__init__``); the helper increments
+    it per scheduled step via direct attribute access.
     """
 
     def __init__(self):
