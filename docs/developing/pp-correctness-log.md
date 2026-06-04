@@ -82,19 +82,19 @@ protocol, the rest of nnsight, or vLLM. Only remove bugs.
   bug1_three_invokes, bug2_canonical.
 - **pp2tp2 (TP×PP): 8/8 PASS** — lb1/lb2/lb4 + the cross-stage + bug scenarios.
   R1/R2 generalize across TP.
-- **pp=4: fails at INIT (NOT cross-stage) — SET ASIDE as a separate PP bug.**
-  Both runs KeyError in vLLM's own kv-cache init
-  (`gpu_model_runner.py:6204 get_attn_backends_for_group`) BEFORE any
-  intervention: run1 `model.layers.14.self_attn.attn`, run2 `layers.7` + `21`
-  — non-deterministic, on stage-*boundary* layers. This is the pre-existing
-  `project_multinode_ray_pp_bug` (Ray multi-node PP worker↔layer↔kv-cache
-  placement race, ~50% of runs). nnsight does NOT override kv-cache/attn init
-  (grep: no `initialize_kv_cache`/`initialize_attn_backend`/`attn_layers`
-  override) — its only influence is `worker_cls` + the envoy-tree meta-model
-  graft. None of R1/R2 touch this path. **Distinct subsystem (init/placement at
-  the vLLM boundary), distinct from cross-stage correctness; a fix likely needs
-  the Ray/kv-cache placement, near the "don't change vLLM" line — flagged as the
-  next PP effort, not fixed here.**
+- **pp=4: fails at INIT (NOT cross-stage) — ROOT-CAUSED as an UPSTREAM vLLM bug; SKIPPED.**
+  KeyError in vLLM's own kv-cache init (`get_attn_backends_for_group`) BEFORE any
+  intervention, on stage-*boundary* layers (`layers.{7,14,21}`), non-deterministic.
+  **Root cause:** stock vLLM's Ray executor leaves `RayWorkerWrapper.global_rank`
+  at bundle/creation order and never re-syncs it after the IP sort (`adjust_rank`
+  updates only `rpc_rank`), while `worker_base.py` selects the per-worker config
+  via `kv_cache_configs[self.global_rank]` — so a worker grabs another PP stage's
+  config. **Confirmed not nnsight's:** vanilla vLLM reproduces it 3/3; multiproc
+  is immune (sets `global_rank` explicitly); PP=2 (2 nodes) = 0 KeyError / PP=4
+  (4 nodes) = 3/3. Tracked upstream (issue #41287, fix PR #41298, ≥3-node trigger
+  #30128). Full writeup + workarounds (≤2-node / multiproc / cherry-pick #41298)
+  in [pp-multinode-ray-init-bug.md](pp-multinode-ray-init-bug.md). **Skipped — no
+  nnsight change; revisit when the upstream fix merges (then a version bump).**
 
 ## Integrity check (no break / no cheat)
 - **Deterministic:** 77 PP/iter/source tests pass; 47 core non-PP tests
