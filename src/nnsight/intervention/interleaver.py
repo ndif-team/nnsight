@@ -1289,9 +1289,17 @@ class Mediator:
                 key = (provider, req_id)
                 with cond:
                     with torch.inference_mode():
-                        self.interleaver.pp_hook_buffer[key] = (
+                        stored = (
                             value.clone() if isinstance(value, torch.Tensor) else value
                         )
+                        self.interleaver.pp_hook_buffer[key] = stored
+                    # Hand this freshly-produced value to any cross-rank pulls
+                    # the listener parked waiting for it (non-blocking serve).
+                    # ``notify_all`` additionally wakes any legacy blocking
+                    # ``local_lookup`` waiters (unit tests / non-vLLM callers).
+                    listener = self.interleaver.pp_listener
+                    if listener is not None:
+                        listener.dispatch_parked(key, stored)
                     cond.notify_all()
         else:
             # If the requester has been seen before, respond with an out of order error.

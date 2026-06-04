@@ -78,9 +78,21 @@ def _pp_reset_iteration(mediator, iteration: int) -> None:
 
     No-op outside PP.
     """
-    mediator._pp_worker_iteration = iteration
+    # Clear the per-iteration latches BEFORE publishing the new iteration
+    # number. The readiness gate (``GPUModelRunner._pp_wait_for_mediators``)
+    # reads ``_pp_worker_iteration`` as its guard and then trusts
+    # ``_pp_past_local`` / ``has_value`` as the data for that iteration. Under
+    # the GIL, publishing ``_pp_worker_iteration`` LAST guarantees any gate
+    # thread that sees ``it == k`` also sees the freshly-cleared latches — never
+    # a stale ``_pp_past_local`` left True by the previous iteration's
+    # downstream access. The reverse order opens a two-write window where the
+    # gate reads ``it == k`` with a stale ``_pp_past_local == True`` and releases
+    # the forward before this iteration's local hook is registered → the hook is
+    # missed → the value is never produced → cross-rank readiness-gate deadlock
+    # at iteration >= 1 (the batched multitoken cross-stage hang).
     mediator._gone_remote = False
     mediator._pp_past_local = False
+    mediator._pp_worker_iteration = iteration
 
 
 def _pp_max_iteration(iteration_range) -> float:

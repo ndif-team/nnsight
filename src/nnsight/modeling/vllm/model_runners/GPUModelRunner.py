@@ -181,7 +181,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # Reset the iteration gate for the new request so mediators
                 # are not blocked by a previous stop signal.
                 interleaver = model.interleaver
-                if getattr(interleaver, "_generation_done", False):
+                if interleaver._generation_done:
                     interleaver._generation_done = False
 
                 mediator.idx = len(interleaver.mediators)
@@ -270,9 +270,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # (immune to pipeline bubbles). The readiness gate uses
                 # ``count - 1`` as the iteration THIS forward is for; the worker
                 # never waits on it.
-                mediator._pp_scheduled_count = (
-                    getattr(mediator, "_pp_scheduled_count", 0) + 1
-                )
+                mediator._pp_scheduled_count = mediator._pp_scheduled_count + 1
 
                 batch_start += num_tokens
 
@@ -707,26 +705,24 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # This worker never reaches iteration k (e.g. a single-shot
             # ``model.trace`` once the engine generates past its one
             # intervention) — don't wait for it.
-            if k > getattr(m, "_pp_max_iteration", 0):
+            if k > m._pp_max_iteration:
                 return True
             # ``_pp_worker_iteration`` (not ``iteration``, which a one-shot hook
             # clears to None) reliably tells which iteration the worker is on.
-            it = getattr(m, "_pp_worker_iteration", 0)
+            it = m._pp_worker_iteration
             if it > k:
                 return True
-            return it == k and (
-                m.event_queue.has_value or getattr(m, "_pp_past_local", False)
-            )
+            return it == k and (m.event_queue.has_value or m._pp_past_local)
 
         deadline = time.monotonic() + 30.0
         for mediator in list(interleaver.mediators):
-            k = getattr(mediator, "_pp_scheduled_count", 0) - 1
+            k = mediator._pp_scheduled_count - 1
             while not _ahead(mediator, k):
                 if time.monotonic() > deadline:
                     raise TimeoutError(
                         f"PP readiness gate: mediator {mediator.name} not ahead "
                         f"of forward (worker_iteration="
-                        f"{getattr(mediator, '_pp_worker_iteration', 0)}, k={k}) "
+                        f"{mediator._pp_worker_iteration}, k={k}) "
                         f"within 30s"
                     )
                 time.sleep(0.0001)

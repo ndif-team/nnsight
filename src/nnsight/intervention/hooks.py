@@ -293,6 +293,32 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     return handle
 
 
+def _should_register(interleaver, mediator, requester) -> bool:
+    """Whether to register a one-shot hook for ``requester``.
+
+    Skip registration ONLY for a reentrant self-provide: the value for this
+    exact module+iteration is being delivered right now AND by THIS mediator
+    (an access inside our own ``handle`` call chain).
+
+    ``batcher.current_provider`` is request-blind — it encodes path+iteration,
+    not the request — so matching it alone would ALSO skip when a *different*
+    request is concurrently providing the same module+iteration. That request's
+    worker would then park with no hook registered, its value would never be
+    produced, and the cross-stage pull waiting on it would hang (the
+    multi-request PP deadlock). The provider's identity is carried by
+    ``interleaver.current``, set in the same critical section as
+    ``current_provider`` (see :meth:`Mediator.handle`), so it disambiguates a
+    self-provide from a foreign one. The two reads are unlocked but err only
+    toward registering an extra hook (safe): a still-registering request has
+    not provided yet, so ``interleaver.current`` cannot be it.
+    """
+    reentrant_self = (
+        interleaver.batcher.current_provider == requester
+        and interleaver.current is mediator
+    )
+    return not reentrant_self
+
+
 def requires_output(fn):
     """Decorator that ensures a one-shot output hook is registered before
     the wrapped eproperty stub runs.
@@ -331,7 +357,7 @@ def requires_output(fn):
 
         requester = f"{self.path}.output.i{iteration}"
 
-        if interleaver.batcher.current_provider != requester:
+        if _should_register(interleaver, mediator, requester):
 
             output_hook(mediator, self._module, f"{self.path}.output")
 
@@ -372,7 +398,7 @@ def requires_input(fn):
 
         requester = f"{self.path}.input.i{iteration}"
 
-        if interleaver.batcher.current_provider != requester:
+        if _should_register(interleaver, mediator, requester):
 
             input_hook(mediator, self._module, f"{self.path}.input")
 
@@ -606,7 +632,7 @@ def requires_operation_output(fn):
         )
         requester = f"{self.path}.output.i{iteration}"
 
-        if self.interleaver.batcher.current_provider != requester:
+        if _should_register(self.interleaver, mediator, requester):
             operation_output_hook(mediator, self.accessor)
 
         return fn(self, *args, **kwargs)
@@ -632,7 +658,7 @@ def requires_operation_input(fn):
         )
         requester = f"{self.path}.input.i{iteration}"
 
-        if self.interleaver.batcher.current_provider != requester:
+        if _should_register(self.interleaver, mediator, requester):
             operation_input_hook(mediator, self.accessor)
 
         return fn(self, *args, **kwargs)

@@ -15,7 +15,12 @@ rendezvous, so the protocol is built around two rules:
     reply. The consumer's recv on that tag is posted before the producer sends
     (it's the next thing the pulling thread does), satisfying the rendezvous.
 
-The producer's listener is a single thread serving requests in arrival order.
+The producer's recv loop is a single thread but it NEVER blocks on serving: a
+request whose value is already buffered is handed to a small reply pool, and a
+request for a not-yet-produced value is PARKED (keyed by the awaited buffer key)
+and served by ``dispatch_parked`` when the producer writes that value. This is
+what stops one not-yet-ready pull from head-of-line-blocking every other rank's
+request-``send`` at the gloo rendezvous (the multinode cross-stage deadlock).
 
 Buffers store narrowed (per-mediator) tensors on GPU; moved to CPU at pull time.
 Dtype and shape are resolved locally from a shared metadata map built at model
@@ -29,6 +34,7 @@ from __future__ import annotations
 import itertools
 import struct
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 import torch
@@ -49,6 +55,12 @@ TAG_RESPONSE_BASE = 1024
 # reused after a full cycle, never while one is concurrently in flight.
 _TAG_RANGE = 1 << 20
 _META_SLOTS = 32  # legacy metadata buffer size
+# Bounded pool that performs reply sends off the recv loop. Replies are always
+# quick (the consumer's recv is already posted), so a small pool keeps up; it
+# only exists to keep the single recv loop free and to cap thread count (vs a
+# thread per pull). Queued replies just wait for a free worker — they never
+# block the recv loop or the producer.
+_REPLY_POOL_SIZE = 32
 
 # Separator between req_id and provider in the wire-encoded key.
 # Format: ``"{req_id}|{provider}"`` (null-terminated).  req_id may be
@@ -136,6 +148,16 @@ class PPListener:
         self._device = device
         self._meta_map = meta_map or {}
         self._thread: Optional[threading.Thread] = None
+        # Non-blocking serve. A request whose value isn't buffered yet is PARKED
+        # here (key -> list of pending requests) instead of blocking the recv
+        # loop; ``dispatch_parked`` serves it when the producer writes the value.
+        # Accessed only under ``_condition`` (the buffer lock), so check-and-park
+        # in the recv loop races safely against the producer's write+dispatch.
+        self._parked: Dict[Any, list] = {}
+        # Bounded pool that runs the (always-quick) reply sends off the recv loop.
+        self._reply_pool = ThreadPoolExecutor(
+            max_workers=_REPLY_POOL_SIZE, thread_name_prefix="pp-reply"
+        )
         # Set by ``stop()`` to break the listen loop cleanly. Also
         # checked after every caught exception so a torn-down ``dist``
         # context (e.g. when the worker process is being shut down)
@@ -175,6 +197,10 @@ class PPListener:
         with self._condition:
             if req_ids is None:
                 self._buffer.clear()
+                # A blanket clear means the request set is done; drop any
+                # still-parked pulls so they don't leak (their value will
+                # never be produced now).
+                self._parked.clear()
             else:
                 id_set = set(req_ids)
                 to_remove = [
@@ -183,6 +209,14 @@ class PPListener:
                 ]
                 for k in to_remove:
                     del self._buffer[k]
+                # Drop parked pulls for the finished requests too (normally
+                # empty — a finished request's pulls were all served — but
+                # guards against a leak if one is cancelled mid-pull).
+                for k in [
+                    k for k in self._parked
+                    if isinstance(k, tuple) and len(k) == 2 and k[1] in id_set
+                ]:
+                    del self._parked[k]
             self._condition.notify_all()
 
     # ------------------------------------------------------------------
@@ -226,6 +260,7 @@ class PPListener:
     def stop(self):
         """Signal the listener thread to exit on its next loop iteration."""
         self._stop_event.set()
+        self._reply_pool.shutdown(wait=False)
 
     def _listen_loop(self):
         group = self._pull_group
@@ -234,13 +269,17 @@ class PPListener:
 
         while not self._stop_event.is_set():
             try:
-                # 1. Recv ONE fixed-size, self-identifying request on
-                #    TAG_REQUEST. A single message (vs. the old header+key pair)
-                #    is what makes concurrent senders safe: each request is
-                #    atomic on the wire, so two mediators' requests can't
-                #    interleave into a size-mismatch abort. ``group_src`` stays
-                #    wildcard for PP>2 (any rank may request); the request
-                #    itself carries ``requesting_rank`` for the reply.
+                # Recv ONE fixed-size, self-identifying request on TAG_REQUEST.
+                # A single atomic message (vs. the old header+key pair) is what
+                # makes concurrent senders safe. ``group_src`` stays wildcard for
+                # PP>2; the request carries ``requesting_rank`` for the reply.
+                #
+                # The recv loop must NEVER block on serving: if the requested
+                # value isn't buffered yet, we PARK the request (served later by
+                # ``dispatch_parked``) instead of waiting. A blocking serve here
+                # would stop the loop from posting the next ``recv``, freezing
+                # every other rank's request-``send`` at the rendezvous — the
+                # multinode cross-stage head-of-line deadlock.
                 req_buf = torch.zeros(REQUEST_MSG_BYTES, dtype=torch.uint8)
                 src = other_ranks[0] if len(other_ranks) == 1 else None
                 dist.recv(req_buf, group=group, group_src=src, tag=TAG_REQUEST)
@@ -256,34 +295,20 @@ class PPListener:
                     req_id_str, provider_string = encoded.split(_KEY_SEP, 1)
                     lookup_key = (provider_string, req_id_str or None)
                 else:
-                    provider_string = encoded
                     lookup_key = encoded
 
-                # 3. Look up value in buffer (blocks until available)
-                value = self.local_lookup(lookup_key)
-
-                # Normalize to list of tensors (handles both tensor and tuple)
-                tensors = list(value) if isinstance(value, (tuple, list)) else [value]
-                cpu_tensors = [t.detach().contiguous().cpu() for t in tensors]
-
-                if num_tokens == 0:
-                    # Legacy mode: send shape metadata then data.
-                    shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
-                    shape_meta[0] = len(cpu_tensors)
-                    idx = 1
-                    for t in cpu_tensors:
-                        shape_meta[idx] = t.ndim
-                        idx += 1
-                        for s in t.shape:
-                            shape_meta[idx] = s
-                            idx += 1
-                    dist.send(shape_meta, group=group, group_dst=requesting_rank, tag=response_tag)
-
-                # 4. Send all tensor data concatenated as one flat buffer, on the
-                #    per-pull response tag carried in the request — so concurrent
-                #    consumers each receive only their own reply.
-                flat = torch.cat([t.contiguous().view(-1) for t in cpu_tensors])
-                dist.send(flat, group=group, group_dst=requesting_rank, tag=response_tag)
+                req = (requesting_rank, response_tag, num_tokens)
+                # Check-and-park under the buffer lock so it races safely with
+                # the producer's write + ``dispatch_parked``: either we already
+                # see the value (serve now via the pool) or we park and the
+                # producer serves us when it writes. Exactly one path fires, so
+                # no request is dropped or double-served.
+                with self._condition:
+                    if lookup_key in self._buffer:
+                        value = self._buffer[lookup_key]
+                        self._reply_pool.submit(self._serve_reply, req, value)
+                    else:
+                        self._parked.setdefault(lookup_key, []).append(req)
 
             except Exception:
                 # If the dist context is gone (worker tearing down, peer
@@ -302,6 +327,61 @@ class PPListener:
                 # the listener alive through transient failures.
                 if self._stop_event.wait(timeout=0.5):
                     return
+
+    def dispatch_parked(self, key, value):
+        """Serve any pulls parked waiting for ``key``.
+
+        Called by the producer (:meth:`Mediator.handle_value_event`) right after
+        it writes ``value`` into the buffer under ``pp_buffer_condition`` (the
+        same object as ``_condition``). Pops the parked requests for ``key`` and
+        hands each to the reply pool. The condition is a reentrant lock, so this
+        is safe to call with it already held.
+        """
+        with self._condition:
+            waiters = self._parked.pop(key, None)
+        if not waiters:
+            return
+        for req in waiters:
+            self._reply_pool.submit(self._serve_reply, req, value)
+
+    def _serve_reply(self, req, value):
+        """Send one reply on its per-pull response tag (runs on the reply pool).
+
+        Legacy mode (``num_tokens == 0``) sends shape metadata then data; the
+        precomputed mode sends flat data only. The consumer's recv on this tag
+        is already posted, so each ``send`` completes promptly.
+        """
+        requesting_rank, response_tag, num_tokens = req
+        try:
+            group = self._pull_group
+
+            # Normalize to list of tensors (handles both tensor and tuple).
+            tensors = list(value) if isinstance(value, (tuple, list)) else [value]
+            cpu_tensors = [t.detach().contiguous().cpu() for t in tensors]
+
+            if num_tokens == 0:
+                # Legacy mode: send shape metadata then data.
+                shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
+                shape_meta[0] = len(cpu_tensors)
+                idx = 1
+                for t in cpu_tensors:
+                    shape_meta[idx] = t.ndim
+                    idx += 1
+                    for s in t.shape:
+                        shape_meta[idx] = s
+                        idx += 1
+                dist.send(shape_meta, group=group, group_dst=requesting_rank, tag=response_tag)
+
+            # Send all tensor data concatenated as one flat buffer, on the
+            # per-pull response tag carried in the request — so concurrent
+            # consumers each receive only their own reply.
+            flat = torch.cat([t.contiguous().view(-1) for t in cpu_tensors])
+            dist.send(flat, group=group, group_dst=requesting_rank, tag=response_tag)
+        except Exception:
+            if not dist.is_initialized() or self._stop_event.is_set():
+                return
+            import traceback
+            traceback.print_exc()
 
     # ------------------------------------------------------------------
     # Consumer: pull tensor from remote rank

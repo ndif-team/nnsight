@@ -70,7 +70,7 @@ def _pp_signal_remote(obj, key: str) -> None:
     # ``go_remote`` posts into the live event protocol (it frees a blocked
     # value-injection ``respond``), which only exists while a forward is live, so
     # that part stays gated on ``interleaving``.
-    interleaving = getattr(interleaver, "interleaving", False)
+    interleaving = interleaver.interleaving
 
     if owner > local_rank:
         # Downstream / trailing remote: past the local part.
@@ -80,7 +80,7 @@ def _pp_signal_remote(obj, key: str) -> None:
             mediator.go_remote()
     elif owner < local_rank:
         # Upstream / leading remote: free a blocked injection respond only.
-        if interleaving and getattr(mediator, "_respond_pending", False):
+        if interleaving and mediator._respond_pending:
             mediator.go_remote()
 
 
