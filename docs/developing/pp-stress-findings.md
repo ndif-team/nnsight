@@ -3,7 +3,7 @@ title: PP=2 vLLM robustness — intervention stress findings
 one_liner: Empirical stress test of the vLLM pipeline-parallel path with real intervention patterns at PP=2; two PP correctness/liveness bugs found (logits-consume-in-iter hang; cross-stage tuple-output read returns wrong values), plus one pre-existing non-PP limitation.
 tags: [internals, dev, vllm, pp, testing, bug]
 related: [docs/developing/pp-pipeline-parallelism.md, docs/developing/vllm-integration.md]
-status: P1 + P2 FIXED & verified at PP=2 across Qwen2/Qwen3/Llama; N1 is a pre-existing non-PP limitation (unchanged)
+status: P1 + P2 FIXED & verified at PP=2 across Qwen2/Qwen3/Llama; N1 (in-place writes) is an intentional design choice, not a bug — use replacement
 ---
 
 # PP=2 vLLM robustness — intervention stress findings
@@ -24,7 +24,7 @@ status: P1 + P2 FIXED & verified at PP=2 across Qwen2/Qwen3/Llama; N1 is a pre-e
 |----|------|--------------------------|----------|--------------|
 | **P1** | PP liveness (hang) | multi-token `for … tracer.iter[:K]:` loop that **consumes** `model.logits` per step (e.g. `.argmax()`/`.item()`) | High (deadlocks the most natural token-collection idiom) | GPT-2, Qwen2.5-0.5B, **Qwen3-0.6B**, Llama (DeepSeek-R1-Distill-Llama-8B) |
 | **P2** | PP correctness (silent) | reading an **upstream** decoder-layer **tuple** output `layers[i].output[0]` and consuming/saving it | High (silently wrong values, no error) | Qwen2.5-0.5B, **Qwen3-0.6B**, **Llama (DeepSeek-8B)** |
-| **N1** | non-PP baseline | in-place `module.output[:] = …` write on a vLLM inference tensor | Medium (pre-existing, not PP) | GPT-2, Qwen2.5-0.5B |
+| **N1** | DESIGN CHOICE (not a bug) | in-place `module.output[:] = …` write on a vLLM inference tensor — intentionally unsupported; use replacement `module.output = value` | n/a | GPT-2, Qwen2.5-0.5B |
 
 What is **robust** at PP=2 (all PASS, PP==PP1): plain generation that appends **raw** `model.logits`
 (argmax outside the trace); single-forward cross-stage **read+consume** of a downstream layer
@@ -221,7 +221,7 @@ doc's own running example. This is the dangerous kind of bug: silent, plausible-
 
 ## Non-PP findings (documented separately, as requested)
 
-### N1 — in-place `module.output[:] = …` errors on vLLM inference tensors (baseline, not PP)
+### N1 — in-place `module.output[:] = …` is intentionally unsupported on vLLM (DESIGN CHOICE, not a bug)
 
 `model.<…>.output[0][:] = x` / `module.output[:] = 0` raises at **PP=1** (and PP=2 owning rank):
 
@@ -229,12 +229,12 @@ doc's own running example. This is the dangerous kind of bug: silent, plausible-
 RuntimeError: Inplace update to inference tensor outside InferenceMode is not allowed.
 ```
 
-Reproduced on GPT-2 and Qwen2.5-0.5B at PP=1 — so it is a **baseline vLLM-path limitation**, not PP
-(matches the in-place note in the canonical vLLM doc / prior work). The supported idiom is
-**replacement** (`module.output = value`), which works at both PP=1 and PP=2 (`cross_write`, `ablation`,
-`steering` all PASS). On GPT-2, the in-place write happened to succeed at PP=2 because the write target
-was a no-op `LazyRemoteTensor` on the non-owning rank — i.e. PP can *mask* this baseline error, which is
-itself a reason to prefer the replacement form.
+This is a **deliberate design decision** — the vLLM integration does **not** support in-place updates of
+module outputs (reproduced on GPT-2 and Qwen2.5-0.5B at PP=1, i.e. it's the baseline vLLM path, nothing
+to do with PP). Use the supported **replacement** idiom (`module.output = value`), which works at both
+PP=1 and PP=2 (`cross_write`, `ablation`, `steering` all PASS). Not a bug to fix. (Aside: on GPT-2 the
+in-place write happened to *succeed* at PP=2 because the write target was a no-op `LazyRemoteTensor` on
+the non-owning rank — i.e. PP can mask the error, another reason to always use replacement.)
 
 ## Not bugs — harness/usage caveats (recorded so they aren't miscounted)
 
@@ -243,9 +243,18 @@ itself a reason to prefer the replacement form.
   forwards — the initial harness misuse (`cache[key].output`) produced a false "bug". Out of scope until
   cache-on-vLLM is targeted.
 - **Cross-prompt activation patching** (`tracer.barrier(2)` + two invokes, capture in A / patch in B):
-  the first harness version failed at **PP=1 too** (an `UnboundLocalError` from a `.save()` var assigned
-  inside a nested `with tracer.invoke()`), so it is not a PP bug; it needs a corrected harness structure
-  to retest and is deferred.
+  fails at **PP=1 too** — a value saved **only in the 2nd invoke** comes back **empty** (`IndexError`
+  on the saved list / `UnboundLocalError` on a bare var). This is the pre-existing branch-wide
+  **`merge_saved` clobber** bug (a populated saved value from one invoke overwritten by the empty one
+  from another on length mismatch), affecting HF too — NOT a PP bug and not introduced by the P1/P2
+  fixes. Tracked separately in `project_batched_multitoken_merge_bug`. To use cross-invoke patching today,
+  save into the list in *both* invokes (equal lengths) or apply the merge_saved fix.
+
+### Robust under sustained generation (post-fix)
+- **`long_gen`** — 16-token greedy generation that **consumes `model.logits` per step** (the P1 path)
+  *and* consumes a downstream layer output per step (cross-stage pull + `pp_hook_buffer` growth over 16
+  iterations): full token sequence matches PP=1 on Qwen2.5-0.5B and Qwen3-0.6B. Confirms the fixes hold
+  at length with no staleness or buffer-growth failure.
 
 ## Environment caveats
 
