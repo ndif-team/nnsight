@@ -8,7 +8,7 @@
 
 **Tech Stack:** PyTorch, vLLM v0.15.1, NCCL/gloo (via `torch.distributed`), nnsight interleaver/envoy, `threading.Condition`.
 
-**Spec:** `src/nnsight/modeling/vllm/PP_DESIGN.md`
+**Spec:** `docs/developing/pp-design.md` (moved from `src/nnsight/modeling/vllm/PP_DESIGN.md`)
 
 ---
 

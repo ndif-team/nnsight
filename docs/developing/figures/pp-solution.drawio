@@ -1,0 +1,292 @@
+<mxfile host="65bd71144e">
+    <diagram id="pp_solution" name="PP Solution">
+        <mxGraphModel dx="1021" dy="817" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1500" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="PP Solution: Short-Circuit + Lazy Pull" style="text;fontSize=20;fontStyle=1;align=center;verticalAlign=middle;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="10" width="800" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="idea_box" value="" style="rounded=1;fillColor=#E8F5E9;strokeColor=#2E7D32;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="55" width="940" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="idea_text" value="Envoy detects PPMissing BEFORE calling mediator.send() (which would block).  Returns LazyRemoteTensor instantly.&#10;The mediator thread skips remote modules without blocking, and only parks when it hits a real (local) module." style="text;fontSize=10;align=left;whiteSpace=wrap;spacingLeft=10;fontColor=#1B5E20;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="idea_box" vertex="1">
+                    <mxGeometry x="5" y="3" width="930" height="44" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_title" value="1. Rank 0: execute_model (Stage 0 forward)" style="text;fontSize=13;fontStyle=1;align=left;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="120" width="350" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_box" value="" style="rounded=1;fillColor=#FAFAFA;strokeColor=#E0E0E0;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="145" width="940" height="170" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_time" value="" style="endArrow=classic;strokeColor=#9E9E9E;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="r0_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="120" y="20" as="sourcePoint"/>
+                        <mxPoint x="920" y="20" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r0_time_l" value="time" style="text;fontSize=9;fontColor=#9E9E9E;fontStyle=2;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="890" y="5" width="30" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_main_l" value="Main thread&#10;(forward)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="10" y="35" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_med_l" value="Worker thread&#10;(mediator)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="10" y="85" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_enter" value="interleaver&#10;.__enter__()" style="rounded=1;fillColor=#E8EAF6;strokeColor=#5C6BC0;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="120" y="35" width="70" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_ready" value="PP ready&#10;check" style="rounded=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="200" y="35" width="55" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_fwd" value="forward: L0 .. L5 .. L39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="265" y="35" width="200" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_fwd_done" value="forward done" style="rounded=1;fillColor=#E0E0E0;strokeColor=#9E9E9E;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="475" y="35" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_m_start" value="start: runs code&#10;until first send()" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="120" y="85" width="110" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_m_req5" value="layers[5].output&#10;send() -&gt; blocked" style="rounded=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=8;whiteSpace=wrap;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="240" y="85" width="110" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_hook5" value="L5 hook&#10;respond()" style="text;fontSize=8;fontColor=#2E7D32;fontStyle=1;align=center;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="290" y="68" width="60" height="17" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_hook5_a" value="" style="endArrow=classic;strokeColor=#2E7D32;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="r0_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="320" y="65" as="sourcePoint"/>
+                        <mxPoint x="320" y="85" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r0_m_fast" value="L50.out -&gt; Lazy (no send) | logits.out -&gt; Lazy (no send) | END" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="360" y="85" width="350" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_m_note" value="PPMissing short-circuited at Envoy: no send(), no blocking, instant LazyRemoteTensor" style="text;fontSize=8;fontColor=#2E7D32;fontStyle=2;align=left;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="360" y="117" width="420" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r0_locals" value="frame locals + pp_hook_buffer keep h5 tensor alive.  Available for pull by rank 1." style="rounded=1;fillColor=#E8EAF6;strokeColor=#5C6BC0;fontSize=9;fontStyle=2;dashed=1;sketch=1;curveFitting=1;jiggle=2;" parent="r0_box" vertex="1">
+                    <mxGeometry x="120" y="140" width="800" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_title" value="2. Rank 1: execute_model (Stage 1 forward)" style="text;fontSize=13;fontStyle=1;align=left;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="325" width="350" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_box" value="" style="rounded=1;fillColor=#FAFAFA;strokeColor=#E0E0E0;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="350" width="940" height="175" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_time" value="" style="endArrow=classic;strokeColor=#9E9E9E;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="r1_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="120" y="20" as="sourcePoint"/>
+                        <mxPoint x="920" y="20" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r1_time_l" value="time" style="text;fontSize=9;fontColor=#9E9E9E;fontStyle=2;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="890" y="5" width="30" height="15" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_main_l" value="Main thread&#10;(forward)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="10" y="35" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_med_l" value="Worker thread&#10;(mediator)" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="10" y="85" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_enter" value="interleaver&#10;.__enter__()" style="rounded=1;fillColor=#E8EAF6;strokeColor=#5C6BC0;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="120" y="35" width="70" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_ready" value="PP ready&#10;check" style="rounded=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="200" y="35" width="55" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_fwd" value="forward: L40 .. L50 .. L79" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="265" y="35" width="210" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_logits_hook" value="logits hook" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="485" y="35" width="80" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_fwd_done" value="done" style="rounded=1;fillColor=#E0E0E0;strokeColor=#9E9E9E;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="575" y="35" width="45" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_m_start" value="L5.out -&gt; Lazy&#10;(instant, no send)" style="rounded=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="120" y="85" width="120" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_m_req50" value="layers[50].output&#10;send() -&gt; blocked" style="rounded=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=8;whiteSpace=wrap;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="250" y="85" width="120" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_hook50" value="L50 hook&#10;respond()" style="text;fontSize=8;fontColor=#2E7D32;fontStyle=1;align=center;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="310" y="68" width="60" height="17" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_hook50_a" value="" style="endArrow=classic;strokeColor=#2E7D32;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="r1_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="340" y="65" as="sourcePoint"/>
+                        <mxPoint x="340" y="85" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r1_m_pull" value="h5*2: Lazy.__mul__&#10;-&gt; PULL from R0" style="rounded=1;fillColor=#E3F2FD;strokeColor=#1565C0;fontSize=8;fontStyle=1;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="380" y="85" width="130" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_pull_note" value="gloo recv from rank 0" style="text;fontSize=8;fontColor=#1565C0;fontStyle=2;align=center;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="380" y="117" width="130" height="13" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_m_logits" value="logits.out: send()&#10;-&gt; hook -&gt; done" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=8;whiteSpace=wrap;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="520" y="85" width="120" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="r1_lhook_a" value="" style="endArrow=classic;strokeColor=#2E7D32;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="r1_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="525" y="65" as="sourcePoint"/>
+                        <mxPoint x="560" y="85" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="r1_collect" value="collect_nnsight: merge saves from rank 0 + rank 1" style="rounded=1;fillColor=#E8EAF6;strokeColor=#5C6BC0;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="r1_box" vertex="1">
+                    <mxGeometry x="120" y="142" width="800" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="cross_pull" value="gloo pull: h5 tensor" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#1565C0;strokeWidth=3;dashed=1;dashPattern=8 4;fontSize=11;fontColor=#1565C0;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="1" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="660" y="310" as="sourcePoint"/>
+                        <mxPoint x="660" y="435" as="targetPoint"/>
+                        <Array as="points">
+                            <mxPoint x="880" y="310"/>
+                            <mxPoint x="880" y="380"/>
+                            <mxPoint x="750" y="380"/>
+                            <mxPoint x="750" y="435"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="p3_title" value="3. Multi-Token: Both Mediators Stay Alive, Pull Per-Step" style="text;fontSize=13;fontStyle=1;align=left;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="540" width="450" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_box" value="" style="rounded=1;fillColor=#FAFAFA;strokeColor=#E0E0E0;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="565" width="940" height="210" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_time" value="" style="endArrow=classic;strokeColor=#9E9E9E;strokeWidth=2;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="mt_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="10" y="20" as="sourcePoint"/>
+                        <mxPoint x="920" y="20" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="mt_s0" value="Step 0" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#E8EAF6;strokeColor=#5C6BC0;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="50" y="5" width="270" height="16" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_s1" value="Step 1" style="text;fontSize=9;fontStyle=1;align=center;fillColor=#E8EAF6;strokeColor=#5C6BC0;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="340" y="5" width="270" height="16" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_s2" value="Step 2 ..." style="text;fontSize=9;fontStyle=1;align=center;fillColor=#E8EAF6;strokeColor=#5C6BC0;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="630" y="5" width="270" height="16" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0f_l" value="R0 fwd" style="text;fontSize=8;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="5" y="35" width="42" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0m_l" value="R0 med" style="text;fontSize=8;fontStyle=1;align=center;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="5" y="60" width="42" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1f_l" value="R1 fwd" style="text;fontSize=8;fontStyle=1;align=center;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="5" y="88" width="42" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1m_l" value="R1 med" style="text;fontSize=8;fontStyle=1;align=center;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="5" y="113" width="42" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0f_0" value="L0..39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="55" y="35" width="90" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0m_0" value="L5(hook) | L50,logits(lazy) done" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="80" y="60" width="170" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1f_0" value="L40..79 + logits" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="155" y="88" width="120" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1m_0" value="L5(lazy) | L50(hook) + pull | logits(hook) done" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="55" y="113" width="255" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_p0" value="" style="endArrow=classic;strokeColor=#1565C0;strokeWidth=2;dashed=1;dashPattern=5 3;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="mt_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="220" y="78" as="sourcePoint"/>
+                        <mxPoint x="220" y="113" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="mt_p0_l" value="pull" style="text;fontSize=7;fontColor=#1565C0;fontStyle=1;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="225" y="90" width="22" height="12" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0f_1" value="L0..39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="345" y="35" width="90" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0m_1" value="L5(hook) | L50,logits(lazy) done" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="370" y="60" width="170" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1f_1" value="L40..79 + logits" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="445" y="88" width="120" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1m_1" value="L5(lazy) | L50(hook) + pull | logits(hook) done" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="345" y="113" width="255" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_p1" value="" style="endArrow=classic;strokeColor=#1565C0;strokeWidth=2;dashed=1;dashPattern=5 3;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="mt_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="510" y="78" as="sourcePoint"/>
+                        <mxPoint x="510" y="113" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="mt_p1_l" value="pull" style="text;fontSize=7;fontColor=#1565C0;fontStyle=1;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="515" y="90" width="22" height="12" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0f_2" value="L0..39" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="635" y="35" width="90" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r0m_2" value="L5(hook) | L50,logits(lazy) done" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="660" y="60" width="170" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1f_2" value="L40..79 + logits" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=8;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="735" y="88" width="120" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_r1m_2" value="L5(lazy) | L50(hook) + pull | logits(hook) done" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=7;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="635" y="113" width="255" height="18" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_p2" value="" style="endArrow=classic;strokeColor=#1565C0;strokeWidth=2;dashed=1;dashPattern=5 3;sketch=1;curveFitting=1;jiggle=2;rounded=1;" parent="mt_box" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <mxPoint x="800" y="78" as="sourcePoint"/>
+                        <mxPoint x="800" y="113" as="targetPoint"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="mt_p2_l" value="pull" style="text;fontSize=7;fontColor=#1565C0;fontStyle=1;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="805" y="90" width="22" height="12" as="geometry"/>
+                </mxCell>
+                <mxCell id="mt_explain" value="Both mediators are long-lived threads iterating via tracer.iter[:].  Frame locals (h5, logits_list) persist on each rank across steps.&#10;Each step: rank 0 re-captures h5.  Rank 1 pulls the FRESH value lazily when h5*2 is evaluated.  No thread serialization, no push-all." style="rounded=1;whiteSpace=wrap;fillColor=#E8F5E9;strokeColor=#2E7D32;fontSize=9;align=left;spacingLeft=8;sketch=1;curveFitting=1;jiggle=2;" parent="mt_box" vertex="1">
+                    <mxGeometry x="55" y="145" width="860" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="p4_title" value="4. Components" style="text;fontSize=13;fontStyle=1;align=left;fillColor=#dae8fc;strokeColor=#6c8ebf;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="790" width="150" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="comp" value="" style="rounded=1;fillColor=#FAFAFA;strokeColor=#E0E0E0;sketch=1;curveFitting=1;jiggle=2;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="815" width="940" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="c1" value="Envoy._is_pp_missing" style="rounded=1;fillColor=#FFF9C4;strokeColor=#F9A825;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="10" y="8" width="155" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="c1d" value="Short-circuits before send().&#10;Returns LazyRemoteTensor." style="text;fontSize=8;whiteSpace=wrap;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="10" y="35" width="155" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c2" value="LazyRemoteTensor" style="rounded=1;fillColor=#E3F2FD;strokeColor=#1565C0;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="185" y="8" width="155" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="c2d" value="Absorbs writes. Materializes&#10;on arithmetic via gloo pull." style="text;fontSize=8;whiteSpace=wrap;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="185" y="35" width="155" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c3" value="PPListener (gloo)" style="rounded=1;fillColor=#E8EAF6;strokeColor=#5C6BC0;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="360" y="8" width="155" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="c3d" value="Background thread. Serves&#10;pull from pp_hook_buffer." style="text;fontSize=8;whiteSpace=wrap;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="360" y="35" width="155" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c4" value="PP Readiness Check" style="rounded=1;fillColor=#FFF3E0;strokeColor=#E65100;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="535" y="8" width="155" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="c4d" value="Waits until mediator parks&#10;at real-layer send()." style="text;fontSize=8;whiteSpace=wrap;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="535" y="35" width="155" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="c5" value="collect_nnsight (all ranks)" style="rounded=1;fillColor=#C8E6C9;strokeColor=#2E7D32;fontSize=9;fontStyle=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="710" y="8" width="155" height="22" as="geometry"/>
+                </mxCell>
+                <mxCell id="c5d" value="Removed rank-0 guard.&#10;Merges saves from all ranks." style="text;fontSize=8;whiteSpace=wrap;rounded=1;sketch=1;curveFitting=1;jiggle=2;" parent="comp" vertex="1">
+                    <mxGeometry x="710" y="35" width="155" height="25" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

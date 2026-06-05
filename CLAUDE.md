@@ -122,6 +122,8 @@ Read at least the first two if the user is asking "why is my code blocking / out
 - [docs/developing/source-accessor-internals.md](docs/developing/source-accessor-internals.md) — `.source` machinery
 - [docs/developing/serialization.md](docs/developing/serialization.md) — source-based pickling for remote
 - [docs/developing/vllm-integration.md](docs/developing/vllm-integration.md) — vLLM internals
+- [docs/developing/pp-pipeline-parallelism.md](docs/developing/pp-pipeline-parallelism.md) — illustrated PP walkthrough (deadlock → short-circuit + lazy pull), with a running example and figures
+- [docs/developing/pp-design.md](docs/developing/pp-design.md) — detailed as-built PP design spec (components, pull protocol, readiness gate, finalize drain barrier); the engineer-facing companion to the walkthrough
 - [docs/developing/agent-evals.md](docs/developing/agent-evals.md) — how the team measures agent ability with nnsight
 
 Long-form architecture reference: [NNsight.md](NNsight.md) (kept for human reading; developing/ docs supplement it with up-to-date branch info).

@@ -18,7 +18,7 @@ STATUS: All PP=2 tests currently fail due to a **mediator deserialization
 failure** — the serialized mediator references module paths (like
 `model.transformer.h.6.ln_1`) that don't exist on non-owning PP ranks
 where those layers are `PPMissingLayer` stubs without children. The
-PP design doc (PP_DESIGN.md) describes `_pp_aware_load` as the solution,
+PP design doc (docs/developing/pp-design.md) describes `_pp_aware_load` as the solution,
 but it is not yet implemented in `serialization.py`'s `persistent_load`.
 
 Root cause chain:

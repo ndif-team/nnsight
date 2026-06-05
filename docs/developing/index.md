@@ -49,6 +49,8 @@ The internal architecture is organized into layered subsystems:
 - `docs/developing/serialization.md` — dill-based pickling for remote execution; `__getstate__` / `__setstate__` on tracers, mediators, and envoys.
 - `docs/developing/backends.md` — the existing backends (`ExecutionBackend`, `EditingBackend`, `RemoteBackend`, `LocalSimulationBackend`).
 - `docs/developing/vllm-integration.md` — `VLLM`, `NNsightGPUModelRunner`, `VLLMBatcher`, and how vLLM's scheduler ordering is reconciled with mediator batch groups.
+- `docs/developing/pp-pipeline-parallelism.md` — illustrated walkthrough of pipeline parallelism: why the interleaver deadlocks across stages, and the short-circuit + lazy-pull (`LazyRemoteTensor`) design that fixes it. Includes a running example and workflow figures.
+- `docs/developing/pp-design.md` — the detailed as-built PP design spec (the engineer-facing companion to the walkthrough): every component (module map, Envoy short-circuit, `LazyRemoteTensor`, hook-buffer clone, gloo pull listener, run-ahead worker + readiness gate, finalize drain barrier, save merge), with file references.
 - `docs/developing/testing.md` — running the test suite, conda env, key test files, smoke vs full validation.
 - `docs/developing/performance.md` — where overhead lives, the trace cache, `PYMOUNT`, and how to profile.
 - `docs/developing/agent-evals.md` — running agent-driven evaluations against the docs and code.
