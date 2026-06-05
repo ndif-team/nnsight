@@ -161,7 +161,14 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
     mediator.iteration_tracker[module_key] += 1
 
     pp_map = interleaver.pp_module_map
-    source_rank = pp_map.get_owning_rank(path or key)
+    # Resolve the owner from the FULL key (``module_key`` = ``f"{path}.{key}"``),
+    # the same lookup ``_is_pp_missing`` uses for detection. Resolving from
+    # ``path`` alone broke root-level epropertys (``logits``/``samples``), whose
+    # ``obj.path`` is the VLLM root ``"model"`` (the module name lives in ``key``):
+    # ``get_owning_rank("model")`` → None → a misdirected cross-stage pull that
+    # blocks forever. For sub-envoy modules ``module_key`` resolves identically to
+    # the old ``path`` (the trailing ``.output``/``.input`` is ignored).
+    source_rank = pp_map.get_owning_rank(module_key)
 
     meta = resolve_meta(getattr(interleaver, "pp_module_meta", {}), path) or {}
     dtype = (

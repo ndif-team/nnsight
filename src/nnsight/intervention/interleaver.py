@@ -400,6 +400,24 @@ def current_mediator() -> Optional["Mediator"]:
     return getattr(_active_mediator, "value", None)
 
 
+def _deep_clone(value):
+    """Deep-clone every tensor inside ``value``, recursing into tuples/lists/dicts.
+
+    Used when stashing a hook value into the PP cross-stage buffer. Cloning ONLY a
+    bare ``torch.Tensor`` (and storing containers by reference) leaves the tensors
+    inside a tuple/list output — e.g. a decoder layer's ``(hidden, residual)`` —
+    aliased to live forward storage that vLLM overwrites in place in later layers,
+    so a cross-stage pull serves stale values. Always clone the whole structure.
+    """
+    if isinstance(value, torch.Tensor):
+        return value.clone()
+    if isinstance(value, (tuple, list)):
+        return type(value)(_deep_clone(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _deep_clone(v) for k, v in value.items()}
+    return value
+
+
 class Cancelation(Exception):
     """Exception raised when a request is canceled."""
 
@@ -1289,9 +1307,12 @@ class Mediator:
                 key = (provider, req_id)
                 with cond:
                     with torch.inference_mode():
-                        stored = (
-                            value.clone() if isinstance(value, torch.Tensor) else value
-                        )
+                        # Deep-clone: cloning only a bare tensor left the tensors
+                        # inside tuple/list outputs (e.g. a decoder layer's
+                        # ``(hidden, residual)``) aliased to live forward storage
+                        # that later layers overwrite in place -> cross-stage pull
+                        # served stale values (P2).
+                        stored = _deep_clone(value)
                         self.interleaver.pp_hook_buffer[key] = stored
                     # Hand this freshly-produced value to any cross-rank pulls
                     # the listener parked waiting for it (non-blocking serve).

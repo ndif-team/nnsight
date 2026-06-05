@@ -52,7 +52,12 @@ _LAYER_CONTAINER_NAMES = {"layers", "h", "block", "blocks"}
 _FIRST_RANK_MODULES = {"embed_tokens", "wte", "wpe"}
 
 # Modules that always live on the last PP rank.
-_LAST_RANK_MODULES = {"norm", "lm_head", "ln_f", "logits", "samples"}
+# ``logits_processor`` is included because some architectures (Qwen2/GPT2/OPT/
+# Pythia/Bloom/Gemma2) construct it unconditionally on every rank rather than as
+# a ``PPMissingLayer`` stub, yet it only fires on the last rank — so direct
+# access on a non-last rank must short-circuit to a cross-stage pull, not block
+# on a hook that never fires.
+_LAST_RANK_MODULES = {"norm", "lm_head", "ln_f", "logits", "samples", "logits_processor"}
 
 
 class PPModuleMap:
