@@ -242,13 +242,11 @@ the non-owning rank — i.e. PP can mask the error, another reason to always use
   cache API is attribute-navigation (`cache.model.layers[i].output`), with entries accumulating across
   forwards — the initial harness misuse (`cache[key].output`) produced a false "bug". Out of scope until
   cache-on-vLLM is targeted.
-- **Cross-prompt activation patching** (`tracer.barrier(2)` + two invokes, capture in A / patch in B):
-  fails at **PP=1 too** — a value saved **only in the 2nd invoke** comes back **empty** (`IndexError`
-  on the saved list / `UnboundLocalError` on a bare var). This is the pre-existing branch-wide
-  **`merge_saved` clobber** bug (a populated saved value from one invoke overwritten by the empty one
-  from another on length mismatch), affecting HF too — NOT a PP bug and not introduced by the P1/P2
-  fixes. Tracked separately in `project_batched_multitoken_merge_bug`. To use cross-invoke patching today,
-  save into the list in *both* invokes (equal lengths) or apply the merge_saved fix.
+- **`tracer.barrier()` + cross-invoke patterns** are out of scope for this PP doc — `barrier` is an
+  advanced cross-invoke primitive and its failure reproduces at **PP=1** (non-PP). The cross-prompt
+  scenario is dropped from this branch's PP stress set. The separate barrier bug (the `Barrier` object is
+  not shared across invokes on the vLLM path) is documented on `dev`:
+  [`barrier-vllm-not-shared.md`](barrier-vllm-not-shared.md).
 
 ### Robust under sustained generation (post-fix)
 - **`long_gen`** — 16-token greedy generation that **consumes `model.logits` per step** (the P1 path)
