@@ -54,6 +54,11 @@ TAG_RESPONSE_BASE = 1024
 # Response tags cycle through this range; with short-lived pulls a tag is only
 # reused after a full cycle, never while one is concurrently in flight.
 _TAG_RANGE = 1 << 20
+# Reserved tag for the request-finalize drain barrier (``drain_barrier``), one
+# above the entire response-tag range so it never aliases TAG_REQUEST or any
+# in-flight reply. gloo routes strictly by ``(peer, tag)``, so the barrier's
+# p2p on the listener thread's pull group is invisible to the serving recvs.
+TAG_DRAIN = TAG_RESPONSE_BASE + _TAG_RANGE
 _META_SLOTS = 32  # legacy metadata buffer size
 # Bounded pool that performs reply sends off the recv loop. Replies are always
 # quick (the consumer's recv is already posted), so a small pool keeps up; it
@@ -449,6 +454,44 @@ class PPListener:
                 group, source_rank, dtype, response_tag,
                 module_path=module_path, meta=meta,
             )
+
+    def drain_barrier(self):
+        """Cross-PP-rank barrier on the reserved ``TAG_DRAIN`` tag.
+
+        Used at request finalize (``GPUModelRunner.collect_nnsight``) so NO rank
+        tears down its ``pp_hook_buffer`` until EVERY rank's mediator workers have
+        drained their cross-stage pulls. Each rank arrives here only AFTER joining
+        its own worker, so reaching the barrier means "my worker is fully drained";
+        and each rank keeps SERVING peers on its listener thread (the buffer is
+        still alive — clear happens after this returns), so a peer's in-flight
+        pulls are satisfied from the live buffer instead of blocking on a torn-down
+        peer until the 5 s join timeout (the PB1 stall).
+
+        Safe to call collectively: ``collect_nnsight`` runs via ``collective_rpc``
+        with identical ``finished_req_ids`` on every rank, and only TP-rank-0 of
+        each PP stage reaches it — exactly the members of this pull group. The
+        pairwise exchange is rank-ordered (lower sends first) so it cannot
+        deadlock, and runs on ``TAG_DRAIN`` so it never collides with the
+        listener's ``TAG_REQUEST`` recvs or in-flight reply tags. No-op without a
+        peer (PP disabled / single rank).
+        """
+        group = self._pull_group
+        if group is None:
+            return
+        world = dist.get_world_size(group)
+        if world < 2:
+            return
+        me = self._local_rank
+        token = torch.zeros(1, dtype=torch.uint8)
+        for r in range(world):
+            if r == me:
+                continue
+            if me < r:
+                dist.send(token, group=group, group_dst=r, tag=TAG_DRAIN)
+                dist.recv(token, group=group, group_src=r, tag=TAG_DRAIN)
+            else:
+                dist.recv(token, group=group, group_src=r, tag=TAG_DRAIN)
+                dist.send(token, group=group, group_dst=r, tag=TAG_DRAIN)
 
     def _next_response_tag(self) -> int:
         """A distinct tag per in-flight pull (≥ ``TAG_RESPONSE_BASE``, never

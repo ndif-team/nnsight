@@ -928,6 +928,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
             for _, mediator, _ in matched:
                 if mediator.worker is not None:
                     mediator.worker.join(timeout=5.0)
+            # PB1 fix: hold every rank here — each still serving peers from its
+            # live buffer on the listener thread — until ALL ranks' workers have
+            # drained their cross-stage pulls, BEFORE any rank clears its buffer
+            # below. Without this, an async-scheduling finalize race lets a
+            # producer rank tear down its serving buffer first, so a consumer
+            # rank's late pulls block on a torn-down peer until the 5 s join
+            # timeout (a fixed ~5 s stall on >~10 cross-stage reads / forward).
+            # The join above now succeeds promptly because no peer clears early;
+            # it remains only as a safety net. Consistent across ranks: this runs
+            # under collective_rpc with identical finished_req_ids, on exactly the
+            # TP-rank-0 ranks that are this pull group's members.
+            if self.pp_listener is not None:
+                self.pp_listener.drain_barrier()
 
         finished_keys = helper.finalize_mediators(
             matched, finished_req_id_set, self.nnsight_model
