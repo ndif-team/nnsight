@@ -17,9 +17,15 @@ def wrap_grad(interleaver: Interleaver):
 
     def wrap(tensor: torch.Tensor):
 
-        # Only wrap the tensor once
-        if tensor._backward_hooks:
-            return
+        # When two or more invokes share an input, the Batcher delivers each
+        # invoke a storage-sharing view (`tensor.narrow(0, start, size)`) of the
+        # full-batch activation. That view is never an input to any op producing
+        # the loss, so a hook on it never fires. The Batcher tags such views with
+        # their batch slice; redirect the hook to the full-batch parent and
+        # narrow the gradient to this invoke's slice. The parent IS in the loss
+        # graph, so its hook fires. (See Batcher._narrow in ../batching.py.)
+        batch_group = getattr(tensor, "_nnsight_batch_group", None)
+        redirect = batch_group is not None and tensor._base is not None
 
         # We are providing the grad of the tensor
         provider = id(tensor)
@@ -27,22 +33,62 @@ def wrap_grad(interleaver: Interleaver):
         # Well need to remove the hook
         hook = None
 
-        # On backwards for this tensor
-        def inner(grad: torch.Tensor):
+        if redirect:
 
-            # Inject the grad value
-            # Possibly editing it in the process
-            try:
-                grad = interleaver.handle(f"{provider}.grad", grad)
-            finally:
-                hook.remove()
+            # Only wrap the view once.
+            if getattr(tensor, "_nnsight_grad_wrapped", False):
+                return
 
-            return grad
+            target = tensor._base
+
+            # The parent gradient has the same shape and (contiguous) layout as
+            # the parent tensor, so this invoke's slice is recovered by re-applying
+            # the view's own geometry. This is general: the parent may be the
+            # flattened (batch*seq, hidden) activation, not (batch, seq, hidden).
+            shape, stride, offset = tensor.shape, tensor.stride(), tensor.storage_offset()
+
+            # On backwards for the parent tensor
+            def inner(grad: torch.Tensor):
+
+                # Slice out this invoke's gradient, let the user read/edit it,
+                # and splice any edit back into the parent gradient.
+                try:
+                    sliced = grad.as_strided(shape, stride, offset)
+                    new_sliced = interleaver.handle(f"{provider}.grad", sliced)
+                    if new_sliced is not sliced:
+                        grad = grad.clone()
+                        grad.as_strided(shape, stride, offset).copy_(new_sliced)
+                finally:
+                    hook.remove()
+
+                return grad
+
+        else:
+
+            # Only wrap the tensor once
+            if tensor._backward_hooks:
+                return
+
+            target = tensor
+
+            # On backwards for this tensor
+            def inner(grad: torch.Tensor):
+
+                # Inject the grad value
+                # Possibly editing it in the process
+                try:
+                    grad = interleaver.handle(f"{provider}.grad", grad)
+                finally:
+                    hook.remove()
+
+                return grad
 
         # Register the hook and track it on the owning mediator so
         # Interleaver.cancel can clean it up if the worker thread dies
         # before the hook fires.
-        hook = tensor.register_hook(inner)
+        hook = target.register_hook(inner)
+        if redirect:
+            tensor._nnsight_grad_wrapped = True
         mediator = interleaver.current
         if mediator is not None:
             mediator.hooks.append(hook)
