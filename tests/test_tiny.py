@@ -57,9 +57,12 @@ class TestSaveCloning:
             saved = save(x)
             x.mul_(1000)
 
+        # ``saved`` is the clone taken before the in-place ``mul_``, so it must
+        # be a distinct object that still holds the pre-mutation values; the
+        # mutated ``x`` is exactly 1000x those values. Deterministic — avoids a
+        # flaky ``randn`` std threshold.
         assert saved is not x
-        assert saved.std().item() < 1.0
-        assert x.std().item() > 50.0
+        assert torch.allclose(x, saved * 1000)
 
     def test_save_does_not_clone_normal_tensors(self):
         from nnsight.intervention.tracing.globals import save
