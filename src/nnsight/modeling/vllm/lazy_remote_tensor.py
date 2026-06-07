@@ -278,9 +278,11 @@ def merge_saved(a, b):
     ranks, preferring the non-:data:`NOT_ON_THIS_RANK` leaf at each slot.
 
     Used by the engine to assemble one complete result from each rank's
-    partial contribution. If both sides are real leaves (or the structures
-    don't line up), ``b`` wins — preserving the previous "later-rank-wins"
-    merge semantics for scalars and degrading safely on mismatch.
+    partial contribution. Lists/tuples merge element-wise; dicts merge by
+    key union (so disjoint-keyed per-stage CacheDicts are combined, not
+    dropped). If both sides are real leaves (or the structures don't line
+    up), ``b`` wins — preserving the previous "later-rank-wins" merge
+    semantics for scalars and degrading safely on mismatch.
     """
     if a is NOT_ON_THIS_RANK:
         return b
@@ -290,6 +292,30 @@ def merge_saved(a, b):
         return [merge_saved(x, y) for x, y in zip(a, b)]
     if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
         return tuple(merge_saved(x, y) for x, y in zip(a, b))
-    if isinstance(a, dict) and isinstance(b, dict) and a.keys() == b.keys():
-        return {k: merge_saved(a[k], b[k]) for k in a}
+    if isinstance(a, dict) and isinstance(b, dict):
+        # Union the key sets, merging overlapping slots position-wise
+        # (sentinel-aware) and taking each disjoint key from whichever rank
+        # owns it. A normal dict save carries identical keys on every rank
+        # (non-owned slots are NOT_ON_THIS_RANK sentinels), so the union
+        # reduces to the prior element-wise merge. But PP ``tracer.cache()``
+        # hooks fire only on the modules that execute on each stage, so the
+        # two ranks' caches have DISJOINT keys; the old equal-keys-only branch
+        # fell through to ``return b`` and silently dropped a whole stage. The
+        # union keeps every stage's contributions.
+        #
+        # Both sides arrive as plain ``dict``s here: ``strip_lazy`` rebuilds a
+        # plain dict on the worker before collection, so a ``CacheDict`` is
+        # already flattened by the time it reaches the merge (which is why
+        # attribute access on a vLLM cache is unavailable at any PP level — a
+        # pre-existing limitation, not introduced here). ``dict.__*`` is used
+        # defensively so a dict subclass with overridden lookups can't corrupt
+        # the copy.
+        merged = {}
+        for k in dict.__iter__(a):
+            other = dict.__getitem__(b, k) if dict.__contains__(b, k) else NOT_ON_THIS_RANK
+            merged[k] = merge_saved(dict.__getitem__(a, k), other)
+        for k in dict.__iter__(b):
+            if not dict.__contains__(a, k):
+                merged[k] = dict.__getitem__(b, k)
+        return merged
     return b

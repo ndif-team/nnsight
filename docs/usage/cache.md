@@ -153,6 +153,7 @@ Returns a `Cache.CacheDict` (already wrapped in `.save()`). Hook handles live on
 - **`tracer.cache()` must be called inside an interleaving context** (i.e. inside `.trace()` / `.generate()` / `.session()`); calling it at module construction time raises `ValueError("Cannot create a cache outside an invoker.")` (`src/nnsight/intervention/tracing/tracer.py:501`).
 - **Repeated forward hits accumulate.** When the same module fires twice (e.g. across generation steps, or shared-weight modules), the entry becomes a `list[Entry]`. Don't assume a single `Entry` per path.
 - **The cache moves tensors to CPU by default.** If you need them on GPU, pass `device=None` or the desired device.
+- **Under vLLM, don't cache `lm_head` expecting logits.** vLLM computes logits inside its `logits_processor` via `lm_head.quant_method.apply(...)`, which bypasses `lm_head.__call__` — so `lm_head`'s cache hook never sees the logits. With tied embeddings (e.g. Qwen2.5) `lm_head` *is* `embed_tokens`, so caching `lm_head` captures the **token embeddings** instead; and under pipeline parallelism (PP > 1) `lm_head` lives on the last stage, where the embedding lookup doesn't run, so it isn't captured at all. For logits use `model.logits` (the vLLM eproperty) or cache `model.logits_processor` — both are correct at every PP degree. (vLLM caches are returned as a plain `dict` keyed by envoy path, not a `CacheDict`, so use `cache["model.model.layers.0"]`, not attribute access.)
 - See [docs/gotchas/save.md](../gotchas/save.md) for the full set.
 
 ## Related
