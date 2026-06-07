@@ -366,6 +366,22 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         per_req[key] = stripped
                         if internal_key in finished_internal_keys:
                             removals.append(id(value))
+                # Durable per-mediator saves. ``info.frame.f_locals`` is filled
+                # by ``Mediator.push()``, which only runs on normal completion
+                # (end()/stop()). A PP rank that produced a value and then
+                # parked on a cross-stage pull never reached push(), so its
+                # frame is empty here and the real save would be dropped.
+                # ``Mediator._snapshot_saves`` captured those live during
+                # execution; pick up anything the frame pass missed.
+                for key, value in mediator.saves.items():
+                    if key in per_req:
+                        continue
+                    stripped, has_real, has_lazy = strip_lazy(value)
+                    if has_lazy and not has_real:
+                        continue
+                    per_req[key] = stripped
+                    if internal_key in finished_internal_keys:
+                        removals.append(id(value))
 
             for internal_key in finished_internal_keys:
                 owning_base = base_by_internal.get(internal_key, internal_key)

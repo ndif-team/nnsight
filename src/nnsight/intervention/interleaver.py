@@ -994,6 +994,11 @@ class Mediator:
         self.history = set()
         self.user_cache: List["Cache"] = list()
         self.hooks: List[Any] = list()
+        # Durable snapshot of this mediator's saved locals (name -> value),
+        # captured incrementally during execution (``_snapshot_saves``) so the
+        # collector still finds them on a rank that never reaches ``end()`` /
+        # ``push()`` — e.g. a PP rank parked mid cross-stage pull.
+        self.saves: dict = dict()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
         # The live iter-loop handle list while this mediator is iterating
@@ -1639,6 +1644,11 @@ class Mediator:
         forward finishes the interleaver context closes and later accesses
         must not post into it.
         """
+        # Durably capture saves before releasing into the blocking cross-stage
+        # pull. The producing rank may park on that pull and never reach
+        # ``end()``/``push()``; without this its real saved value would be lost
+        # at collection (empty frame). Runs while the live frame is in scope.
+        self._snapshot_saves()
         self.event_queue.put((Events.RELEASE, None))
 
     def exception(self, exception: Exception):
@@ -1663,11 +1673,38 @@ class Mediator:
 
         return frame
 
+    def _snapshot_saves(self):
+        """Capture saved locals (name -> value) from the live intervention
+        frame into ``self.saves``.
+
+        Saves are normally recovered at collection time by reading
+        ``info.frame.f_locals``, which ``push()`` fills from the live frame —
+        but ``push()`` only runs on normal completion (``end()``/``stop()``).
+        A PP rank that produces a value and then parks on a cross-stage pull
+        may never reach ``push()``; without this its real saved value is lost.
+        Called from ``go_remote()`` (just before the producing rank releases
+        into the blocking pull) and from ``push()`` (normal completion), so the
+        value is recorded while the live frame is still in scope. Idempotent
+        and additive — only known saves are recorded.
+        """
+        if self.info.frame is None:
+            return
+        frame = self.frame
+        if frame is None:
+            return
+        from .tracing.globals import Globals
+        saves = Globals.saves
+        for k, v in frame.f_locals.items():
+            if not k.startswith(NNSIGHT_PREFIX) and id(v) in saves:
+                self.saves[k] = v
+
     def push(self):
         """Push local variables to the interleaver state."""
 
         if self.info.frame is None:
             return
+
+        self._snapshot_saves()
 
         state = {
             k: v
@@ -1758,6 +1795,7 @@ class Mediator:
         self.history = set()
         self.user_cache: "Cache" = list()
         self.hooks: List[Any] = list()
+        self.saves: dict = dict()
         self.iteration = 0
         self._active_iter_handles: Optional[List] = None
         self.args = list()
