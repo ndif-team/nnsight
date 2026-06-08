@@ -418,6 +418,18 @@ class CudaIpcHostChannel(MediatorChannel):
         self._pending = item
         self._has = True
 
+    def reset(self) -> None:
+        """Clear single-slot + per-job state so a recycled worker's channel is fresh.
+
+        Re-arms the generous startup timeout (the next job's first event covers a
+        fresh deserialize + run-to-first-request) and drops the per-mediator
+        ``meta_provider`` / ``on_push`` bindings (re-set on the next acquire)."""
+        self._pending = None
+        self._has = False
+        self._started = False
+        self.meta_provider = None
+        self.on_push = None
+
     # --- main -> worker ---
     def put_response(self, value: Any) -> None:
         skel, table = pack_cuda(value, self._buf)

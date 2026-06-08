@@ -174,7 +174,8 @@ rule; deferred (revisit with double-buffering if real workloads need it).
 | `cross_invoker` variable sharing | host-mediated variable store (worker pushes data locals, pulls the merged store) | done |
 | `with tensor.backward()` / `.grad` | needs host-side backward execution (the autograd graph is host-side) | planned |
 | `tracer.cache()` | host-side cache-hook registration + post-forward injection of the populated CacheDict | planned |
-| warm worker pool / MPS / `isolate_mediators()` polish | — | planned |
+| warm worker pool (`pool_size=`) | generic workers receive serialized mediators as jobs over the channel; clean-END workers recycled, others retired | done (§14) |
+| MPS / `isolate_mediators()` further polish | — | planned |
 
 When isolation is on and a not-yet-supported feature is used, the trace **fails cleanly** — a
 missed-provider error or the per-step timeout (the lifecycle is the safety net), not a silent deadlock or
@@ -254,6 +255,7 @@ benign CudaIPC release warning.
 | `iter`/`all`/`next` (multi-token) | ✅ bit-identical (`iter[N]`, `iter[:]`, per-step swap) |
 | `tracer.barrier()` | ✅ host-side participant counting |
 | `cross_invoker` variable sharing | ✅ host variable store; transmittable data vars only — see §10 |
+| warm worker pool (`pool_size=N`, `warm_worker_pool`) | ✅ ~21× faster per request once warm; recycle-on-clean-END — see §14 |
 | `with tensor.backward()` / `.grad` | 🔜 hard: the autograd graph is host-side, the worker has detached clones; needs the backward pass to run host-side with path-based grad providers (a major build) |
 | `tracer.cache()` | 🔜 tractable: returns an empty CacheDict today (hooks fire on dummy modules); needs host-side cache-hook registration + shipping the populated CacheDict back |
 | `.source` operation-level access (`...attn.split_1.output`) | 🔜 not yet (op paths aren't in `model.modules()`) |
@@ -319,8 +321,9 @@ regression PASS (4-tuple event).
 
 **Findings:** the variable-sharing push must filter to transmittable data (else the `Barrier` local pulls
 in the whole model) AND move tensors to CPU (CUDA-IPC tensors can't be re-shared by the host). The
-`_xinvoke_store` is per-interleaver (reset each trace) so no cross-trace leak today; a warm pool must
-clear it + the dummy-module hooks + `Globals.saves` per trace. Known coverage gaps: no tests yet for
+`_xinvoke_store` is per-interleaver (reset each trace) so no cross-trace leak today; the warm pool (§14)
+rebuilds the interleaver + dummy modules per job and clears `Globals.saves`, so there is no cross-trace
+leak under reuse either. Known coverage gaps: no tests yet for
 multi-barrier-in-one-trace, 3+ participants, multi-token + barrier, or variable sharing without a barrier;
 the store grows monotonically per trace and ships all shared tensors CPU-serialized on every response (a
 perf cliff for large cross-invoke tensors).
@@ -374,3 +377,59 @@ fallback) is config-selectable. Server deployments set the flag globally.
   clone-on-receive rule must not be skipped, or held-across-access tensors corrupt silently.
 - **Path-only envoy fidelity** — the worker mirror must resolve every path the user writes; built from
   the serialized tree, validated by the non-standard-named-model acceptance test.
+
+---
+
+## 14. Warm worker pool — DONE (2026-06-07)
+
+**Why.** Spawning a worker per request is the dominant isolation cost: **~4.5 s** end-to-end on gpt2/A100
+(~12 ms in-process, ~370×), of which **~4.2 s** is cold `import torch` (1.3 s) + `import nnsight` (2.3 s) +
+CUDA context init (0.4 s) — measured (`perf_spawn_cost.py`), **model-independent** (weights aren't shipped),
+a flat per-request tax. Host-side mediator serialization is only ~3 ms. A warm pool amortizes the spawn.
+
+**The key change: the worker is generic, not mediator-bound.** Previously `_worker_main(payload, ...)`
+received its mediator as a spawn-time argument. Now `_pool_worker_main(conn, buf, base_opts)` warms CUDA +
+imports + `_ensure_mounted` **once**, optionally locks down, sends a one-time `"ready"` ack, then loops:
+`conn.recv()` → on `("job", payload, extras, opts)` clear `Globals.saves`, deserialize a fresh mediator
+against fresh dummies (`_run_one_job`), run it, loop; on `"stop"` `os._exit(0)`. The CUDA context, warmed
+kernels, bounce buffer, and `CudaIpcWorkerChannel` persist across jobs; only the ~3 ms payload changes per
+request. This **unifies** the cold and pooled paths — the worker always runs the loop; the host decides
+recycle-vs-kill. The one-time `"ready"` is consumed by the spawner before the channel reads protocol frames
+(they share the pipe).
+
+**Host side.** A process-global `_WorkerPool` (thread-safe) persists across traces. `acquire_isolated_worker`
+serializes the mediator (`_build_job`), pulls an idle worker (or lazily grows to the `pool_size` cap, or a
+cold one-shot worker past the cap so a trace never blocks on the budget), ships the job, and re-points the
+host channel's `meta_provider`/`on_push` to *this* mediator's interleaver. `Mediator.cancel` calls
+`release_isolated_worker`.
+
+**Recycle-safety rule.** Recycle **only a cleanly-ended worker**: `handle_end_event` sets `_iso.clean=True`
+when a worker's END is consumed; `release` recycles iff `clean and poolable and alive and not dirty`. A
+worker drained mid-protocol with a `Cancelation` (`dirty` — the pipe is now unbalanced), a timeout/death
+(`clean` never set — it's *spinning*, not idle), or a cold one-shot worker is **retired** (killed) and the
+pool re-warms lazily. Recycle resets the worker's host channel (`CudaIpcHostChannel.reset`) and per-job
+hook-registration state; the worker rebuilds its interleaver + dummy modules per job and clears
+`Globals.saves`, so there is no cross-trace state leak.
+
+**Opt-in.** `isolate_mediators(..., pool_size=N)` routes through the pool (`pool_size=0`, the default, is
+the unchanged cold-spawn path). `warm_worker_pool(N, ...)` pre-warms at startup (blocks until N ack ready);
+`shutdown_worker_pool()` tears it down. Base options (device/arena/gpu_mem_fraction/lockdown) are fixed when
+the pool is first warmed; per-trace options (`default_all`, `cross_invoker`, `timeout`) ride each job.
+
+**Pool sizing is a GPU-memory budget.** The natural ceiling is the **batch size** (one worker per mediator,
+one mediator per invoke, all concurrent vs one forward pass → concurrent workers = #invokes ≤ batch size).
+Each warm worker costs **~0.55 GiB GPU per GPU it touches** (CUDA context + cuBLAS kernels; measured,
+model-weight-independent, linear in worker count) — and **MPS does not reduce this** (Ampere MPS shares the
+*scheduler*, not context memory; measured identical under MPS). So at batch-16/single-GPU ≈ 8.7 GB (11% of
+an 80 GB A100 but ~55% of a 16 GB T4) — the cap must be deliberate, with the cold-spawn fallback past it.
+(`probe_pool_gpu_footprint.py`.)
+
+**Lockdown + pool.** Seccomp lockdown happens once after warm-up (before the job loop), so a pooled worker
+locks the import set at warm time — a job whose user code triggers a *new* import fails. Lockdown defaults
+off; document the trade-off.
+
+**Verified (`test_isolated_pool.py`, gpt2/A100):** reuse bit-identical (`max|Δ|=0`) at **~21× faster** once
+warm (4.57 s cold → 0.22 s warm) with worker PIDs reused (no fresh spawn); a 3-invoke trace draws 3 distinct
+pooled workers all bit-identical; a timed-out (infinite-loop) worker is retired and the pool re-warms with
+the next trace bit-identical; a non-standard-named model works through the pool. Cold path (`pool_size=0`)
+stays bit-identical across read/swap/save/multi/exception/hang/multitoken/cross-invoke/barrier/nonstd.

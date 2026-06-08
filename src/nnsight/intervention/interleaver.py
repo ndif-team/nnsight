@@ -973,11 +973,11 @@ class Mediator:
 
         self.worker = None
 
-        # Host-side handle to an isolated worker process (set by
-        # isolation.spawn_isolated_worker). ``None`` => in-process (default).
+        # Host-side handle (_PooledWorker) to an isolated worker process (set by
+        # isolation.acquire_isolated_worker). ``None`` => in-process (default).
         self._iso = None
 
-        # True only inside an isolated worker process (set by _worker_main). Lets
+        # True only inside an isolated worker process (set by _run_one_job). Lets
         # cross-process-aware logic (e.g. Barrier) know it can't count locally.
         self._isolated_worker = False
 
@@ -1073,11 +1073,12 @@ class Mediator:
         from .isolation import isolation_state
 
         if isolation_state()["on"]:
-            # Isolated path: run the intervention in a spawned GPU worker process.
+            # Isolated path: run the intervention in an isolated GPU worker process
+            # (a warm pooled worker when pool_size>0, else a cold one-shot worker).
             # Sets self.channel (host end), self.worker (the process), self._iso.
-            from .isolation import spawn_isolated_worker
+            from .isolation import acquire_isolated_worker
 
-            spawn_isolated_worker(self)
+            acquire_isolated_worker(self)
             self.interleaver.current = self
         else:
             _intervention = self.intervention
@@ -1118,16 +1119,25 @@ class Mediator:
         self.iteration = 0
         self.worker = None
 
+        # If the worker is still mid-protocol, drain it with a Cancelation. That
+        # leaves the cross-process pipe unbalanced, so such a worker must NOT be
+        # recycled into the pool — mark it dirty.
+        dirty = False
         if self.channel.has_event:
             self.handle()
             if self.channel.has_event:
                 self.channel.get_event()
                 self.channel.put_response(Cancelation())
                 self.channel.get_event()
+            dirty = True
 
-        # Tear down the isolated worker process + free the bounce buffer.
+        # Release the isolated worker: recycle it if it ended cleanly (set above in
+        # handle_end_event), else retire it (the pool re-warms lazily). For a cold
+        # one-shot worker (pool_size=0) this just kills it and frees the buffer.
         if self._iso is not None:
-            self._iso.close()
+            from .isolation import release_isolated_worker
+
+            release_isolated_worker(self._iso, dirty=dirty)
             self._iso = None
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
@@ -1401,15 +1411,19 @@ class Mediator:
         vars). The worker already applied the ``Globals.saves`` filter, so no
         second filtering hop is needed here.
         """
-        if self._iso is not None and saves:
-            tracer = self.interleaver.tracer
-            user_frame = (
-                tracer.info.frame
-                if tracer is not None and tracer.info.frame is not None
-                else self.info.frame
-            )
-            if user_frame is not None:
-                push_variables(user_frame, saves)
+        if self._iso is not None:
+            # A consumed END means the worker ended cleanly => recyclable by the pool.
+            # cancel() (below) reads this to recycle vs retire the worker.
+            self._iso.clean = True
+            if saves:
+                tracer = self.interleaver.tracer
+                user_frame = (
+                    tracer.info.frame
+                    if tracer is not None and tracer.info.frame is not None
+                    else self.info.frame
+                )
+                if user_frame is not None:
+                    push_variables(user_frame, saves)
 
         self.cancel()
 
