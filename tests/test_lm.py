@@ -537,6 +537,36 @@ class TestInvokerBatching:
         assert torch.allclose(list_logits3, invoke_logits3, atol=1e-5)
 
     @torch.no_grad()
+    def test_batched_positions_match_single_prompt(
+        self, gpt2: nnsight.LanguageModel, ET_prompt: str
+    ):
+        """A prompt's next-token logits in a mixed-length batch must match running it alone.
+
+        The batch is left-padded, so a shorter prompt's real tokens land at shifted positions unless
+        ``position_ids`` are derived from the attention mask. Without that, GPT-2's learned absolute
+        position embeddings make the padded row's logits diverge from the single-prompt result — a
+        silent per-prompt error. This is a stronger check than ``test_invoke_list_attention_mask``,
+        which compares batched paths to each other: both share the same padding, so they agree even
+        when both are wrong. The single-prompt run is the real ground truth.
+        """
+        short = "Hello world"            # fewer tokens -> left-padded in the batch
+        long = ET_prompt
+
+        with gpt2.trace([short, long]):
+            batched = gpt2.lm_head.output[:, -1].save()        # [2, vocab]
+        with gpt2.trace(short):
+            short_alone = gpt2.lm_head.output[:, -1].save()    # [1, vocab]
+        with gpt2.trace(long):
+            long_alone = gpt2.lm_head.output[:, -1].save()
+
+        # the padded (shorter) row is the one the position shift corrupts
+        assert (batched[0] - short_alone[0]).abs().max() < 1e-1
+        assert torch.equal(batched[0].argmax(-1), short_alone[0].argmax(-1))
+        # the longest (unpadded) row is unaffected either way; check it stays correct
+        assert (batched[1] - long_alone[0]).abs().max() < 1e-1
+        assert torch.equal(batched[1].argmax(-1), long_alone[0].argmax(-1))
+
+    @torch.no_grad()
     def test_invoker_input_ids(self, gpt2: nnsight.LanguageModel):
         """Test that input IDs are copied when batching."""
         with gpt2.trace() as tracer:

@@ -279,6 +279,33 @@ class LanguageModel(TransformersModel):
         "verbose",
     }
 
+    def _supply_left_pad_position_ids(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Supply mask-derived ``position_ids`` for a left-padded batch.
+
+        When the tokenizer left-pads a multi-row batch, a bare ``forward`` defaults ``position_ids``
+        to a mask-blind ``arange``, so a padded (shorter) row's real tokens are assigned absolute
+        positions shifted by the pad count. Models with learned absolute position embeddings (the
+        GPT-2 family) then read the wrong position vector and silently mispredict every prompt
+        shorter than the longest one in the batch. Deriving ``position_ids`` from the attention mask
+        — exactly what ``generate`` does — keeps each real token at its true 0-based position.
+        Relative-position models (RoPE/ALiBi) are unaffected by the shift, and correct
+        ``position_ids`` are a harmless no-op for them.
+
+        No-op unless the tokenizer pads on the left, ``position_ids`` was not already supplied, and
+        an ``attention_mask`` with actual padding is present.
+        """
+        if self.tokenizer.padding_side != "left":
+            return kwargs
+        if kwargs.get("position_ids", None) is not None:
+            return kwargs
+        mask = kwargs.get("attention_mask", None)
+        if not isinstance(mask, torch.Tensor) or mask.dim() != 2 or bool(mask.all()):
+            return kwargs
+        position_ids = mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(mask == 0, 0)
+        kwargs["position_ids"] = position_ids
+        return kwargs
+
     def _prepare_input(
         self,
         *inputs: Union[
@@ -351,11 +378,10 @@ class LanguageModel(TransformersModel):
                 "Pass a non-empty prompt or non-empty `input_ids`."
             )
 
-        return (
-            tuple(),
-            {**inputs, "labels": labels, **remaining_kwargs},
-            len(inputs["input_ids"]),
+        kwargs = self._supply_left_pad_position_ids(
+            {**inputs, "labels": labels, **remaining_kwargs}
         )
+        return (tuple(), kwargs, len(inputs["input_ids"]))
 
     def _batch(
         self,
@@ -417,11 +443,13 @@ class LanguageModel(TransformersModel):
 
         batched_inputs.pop("input_ids", None)
         batched_inputs.pop("attention_mask", None)
+        # drop any stale per-invoke position_ids; recompute below from the final combined mask
+        batched_inputs.pop("position_ids", None)
 
-        return (
-            tuple(),
-            {**new_batched_inputs, **batched_inputs, "labels": batched_labels},
+        kwargs = self._supply_left_pad_position_ids(
+            {**new_batched_inputs, **batched_inputs, "labels": batched_labels}
         )
+        return tuple(), kwargs
 
     def _remoteable_model_key(self) -> str:
         return super()._remoteable_model_key()
