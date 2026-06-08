@@ -735,6 +735,13 @@ class Barrier:
 
         mediator = self.model.interleaver.current
 
+        # Isolated worker: each invoke runs in its own process with its own Barrier
+        # copy, so it can't count cross-invoke. Send the TARGET count and let the host
+        # accumulate participants across mediators (see handle_barrier_event).
+        if mediator._isolated_worker:
+            mediator.send(Events.BARRIER, self.n_participants)
+            return
+
         self.participants.add(mediator.name)
 
         if len(self.participants) == self.n_participants:

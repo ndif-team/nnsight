@@ -463,6 +463,16 @@ class Interleaver:
 
         self.current: Mediator = None
 
+        # Isolated BARRIER: workers can't count across processes, so each sends the
+        # target count and the host accumulates participant names here, coordinating
+        # when all have arrived. Unused on the in-process path.
+        self._barrier_acc: set = set()
+
+        # Isolated cross_invoker: per-worker frames aren't shared across processes, so
+        # workers push their locals here and pull the merged store back (host-mediated
+        # replacement for the shared-frame push/pull). Unused on the in-process path.
+        self._xinvoke_store: dict = {}
+
     def cancel(self):
         """Cancel all mediators / intervention threads.
 
@@ -712,7 +722,7 @@ class Interleaver:
         for mediator in self.mediators:
 
             if mediator.alive:
-                requested_event, requester = mediator.event_queue.get()
+                requested_event, requester = mediator.channel.get_event()
 
                 if isinstance(requester, tuple):
                     requester = requester[0]
@@ -771,6 +781,91 @@ class Interleaver:
         return self
 
 
+class MediatorChannel:
+    """Bidirectional, one-event-in-flight handoff between the worker thread (the
+    intervention fn) and the main thread (the model forward pass).
+
+    The six :class:`Events` (VALUE/SWAP/SKIP/BARRIER/END/EXCEPTION) ride on top of
+    this channel unchanged. Today the only implementation is in-process
+    (:class:`InProcessChannel`, two lock-based one-slot queues); the mediator
+    isolation refactor adds a socket-backed subclass so the worker can run in a
+    separate sandbox process. See docs/developing/mediator-isolation-harness-plan.md.
+
+    Direction conventions:
+    - ``*_event`` methods carry worker -> main messages (an ``(Events, requester)`` pair).
+    - ``*_response`` methods carry main -> worker replies (the value for a pending event).
+
+    Only one event is ever in flight, which is what enforces the "access modules in
+    forward-pass order" contract.
+    """
+
+    # --- worker -> main (event direction) ---
+    def put_event(self, item: Any) -> None:
+        raise NotImplementedError
+
+    def restore_event(self, item: Any) -> None:
+        """Stage an event back without releasing a waiter (used when a provider
+        fires that the worker is not currently requesting)."""
+        raise NotImplementedError
+
+    def get_event(self) -> Any:
+        raise NotImplementedError
+
+    def wait_event(self) -> None:
+        raise NotImplementedError
+
+    @property
+    def has_event(self) -> bool:
+        raise NotImplementedError
+
+    # --- main -> worker (response direction) ---
+    def put_response(self, value: Any) -> None:
+        raise NotImplementedError
+
+    def get_response(self) -> Any:
+        raise NotImplementedError
+
+    def wait_response(self) -> None:
+        raise NotImplementedError
+
+
+class InProcessChannel(MediatorChannel):
+    """The original transport: two :class:`Mediator.Value` one-slot lock queues.
+
+    Behaviour-identical to the pre-seam ``event_queue``/``response_queue`` pair —
+    this is the default channel and the regression baseline for the seam.
+    """
+
+    def __init__(self) -> None:
+        self._event = Mediator.Value()
+        self._response = Mediator.Value()
+
+    def put_event(self, item: Any) -> None:
+        self._event.put(item)
+
+    def restore_event(self, item: Any) -> None:
+        self._event.restore(item)
+
+    def get_event(self) -> Any:
+        return self._event.get()
+
+    def wait_event(self) -> None:
+        self._event.wait()
+
+    @property
+    def has_event(self) -> bool:
+        return self._event.has_value
+
+    def put_response(self, value: Any) -> None:
+        self._response.put(value)
+
+    def get_response(self) -> Any:
+        return self._response.get()
+
+    def wait_response(self) -> None:
+        self._response.wait()
+
+
 class Mediator:
     """
     Mediates between the model execution and a single intervention function.
@@ -785,8 +880,7 @@ class Mediator:
         info (Tracer.Info): Information about the tracing context associated with this mediator
         name (Optional[str]): Optional name for the mediator
         batch_group (Optional[List[int]]): Optional batch group for the mediator to determine which slice of tensors are being intervened on
-        event_queue (SimpleQueue): Where the mediator (worker thread) puts events to be processed by the interleaver (main thread). Will only ever have 1 or 0 items in the queue.
-        response_queue (SimpleQueue): Where the interleaver (main thread) puts responses to events, to then be processed by the mediator (worker thread). Will only ever have 1 or 0 items in the queue.
+        channel (MediatorChannel): The bidirectional one-event-in-flight handoff between the mediator (worker thread) and the interleaver (main thread). The worker puts events for the interleaver to process and the interleaver puts responses back; only ever 1 or 0 messages in flight in each direction. ``InProcessChannel`` by default; swappable for a socket-backed channel to run the worker in an isolated process.
         worker (Thread): The thread that runs the intervention function
         history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
         iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
@@ -875,10 +969,17 @@ class Mediator:
 
         self.interleaver = None
 
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        self.channel: MediatorChannel = InProcessChannel()
 
         self.worker = None
+
+        # Host-side handle to an isolated worker process (set by
+        # isolation.spawn_isolated_worker). ``None`` => in-process (default).
+        self._iso = None
+
+        # True only inside an isolated worker process (set by _worker_main). Lets
+        # cross-process-aware logic (e.g. Barrier) know it can't count locally.
+        self._isolated_worker = False
 
         self.skip_container = None
 
@@ -969,24 +1070,35 @@ class Mediator:
         else:
             _caller_stream = None
 
-        _intervention = self.intervention
-        _args = (self, self.info, *self.args)
+        from .isolation import isolation_state
 
-        def _worker_target():
-            if _caller_stream is not None:
-                torch.cuda.set_stream(_caller_stream)
-            _intervention(*_args)
+        if isolation_state()["on"]:
+            # Isolated path: run the intervention in a spawned GPU worker process.
+            # Sets self.channel (host end), self.worker (the process), self._iso.
+            from .isolation import spawn_isolated_worker
 
-        # Start the worker thread.
-        self.worker = Thread(
-            target=_worker_target,
-            daemon=True,
-            name=self.name,
-        )
+            spawn_isolated_worker(self)
+            self.interleaver.current = self
+        else:
+            _intervention = self.intervention
+            _args = (self, self.info, *self.args)
 
-        self.interleaver.current = self
-        self.worker.start()
-        self.event_queue.wait()
+            def _worker_target():
+                if _caller_stream is not None:
+                    torch.cuda.set_stream(_caller_stream)
+                _intervention(*_args)
+
+            # Start the worker thread.
+            self.worker = Thread(
+                target=_worker_target,
+                daemon=True,
+                name=self.name,
+            )
+
+            self.interleaver.current = self
+            self.worker.start()
+
+        self.channel.wait_event()
 
         # Handle the first event for each mediator to clear mediators that already ended.
         try:
@@ -1006,12 +1118,17 @@ class Mediator:
         self.iteration = 0
         self.worker = None
 
-        if self.event_queue.has_value:
+        if self.channel.has_event:
             self.handle()
-            if self.event_queue.has_value:
-                self.event_queue.get()
-                self.response_queue.put(Cancelation())
-                self.event_queue.get()
+            if self.channel.has_event:
+                self.channel.get_event()
+                self.channel.put_response(Cancelation())
+                self.channel.get_event()
+
+        # Tear down the isolated worker process + free the bounce buffer.
+        if self._iso is not None:
+            self._iso.close()
+            self._iso = None
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
         """Process a provided value against this mediator's pending event.
@@ -1048,13 +1165,26 @@ class Mediator:
         self.interleaver.batcher.current_provider = provider
 
         # Check to see if this mediator has an unprocessed eventto start.
-        process = self.event_queue.has_value
+        process = self.channel.has_event
 
         # Continue processing events until there are no more events to process.
         # Means we can move on to the next mediator and continue the model execution.
         while process:
 
-            event, data = self.event_queue.get()
+            event, data = self.channel.get_event()
+
+            # Host-side hook registration: in the isolated path the worker has no real module, so the
+            # host registers the one-shot hook on demand from the requester string
+            # the worker just sent.
+            if self._iso is not None and event in (
+                Events.VALUE,
+                Events.SWAP,
+                Events.SKIP,
+            ):
+                from .isolation import ensure_isolated_provider
+
+                requester = data if event == Events.VALUE else data[0]
+                ensure_isolated_provider(self, requester)
 
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider)
@@ -1067,7 +1197,7 @@ class Mediator:
             elif event == Events.BARRIER:
                 process = self.handle_barrier_event(provider, data)
             elif event == Events.END:
-                process = self.handle_end_event()
+                process = self.handle_end_event(data)
 
         value = self.interleaver.batcher.current_value
 
@@ -1120,7 +1250,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the value event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.restore((Events.VALUE, requester))
+                self.channel.restore_event((Events.VALUE, requester))
 
                 return False
 
@@ -1158,7 +1288,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the swap event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.restore((Events.SWAP, (requester, swap_value)))
+                self.channel.restore_event((Events.SWAP, (requester, swap_value)))
 
                 return False
 
@@ -1224,6 +1354,19 @@ class Mediator:
         carries the swap forward to the outer handle context.
         """
 
+        # Isolated path: the worker can't count participants across processes, so it
+        # sends the TARGET count (an int). Accumulate names host-side; only coordinate
+        # once all participants have arrived. Until then this mediator stays blocked at
+        # the barrier (return False without responding).
+        if isinstance(participants, int):
+            n = participants
+            acc = self.interleaver._barrier_acc
+            acc.add(self.name)
+            if len(acc) < n:
+                return False
+            participants = set(acc)
+            acc.clear()
+
         if participants is not None:
 
             prev_current = self.interleaver.current
@@ -1246,10 +1389,28 @@ class Mediator:
 
         return False
 
-    def handle_end_event(self):
+    def handle_end_event(self, saves: Optional[Any] = None):
         """
         Handle an end event by stopping the mediator.
+
+        Worker→host saves transmission: in the isolated path the worker bundles its ``.save()``'d values
+        (already filtered by ``Globals.saves``) into the END event, since the
+        worker's frame + ``Globals.saves`` live in another process. The host
+        injects them directly into the real **user** frame — the tracer's
+        ``info.frame`` (where the in-process two-hop push ultimately lands saved
+        vars). The worker already applied the ``Globals.saves`` filter, so no
+        second filtering hop is needed here.
         """
+        if self._iso is not None and saves:
+            tracer = self.interleaver.tracer
+            user_frame = (
+                tracer.info.frame
+                if tracer is not None and tracer.info.frame is not None
+                else self.info.frame
+            )
+            if user_frame is not None:
+                push_variables(user_frame, saves)
+
         self.cancel()
 
         return False
@@ -1292,7 +1453,7 @@ class Mediator:
                 return True
             else:
                 self.history.add(provider)
-                self.event_queue.restore((Events.SKIP, (requester, value)))
+                self.channel.restore_event((Events.SKIP, (requester, value)))
 
                 return False
 
@@ -1305,8 +1466,8 @@ class Mediator:
         """
 
         # Respond and resume the mediator thread.
-        self.response_queue.put(value)
-        self.event_queue.wait()
+        self.channel.put_response(value)
+        self.channel.wait_event()
 
     ### Requester Methods ###
 
@@ -1328,11 +1489,11 @@ class Mediator:
             self.push()
 
         # Send the event
-        self.event_queue.put((event, requester))
+        self.channel.put_event((event, requester))
 
         # Wait for the interleaver to process the event and respond with the value.
-        self.response_queue.wait()
-        response = self.response_queue.get()
+        self.channel.wait_response()
+        response = self.channel.get_response()
 
         # If the response is an exception, raise it.
         if isinstance(response, Exception):
@@ -1383,7 +1544,7 @@ class Mediator:
 
         self.push()
 
-        self.event_queue.put((Events.END, None))
+        self.channel.put_event((Events.END, None))
 
     def exception(self, exception: Exception):
         """
@@ -1392,7 +1553,7 @@ class Mediator:
         Args:
             exception: The exception that occurred
         """
-        self.event_queue.put((Events.EXCEPTION, exception))
+        self.channel.put_event((Events.EXCEPTION, exception))
 
     @property
     def frame(self) -> FrameType:
@@ -1494,10 +1655,11 @@ class Mediator:
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
         self.iteration_tracker = state["iteration_tracker"]
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        self.channel: MediatorChannel = InProcessChannel()
 
         self.worker = None
+        self._iso = None
+        self._isolated_worker = False
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()

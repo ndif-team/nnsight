@@ -151,7 +151,12 @@ def add_ordered_hook(module: torch.nn.Module, hook: Callable, type: str) -> Any:
     return handle
 
 
-def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
+def input_hook(
+    mediator: Mediator,
+    module: torch.nn.Module,
+    path: str,
+    iteration: Optional[int] = None,
+) -> Any:
     """Register a one-shot forward pre-hook for a mediator on a module.
 
     The hook target iteration is captured at registration time:
@@ -188,11 +193,12 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     """
 
     handle = None
-    iteration = (
-        mediator.iteration
-        if mediator.iteration is not None
-        else mediator.iteration_tracker[path]
-    )
+    if iteration is None:
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iteration_tracker[path]
+        )
 
     def hook(module: torch.nn.Module, args: Any, kwargs: Any) -> Any:
 
@@ -221,7 +227,12 @@ def input_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
     return handle
 
 
-def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
+def output_hook(
+    mediator: Mediator,
+    module: torch.nn.Module,
+    path: str,
+    iteration: Optional[int] = None,
+) -> Any:
     """Register a one-shot forward hook for a mediator on a module.
 
     Behaves identically to :func:`input_hook` but intercepts the module's
@@ -233,17 +244,22 @@ def output_hook(mediator: Mediator, module: torch.nn.Module, path: str) -> Any:
         mediator: The mediator requesting this hook.
         module: The PyTorch module to hook.
         path: The provider path prefix (e.g. ``"model.layer.0.output"``).
+        iteration: Explicit target step. ``None`` (default) resolves it from
+            ``mediator.iteration``/``iteration_tracker`` (in-process). The isolated
+            path (host-side hook registration) passes the step parsed from the worker's requester
+            string, since the worker's tracker lives in another process.
 
     Returns:
         A :class:`~torch.utils.hooks.RemovableHandle` for the registered hook.
     """
 
     handle = None
-    iteration = (
-        mediator.iteration
-        if mediator.iteration is not None
-        else mediator.iteration_tracker[path]
-    )
+    if iteration is None:
+        iteration = (
+            mediator.iteration
+            if mediator.iteration is not None
+            else mediator.iteration_tracker[path]
+        )
 
     def hook(module: torch.nn.Module, _, output: Any) -> Any:
 
