@@ -567,6 +567,32 @@ class TestInvokerBatching:
         assert torch.equal(batched[1].argmax(-1), long_alone[0].argmax(-1))
 
     @torch.no_grad()
+    def test_batched_generation_matches_single_prompt(
+        self, gpt2: nnsight.LanguageModel, ET_prompt: str
+    ):
+        """Mixed-length batched generation must produce the same continuation for a prompt as
+        generating it alone.
+
+        The left-padded-batch ``position_ids`` correction is for the bare-forward (trace) path only.
+        ``generate`` derives and advances ``position_ids`` itself across decode steps, so if the
+        correction leaks into ``generate`` the padded row's positions freeze and its decode diverges.
+        This guards that the correction is stripped before ``generate`` (the trace fix must not break
+        generation)."""
+        short = "Hello world"           # fewer tokens -> left-padded in the batch
+        long = ET_prompt
+
+        with gpt2.generate(max_new_tokens=8, do_sample=False) as tracer:
+            with tracer.invoke([short, long]):
+                batched = gpt2.generator.output.save()
+        with gpt2.generate(max_new_tokens=8, do_sample=False) as tracer:
+            with tracer.invoke(short):
+                single = gpt2.generator.output.save()
+
+        # the last 8 columns are the newly generated tokens; the padded (short) row must match
+        # the standalone run token-for-token.
+        assert torch.equal(batched[0, -8:], single[0, -8:])
+
+    @torch.no_grad()
     def test_invoker_input_ids(self, gpt2: nnsight.LanguageModel):
         """Test that input IDs are copied when batching."""
         with gpt2.trace() as tracer:

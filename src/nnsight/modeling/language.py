@@ -193,6 +193,11 @@ class LanguageModel(TransformersModel):
 
         streamer = kwargs.pop("streamer", self.generator.streamer._module)
 
+        # The left-padded-batch position_ids correction (`_supply_left_pad_position_ids`) is for the
+        # bare-forward/trace path only. `generate` derives and advances `position_ids` itself across
+        # decode steps; a static tensor passed in would freeze the padded rows' positions and corrupt
+        # their continuation, so drop it here and let `generate` handle left-padding as it already does.
+        kwargs.pop("position_ids", None)
         output = self._model.generate(*args, streamer=streamer, **kwargs)
 
         if self.interleaver is not None:
@@ -287,9 +292,12 @@ class LanguageModel(TransformersModel):
         positions shifted by the pad count. Models with learned absolute position embeddings (the
         GPT-2 family) then read the wrong position vector and silently mispredict every prompt
         shorter than the longest one in the batch. Deriving ``position_ids`` from the attention mask
-        — exactly what ``generate`` does — keeps each real token at its true 0-based position.
+        (the standard left-padding correction) keeps each real token at its true 0-based position.
         Relative-position models (RoPE/ALiBi) are unaffected by the shift, and correct
         ``position_ids`` are a harmless no-op for them.
+
+        This corrects the bare-forward (trace) path. ``generate`` manages ``position_ids`` itself
+        across decode steps, so ``__nnsight_generate__`` strips this value before calling it.
 
         No-op unless the tokenizer pads on the left, ``position_ids`` was not already supplied, and
         an ``attention_mask`` with actual padding is present.
