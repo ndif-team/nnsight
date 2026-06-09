@@ -1,4 +1,5 @@
 from .huggingface import HuggingFaceModel
+from ._kernel_shim import meta_kernel_shim
 
 from torch.nn.modules import Module
 from transformers import AutoConfig, PreTrainedModel, PretrainedConfig
@@ -52,6 +53,12 @@ class TransformersModel(HuggingFaceModel):
 
         if self.config is None:
 
+            # Default to trusting remote code so the config class matches the
+            # remote modeling code used for meta/dispatch. Some remote configs
+            # understand fields the native class does not (e.g. newer Nemotron-H
+            # ``hybrid_override_pattern`` block types).
+            kwargs.setdefault("trust_remote_code", True)
+
             self.__dict__["config"] = AutoConfig.from_pretrained(
                 repo_id, revision=revision, **kwargs
             )
@@ -65,7 +72,20 @@ class TransformersModel(HuggingFaceModel):
 
         self._load_config(repo_id, revision=revision, **kwargs)
 
-        model = self.automodel.from_config(self.config, trust_remote_code=True)
+        # Keep the meta implementation consistent with the dispatched one: both
+        # default to trusting remote code so the intervention tree the client
+        # builds matches the model that is actually loaded/served (e.g. the
+        # Nemotron-H remote code, whose per-expert layout differs from the native
+        # transformers class).
+        trust_remote_code = kwargs.get("trust_remote_code", True)
+
+        # Some remote modeling files hard-import CUDA-only kernels (mamba_ssm,
+        # causal_conv1d) at module import time. A meta model never runs a forward,
+        # so satisfy those imports with inert stubs and keep the client GPU-free.
+        with meta_kernel_shim():
+            model = self.automodel.from_config(
+                self.config, trust_remote_code=trust_remote_code
+            )
 
         self.__dict__["config"] = model.config
 
@@ -79,6 +99,10 @@ class TransformersModel(HuggingFaceModel):
     ) -> PreTrainedModel:
 
         self._load_config(repo_id, revision=revision, **kwargs)
+
+        # Mirror the meta path's default so dispatch loads the same implementation
+        # the intervention tree was built against.
+        kwargs.setdefault("trust_remote_code", True)
 
         model = self.automodel.from_pretrained(repo_id, revision=revision, **kwargs)
 
