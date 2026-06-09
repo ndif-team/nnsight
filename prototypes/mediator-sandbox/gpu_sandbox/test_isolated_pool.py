@@ -60,7 +60,7 @@ def test_reuse(model):
             with model.trace(PROMPT):
                 got = model.transformer.h[6].output[0].save()
             # the worker that just served this trace
-            pids |= {w.proc.pid for w in isolation._POOL._all}
+            pids |= {w.proc.pid for w in isolation._POOL._all[_pool_key()]}
         warm_times.append(time.perf_counter() - t0)
         ok = ok and torch.equal(ref, got)
 
@@ -91,7 +91,7 @@ def test_concurrent(model):
                 with tracer.invoke(PROMPT):
                     got.append(model.transformer.h[6].output[0].save())
         # during the trace all 3 were checked out; after, count distinct served
-        pids_during = [w.proc.pid for w in isolation._POOL._all]
+        pids_during = [w.proc.pid for w in isolation._POOL._all[_pool_key()]]
     ok = all(torch.equal(r, g) for r, g in zip(refs, got))
     distinct = len(set(pids_during))
     print(f"[concurrent] 3 invokes bit-identical={ok} | distinct workers={distinct}")
@@ -102,7 +102,7 @@ def test_concurrent(model):
 def test_retire(model):
     ref = _read_inproc(model)
     warm_worker_pool(1, device="cuda")
-    before = next(iter(isolation._POOL._all)).proc.pid
+    before = next(iter(isolation._POOL._all[_pool_key()])).proc.pid
 
     # A hung intervention: exceed the 2 s timeout -> the worker is killed, not recycled.
     timed_out = False
@@ -118,7 +118,7 @@ def test_retire(model):
         timed_out = "hung" in str(e).lower() or "exceeded" in str(e).lower() or True
 
     # The hung worker must have been retired (its PID gone from the pool).
-    survivors = {w.proc.pid for w in isolation._POOL._all}
+    survivors = {w.proc.pid for w in isolation._POOL._all[_pool_key()]}
     retired = before not in survivors
 
     # The pool re-warms lazily and the NEXT trace still works, bit-identical.
@@ -159,6 +159,81 @@ def test_nonstd():
     return ok
 
 
+def _pool_key(device="cuda", arena=64 << 20, frac=0.3, lock=False):
+    return isolation._WorkerPool._key(
+        {"device": device, "arena_bytes": arena, "gpu_mem_fraction": frac, "lockdown": lock}
+    )
+
+
+def test_dead_idle(model):
+    # A pooled worker that DIED while idle must be skipped + replaced on the next
+    # acquire, not handed out (which would fail the trace on a broken pipe).
+    ref = _read_inproc(model)
+    warm_worker_pool(1, device="cuda")
+    key = _pool_key()
+    victim = next(iter(isolation._POOL._all[key])).proc
+    victim_pid = victim.pid
+    victim.kill(); victim.join(timeout=5)  # simulate OOM-kill/crash while idle
+
+    with isolate_mediators(pool_size=1):
+        with model.trace(PROMPT):
+            got = model.transformer.h[6].output[0].save()
+    ok = torch.equal(ref, got)
+    alive = {w.proc.pid for w in isolation._POOL._all[key]}
+    replaced = victim_pid not in alive and len(alive) == 1
+    print(f"[dead_idle] killed idle worker skipped+replaced={replaced} next_trace_ok={ok}")
+    shutdown_worker_pool()
+    return ok and replaced
+
+
+def test_exception_recycle(model):
+    # A worker whose intervention RAISES is alive + pipe-balanced -> must be recycled,
+    # not retired (else every erroring trace pays a ~4 s re-warm).
+    ref = _read_inproc(model)
+    warm_worker_pool(1, device="cuda")
+    key = _pool_key()
+    pid_before = next(iter(isolation._POOL._all[key])).proc.pid
+
+    raised = False
+    try:
+        with isolate_mediators(pool_size=1):
+            with model.trace(PROMPT):
+                _ = model.transformer.h[6].output[0].save()
+                raise ValueError("boom")
+    except Exception as e:  # noqa: BLE001
+        raised = "boom" in str(e)
+
+    pids_after = {w.proc.pid for w in isolation._POOL._all[key]}
+    recycled = pid_before in pids_after and len(pids_after) == 1
+
+    with isolate_mediators(pool_size=1):
+        with model.trace(PROMPT):
+            got = model.transformer.h[6].output[0].save()
+    reused = next(iter(isolation._POOL._all[key])).proc.pid == pid_before
+    ok = torch.equal(ref, got)
+    print(f"[exc_recycle] raised={raised} worker_recycled={recycled} reused={reused} next_ok={ok}")
+    shutdown_worker_pool()
+    return raised and recycled and reused and ok
+
+
+def test_multidevice():
+    # The pool must key by device: a worker for cuda:0 is never reused for cuda:1
+    # (its bounce buffer is on cuda:0 -> wrong-device copy = silent corruption).
+    if torch.cuda.device_count() < 2:
+        print("[multidevice] SKIP (need >=2 visible GPUs)")
+        return True
+    warm_worker_pool(1, device="cuda:0")
+    warm_worker_pool(1, device="cuda:1")
+    k0, k1 = _pool_key("cuda:0"), _pool_key("cuda:1")
+    w0 = list(isolation._POOL._all[k0])
+    w1 = list(isolation._POOL._all[k1])
+    distinct = len(w0) == 1 and len(w1) == 1 and w0[0].proc.pid != w1[0].proc.pid
+    bufs_ok = str(w0[0].buf.device) == "cuda:0" and str(w1[0].buf.device) == "cuda:1"
+    print(f"[multidevice] distinct per-device workers={distinct} bufs_on_right_device={bufs_ok}")
+    shutdown_worker_pool()
+    return distinct and bufs_ok
+
+
 def main():
     assert torch.cuda.is_available(), "needs CUDA"
     model = LanguageModel("gpt2", device_map="cuda", dispatch=True)
@@ -166,6 +241,9 @@ def main():
         "reuse": test_reuse(model),
         "concurrent": test_concurrent(model),
         "retire": test_retire(model),
+        "dead_idle": test_dead_idle(model),
+        "exc_recycle": test_exception_recycle(model),
+        "multidevice": test_multidevice(),
         "nonstd": test_nonstd(),
     }
     ok = all(results.values())

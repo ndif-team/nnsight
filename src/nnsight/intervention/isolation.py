@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections import deque
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
@@ -51,6 +51,11 @@ from ..util import apply
 
 # Types that cross_invoker may ship between workers (data, not framework objects).
 _XINVOKE_SCALARS = (int, float, complex, bool, str, bytes, type(None))
+
+# Extra wall-clock allowed for a job's first event beyond the user `timeout`, to cover
+# deserializing the mediator on an already-warm worker (the spawn+warm is paid before
+# the worker's "ready" ack, so the first event only covers deserialize + run-to-first).
+_JOB_STARTUP_MARGIN = 30.0
 
 
 def _transmittable(v) -> bool:
@@ -105,11 +110,13 @@ def isolate_mediators(
         timeout: per-step wall-clock cap on user code; a worker that produces no
             event within ``timeout`` is presumed hung and killed (the host survives).
         pool_size: if > 0, draw workers from a process-global warm pool capped at
-            ``pool_size`` (auto-grown lazily, persists across traces, falls back to a
-            cold one-shot worker past the cap). 0 (default) spawns a cold worker per
-            trace — the original behavior. The pool's base options (device,
-            arena_bytes, gpu_mem_fraction, lockdown) are fixed when it is first
-            warmed; use :func:`warm_worker_pool` to pre-warm at startup.
+            ``pool_size`` per (device, arena_bytes, gpu_mem_fraction, lockdown)
+            signature (auto-grown lazily, persists across traces, falls back to a cold
+            one-shot worker past the cap). 0 (default) spawns a cold worker per trace —
+            the original behavior. Use :func:`warm_worker_pool` to pre-warm at startup.
+            Under ``lockdown=True`` a pooled worker locks its import set at warm time, so
+            a job whose user code triggers a NEW import fails (consistently across the
+            pool) — stricter than the cold path, which deserializes before lockdown.
     """
     prev = dict(_STATE)
     _STATE.update(
@@ -150,12 +157,13 @@ class _PooledWorker:
     and a ``clean`` flag gating recycle (set when this job's END is consumed).
     """
 
-    def __init__(self, proc, buf, conn, channel, poolable: bool):
+    def __init__(self, proc, buf, conn, channel, poolable: bool, key: tuple = None):
         self.proc = proc
         self.buf = buf
         self.conn = conn
         self.channel = channel
         self.poolable = poolable        # False => one-shot cold worker (never recycled)
+        self.key = key                  # base-opts signature (device, ...) for pool keying
         self.registered: set = set()    # requesters whose host-side hook is registered
         self.path2envoy: Optional[dict] = None
         self.clean = False              # True once this job ended via a consumed END
@@ -171,7 +179,9 @@ class _PooledWorker:
         self.channel.reset()
 
     def close(self) -> None:
-        """Stop the worker, escalating SIGTERM->SIGKILL for a wedged CUDA/C call."""
+        """Stop the worker, escalating SIGTERM->SIGKILL for a wedged CUDA/C call,
+        then release the host-side pipe fd + GPU bounce buffer (else they linger
+        until GC)."""
         try:
             self.conn.send("stop")
         except Exception:  # noqa: BLE001
@@ -183,6 +193,11 @@ class _PooledWorker:
         if self.proc.is_alive():
             self.proc.kill()  # SIGKILL — wedged in a non-interruptible CUDA/C call
             self.proc.join(timeout=5)
+        try:
+            self.channel.close()  # closes the pipe fd
+        except Exception:  # noqa: BLE001
+            pass
+        self.buf = None  # drop the host ref so the GPU arena can be reclaimed
 
 
 class _WorkerPool:
@@ -195,63 +210,105 @@ class _WorkerPool:
     """
 
     def __init__(self):
-        self._idle: deque = deque()
-        self._all: set = set()
-        self._base_opts: Optional[dict] = None
+        # Keyed by base-opts signature: workers are interchangeable ONLY within the
+        # same (device, arena_bytes, gpu_mem_fraction, lockdown) — the bounce buffer is
+        # device- and size-specific, so reusing a worker across devices would copy into
+        # the wrong-device buffer (silent corruption).
+        self._idle: Dict[tuple, deque] = defaultdict(deque)
+        self._all: Dict[tuple, set] = defaultdict(set)
         self._lock = threading.Lock()
+        self._shutting_down = False
 
-    def _remember_base_opts(self, base_opts: dict) -> dict:
-        # The pool's base options are fixed the first time it is warmed/grown; later
-        # traces with different base options reuse the existing warm workers.
-        if self._base_opts is None:
-            self._base_opts = dict(base_opts)
-        return self._base_opts
+    @staticmethod
+    def _key(base_opts: dict) -> tuple:
+        return (
+            str(base_opts["device"]),
+            int(base_opts["arena_bytes"]),
+            float(base_opts["gpu_mem_fraction"]),
+            bool(base_opts.get("lockdown", False)),
+        )
 
     def warm(self, n: int, base_opts: dict) -> None:
-        base = self._remember_base_opts(base_opts)
+        key = self._key(base_opts)
+        with self._lock:
+            need = max(0, n - len(self._all[key]))
         # Spawn outside the lock (each ~4 s); register under it.
-        need = max(0, n - len(self._all))
-        fresh = [_spawn_worker(base, poolable=True) for _ in range(need)]
+        fresh = [_spawn_worker(base_opts, poolable=True) for _ in range(need)]
         with self._lock:
             for w in fresh:
-                self._all.add(w)
-                self._idle.append(w)
+                self._all[key].add(w)
+                self._idle[key].append(w)
 
     def acquire(self, base_opts: dict, cap: int) -> _PooledWorker:
-        base = self._remember_base_opts(base_opts)
+        key = self._key(base_opts)
+        dead: list = []
+        live = None
+        placeholder = None
         with self._lock:
-            if self._idle:
-                return self._idle.popleft()
-            grow = len(self._all) < cap
-        if grow:
-            w = _spawn_worker(base, poolable=True)  # spawn outside the lock
+            idle, allset = self._idle[key], self._all[key]
+            # Skip workers that died while idle (OOM-killed by a neighbor, crashed):
+            # forget them now and close below, so a dead worker is never handed out.
+            while idle and live is None:
+                w = idle.popleft()
+                if w.proc.is_alive():
+                    live = w
+                else:
+                    allset.discard(w)
+                    dead.append(w)
+            if live is None and len(allset) < cap:
+                # Reserve the slot under the lock so concurrent acquires can't grow
+                # past the cap (the spawn itself happens outside the lock).
+                placeholder = object()
+                allset.add(placeholder)
+        for w in dead:
+            w.close()
+        if live is not None:
+            return live
+        if placeholder is not None:
+            try:
+                w = _spawn_worker(base_opts, poolable=True)
+            except BaseException:
+                with self._lock:
+                    self._all[key].discard(placeholder)
+                raise
             with self._lock:
-                self._all.add(w)
+                self._all[key].discard(placeholder)
+                self._all[key].add(w)
             return w
         # At cap with none idle: a cold one-shot worker so the trace never blocks.
-        return _spawn_worker(base, poolable=False)
+        return _spawn_worker(base_opts, poolable=False)
 
     def put_idle(self, w: _PooledWorker) -> None:
+        close_it = False
         with self._lock:
-            if w in self._all:
-                self._idle.append(w)
+            if self._shutting_down or w not in self._all[w.key]:
+                # Released during shutdown, or forgotten while checked out: don't
+                # re-pool — close it so the process can't leak (close is idempotent if
+                # it was already torn down).
+                close_it = True
+            else:
+                self._idle[w.key].append(w)
+        if close_it:
+            w.close()
 
     def forget(self, w: _PooledWorker) -> None:
         with self._lock:
-            self._all.discard(w)
+            self._all[w.key].discard(w)
             try:
-                self._idle.remove(w)
+                self._idle[w.key].remove(w)
             except ValueError:
                 pass
 
     def shutdown(self) -> None:
         with self._lock:
-            workers = list(self._all)
+            self._shutting_down = True
+            workers = [w for s in self._all.values() for w in s]
             self._all.clear()
             self._idle.clear()
-            self._base_opts = None
         for w in workers:
             w.close()
+        with self._lock:
+            self._shutting_down = False
 
 
 _POOL = _WorkerPool()
@@ -300,19 +357,30 @@ def _spawn_worker(base_opts: dict, poolable: bool) -> _PooledWorker:
     )
     proc.start()
     # The worker warms CUDA + imports (~4 s) then sends exactly one "ready"; consume
-    # it before the channel starts reading protocol frames on the same pipe.
-    startup = base_opts.get("startup_timeout", 180.0)
-    if not parent_conn.poll(startup):
+    # it before the channel starts reading protocol frames on the same pipe. This poll
+    # covers the cold spawn+warm, so it stays generous.
+    warm_wait = base_opts.get("startup_timeout", 180.0)
+    if not parent_conn.poll(warm_wait):
         proc.terminate()
-        raise TimeoutError(
-            f"isolated worker failed to warm up within {startup}s"
-        )
+        raise TimeoutError(f"isolated worker failed to warm up within {warm_wait}s")
     msg = parent_conn.recv()
     if msg != "ready":
         proc.terminate()
         raise RuntimeError(f"unexpected isolated-worker handshake: {msg!r}")
-    chan = CudaIpcHostChannel(parent_conn, buf, timeout=base_opts["timeout"])
-    return _PooledWorker(proc, buf, parent_conn, chan, poolable=poolable)
+    # The channel's first-event budget covers only a job's deserialize + run-to-first-
+    # request (spawn+warm already happened above), so it is the user timeout plus a
+    # deserialize margin — NOT the cold 180 s, which would defeat hang-containment on a
+    # job that hangs before its first event on an already-warm worker.
+    chan = CudaIpcHostChannel(
+        parent_conn,
+        buf,
+        timeout=base_opts["timeout"],
+        startup_timeout=base_opts["timeout"] + _JOB_STARTUP_MARGIN,
+    )
+    return _PooledWorker(
+        proc, buf, parent_conn, chan, poolable=poolable,
+        key=_WorkerPool._key(base_opts),
+    )
 
 
 def _build_job(mediator) -> tuple:
@@ -397,11 +465,22 @@ def acquire_isolated_worker(mediator) -> None:
     """
     payload, extras, worker_opts = _build_job(mediator)
     pool_size = _STATE.get("pool_size", 0)
-    if pool_size > 0:
-        iso = _POOL.acquire(_base_opts(), pool_size)
-    else:
-        iso = _spawn_worker(_base_opts(), poolable=False)
-    iso.send_job(payload, extras, worker_opts)
+
+    def _acquire():
+        if pool_size > 0:
+            return _POOL.acquire(_base_opts(), pool_size)
+        return _spawn_worker(_base_opts(), poolable=False)
+
+    iso = _acquire()
+    try:
+        iso.send_job(payload, extras, worker_opts)
+    except (BrokenPipeError, EOFError, OSError):
+        # The worker died between the liveness check and dispatch (tiny race). Forget
+        # it and retry once through the normal acquisition path with a fresh worker;
+        # a second failure is a real problem and propagates.
+        _POOL.forget(iso)
+        iso = _acquire()
+        iso.send_job(payload, extras, worker_opts)
     _wire_host_channel(mediator, iso)
 
 

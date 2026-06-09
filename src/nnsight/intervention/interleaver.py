@@ -1119,9 +1119,11 @@ class Mediator:
         self.iteration = 0
         self.worker = None
 
-        # If the worker is still mid-protocol, drain it with a Cancelation. That
-        # leaves the cross-process pipe unbalanced, so such a worker must NOT be
-        # recycled into the pool — mark it dirty.
+        # If the worker is still mid-protocol, unwind it with a Cancelation. For the
+        # isolated channel the get_event/put_response calls are host-local — they do NOT
+        # drain the worker's subsequent EXCEPTION from the cross-process pipe — so the
+        # pipe is left unbalanced; such a worker must NOT be recycled. Mark it dirty so
+        # release() retires (SIGKILLs) it.
         dirty = False
         if self.channel.has_event:
             self.handle()
@@ -1314,6 +1316,14 @@ class Mediator:
         Returns:
             bool: Flag to stop processing events.
         """
+
+        if self._iso is not None:
+            # An EXCEPTION event means the isolated worker's intervention raised and the
+            # worker looped back idle with a BALANCED pipe (it sent one event, the host
+            # consumed it, no response is sent) — the worker is healthy and recyclable.
+            # cancel() honors this unless it finds a still-pending event (dirty), in
+            # which case it retires the worker instead.
+            self._iso.clean = True
 
         self.cancel()
 

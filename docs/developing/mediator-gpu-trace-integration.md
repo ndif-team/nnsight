@@ -413,8 +413,11 @@ hook-registration state; the worker rebuilds its interleaver + dummy modules per
 
 **Opt-in.** `isolate_mediators(..., pool_size=N)` routes through the pool (`pool_size=0`, the default, is
 the unchanged cold-spawn path). `warm_worker_pool(N, ...)` pre-warms at startup (blocks until N ack ready);
-`shutdown_worker_pool()` tears it down. Base options (device/arena/gpu_mem_fraction/lockdown) are fixed when
-the pool is first warmed; per-trace options (`default_all`, `cross_invoker`, `timeout`) ride each job.
+`shutdown_worker_pool()` tears it down. Workers are pooled **per (device, arena_bytes, gpu_mem_fraction,
+lockdown) signature** — a worker is reused only for a matching signature, so a process hosting models on
+different GPUs gets a per-device sub-pool (NOT a shared pool whose bounce buffer is fixed to the first
+model's device — that would copy into the wrong-device buffer). Per-trace options (`default_all`,
+`cross_invoker`, `timeout`) ride each job.
 
 **Pool sizing is a GPU-memory budget.** The natural ceiling is the **batch size** (one worker per mediator,
 one mediator per invoke, all concurrent vs one forward pass → concurrent workers = #invokes ≤ batch size).
@@ -425,11 +428,24 @@ an 80 GB A100 but ~55% of a 16 GB T4) — the cap must be deliberate, with the c
 (`probe_pool_gpu_footprint.py`.)
 
 **Lockdown + pool.** Seccomp lockdown happens once after warm-up (before the job loop), so a pooled worker
-locks the import set at warm time — a job whose user code triggers a *new* import fails. Lockdown defaults
-off; document the trade-off.
+locks the import set at warm time — a job whose user code triggers a *new* import fails (deterministically,
+since every worker shares the same warm-time import set). This is **stricter than the cold path**
+(`pool_size=0`), which deserializes the mediator *before* lockdown and so allows deserialize-time imports.
+Lockdown defaults off.
+
+**Hardening (independent review, 2026-06-08).** Both passes confirmed no Critical issue — the cross-request
+*data* invariant holds (per-job fresh interleaver/dummies/`Globals.saves`; host channel reset before
+re-bind). Fixes applied: (1) `acquire` skips/forgets workers that **died while idle** and re-spawns, instead
+of handing out a dead worker; (2) the pool is **keyed per device-signature** (above); (3) an **EXCEPTION-
+ended worker is recycled** (it's alive + the pipe is balanced), not retired — so erroring traces keep the
+pool benefit; (4) a recycled worker's first event uses `timeout + margin`, not the cold 180 s, preserving
+hang-containment; (5) the grow slot is **reserved under the lock** so concurrent acquires can't exceed the
+cap; (6) `close()` releases the pipe fd + GPU buffer; (7) a `_shutting_down` flag stops a shutdown/release
+race from orphaning a worker.
 
 **Verified (`test_isolated_pool.py`, gpt2/A100):** reuse bit-identical (`max|Δ|=0`) at **~21× faster** once
 warm (4.57 s cold → 0.22 s warm) with worker PIDs reused (no fresh spawn); a 3-invoke trace draws 3 distinct
 pooled workers all bit-identical; a timed-out (infinite-loop) worker is retired and the pool re-warms with
-the next trace bit-identical; a non-standard-named model works through the pool. Cold path (`pool_size=0`)
-stays bit-identical across read/swap/save/multi/exception/hang/multitoken/cross-invoke/barrier/nonstd.
+the next trace bit-identical; a killed idle worker is skipped + replaced on the next acquire; a non-standard-
+named model works through the pool. Cold path (`pool_size=0`) stays bit-identical across
+read/swap/save/multi/exception/hang/multitoken/cross-invoke/barrier/nonstd.
