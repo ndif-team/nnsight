@@ -20,21 +20,22 @@ from nnsight.intervention.isolation import isolate_mediators
 PROMPT = "The Eiffel Tower is in the city of"
 
 
-def _entry_out(cache, path):
+def _entry(cache, path):
     e = cache[path]
-    e = e[-1] if isinstance(e, list) else e
-    return e.output
+    return e[-1] if isinstance(e, list) else e
 
 
 def test_one(model):
+    h6 = model.transformer.h[6]
     with model.trace(PROMPT) as t:
-        ref = t.cache(modules=[model.transformer.h[6]]).save()
+        ref = t.cache(modules=[h6]).save()
     with isolate_mediators(timeout=30):
         with model.trace(PROMPT) as t:
-            got = t.cache(modules=[model.transformer.h[6]]).save()
+            got = t.cache(modules=[h6]).save()
+    key = h6.path  # derive the key from the envoy path, don't hardcode the prefix
     rk, gk = sorted(ref.keys()), sorted(got.keys())
     ok = rk == gk and len(gk) > 0 and torch.equal(
-        _entry_out(ref, "transformer.h.6")[0], _entry_out(got, "transformer.h.6")[0]
+        _entry(ref, key).output[0], _entry(got, key).output[0]
     )
     print(f"[one]   keys ref={rk} got={gk} match={ok}", flush=True)
     return ok
@@ -47,18 +48,39 @@ def test_multi(model):
     with isolate_mediators(timeout=30):
         with model.trace(PROMPT) as t:
             got = t.cache(modules=mods).save()
-    paths = ["transformer.h.2", "transformer.h.5", "transformer.h.9"]
+    paths = [m.path for m in mods]
     ok = sorted(ref.keys()) == sorted(got.keys()) and all(
-        torch.equal(_entry_out(ref, p)[0], _entry_out(got, p)[0]) for p in paths
+        torch.equal(_entry(ref, p).output[0], _entry(got, p).output[0]) for p in paths
     )
     print(f"[multi] {len(got.keys())} keys match={ok}", flush=True)
+    return ok
+
+
+def test_inputs(model):
+    # include_inputs=True: the cached module inputs must match in-process too.
+    h4 = model.transformer.h[4]
+    with model.trace(PROMPT) as t:
+        ref = t.cache(modules=[h4], include_inputs=True).save()
+    with isolate_mediators(timeout=30):
+        with model.trace(PROMPT) as t:
+            got = t.cache(modules=[h4], include_inputs=True).save()
+    key = h4.path
+    rk, gk = sorted(ref.keys()), sorted(got.keys())
+    ok = rk == gk and len(gk) > 0 and torch.equal(
+        _entry(ref, key).input, _entry(got, key).input
+    )
+    print(f"[inputs] keys match, input bit-identical={ok}", flush=True)
     return ok
 
 
 def main():
     assert torch.cuda.is_available()
     model = LanguageModel("gpt2", device_map="cuda", dispatch=True)
-    results = {"one": test_one(model), "multi": test_multi(model)}
+    results = {
+        "one": test_one(model),
+        "multi": test_multi(model),
+        "inputs": test_inputs(model),
+    }
     ok = all(results.values())
     print("=" * 72, flush=True)
     print(f"ISOLATED CACHE: {'PASS' if ok else 'FAIL'} — {results}", flush=True)

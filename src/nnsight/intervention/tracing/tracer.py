@@ -614,15 +614,39 @@ class InterleavingTracer(Tracer):
                         targets.append(envoy)
 
         # Register persistent cache hooks on each target module
-        for envoy in targets:
-            if include_output:
-                cache_output_hook(
-                    cache_obj, envoy._module, envoy.path, batcher, mediator
-                )
-            if include_inputs:
-                cache_input_hook(
-                    cache_obj, envoy._module, envoy.path, batcher, mediator
-                )
+        if mediator._isolated_worker:
+            # Isolated: the worker's modules are DUMMIES, so cache hooks registered
+            # here would never fire. Ship the spec via a CACHE event so the HOST
+            # registers the hooks on its real modules and fills this cache. The
+            # returned CacheDict is a token-tagged placeholder the user binds +
+            # .save()s; the host swaps in its own (forward-filled) CacheDict when the
+            # saved variables are injected into the user frame (matched by token).
+            from ..interleaver import Events
+
+            token = id(cache_obj.cache)
+            cache_obj.cache._iso_cache_token = token
+            spec = (
+                token,
+                [envoy.path for envoy in targets],
+                device,
+                dtype,
+                detach,
+                include_output,
+                include_inputs,
+                rename_dict,
+                alias_dict,
+            )
+            mediator.send(Events.CACHE, spec)
+        else:
+            for envoy in targets:
+                if include_output:
+                    cache_output_hook(
+                        cache_obj, envoy._module, envoy.path, batcher, mediator
+                    )
+                if include_inputs:
+                    cache_input_hook(
+                        cache_obj, envoy._module, envoy.path, batcher, mediator
+                    )
 
         mediator.set_user_cache(cache_obj)
 

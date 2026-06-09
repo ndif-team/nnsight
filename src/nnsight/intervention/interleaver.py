@@ -355,6 +355,7 @@ class Events(Enum):
     EXCEPTION = "exception"  # Signal that an exception occurred
     SKIP = "skip"  # Signal that an operation should be skipped
     BARRIER = "barrier"  # Signal that a barrier should be set
+    CACHE = "cache"  # Register a tracer.cache() on the host's real modules (isolation)
 
 
 class Cancelation(Exception):
@@ -977,6 +978,11 @@ class Mediator:
         # isolation.acquire_isolated_worker). ``None`` => in-process (default).
         self._iso = None
 
+        # Isolated tracer.cache(): token -> host Cache. The worker ships a CACHE event;
+        # the host registers cache hooks here on the REAL modules and swaps the host
+        # CacheDict in for the worker's empty placeholder when saves are injected.
+        self._iso_caches: dict = {}
+
         # True only inside an isolated worker process (set by _run_one_job). Lets
         # cross-process-aware logic (e.g. Barrier) know it can't count locally.
         self._isolated_worker = False
@@ -1208,6 +1214,8 @@ class Mediator:
                 process = self.handle_skip_event(provider, *data)
             elif event == Events.BARRIER:
                 process = self.handle_barrier_event(provider, data)
+            elif event == Events.CACHE:
+                process = self.handle_cache_event(data)
             elif event == Events.END:
                 process = self.handle_end_event(data)
 
@@ -1409,6 +1417,53 @@ class Mediator:
 
         return False
 
+    def handle_cache_event(self, spec: Any):
+        """Isolated ``tracer.cache()``: register the persistent cache hooks on the
+        HOST's REAL modules (the worker's are dummies, so its hooks never fire).
+
+        The host ``Cache``'s ``CacheDict`` is filled IN-PLACE by the forward pass (the
+        hooks are ``mediator_idx=inf``, firing after intervention hooks).
+        :meth:`handle_end_event` swaps this host ``CacheDict`` in for the worker's empty
+        placeholder (matched by token) when the saved variables are injected, so the
+        user's variable *is* the forward-filled host cache. The hooks live on
+        ``self.hooks`` and are dropped at teardown by ``remove_hooks`` — exactly like the
+        in-process path. Acks so the worker's ``send`` returns and it proceeds to END.
+        """
+        from .hooks import cache_input_hook, cache_output_hook
+        from .tracing.tracer import Cache
+
+        (
+            token,
+            paths,
+            device,
+            dtype,
+            detach,
+            include_output,
+            include_inputs,
+            rename,
+            alias,
+        ) = spec
+
+        model = self.interleaver.tracer.model
+        path2envoy = {e.path: e for e in model.modules()}
+        targets = [path2envoy[p] for p in paths if p in path2envoy]
+
+        cache_obj = Cache(
+            paths, device, dtype, detach, include_output, include_inputs, rename, alias
+        )
+        batcher = self.interleaver.batcher
+        for envoy in targets:
+            if include_output:
+                cache_output_hook(cache_obj, envoy._module, envoy.path, batcher, self)
+            if include_inputs:
+                cache_input_hook(cache_obj, envoy._module, envoy.path, batcher, self)
+
+        self._iso_caches[token] = cache_obj
+        self.set_user_cache(cache_obj)
+
+        self.respond(None)  # ack -> worker's send() returns, it proceeds to END
+        return True
+
     def handle_end_event(self, saves: Optional[Any] = None):
         """
         Handle an end event by stopping the mediator.
@@ -1426,6 +1481,21 @@ class Mediator:
             # cancel() (below) reads this to recycle vs retire the worker.
             self._iso.clean = True
             if saves:
+                if self._iso_caches:
+                    # tracer.cache(): the worker shipped an EMPTY placeholder CacheDict;
+                    # swap in the HOST cache (matched by token), which the forward fills
+                    # in-place after this injection. The user's variable then IS the
+                    # forward-filled host cache.
+                    from .tracing.tracer import Cache
+
+                    saves = dict(saves)
+                    for name, val in list(saves.items()):
+                        if isinstance(val, Cache.CacheDict):
+                            host_cache = self._iso_caches.get(
+                                getattr(val, "_iso_cache_token", None)
+                            )
+                            if host_cache is not None:
+                                saves[name] = host_cache.cache
                 tracer = self.interleaver.tracer
                 user_frame = (
                     tracer.info.frame

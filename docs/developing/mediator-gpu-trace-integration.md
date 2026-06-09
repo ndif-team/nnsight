@@ -173,7 +173,7 @@ rule; deferred (revisit with double-buffering if real workloads need it).
 | `tracer.barrier()` | host-side participant counting + the existing `handle_barrier_event` coordination loop | done |
 | `cross_invoker` variable sharing | host-mediated variable store (worker pushes data locals, pulls the merged store) | done |
 | `with tensor.backward()` / `.grad` | needs host-side backward execution (the autograd graph is host-side) | planned |
-| `tracer.cache()` | host-side cache-hook registration + post-forward injection of the populated CacheDict | planned |
+| `tracer.cache()` | CACHE event → host registers the real cache hooks; host CacheDict swapped in for the worker placeholder, filled in-place by the forward | done (§15) |
 | warm worker pool (`pool_size=`) | generic workers receive serialized mediators as jobs over the channel; clean-END workers recycled, others retired | done (§14) |
 | MPS / `isolate_mediators()` further polish | — | planned |
 
@@ -257,7 +257,7 @@ benign CudaIPC release warning.
 | `cross_invoker` variable sharing | ✅ host variable store; transmittable data vars only — see §10 |
 | warm worker pool (`pool_size=N`, `warm_worker_pool`) | ✅ ~21× faster per request once warm; recycle-on-clean-END — see §14 |
 | `with tensor.backward()` / `.grad` | 🔜 hard: the autograd graph is host-side, the worker has detached clones; needs the backward pass to run host-side with path-based grad providers (a major build) |
-| `tracer.cache()` | 🔜 tractable: returns an empty CacheDict today (hooks fire on dummy modules); needs host-side cache-hook registration + shipping the populated CacheDict back |
+| `tracer.cache()` (`modules=`, `include_inputs=`) | ✅ bit-identical — CACHE event → host registers the real cache hooks; the forward fills the host CacheDict in-place (§15) |
 | `.source` operation-level access (`...attn.split_1.output`) | 🔜 not yet (op paths aren't in `model.modules()`) |
 | in-place `[:]=` | ⛔ use explicit `=` (clone semantics, §4) |
 
@@ -449,3 +449,41 @@ pooled workers all bit-identical; a timed-out (infinite-loop) worker is retired 
 the next trace bit-identical; a killed idle worker is skipped + replaced on the next acquire; a non-standard-
 named model works through the pool. Cold path (`pool_size=0`) stays bit-identical across
 read/swap/save/multi/exception/hang/multitoken/cross-invoke/barrier/nonstd.
+
+---
+
+## 15. `tracer.cache()` — DONE (2026-06-08)
+
+**The gap.** `tracer.cache()` registers **persistent** hooks (`mediator_idx=inf`) that fill a `.save()`'d
+`CacheDict` *during the forward*. In the worker those hooks land on the **dummy** modules and never fire, so
+the user got an empty `CacheDict` (the `.save()`'d placeholder shipped back unfilled).
+
+**The fix — a `CACHE` event + host-side registration, with the post-forward injection collapsed.**
+- **Worker `cache()` (isolated branch in `tracer.py`):** instead of registering dummy hooks, ship the spec
+  `(token, module-paths, device, dtype, detach, include_output, include_inputs, rename, alias)` via a new
+  `Events.CACHE` request (`mediator.send`). Return a **token-tagged** placeholder `CacheDict` the user binds
+  and `.save()`s — that is what carries the user's variable name across the boundary.
+- **Host `handle_cache_event`:** resolve the paths to the **real** envoys, register the real
+  `cache_output_hook`/`cache_input_hook` into a host `Cache` keyed by the token (on `Mediator._iso_caches`),
+  `set_user_cache`, ack. Hooks live on the host mediator's `hooks`, removed at teardown by `remove_hooks` —
+  exactly like in-process.
+- **The timing insight (no separate teardown step).** `handle_cache_event` acks and returns `True`, so the
+  host loop processes `CACHE` then `END` consecutively at `Mediator.start` — *before* the forward. So
+  `handle_end_event` swaps the **host** `CacheDict` reference in for the worker's empty placeholder (matched
+  by the token on the saved value) when it injects the saves. The forward then fills *that same object*
+  in-place. The user's variable **is** the forward-filled host cache; the doc's earlier "token-matched
+  post-forward injection" collapses to "swap in the host CacheDict at END; the forward fills it." This also
+  preserves in-process semantics, including "a cache defined after a module is called misses it" (the host
+  hooks register only when the `CACHE` event arrives, just like the in-process registration point).
+
+**Touch points:** `Events.CACHE`; `tracer.cache()` isolated branch; `handle()` dispatch + `handle_cache_event`;
+the `handle_end_event` token-swap (gated on `_iso_caches`, so non-cache traces are untouched); `_iso_caches`
+on `Mediator`.
+
+**Verified (`test_isolated_cache.py`, gpt2/A100):** single module, multi-module (3 keys), and
+`include_inputs=True` all bit-identical (`max|Δ|=0`, keys match in-process). Cold path + the full isolated
+regression (trace/acceptance/multitoken/cross-invoke/pool) unchanged.
+
+**Not covered:** a cache placeholder nested inside a container save (`got = [t.cache().save()]`) — the swap
+matches a top-level saved `CacheDict`; nesting would need a recursive walk. `cross_invoker` + cache is
+untested. `modules=None` (cache *all* modules) registers a hook per module on the host — correct but heavy.
