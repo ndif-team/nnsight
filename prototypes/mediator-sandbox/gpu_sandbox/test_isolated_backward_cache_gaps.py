@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""backward/grad + cache() under isolation.
+"""backward/grad + cache() under isolation (former gaps, now closed).
 
-  backward — GAP (not built): grad of an ON-PATH tensor (``ln_f.output``) works
-             in-process but fails cleanly under isolation. The fundamentals: the
-             autograd graph is host-only, the worker holds DETACHED clones (no
-             grad_fn), and ``.grad`` is keyed by ``id(tensor)`` (no cross-process name,
-             unlike a module path). NB: grad MUST be taken on a tensor-output module
-             like ``ln_f`` — a GPT2 block's ``.output[0]`` is an off-the-backward-path
-             index into its tuple output, whose grad hook never fires (a usage gotcha
-             that would make the in-process control spuriously error).
-  cache    — now SUPPORTED: ``tracer.cache(modules=[...])`` is bit-identical under
+  backward — now SUPPORTED (increment 1): grad of an ON-PATH tensor-output module
+             (``ln_f.output``) runs HOST-SIDE under isolation and is bit-identical to
+             in-process. The host keeps the real graph; the worker computes its half of
+             the chain rule at the delivered-activation seam and reads grads back by
+             PATH. Canonical coverage in test_isolated_backward.py. (Still open: gradient
+             THROUGH a swap, which severs the host graph at the patch point.)
+  cache    — SUPPORTED: ``tracer.cache(modules=[...])`` is bit-identical under
              isolation (kept here as a regression check; see test_isolated_cache.py).
 
 Each isolated-vs-in-process, hard timeout so a deadlock shows as a timeout.
@@ -37,8 +35,8 @@ def _run(fn):
 
 
 def test_backward(model):
-    # ln_f.output is a tensor-output module ON the autograd path, so the in-process
-    # control is VALID (unlike a block's off-path .output[0]).
+    # Increment 1 closed this gap: read-then-backward on an on-path tensor-output module
+    # (ln_f.output) now runs HOST-SIDE under isolation, bit-identical to in-process.
     def body():
         with model.trace(PROMPT):
             hs = model.transformer.ln_f.output
@@ -54,16 +52,16 @@ def test_backward(model):
 
     gs, gv = _run(iso)
 
-    inproc_ok = rs == "ok" and torch.is_tensor(rv)
-    # Backward under isolation is a documented gap (host-only autograd graph, detached
-    # worker clones). It must fail CLEANLY (an error) — not hang or silently return
-    # wrong grads. So the characterization holds iff in-process works AND isolated errors.
-    isolated_fails_cleanly = gs == "err"
-    ok = inproc_ok and isolated_fails_cleanly
+    ok = (
+        rs == "ok"
+        and gs == "ok"
+        and torch.is_tensor(rv)
+        and torch.is_tensor(gv)
+        and torch.equal(rv, gv)
+    )
     print(
-        f"[backward] in-process={'ok (valid control)' if inproc_ok else rs}; "
-        f"isolated={'fails cleanly — expected gap' if isolated_fails_cleanly else gs}: "
-        f"{gv if gs == 'err' else 'UNEXPECTEDLY OK — investigate'}",
+        f"[backward] in-process={rs}; isolated={gs}; bit-identical={ok} "
+        f"({'' if ok else (gv if gs == 'err' else 'mismatch')})",
         flush=True,
     )
     return ok

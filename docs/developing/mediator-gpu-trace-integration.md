@@ -172,7 +172,7 @@ rule; deferred (revisit with double-buffering if real workloads need it).
 | `iter`/`all`/`next` (multi-token) | iteration step stamped host-side; host iter-hooks bump the tracker; worker sets its step explicitly | done |
 | `tracer.barrier()` | host-side participant counting + the existing `handle_barrier_event` coordination loop | done |
 | `cross_invoker` variable sharing | host-mediated variable store (worker pushes data locals, pulls the merged store) | done |
-| `with tensor.backward()` / `.grad` | needs host-side backward execution (the autograd graph is host-side) | planned |
+| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)` from its local tape, host continues `torch.autograd.grad` on the real graph, `.grad` served by provenance path | done (§16) |
 | `tracer.cache()` | CACHE event → host registers the real cache hooks; host CacheDict swapped in for the worker placeholder, filled in-place by the forward | done (§15) |
 | warm worker pool (`pool_size=`) | generic workers receive serialized mediators as jobs over the channel; clean-END workers recycled, others retired | done (§14) |
 | MPS / `isolate_mediators()` further polish | — | planned |
@@ -256,7 +256,7 @@ benign CudaIPC release warning.
 | `tracer.barrier()` | ✅ host-side participant counting |
 | `cross_invoker` variable sharing | ✅ host variable store; transmittable data vars only — see §10 |
 | warm worker pool (`pool_size=N`, `warm_worker_pool`) | ✅ ~21× faster per request once warm; recycle-on-clean-END — see §14 |
-| `with tensor.backward()` / `.grad` | 🔜 hard: the autograd graph is host-side, the worker has detached clones; needs the backward pass to run host-side with path-based grad providers (a major build) |
+| `with tensor.backward()` / `.grad` | ✅ read-path bit-identical (scalar loss; single invoke; no swap-then-backward; `.grad` editing raises — §16) |
 | `tracer.cache()` (`modules=`, `include_inputs=`) | ✅ bit-identical — CACHE event → host registers the real cache hooks; the forward fills the host CacheDict in-place (§15) |
 | `.source` operation-level access (`...attn.split_1.output`) | 🔜 not yet (op paths aren't in `model.modules()`) |
 | in-place `[:]=` | ⛔ use explicit `=` (clone semantics, §4) |
@@ -330,9 +330,10 @@ perf cliff for large cross-invoke tensors).
 
 ---
 
-## 11. Backward + caching — CHARACTERIZED (not yet built)
+## 11. Backward + caching — characterization (both gaps since closed: cache §15, backward §16)
 
-`test_isolated_backward_cache_gaps.py` confirms the two gaps and their difficulty:
+`test_isolated_backward_cache_gaps.py` confirmed the two gaps and their difficulty at the time;
+kept for the reasoning record:
 
 - **`tracer.cache()` (a real build, not a quick shim):** `tracer.cache()` runs in the worker → registers
   cache hooks on dummy modules → never fire → the `.save()`'d CacheDict comes back **empty**. The fix
@@ -487,3 +488,56 @@ regression (trace/acceptance/multitoken/cross-invoke/pool) unchanged.
 **Not covered:** a cache placeholder nested inside a container save (`got = [t.cache().save()]`) — the swap
 matches a top-level saved `CacheDict`; nesting would need a recursive walk. `cross_invoker` + cache is
 untested. `modules=None` (cache *all* modules) registers a hook per module on the host — correct but heavy.
+
+---
+
+## 16. `with tensor.backward()` — read-path DONE (2026-06-10)
+
+**The gap (§11).** Clone-on-receive strips `grad_fn` — the worker's delivered activations are detached
+clones, the autograd graph lives only on the host, and `.grad` providers were keyed by `id(tensor)`
+(process-local). So a backward block in the worker had nothing to differentiate.
+
+**The fix — split the chain rule at the process boundary** (distributed-autograd-style stitch), keyed by
+**requester string** (module path + kind + step), not `id(tensor)`:
+
+- **Worker, forward time:** when the trace contains a backward block (detected from the intervention
+  source), every delivered activation clone is tagged — `requires_grad_(True)` + an `id(clone)` →
+  requester-string provenance map — via a wrapped `mediator.request` (`_tag_delivered`,
+  `isolation.py`). Worker-side ops on delivered values therefore build the worker's local half of the
+  graph (delivered leaves → loss).
+- **Worker, backward time:** `BackwardsTracer.execute` detects the isolated context
+  (`worker_backward_context()`) and runs `_execute_isolated` (`tracing/backwards.py`): it computes the
+  worker half of the chain rule — `dL/d(delivered clone)` for each tagged leaf the loss depends on
+  (`torch.autograd.grad`, `allow_unused`) — and ships the seed dict `{requester: grad}` via a new
+  `Events.BACKWARD`.
+- **Host:** `handle_value_event` retains the REAL on-graph activation per requester (gated on
+  `_iso_backward` so non-backward traces pay nothing); `handle_backward_event` continues the chain rule
+  on the host's real graph (`torch.autograd.grad` seeded by the worker grads, targets = all retained
+  activations, `allow_unused`, `retain_graph`) and returns `{requester: dL/d(activation)}`. No user code
+  runs on the host.
+- **Worker, block body:** runs locally; each `.grad` read is served from the returned dict by the
+  tensor's provenance path (a patched `Tensor.grad` property). `.grad` on a user-derived tensor (no
+  provenance) raises a clear error; the `.grad` setter raises `NotImplementedError`.
+
+**Stitch correctness (no double-counting):** the worker seeds are partials treating delivered leaves as
+independent; the host's autograd adds the indirect inter-layer contributions. Verified empirically — a
+loss using the same read activation twice is bit-identical to in-process.
+
+**Verified (`test_isolated_backward.py`, gpt2/A100):** grad of `ln_f.output` `max|Δ|=0` vs in-process;
+renamed model (`final_norm`/`output_projection`) `max|Δ|=0`; user-derived-tensor `.grad` → clear error.
+Independent review (7 finder angles, dedup + verify): **no silent-wrong in the in-scope path** (single
+invoke, on-path tensor-output target, scalar loss, no swaps).
+
+**Limits / open:**
+- Scalar loss only — `loss.backward(gradient=...)` is not honored (scalar-only error).
+- **Gradient-through-swap unsupported** (next increment): an isolated SWAP splices a graph *leaf* into
+  the host forward (worker-computed values carry no host `grad_fn`), so the host backward dead-ends at
+  the swap — while in-process gradients DO flow through swaps. Fix = recursive seam stitch (host ships
+  `dL/d(swap)` to the worker, the worker tape backprops to its leaves, ships back).
+- Batched traces error with a cryptic shape mismatch (host retains the full-batch tensor, worker seeds
+  the narrowed clone) — needs a clear error or narrowed retention.
+- Multi-token backward: under characterization (control test first; guard or document per outcome).
+- Efficiency deferred: the host computes + ships grads for ALL retained reads (`retain_graph` always
+  on); a large read set can overflow the 64 MB arena.
+- The `".backward("` source-substring detection can false-positive (e.g. the string in a comment),
+  which only costs needless tagging — tightening is planned alongside the gate consolidation.

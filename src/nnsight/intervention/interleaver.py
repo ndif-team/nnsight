@@ -356,6 +356,7 @@ class Events(Enum):
     SKIP = "skip"  # Signal that an operation should be skipped
     BARRIER = "barrier"  # Signal that a barrier should be set
     CACHE = "cache"  # Register a tracer.cache() on the host's real modules (isolation)
+    BACKWARD = "backward"  # Run the backward pass on the host's real graph (isolation)
 
 
 class Cancelation(Exception):
@@ -983,6 +984,14 @@ class Mediator:
         # CacheDict in for the worker's empty placeholder when saves are injected.
         self._iso_caches: dict = {}
 
+        # Isolated `with tensor.backward()`: when the trace uses backward, the host keeps
+        # a reference to each delivered (real, on-graph) activation tensor keyed by its
+        # requester string, so handle_backward_event can run the real backward and read
+        # gradients off the host's graph. ``_iso_backward`` gates the retention so a
+        # non-backward isolated trace pays nothing.
+        self._iso_backward = False
+        self._iso_grad_reals: dict = {}
+
         # True only inside an isolated worker process (set by _run_one_job). Lets
         # cross-process-aware logic (e.g. Barrier) know it can't count locally.
         self._isolated_worker = False
@@ -1216,6 +1225,8 @@ class Mediator:
                 process = self.handle_barrier_event(provider, data)
             elif event == Events.CACHE:
                 process = self.handle_cache_event(data)
+            elif event == Events.BACKWARD:
+                process = self.handle_backward_event(data)
             elif event == Events.END:
                 process = self.handle_end_event(data)
 
@@ -1240,6 +1251,13 @@ class Mediator:
 
         # If fulfilled by this processor, respond with the value and continue processing events.
         if provider == requester:
+
+            # Isolated backward: keep a reference to the REAL (on-graph) activation tensor,
+            # keyed by its requester string, so handle_backward_event can run the host's
+            # real backward and read this activation's gradient. The worker only ever got a
+            # detached clone, so its half of the graph can't be differentiated there.
+            if self._iso is not None and self._iso_backward:
+                self._iso_grad_reals[provider] = self.interleaver.batcher.current_value
 
             # Potentially only select a slice of the value if this mediator is part of a batch group.
             value = self.interleaver.batcher.narrow(self.batch_group)
@@ -1462,6 +1480,50 @@ class Mediator:
         self.set_user_cache(cache_obj)
 
         self.respond(None)  # ack -> worker's send() returns, it proceeds to END
+        return True
+
+    def handle_backward_event(self, seed: dict):
+        """Run the backward pass on the host's real graph (isolation).
+
+        The worker computed its half of the chain rule — ``seed`` maps each delivered
+        activation's requester string to ``dL/d(that activation)`` (the gradient at the
+        worker→host seam, computed on the worker's local tape). The host continues the
+        chain rule on its own graph: it differentiates the seeded activations and returns
+        ``dL/d(activation)`` for every delivered activation the worker might read via
+        ``.grad`` (keyed by the same requester strings). No user code runs here — only
+        ``torch.autograd.grad`` on the host's graph with the worker-supplied seeds.
+        """
+        reals = self._iso_grad_reals
+
+        # The seeds: (real activation tensor, dL/d(activation) from the worker).
+        out_tensors, out_grads = [], []
+        for path, grad in seed.items():
+            real = reals.get(path)
+            if torch.is_tensor(real) and real.requires_grad and torch.is_tensor(grad):
+                out_tensors.append(real)
+                out_grads.append(grad)
+
+        # The targets: every delivered activation still on the host graph. The worker
+        # reads a subset of these via ``.grad``; computing all keeps it source-agnostic.
+        target_paths = [
+            p for p, r in reals.items() if torch.is_tensor(r) and r.requires_grad
+        ]
+        target_tensors = [reals[p] for p in target_paths]
+
+        result: dict = {}
+        if out_tensors and target_tensors:
+            grads = torch.autograd.grad(
+                out_tensors,
+                target_tensors,
+                grad_outputs=out_grads,
+                allow_unused=True,
+                retain_graph=True,
+            )
+            result = {
+                p: g for p, g in zip(target_paths, grads) if torch.is_tensor(g)
+            }
+
+        self.respond(result)  # ack -> worker's send() returns the grad dict
         return True
 
     def handle_end_event(self, saves: Optional[Any] = None):
@@ -1754,6 +1816,8 @@ class Mediator:
         self.worker = None
         self._iso = None
         self._isolated_worker = False
+        self._iso_backward = False
+        self._iso_grad_reals = {}
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()

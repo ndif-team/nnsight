@@ -441,6 +441,11 @@ def _wire_host_channel(mediator, iso: _PooledWorker) -> None:
     mediator.channel = chan
     mediator.worker = iso.proc
     mediator._iso = iso
+    # `with tensor.backward()`: if the trace differentiates, the host must retain each
+    # delivered (real, on-graph) activation so handle_backward_event can run the real
+    # backward. Detect it from the source and start with a fresh retention map.
+    mediator._iso_backward = ".backward(" in mediator.intervention.__source__
+    mediator._iso_grad_reals = {}
     # Fresh per-job host-side hook-registration state.
     iso.registered = set()
     iso.path2envoy = None
@@ -614,6 +619,53 @@ def _transmissible_exc(e):
         return RuntimeError(f"{type(e).__name__}: {e}")
 
 
+# Per-job worker-side state for `with tensor.backward()`. When the trace uses backward,
+# every delivered activation clone is tagged with its requester string and made to
+# require grad, so the worker can build its half of the autograd graph and compute the
+# seed gradient at the seam. ``BackwardsTracer.execute`` reads this via
+# ``worker_backward_context``. Reset per job in ``_run_one_job``.
+_WORKER_BACKWARD_CTX: Dict[str, Any] = {
+    "mediator": None,  # the forward mediator (its channel reaches the host)
+    "active": False,   # the trace contains a `.backward(` call
+    "prov": {},        # id(delivered clone) -> requester string
+    "tagged": [],      # delivered clones made to require grad (loss may depend on them)
+}
+
+
+def worker_backward_context():
+    """Return the active backward context inside an isolated worker, else None.
+
+    Used by ``BackwardsTracer.execute`` to detect that ``.backward()`` is running in an
+    isolated worker (so it must drive the host's real backward instead of differentiating
+    its detached clones locally)."""
+    ctx = _WORKER_BACKWARD_CTX
+    if ctx["active"] and ctx["mediator"] is not None:
+        return ctx
+    return None
+
+
+def _reset_worker_backward_ctx(mediator, active: bool) -> None:
+    _WORKER_BACKWARD_CTX["mediator"] = mediator
+    _WORKER_BACKWARD_CTX["active"] = active
+    _WORKER_BACKWARD_CTX["prov"] = {}
+    _WORKER_BACKWARD_CTX["tagged"] = []
+
+
+def _tag_delivered(value, requester: str) -> None:
+    """Tag each delivered activation tensor with its requester provenance and make it
+    require grad, so worker-side ops on it build the worker's half of the graph."""
+    ctx = _WORKER_BACKWARD_CTX
+
+    def _tag(t):
+        if t.is_floating_point() and t.is_leaf:
+            t.requires_grad_(True)
+            ctx["prov"][id(t)] = requester
+            ctx["tagged"].append(t)
+        return t
+
+    apply(value, _tag, torch.Tensor)
+
+
 def _run_one_job(channel, payload, extras, opts, device) -> None:
     """Deserialize one mediator against fresh dummies, run its intervention, and ship
     saves at END. Any failure (including a bad payload) is reported as an EXCEPTION
@@ -634,6 +686,23 @@ def _run_one_job(channel, payload, extras, opts, device) -> None:
         mediator.cross_invoker = opts.get("cross_invoker", False)
         mediator._isolated_worker = True  # so Barrier sends the target count (host counts)
         interleaver.current = mediator
+
+        # `with tensor.backward()`: when the trace differentiates, tag each delivered
+        # activation so the worker can build its half of the graph and seed the host
+        # backward (BackwardsTracer.execute reads this context). Wrap request() so every
+        # VALUE read is tagged with its requester provenance + made to require grad.
+        source = "".join(mediator.info.source) if mediator.info.source else ""
+        backward_active = ".backward(" in source
+        _reset_worker_backward_ctx(mediator, backward_active)
+        if backward_active:
+            _orig_request = mediator.request
+
+            def _tagging_request(requester, __orig=_orig_request):
+                value = __orig(requester)
+                _tag_delivered(value, requester)
+                return value
+
+            mediator.request = _tagging_request
 
         def _apply_meta(m):
             # Live host state piggybacked on each response: the iter[:] bound and the
