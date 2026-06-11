@@ -496,8 +496,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             from ..pp_listener import PPListener
             import torch.distributed as dist
 
-            num_layers = self.model_config.hf_config.num_hidden_layers
-            self.pp_module_map = PPModuleMap(num_layers, pp_world_size)
+            self.pp_module_map = PPModuleMap(pp_world_size)
 
             # Graft children of meta-model PPMissingLayer stubs onto the
             # worker Envoy tree so users can access ``model.layers[5].attn.output``
@@ -518,11 +517,20 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # ``BasevLLMParameter`` ``__torch_function__`` on ``aten.t`` and
             # never completes.
             self.pp_module_meta, _derived_owners = self._exchange_pp_module_meta()
-            # Architecture-agnostic ownership: derive each module's owning stage
-            # from where it is REAL (the exchange), so non-standard embedding/
-            # norm/head names resolve without name knowledge. The name table in
-            # PPModuleMap remains only for build-on-every-rank, fire-on-last
-            # modules (logits/samples/logits_processor).
+            # Architecture-agnostic ownership: a module's owning stage is
+            # wherever it is REAL (the exchange), so non-standard embedding/
+            # norm/head names resolve without name knowledge. The only
+            # non-derivable cases are the build-on-every-rank, fire-on-last
+            # modules — real everywhere, so ambiguous in the exchange — whose
+            # stage is structural (sampling runs on the last rank): vLLM's
+            # ``logits_processor`` and nnsight's own ``logits``/``samples``
+            # root wrapper modules. Claim them here, the one site holding all
+            # ownership knowledge. ``setdefault`` keeps a derived entry (e.g.
+            # Llama, where the non-last-rank logits_processor is a stub and
+            # the exchange already attributes it to the last stage).
+            _last_stage = pp_world_size - 1
+            for _structural in ("logits", "samples", "logits_processor"):
+                _derived_owners.setdefault(_structural, _last_stage)
             self.pp_module_map.set_derived_owners(_derived_owners)
 
             # Dedicated gloo group for pull requests — separate from

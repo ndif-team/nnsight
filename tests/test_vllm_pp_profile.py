@@ -476,28 +476,37 @@ def test_pp_listener_corner_cases():
 
 
 def test_pp_module_map():
-    """Test PPModuleMap edge cases without vLLM distributed init."""
-    # PPModuleMap imports vllm.distributed.utils.get_pp_indices which
-    # requires vLLM distributed init. We test the logic patterns instead.
+    """PPModuleMap resolves ownership from installed derived owners only
+    (no naming-convention tables); GPT-2-shaped derived map as the example."""
     results = []
 
     try:
-        from nnsight.modeling.vllm.pp import (
-            _FIRST_RANK_MODULES,
-            _LAST_RANK_MODULES,
-            _LAYER_CONTAINER_NAMES,
-        )
-        # Verify the module sets contain expected entries for GPT-2
-        results.append(("FIRST_RANK has wte", "wte" in _FIRST_RANK_MODULES))
-        results.append(("FIRST_RANK has wpe", "wpe" in _FIRST_RANK_MODULES))
-        results.append(("LAST_RANK has ln_f", "ln_f" in _LAST_RANK_MODULES))
-        results.append(("LAST_RANK has lm_head", "lm_head" in _LAST_RANK_MODULES))
-        results.append(("LAST_RANK has logits", "logits" in _LAST_RANK_MODULES))
-        results.append(("LAST_RANK has samples", "samples" in _LAST_RANK_MODULES))
-        results.append(("LAYER_CONTAINERS has h", "h" in _LAYER_CONTAINER_NAMES))
-        results.append(("LAYER_CONTAINERS has layers", "layers" in _LAYER_CONTAINER_NAMES))
+        from nnsight.modeling.vllm.pp import PPModuleMap
+
+        m = PPModuleMap(pp_world_size=2)
+        m.set_derived_owners({
+            "transformer.wte": 0, "transformer.wpe": 0,
+            "transformer.h.0": 0, "transformer.h.5": 0,
+            "transformer.h.6": 1, "transformer.h.11": 1,
+            "transformer.ln_f": 1, "lm_head": 1,
+            # the runner's structural last-rank claims
+            "logits": 1, "samples": 1, "logits_processor": 1,
+        })
+        results.append(("wte resolves to stage 0",
+                        m.get_owning_rank("model.transformer.wte.output") == 0))
+        results.append(("ln_f resolves to stage 1",
+                        m.get_owning_rank("model.transformer.ln_f.output") == 1))
+        results.append(("layer submodule inherits its layer's stage",
+                        m.get_owning_rank("model.transformer.h.6.attn.output") == 1))
+        results.append(("logits resolves to last stage",
+                        m.get_owning_rank("model.logits.i0") == 1))
+        results.append(("samples resolves to last stage",
+                        m.get_owning_rank("model.samples.i0") == 1))
+        results.append(("unknown path unresolved -> treated local",
+                        m.get_owning_rank("model.someething.weird") is None
+                        and m.is_local("model.someething.weird", 0)))
     except Exception as e:
-        results.append(("PPModuleMap imports", False, str(e)))
+        results.append(("PPModuleMap derived ownership", False, str(e)))
 
     return results
 

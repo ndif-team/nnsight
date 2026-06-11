@@ -372,18 +372,19 @@ class TestPPTimeoutConstants:
 
 
 class TestDerivedOwnership:
-    """``PPModuleMap`` must resolve a module's owning stage from the load-time
-    meta exchange (which module is REAL on which rank), not from hardcoded
-    embedding/norm/head name tables. The tables miss real architectures:
-    Falcon ``word_embeddings``, OPT ``final_layer_norm``, GPT-NeoX
-    ``embed_in``/``embed_out`` — for which the old map returns ``None`` (→ a
-    misdirected ``source_rank=None`` pull). Derived ownership is name-agnostic.
+    """``PPModuleMap`` resolves a module's owning stage from the load-time
+    meta exchange (which module is REAL on which rank) — its ONLY mechanism.
+    Hardcoded embedding/norm/head name tables miss real architectures
+    (Falcon ``word_embeddings``, OPT ``final_layer_norm``, GPT-NeoX
+    ``embed_in``/``embed_out``); derived ownership is name-agnostic. The
+    runner injects the three structural last-rank entries
+    (``logits``/``samples``/``logits_processor``) right after the exchange.
     """
 
     def _map(self, owners):
         from nnsight.modeling.vllm.pp import PPModuleMap
 
-        m = PPModuleMap(num_hidden_layers=4, pp_world_size=2)
+        m = PPModuleMap(pp_world_size=2)
         m.set_derived_owners(owners)
         return m
 
@@ -409,28 +410,36 @@ class TestDerivedOwnership:
         assert m.get_owning_rank("model.model.layers.3.mlp.output") == 1
         assert m.get_owning_rank("model.model.layers.0.self_attn.output") == 0
 
-    def test_ambiguous_module_falls_through_to_name_table(self):
+    def test_structural_last_rank_claims_resolve(self):
         # ``logits_processor`` is built on EVERY rank (real everywhere), so the
-        # exchange can't attribute it — it must not appear in derived owners and
-        # the last-rank name rule still applies.
+        # exchange can't attribute it; the runner injects the structural
+        # last-rank claims for it and for nnsight's own root wrapper modules.
+        # With the entries installed, all three resolve — including via the
+        # provider-string form with an iteration suffix.
         m = self._map({
             "model.layers.0": 0, "model.layers.3": 1,
-            # no logits_processor entry (ambiguous, dropped by the exchange)
+            "logits": 1, "samples": 1, "logits_processor": 1,
         })
-        assert m.get_owning_rank("model.logits_processor.output") == 1  # last rank
+        assert m.get_owning_rank("model.logits_processor.output") == 1
         assert m.get_owning_rank("model.logits.i0") == 1
         assert m.get_owning_rank("model.samples.i0") == 1
 
-    def test_no_derived_owners_falls_back_to_legacy_logic(self):
+    def test_ambiguous_module_without_claim_is_unresolved(self):
+        # A module the exchange dropped as ambiguous and nobody claimed
+        # resolves to None — treated as local (safe), and a genuine
+        # cross-stage consume raises descriptively at pull time.
+        m = self._map({"model.layers.0": 0, "model.layers.3": 1})
+        assert m.get_owning_rank("model.logits_processor.output") is None
+
+    def test_no_derived_owners_resolves_nothing(self):
         from nnsight.modeling.vllm.pp import PPModuleMap
 
-        # Construction without an exchange (unit tests / PP-disabled): the
-        # layer-range + standard-name logic still works unchanged.
-        m = PPModuleMap(num_hidden_layers=4, pp_world_size=2)
-        assert m.get_owning_rank("model.layers.0.output") == 0
-        assert m.get_owning_rank("model.layers.3.output") == 1
-        assert m.get_owning_rank("model.embed_tokens.output") == 0
-        assert m.get_owning_rank("model.lm_head.output") == 1
+        # Before the exchange installs owners (nothing traces that early),
+        # every path is unresolved -> treated as local.
+        m = PPModuleMap(pp_world_size=2)
+        assert m.get_owning_rank("model.layers.0.output") is None
+        assert m.get_owning_rank("model.embed_tokens.output") is None
+        assert m.is_local("model.layers.0.output", local_rank=0) is True
 
 
 class TestPullErrorReply:
