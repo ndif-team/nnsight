@@ -60,6 +60,32 @@ _TAG_RANGE = 1 << 20
 # p2p on the listener thread's pull group is invisible to the serving recvs.
 TAG_DRAIN = TAG_RESPONSE_BASE + _TAG_RANGE
 _META_SLOTS = 32  # legacy metadata buffer size
+
+# Wire codec for the legacy shape header's dtype slot (``shape_meta[1]``). The
+# producer stamps the value's TRUE dtype here so the consumer sizes its recv
+# buffer from the truth instead of guessing from the module's weight dtype —
+# which is wrong for integer-valued outputs (e.g. sampled token ids are int32,
+# not the model's bf16 compute dtype, so the guess under-sizes the buffer and
+# gloo aborts on the size mismatch). Both PP ranks run identical code, so a
+# fixed enum agrees on the wire. ``_DTYPE_CODE_UNKNOWN`` (0, the value a
+# zero-initialized slot already holds) means "not encodable — fall back to the
+# local guess", preserving pre-fix behavior for any dtype outside the table.
+_DTYPE_CODE_UNKNOWN = 0
+_DTYPE_TO_CODE = {
+    torch.float32: 1,
+    torch.float64: 2,
+    torch.float16: 3,
+    torch.bfloat16: 4,
+    torch.int64: 5,
+    torch.int32: 6,
+    torch.int16: 7,
+    torch.int8: 8,
+    torch.uint8: 9,
+    torch.bool: 10,
+    torch.complex64: 11,
+    torch.complex128: 12,
+}
+_CODE_TO_DTYPE = {code: dtype for dtype, code in _DTYPE_TO_CODE.items()}
 # Bounded pool that performs reply sends off the recv loop. Replies are always
 # quick (the consumer's recv is already posted), so a small pool keeps up; it
 # only exists to keep the single recv loop free and to cap thread count (vs a
@@ -368,7 +394,16 @@ class PPListener:
                 # Legacy mode: send shape metadata then data.
                 shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
                 shape_meta[0] = len(cpu_tensors)
-                idx = 1
+                # Slot 1 carries the value's real dtype so the consumer sizes
+                # its recv buffer from the truth, not a weight-derived guess.
+                # All ``cpu_tensors`` share one dtype (the ``cat`` below
+                # requires it).
+                shape_meta[1] = (
+                    _DTYPE_TO_CODE.get(cpu_tensors[0].dtype, _DTYPE_CODE_UNKNOWN)
+                    if cpu_tensors
+                    else _DTYPE_CODE_UNKNOWN
+                )
+                idx = 2
                 for t in cpu_tensors:
                     shape_meta[idx] = t.ndim
                     idx += 1
@@ -549,8 +584,13 @@ class PPListener:
         dist.recv(shape_meta, group=group, group_src=source_rank, tag=tag)
 
         num_elements = int(shape_meta[0].item())
+        # The producer stamped the value's real dtype in slot 1; trust it over
+        # the weight-derived guess in ``dtype`` (used only when the code is
+        # unknown — a dtype outside the codec / an old-format sender).
+        wire_dtype = _CODE_TO_DTYPE.get(int(shape_meta[1].item()))
+        recv_dtype = wire_dtype if wire_dtype is not None else dtype
         shapes = []
-        idx = 1
+        idx = 2
         total_numel = 0
         for _ in range(num_elements):
             ndim = int(shape_meta[idx].item())
@@ -563,7 +603,7 @@ class PPListener:
             shapes.append((shape, numel))
             total_numel += numel
 
-        flat = torch.zeros(total_numel, dtype=dtype)
+        flat = torch.zeros(total_numel, dtype=recv_dtype)
         dist.recv(flat, group=group, group_src=source_rank, tag=tag)
 
         results = []
@@ -572,7 +612,7 @@ class PPListener:
             results.append(flat[offset:offset + numel].reshape(shape).to(self._device))
             offset += numel
 
-        self._cache_module_shapes(module_path, meta, shapes, dtype)
+        self._cache_module_shapes(module_path, meta, shapes, recv_dtype)
 
         if num_elements == 1:
             return results[0]
@@ -608,24 +648,39 @@ class PPListener:
 
         module_shapes = [tuple(shape) for shape, _ in shapes]
 
-        # Mutate the resolved entry in place when it exists (keeps the
-        # allgather-provided dtype and is agnostic to the prefix-tolerant
-        # key under which it was found); otherwise create a fresh entry.
+        # Mutate the resolved entry in place when it exists (agnostic to the
+        # prefix-tolerant key under which it was found); otherwise create a
+        # fresh entry. Either way adopt the wire-learned ``dtype``, replacing
+        # the weight-derived guess from the load-time meta exchange — that guess
+        # is wrong for integer-valued outputs (sampled token ids), and the
+        # producer's stamped dtype is authoritative. Subsequent precomputed
+        # pulls read ``entry["dtype"]``, so they inherit the corrected value.
         if isinstance(meta, dict):
             entry = meta
         else:
-            entry = {"dtype": dtype}
+            entry = {}
             self._meta_map[module_path] = entry
+        entry["dtype"] = dtype
         entry["module_shapes"] = module_shapes
         entry["num_outputs"] = len(shapes)
 
 
 def _provider_to_module_path(provider_string: str) -> str:
-    """Strip '.output.iN' or '.input.iN' suffix to get the module path."""
+    """Strip the access suffix (``.output.iN`` / ``.input.iN`` / ``.iN``) to
+    get the module path.
+
+    The part before the iteration marker is only dropped when it actually is
+    the eproperty name (``output``/``input``/``inputs``). A root eproperty's
+    provider is ``model.logits.iN`` — its trailing part IS the module name;
+    unconditionally dropping it collapsed both ``model.logits`` and
+    ``model.samples`` to ``"model"``, making their meta/shape-cache entries
+    collide.
+    """
     parts = provider_string.split(".")
     # Walk backwards to find and remove the access suffix
     for i in range(len(parts) - 1, -1, -1):
         if parts[i].startswith("i") and parts[i][1:].isdigit():
-            # Found iteration marker, the part before is "output" or "input"
-            return ".".join(parts[: i - 1])
+            if i > 0 and parts[i - 1] in ("output", "input", "inputs"):
+                return ".".join(parts[: i - 1])
+            return ".".join(parts[:i])
     return provider_string

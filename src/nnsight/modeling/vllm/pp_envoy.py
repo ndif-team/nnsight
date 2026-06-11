@@ -170,7 +170,15 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
     # the old ``path`` (the trailing ``.output``/``.input`` is ignored).
     source_rank = pp_map.get_owning_rank(module_key)
 
-    meta = resolve_meta(getattr(interleaver, "pp_module_meta", {}), path) or {}
+    # Resolve the dtype hint from the same canonical module path the pull
+    # protocol uses (``_provider_to_module_path(provider_string)``): the
+    # eproperty suffix (``output``/``input``) strips back to ``path``, but a
+    # root eproperty's name lives in ``key`` (``path="model"``, ``key=
+    # "samples"``) and must stay in the lookup — resolving from ``path`` alone
+    # misses and falls back to float32, the same class of bug as resolving
+    # ``source_rank`` from ``path`` (fixed above).
+    meta_path = path if key in ("output", "input", "inputs") else module_key
+    meta = resolve_meta(getattr(interleaver, "pp_module_meta", {}), meta_path) or {}
     dtype = (
         meta.get("dtype", torch.float32)
         if isinstance(meta, dict)

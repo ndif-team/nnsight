@@ -140,6 +140,30 @@ class TestStripLazyContainers:
         assert torch.equal(merged.residual, torch.ones(2))
 
 
+class TestProviderModulePath:
+    """``_provider_to_module_path`` must keep root wrapper-module names.
+
+    For sub-envoy providers the suffix is ``.output.iN``/``.input.iN`` and both
+    trailing parts strip. But a root eproperty's provider is
+    ``model.logits.iN`` — stripping two parts collapses BOTH ``model.logits``
+    and ``model.samples`` to ``"model"``, so their meta/shape-cache entries
+    collide (latent: masked today only because consumers always request the
+    shape-on-wire mode).
+    """
+
+    def test_strips_output_and_input_suffix(self):
+        from nnsight.modeling.vllm.pp_listener import _provider_to_module_path
+
+        assert _provider_to_module_path("model.layers.5.output.i0") == "model.layers.5"
+        assert _provider_to_module_path("model.layers.5.input.i12") == "model.layers.5"
+
+    def test_keeps_root_wrapper_module_name(self):
+        from nnsight.modeling.vllm.pp_listener import _provider_to_module_path
+
+        assert _provider_to_module_path("model.logits.i0") == "model.logits"
+        assert _provider_to_module_path("model.samples.i3") == "model.samples"
+
+
 class TestPPListener:
 
     def _make_listener(self, buffer=None):
@@ -337,6 +361,27 @@ class TestEnvoyPPMissingShortCircuit:
             _ = lazy + 1
 
         interleaver.pp_listener.pull_from_remote.assert_not_called()
+
+    def test_root_eproperty_dtype_meta_resolved_from_full_key(self):
+        """The dtype hint for a root eproperty (``logits``/``samples``) must be
+        looked up under the full ``{path}.{key}`` — the same lookup the
+        source-rank resolution uses — not ``path`` alone (which is just
+        ``"model"`` for root epropertys, so the lookup misses and the lazy
+        carries the ``float32`` fallback)."""
+        from nnsight.modeling.vllm.pp_envoy import _pp_lazy_access
+
+        envoy, mediator = self._make_pp_envoy()
+        interleaver = envoy.interleaver
+        interleaver.pp_module_meta = {"model.samples": {"dtype": torch.int32}}
+
+        class RootHost:
+            path = "model"
+
+        host = RootHost()
+        host.interleaver = interleaver
+
+        lazy = _pp_lazy_access(host, "samples")
+        assert lazy._meta["dtype"] == torch.int32
 
 
 class TestIteratorMediatorResolution:

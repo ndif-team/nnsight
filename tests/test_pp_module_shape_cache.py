@@ -53,10 +53,29 @@ def test_first_pull_legacy_then_precomputed():
     lis._cache_module_shapes(path, meta_map[path], _shapes((7, 512)), dtype=torch.bfloat16)
     assert meta_map[path]["module_shapes"] == [(7, 512)]
     assert meta_map[path]["num_outputs"] == 1
-    assert meta_map[path]["dtype"] == torch.bfloat16  # untouched
+    assert meta_map[path]["dtype"] == torch.bfloat16  # adopted from wire (same value here)
 
     # Pull #2: same module -> precomputed.
     assert lis._should_use_precomputed(resolve_meta(meta_map, path), num_tokens=11) is True
+
+
+def test_wire_dtype_overrides_weight_derived_guess():
+    # The load-time meta exchange derives a module's dtype from its *weights*
+    # (here bf16), but an integer-valued output — sampled token ids — is int32.
+    # The legacy pull learns the real dtype from the wire and must overwrite the
+    # guess, so the precomputed path that follows sizes its recv buffer as int32
+    # instead of bf16 (the under-size that made gloo abort). Unconventional name
+    # on purpose: this is not a float activation module.
+    path = "sampler.output_tokens"
+    meta_map = {path: {"dtype": torch.bfloat16, "num_outputs": 1, "module_shapes": []}}
+    lis = _make_listener(meta_map)
+
+    # Wire delivers int32 (the real sampled-token dtype), not the bf16 guess.
+    lis._cache_module_shapes(path, meta_map[path], _shapes((4, 1)), dtype=torch.int32)
+
+    assert meta_map[path]["dtype"] == torch.int32  # guess overridden by the wire
+    assert meta_map[path]["module_shapes"] == [(4, 1)]
+    assert meta_map[path]["num_outputs"] == 1
 
 
 def test_recv_substitutes_live_token_count():
