@@ -160,9 +160,9 @@ def test_nonstd():
 
 
 def _pool_key(device="cuda", arena=64 << 20, frac=0.3, lock=False):
-    return isolation._WorkerPool._key(
-        {"device": device, "arena_bytes": arena, "gpu_mem_fraction": frac, "lockdown": lock}
-    )
+    return isolation.IsoOptions(
+        device=device, arena_bytes=arena, gpu_mem_fraction=frac, lockdown=lock
+    ).pool_key
 
 
 def test_dead_idle(model):

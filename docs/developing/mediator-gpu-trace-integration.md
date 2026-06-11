@@ -162,25 +162,13 @@ rule; deferred (revisit with double-buffering if real workloads need it).
 
 ---
 
-## 6. Feature coverage map (so nothing is silently dropped)
+## 6. Feature coverage map
 
-| Feature | Cross-process mechanism | Status |
-|---|---|---|
-| read / swap / skip / exception | events over channel + host-side hook registration | done |
-| `.save()` (tensors) | worker→host saves transmission | done |
-| multi-invoke + batch narrowing | per-worker host mediator; Batcher host-side | done |
-| `iter`/`all`/`next` (multi-token) | iteration step stamped host-side; host iter-hooks bump the tracker; worker sets its step explicitly | done |
-| `tracer.barrier()` | host-side participant counting + the existing `handle_barrier_event` coordination loop | done |
-| `cross_invoker` variable sharing | host-mediated variable store (worker pushes data locals, pulls the merged store) | done |
-| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)` from its local tape, host continues `torch.autograd.grad` on the real graph, `.grad` served by provenance path | done (§16) |
-| `tracer.cache()` | CACHE event → host registers the real cache hooks; host CacheDict swapped in for the worker placeholder, filled in-place by the forward | done (§15) |
-| warm worker pool (`pool_size=`) | generic workers receive serialized mediators as jobs over the channel; clean-END workers recycled, others retired | done (§14) |
-| MPS / `isolate_mediators()` further polish | — | planned |
-
-When isolation is on and a not-yet-supported feature is used, the trace **fails cleanly** — a
-missed-provider error or the per-step timeout (the lifecycle is the safety net), not a silent deadlock or
-silent-wrong result. (There is no automatic "route to in-process" fallback; features are added one at a
-time. See the support matrix in §8 for what works today.)
+Folded into the **support matrix (§8)**, which carries each feature's cross-process mechanism and
+current status in one table. The invariant it tracks: when isolation is on and a not-yet-supported
+feature is used, the trace **fails cleanly** — a missed-provider error or the per-step timeout (the
+lifecycle is the safety net), not a silent deadlock or silent-wrong result. (There is no automatic
+"route to in-process" fallback; features are added one at a time.)
 
 ---
 
@@ -245,21 +233,23 @@ benign CudaIPC release warning.
 
 ---
 
-## 8. Support matrix (what works under `isolate_mediators()` today)
+## 8. Support matrix (what works under `isolate_mediators()` today, and how)
 
-| Feature | Status |
-|---|---|
-| read / swap (`=`) / `.save()` (tensors) / skip / exception / multi-invoke | ✅ bit-identical |
-| single-forward `generate(...)` (no iter) | ✅ verified |
-| seccomp lockdown (fs/net/exec) | ✅ |
-| `iter`/`all`/`next` (multi-token) | ✅ bit-identical (`iter[N]`, `iter[:]`, per-step swap) |
-| `tracer.barrier()` | ✅ host-side participant counting |
-| `cross_invoker` variable sharing | ✅ host variable store; transmittable data vars only — see §10 |
-| warm worker pool (`pool_size=N`, `warm_worker_pool`) | ✅ ~21× faster per request once warm; recycle-on-clean-END — see §14 |
-| `with tensor.backward()` / `.grad` | ✅ read-path bit-identical (scalar loss; single invoke; no swap-then-backward; `.grad` editing raises — §16) |
-| `tracer.cache()` (`modules=`, `include_inputs=`) | ✅ bit-identical — CACHE event → host registers the real cache hooks; the forward fills the host CacheDict in-place (§15) |
-| `.source` operation-level access (`...attn.split_1.output`) | 🔜 not yet (op paths aren't in `model.modules()`) |
-| in-place `[:]=` | ⛔ use explicit `=` (clone semantics, §4) |
+| Feature | Cross-process mechanism | Status |
+|---|---|---|
+| read / swap (`=`) / `.save()` (tensors) / skip / exception | six events over the channel; host-side hook registration; worker→host saves transmission at END | ✅ bit-identical |
+| multi-invoke + batch narrowing | per-invoke worker + host mediator; Batcher stays host-side | ✅ bit-identical |
+| single-forward `generate(...)` (no iter) | same as trace | ✅ verified |
+| seccomp lockdown (fs/net/exec) | `_sandbox.lock_down` after warm-up | ⚠️ broken since the warm-pool unification (§14): the worker locks down BEFORE receiving its first job, and unpickling the job's extras (Tokenizer) triggers a new `transformers` submodule import that seccomp blocks → the worker dies at job-recv. Pre-dates the 2026-06-10 refactors (reproduced on the pre-refactor commit). Needs a fix decision: warm the model's transformers modules before lockdown, or restore deserialize-before-lockdown for cold workers. |
+| `iter`/`all`/`next` (multi-token) | step stamped in the requester; host iter-hooks bump the tracker; live `default_all` piggyback (§9) | ✅ bit-identical (`iter[N]`, `iter[:]`, per-step swap) |
+| `tracer.barrier()` | worker sends the target count; host accumulates participants + runs the coordination loop (§10) | ✅ |
+| `cross_invoker` variable sharing | host variable store; worker pushes data locals, pulls the merged store; transmittable data only (§10) | ✅ |
+| warm worker pool (`pool_size=N`, `warm_worker_pool`) | generic workers receive serialized mediators as jobs; clean-END recycle (§14) | ✅ ~21× faster per request once warm |
+| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path (§16) | ✅ read-path bit-identical (scalar loss; single invoke; no swap-then-backward; `.grad` editing raises) |
+| `tracer.cache()` (`modules=`, `include_inputs=`) | CACHE event → host registers the real cache hooks; host CacheDict swapped in at END, filled in-place by the forward (§15) | ✅ bit-identical |
+| `.source` operation-level access (`...attn.split_1.output`) | — (op paths aren't in `model.modules()`) | 🔜 not yet |
+| in-place `[:]=` | — (clone-on-receive semantics; use explicit `=`, §4) | ⛔ |
+| MPS / `isolate_mediators()` further polish | — | planned |
 
 Not-yet-supported features fail **cleanly** (missed-provider error or the per-step timeout), not as a
 silent deadlock — the lifecycle (timeout + `finally: cancel()`) is the safety net until each feature lands.
@@ -332,8 +322,9 @@ perf cliff for large cross-invoke tensors).
 
 ## 11. Backward + caching — characterization (both gaps since closed: cache §15, backward §16)
 
-`test_isolated_backward_cache_gaps.py` confirmed the two gaps and their difficulty at the time;
-kept for the reasoning record:
+A gap-characterization harness (`test_isolated_backward_cache_gaps.py`, since retired — canonical
+coverage lives in `test_isolated_cache.py` / `test_isolated_backward.py`) confirmed the two gaps and
+their difficulty at the time; kept for the reasoning record:
 
 - **`tracer.cache()` (a real build, not a quick shim):** `tracer.cache()` runs in the worker → registers
   cache hooks on dummy modules → never fire → the `.save()`'d CacheDict comes back **empty**. The fix

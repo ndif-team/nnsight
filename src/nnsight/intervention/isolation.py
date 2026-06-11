@@ -39,6 +39,7 @@ import os
 import threading
 from collections import defaultdict, deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -77,14 +78,46 @@ def _transmittable(v) -> bool:
 # --------------------------------------------------------------------------- #
 # Opt-in surface                                                              #
 # --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class IsoOptions:
+    """Per-worker isolation options, in one place for every consumer (the opt-in
+    context, the pool key, spawn, and the worker bootstrap — previously four
+    hand-copied dicts).
+
+    ``device``/``arena_bytes``/``gpu_mem_fraction``/``lockdown`` are **warm-time**:
+    fixed when the worker process spawns, and they define pool interchangeability
+    (:attr:`pool_key`). ``timeout`` is **per-job**: re-applied to the host channel
+    each trace in ``_wire_host_channel`` (it also sizes the channel's first-event
+    budget at spawn).
+    """
+
+    device: str = "cuda"
+    arena_bytes: int = 64 << 20
+    gpu_mem_fraction: float = 0.3
+    lockdown: bool = False   # functional-first; seccomp lockdown enabled separately
+    timeout: float = 60.0    # per-step wall-clock cap on user code (hang containment)
+
+    @property
+    def pool_key(self) -> tuple:
+        # Workers are interchangeable ONLY within the same warm-time signature — the
+        # bounce buffer is device- and size-specific, so reusing a worker across
+        # devices would copy into the wrong-device buffer (silent corruption).
+        return (
+            str(self.device),
+            int(self.arena_bytes),
+            float(self.gpu_mem_fraction),
+            bool(self.lockdown),
+        )
+
+
+# Generous wait for a COLD spawn+warm (import torch/nnsight + CUDA init, ~4 s typical);
+# distinct from the per-job first-event budget (user timeout + deserialize margin).
+_WARM_STARTUP_TIMEOUT = 180.0
+
 _STATE: Dict[str, Any] = {
     "on": False,
-    "arena_bytes": 64 << 20,
-    "gpu_mem_fraction": 0.3,
-    "device": "cuda",
-    "timeout": 60.0,    # per-step wall-clock cap on user code (hang containment)
-    "lockdown": False,  # functional-first; seccomp lockdown enabled separately
-    "pool_size": 0,     # 0 => cold one-shot worker per trace; >0 => warm pool cap
+    "pool_size": 0,  # 0 => cold one-shot worker per trace; >0 => warm pool cap
+    "opts": IsoOptions(),
 }
 
 
@@ -122,28 +155,19 @@ def isolate_mediators(
     prev = dict(_STATE)
     _STATE.update(
         on=True,
-        arena_bytes=arena_bytes,
-        gpu_mem_fraction=gpu_mem_fraction,
-        device=device,
-        timeout=timeout,
-        lockdown=lockdown,
         pool_size=pool_size,
+        opts=IsoOptions(
+            device=device,
+            arena_bytes=arena_bytes,
+            gpu_mem_fraction=gpu_mem_fraction,
+            lockdown=lockdown,
+            timeout=timeout,
+        ),
     )
     try:
         yield
     finally:
         _STATE.update(prev)
-
-
-def _base_opts() -> Dict[str, Any]:
-    """The per-worker (warm-time) options, distinct from per-job (per-trace) ones."""
-    return {
-        "device": _STATE["device"],
-        "arena_bytes": _STATE["arena_bytes"],
-        "gpu_mem_fraction": _STATE["gpu_mem_fraction"],
-        "lockdown": _STATE["lockdown"],
-        "timeout": _STATE["timeout"],
-    }
 
 
 # --------------------------------------------------------------------------- #
@@ -213,37 +237,26 @@ class _WorkerPool:
     """
 
     def __init__(self):
-        # Keyed by base-opts signature: workers are interchangeable ONLY within the
-        # same (device, arena_bytes, gpu_mem_fraction, lockdown) — the bounce buffer is
-        # device- and size-specific, so reusing a worker across devices would copy into
-        # the wrong-device buffer (silent corruption).
+        # Keyed by IsoOptions.pool_key (the warm-time signature): workers are
+        # interchangeable only within it — see IsoOptions.
         self._idle: Dict[tuple, deque] = defaultdict(deque)
         self._all: Dict[tuple, set] = defaultdict(set)
         self._lock = threading.Lock()
         self._shutting_down = False
 
-    @staticmethod
-    def _key(base_opts: dict) -> tuple:
-        return (
-            str(base_opts["device"]),
-            int(base_opts["arena_bytes"]),
-            float(base_opts["gpu_mem_fraction"]),
-            bool(base_opts.get("lockdown", False)),
-        )
-
-    def warm(self, n: int, base_opts: dict) -> None:
-        key = self._key(base_opts)
+    def warm(self, n: int, opts: IsoOptions) -> None:
+        key = opts.pool_key
         with self._lock:
             need = max(0, n - len(self._all[key]))
         # Spawn outside the lock (each ~4 s); register under it.
-        fresh = [_spawn_worker(base_opts, poolable=True) for _ in range(need)]
+        fresh = [_spawn_worker(opts, poolable=True) for _ in range(need)]
         with self._lock:
             for w in fresh:
                 self._all[key].add(w)
                 self._idle[key].append(w)
 
-    def acquire(self, base_opts: dict, cap: int) -> _PooledWorker:
-        key = self._key(base_opts)
+    def acquire(self, opts: IsoOptions, cap: int) -> _PooledWorker:
+        key = opts.pool_key
         dead: list = []
         live = None
         placeholder = None
@@ -269,7 +282,7 @@ class _WorkerPool:
             return live
         if placeholder is not None:
             try:
-                w = _spawn_worker(base_opts, poolable=True)
+                w = _spawn_worker(opts, poolable=True)
             except BaseException:
                 with self._lock:
                     self._all[key].discard(placeholder)
@@ -279,7 +292,7 @@ class _WorkerPool:
                 self._all[key].add(w)
             return w
         # At cap with none idle: a cold one-shot worker so the trace never blocks.
-        return _spawn_worker(base_opts, poolable=False)
+        return _spawn_worker(opts, poolable=False)
 
     def put_idle(self, w: _PooledWorker) -> None:
         close_it = False
@@ -333,13 +346,13 @@ def warm_worker_pool(
     """
     _POOL.warm(
         size,
-        {
-            "device": device,
-            "arena_bytes": arena_bytes,
-            "gpu_mem_fraction": gpu_mem_fraction,
-            "lockdown": lockdown,
-            "timeout": timeout,
-        },
+        IsoOptions(
+            device=device,
+            arena_bytes=arena_bytes,
+            gpu_mem_fraction=gpu_mem_fraction,
+            lockdown=lockdown,
+            timeout=timeout,
+        ),
     )
 
 
@@ -348,24 +361,23 @@ def shutdown_worker_pool() -> None:
     _POOL.shutdown()
 
 
-def _spawn_worker(base_opts: dict, poolable: bool) -> _PooledWorker:
+def _spawn_worker(opts: IsoOptions, poolable: bool) -> _PooledWorker:
     """Spawn a generic worker, wait for its one-time ``ready`` ack, wire the channel."""
     ctx = mp.get_context("spawn")  # CUDA requires spawn, not fork
-    buf = torch.empty(
-        base_opts["arena_bytes"], dtype=torch.uint8, device=base_opts["device"]
-    )
+    buf = torch.empty(opts.arena_bytes, dtype=torch.uint8, device=opts.device)
     parent_conn, child_conn = ctx.Pipe()
     proc = ctx.Process(
-        target=_pool_worker_main, args=(child_conn, buf, base_opts), daemon=True
+        target=_pool_worker_main, args=(child_conn, buf, opts), daemon=True
     )
     proc.start()
     # The worker warms CUDA + imports (~4 s) then sends exactly one "ready"; consume
     # it before the channel starts reading protocol frames on the same pipe. This poll
     # covers the cold spawn+warm, so it stays generous.
-    warm_wait = base_opts.get("startup_timeout", 180.0)
-    if not parent_conn.poll(warm_wait):
+    if not parent_conn.poll(_WARM_STARTUP_TIMEOUT):
         proc.terminate()
-        raise TimeoutError(f"isolated worker failed to warm up within {warm_wait}s")
+        raise TimeoutError(
+            f"isolated worker failed to warm up within {_WARM_STARTUP_TIMEOUT}s"
+        )
     msg = parent_conn.recv()
     if msg != "ready":
         proc.terminate()
@@ -377,12 +389,11 @@ def _spawn_worker(base_opts: dict, poolable: bool) -> _PooledWorker:
     chan = CudaIpcHostChannel(
         parent_conn,
         buf,
-        timeout=base_opts["timeout"],
-        startup_timeout=base_opts["timeout"] + _JOB_STARTUP_MARGIN,
+        timeout=opts.timeout,
+        startup_timeout=opts.timeout + _JOB_STARTUP_MARGIN,
     )
     return _PooledWorker(
-        proc, buf, parent_conn, chan, poolable=poolable,
-        key=_WorkerPool._key(base_opts),
+        proc, buf, parent_conn, chan, poolable=poolable, key=opts.pool_key
     )
 
 
@@ -431,8 +442,8 @@ def _build_job(mediator) -> tuple:
 def _wire_host_channel(mediator, iso: _PooledWorker, worker_opts: dict) -> None:
     """Point the (possibly recycled) worker's host channel at THIS mediator."""
     chan = iso.channel
-    chan.reset()                         # fresh single-slot buffer + startup-timeout
-    chan._timeout = _STATE["timeout"]    # per-trace user-code cap
+    chan.reset()                            # fresh single-slot buffer + startup-timeout
+    chan._timeout = _STATE["opts"].timeout  # per-trace user-code cap
     # default_all is set by generate() AFTER the worker is acquired (LanguageModel
     # ._execute), so a snapshot is stale. Piggyback the LIVE value + the cross_invoker
     # var store on each response; the worker reads default_all before bounding its
@@ -474,12 +485,12 @@ def acquire_isolated_worker(mediator) -> None:
     registration + cancel/release).
     """
     payload, extras, worker_opts = _build_job(mediator)
-    pool_size = _STATE.get("pool_size", 0)
+    pool_size = _STATE["pool_size"]
 
     def _acquire():
         if pool_size > 0:
-            return _POOL.acquire(_base_opts(), pool_size)
-        return _spawn_worker(_base_opts(), poolable=False)
+            return _POOL.acquire(_STATE["opts"], pool_size)
+        return _spawn_worker(_STATE["opts"], poolable=False)
 
     iso = _acquire()
     try:
@@ -794,7 +805,7 @@ def _run_one_job(channel, payload, extras, opts, device) -> None:
         _WORKER_CURRENT = None
 
 
-def _pool_worker_main(conn, buf, base_opts):
+def _pool_worker_main(conn, buf, worker_iso_opts: IsoOptions):
     """Generic worker: warm CUDA + imports ONCE, optionally lock down, then loop
     serving ``("job", payload, extras, opts)`` messages until told to ``"stop"``.
 
@@ -803,7 +814,7 @@ def _pool_worker_main(conn, buf, base_opts):
     against fresh dummy modules (no cross-job state but ``Globals.saves``, cleared)."""
     from .tracing.globals import _ensure_mounted
 
-    device = base_opts.get("device", "cuda")
+    device = worker_iso_opts.device
 
     # Warm CUDA before any lockdown so kernels/contexts are loaded.
     if torch.cuda.is_available():
@@ -821,8 +832,8 @@ def _pool_worker_main(conn, buf, base_opts):
 
     _ensure_mounted()  # install Object.save so `.save()` resolves in the worker
 
-    if base_opts.get("gpu_mem_fraction") and torch.cuda.is_available():
-        torch.cuda.set_per_process_memory_fraction(base_opts["gpu_mem_fraction"])
+    if worker_iso_opts.gpu_mem_fraction and torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(worker_iso_opts.gpu_mem_fraction)
 
     channel = CudaIpcWorkerChannel(conn, buf)  # persistent; rebinds handlers per job
 
@@ -831,7 +842,7 @@ def _pool_worker_main(conn, buf, base_opts):
     # import set for ALL jobs (jobs whose user code triggers a NEW import will fail) —
     # lockdown defaults off; document the trade-off. CUDA + the control Pipe + the IPC
     # buffer use already-open fds.
-    if base_opts.get("lockdown"):
+    if worker_iso_opts.lockdown:
         from ._sandbox import lock_down
 
         lock_down()

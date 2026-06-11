@@ -625,17 +625,17 @@ class InterleavingTracer(Tracer):
 
             token = id(cache_obj.cache)
             cache_obj.cache._iso_cache_token = token
-            spec = (
-                token,
-                [envoy.path for envoy in targets],
-                device,
-                dtype,
-                detach,
-                include_output,
-                include_inputs,
-                rename_dict,
-                alias_dict,
-            )
+            spec = {
+                "token": token,
+                "paths": [envoy.path for envoy in targets],
+                "device": device,
+                "dtype": dtype,
+                "detach": detach,
+                "include_output": include_output,
+                "include_inputs": include_inputs,
+                "rename": rename_dict,
+                "alias": alias_dict,
+            }
             mediator.send(Events.CACHE, spec)
         else:
             for envoy in targets:

@@ -1448,36 +1448,30 @@ class Mediator:
         in-process path. Acks so the worker's ``send`` returns and it proceeds to END.
         """
         from .hooks import cache_input_hook, cache_output_hook
+        from .isolation import path_to_envoy
         from .tracing.tracer import Cache
 
-        (
-            token,
-            paths,
-            device,
-            dtype,
-            detach,
-            include_output,
-            include_inputs,
-            rename,
-            alias,
-        ) = spec
-
-        from .isolation import path_to_envoy
-
         path2envoy = path_to_envoy(self)
-        targets = [path2envoy[p] for p in paths if p in path2envoy]
+        targets = [path2envoy[p] for p in spec["paths"] if p in path2envoy]
 
         cache_obj = Cache(
-            paths, device, dtype, detach, include_output, include_inputs, rename, alias
+            spec["paths"],
+            spec["device"],
+            spec["dtype"],
+            spec["detach"],
+            spec["include_output"],
+            spec["include_inputs"],
+            spec["rename"],
+            spec["alias"],
         )
         batcher = self.interleaver.batcher
         for envoy in targets:
-            if include_output:
+            if spec["include_output"]:
                 cache_output_hook(cache_obj, envoy._module, envoy.path, batcher, self)
-            if include_inputs:
+            if spec["include_inputs"]:
                 cache_input_hook(cache_obj, envoy._module, envoy.path, batcher, self)
 
-        self._iso_caches[token] = cache_obj
+        self._iso_caches[spec["token"]] = cache_obj
         self.set_user_cache(cache_obj)
 
         self.respond(None)  # ack -> worker's send() returns, it proceeds to END
