@@ -496,7 +496,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
             from ..pp_listener import PPListener
             import torch.distributed as dist
 
-            self.pp_module_map = PPModuleMap(pp_world_size)
+            self.pp_module_map = PPModuleMap(
+                pp_world_size, root_path=self.nnsight_model.path
+            )
 
             # Graft children of meta-model PPMissingLayer stubs onto the
             # worker Envoy tree so users can access ``model.layers[5].attn.output``

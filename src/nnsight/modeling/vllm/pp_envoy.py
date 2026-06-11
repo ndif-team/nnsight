@@ -190,7 +190,11 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
     # misses and falls back to float32, the same class of bug as resolving
     # ``source_rank`` from ``path`` (fixed above).
     meta_path = path if key in ("output", "input", "inputs") else module_key
-    meta = resolve_meta(getattr(interleaver, "pp_module_meta", {}), meta_path) or {}
+    meta = resolve_meta(
+        getattr(interleaver, "pp_module_meta", {}),
+        meta_path,
+        root=pp_map.root_path,
+    ) or {}
     dtype = (
         meta.get("dtype", torch.float32)
         if isinstance(meta, dict)
