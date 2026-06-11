@@ -113,10 +113,10 @@ _CODE_TO_DTYPE = {code: dtype for dtype, code in _DTYPE_TO_CODE.items()}
 # block the recv loop or the producer.
 _REPLY_POOL_SIZE = 32
 
-# Separator between req_id and provider in the wire-encoded key.
-# Format: ``"{req_id}|{provider}"`` (null-terminated).  req_id may be
-# empty for requests that predate the composite-key discipline — the
-# listener then falls back to the string-only provider key (legacy).
+# Separator between req_id and provider in the wire-encoded key. The wire key
+# is ALWAYS ``"{req_id}|{provider}"`` (req_id empty for ``None``), decoding to
+# the composite ``(provider, req_id)`` tuple the producer buffers under — the
+# same key shape on both ends, no string-only fallback to diverge on.
 _KEY_SEP = "|"
 
 # A pull request is ONE fixed-size, self-identifying message on TAG_REQUEST:
@@ -319,14 +319,10 @@ class PPListener:
                     _decode_request(req_buf)
                 )
 
-                # Wire key is ``"{req_id}|{provider}"`` (the composite buffer
-                # key); a missing separator (legacy callers / tests) is a
-                # plain provider string with req_id=None.
-                if _KEY_SEP in encoded:
-                    req_id_str, provider_string = encoded.split(_KEY_SEP, 1)
-                    lookup_key = (provider_string, req_id_str or None)
-                else:
-                    lookup_key = encoded
+                # Wire key is ``"{req_id}|{provider}"``; decode to the same
+                # composite ``(provider, req_id)`` the producer buffers under.
+                req_id_str, provider_string = encoded.split(_KEY_SEP, 1)
+                lookup_key = (provider_string, req_id_str or None)
 
                 req = (requesting_rank, response_tag)
                 # Check-and-park under the buffer lock so it races safely with
@@ -489,12 +485,13 @@ class PPListener:
         Args:
             source_rank: PP rank that owns the module.
             provider_string: Module-level provider (``"…output.iN"``).
-            req_id: vLLM request id. When non-None, the wire key encodes
+            req_id: vLLM request id. The wire key encodes
                 ``"{req_id}|{provider}"`` and the producer looks up the
                 composite ``(provider, req_id)`` tuple so concurrent
                 requests reading the same provider on the same forward
-                can't deliver each other's slices. ``None`` falls back to
-                the string-only key (unit tests / non-vLLM callers).
+                can't deliver each other's slices. ``None`` encodes as an
+                empty id, matching a producer-side key of
+                ``(provider, None)``.
         """
         if self._pull_group is None:
             raise RuntimeError("No pull_group configured for cross-rank pull")
@@ -502,10 +499,7 @@ class PPListener:
         group = self._pull_group
 
         # Wire-encode the composite key; producer parses on receipt.
-        if req_id is not None:
-            wire_key = f"{req_id}{_KEY_SEP}{provider_string}"
-        else:
-            wire_key = provider_string
+        wire_key = f"{req_id if req_id is not None else ''}{_KEY_SEP}{provider_string}"
 
         # Allocate a private response tag for THIS pull and send ONE fixed-size,
         # self-identifying request. No lock: each mediator thread runs its own

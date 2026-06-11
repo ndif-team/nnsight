@@ -1,3 +1,4 @@
+import os
 import pickle
 import threading
 import time
@@ -27,6 +28,31 @@ else:
 if TYPE_CHECKING:
 
     from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+
+
+def _pp_buffer_stats(buffer: Dict[Any, Any]) -> tuple:
+    """``(entry_count, total_bytes, devices)`` for the PP hook buffer.
+
+    NNSIGHT_PP_BUFFER_DEBUG diagnostic: comparing pre/post-clear stats
+    distinguishes a real cross-request leak (post-clear size grows over time)
+    from benign allocator caching, and the pre-clear size is the
+    intra-request peak. Recurses because a layer ``.output`` is a
+    ``(hidden, residual)`` tuple — bare-tensor counting undercounts to zero.
+    """
+    devices: set = set()
+
+    def _nbytes(v):
+        if isinstance(v, torch.Tensor):
+            devices.add(str(v.device))
+            return v.element_size() * v.nelement()
+        if isinstance(v, (tuple, list)):
+            return sum(_nbytes(x) for x in v)
+        if isinstance(v, dict):
+            return sum(_nbytes(x) for x in v.values())
+        return 0
+
+    total = sum(_nbytes(v) for v in buffer.values())
+    return len(buffer), total, ",".join(sorted(devices)) or "-"
 
 
 class NNsightGPUModelRunner(GPUModelRunner):
@@ -971,53 +997,19 @@ class NNsightGPUModelRunner(GPUModelRunner):
         # A blanket clear would also wipe concurrent in-flight requests'
         # slices and break their cross-rank pulls.
         if self.pp_enabled and finished_keys and self.pp_listener is not None:
-            # Diagnostic (env-gated, inert otherwise): report buffer size
-            # before/after the scoped clear so we can distinguish a real
-            # cross-request leak (post-clear size grows over time) from
-            # benign allocator caching, and measure the intra-request peak
-            # (pre-clear size for a long-generation request).
-            import os as _os
-            if _os.environ.get("NNSIGHT_PP_BUFFER_DEBUG"):
-                def _nbytes(v):
-                    # Recurse: layer .output is a (hidden, residual) tuple, so
-                    # bare-tensor counting undercounts to zero.
-                    if isinstance(v, torch.Tensor):
-                        return v.element_size() * v.nelement()
-                    if isinstance(v, (tuple, list)):
-                        return sum(_nbytes(x) for x in v)
-                    if isinstance(v, dict):
-                        return sum(_nbytes(x) for x in v.values())
-                    return 0
-                def _devs(d):
-                    out = set()
-                    def walk(v):
-                        if isinstance(v, torch.Tensor):
-                            out.add(str(v.device))
-                        elif isinstance(v, (tuple, list)):
-                            for x in v:
-                                walk(x)
-                        elif isinstance(v, dict):
-                            for x in v.values():
-                                walk(x)
-                    for v in d.values():
-                        walk(v)
-                    return ",".join(sorted(out)) or "-"
-                buf = self.pp_hook_buffer
-                _pre_n = len(buf)
-                _pre_b = sum(_nbytes(v) for v in buf.values())
-                _pre_dev = _devs(buf)
-                _rank = get_pp_group().rank_in_group
-                self.pp_listener.clear_buffer(req_ids=finished_keys)
-                _post_n = len(buf)
-                _post_b = sum(_nbytes(v) for v in buf.values())
+            debug_buffer = bool(os.environ.get("NNSIGHT_PP_BUFFER_DEBUG"))
+            if debug_buffer:
+                pre = _pp_buffer_stats(self.pp_hook_buffer)
+            self.pp_listener.clear_buffer(req_ids=finished_keys)
+            if debug_buffer:
+                post = _pp_buffer_stats(self.pp_hook_buffer)
                 print(
-                    f"[PPBUF rank{_rank}] pre n={_pre_n} {_pre_b/1e6:.2f}MB "
-                    f"dev=[{_pre_dev}] -> post n={_post_n} {_post_b/1e6:.2f}MB "
+                    f"[PPBUF rank{get_pp_group().rank_in_group}] "
+                    f"pre n={pre[0]} {pre[1] / 1e6:.2f}MB dev=[{pre[2]}] -> "
+                    f"post n={post[0]} {post[1] / 1e6:.2f}MB "
                     f"(finished {len(finished_keys)} reqs)",
                     flush=True,
                 )
-            else:
-                self.pp_listener.clear_buffer(req_ids=finished_keys)
 
         # Collect deferred exceptions. Each mediator has its own — nest the
         # typed envelope inside THAT request's sub-dict under
