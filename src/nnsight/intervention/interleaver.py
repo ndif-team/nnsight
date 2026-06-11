@@ -1462,8 +1462,9 @@ class Mediator:
             alias,
         ) = spec
 
-        model = self.interleaver.tracer.model
-        path2envoy = {e.path: e for e in model.modules()}
+        from .isolation import path_to_envoy
+
+        path2envoy = path_to_envoy(self)
         targets = [path2envoy[p] for p in paths if p in path2envoy]
 
         cache_obj = Cache(

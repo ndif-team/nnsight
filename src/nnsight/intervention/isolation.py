@@ -173,10 +173,12 @@ class _PooledWorker:
         self.conn.send(("job", payload, extras, opts))
 
     def reset_for_release(self) -> None:
-        """Clear per-job host state so the worker can serve the next trace."""
+        """Drop per-job references so an idle worker doesn't pin them (the hook set,
+        the path→envoy map, and — via ``channel.reset()`` — the meta/push callbacks
+        closing over the last trace's interleaver). The *authoritative* per-job reset
+        happens at acquire time in ``_wire_host_channel``; this is memory hygiene."""
         self.registered = set()
         self.path2envoy = None
-        self.clean = False
         self.channel.reset()
 
     def close(self) -> None:
@@ -509,6 +511,17 @@ def release_isolated_worker(iso: _PooledWorker, dirty: bool) -> None:
         _POOL.forget(iso)
 
 
+def path_to_envoy(mediator) -> dict:
+    """The ``{path: envoy}`` map for this job's model, built lazily and cached on the
+    worker handle (fresh per job — ``_wire_host_channel`` clears it). Shared by
+    host-side hook registration and ``handle_cache_event``'s target resolution."""
+    iso = mediator._iso
+    if iso.path2envoy is None:
+        model = mediator.interleaver.tracer.model
+        iso.path2envoy = {e.path: e for e in model.modules()}
+    return iso.path2envoy
+
+
 def ensure_isolated_provider(mediator, requester: str) -> None:
     """Host-side hook registration: register the one-shot hook for ``requester`` on the *real* module.
 
@@ -533,10 +546,7 @@ def ensure_isolated_provider(mediator, requester: str) -> None:
     if kind not in ("output", "input"):
         return  # externally-provided eproperties (e.g. .result) need no module hook
 
-    if iso.path2envoy is None:
-        model = mediator.interleaver.tracer.model
-        iso.path2envoy = {e.path: e for e in model.modules()}
-    envoy = iso.path2envoy.get(path)
+    envoy = path_to_envoy(mediator).get(path)
     if envoy is None:
         return  # unknown path → let normal missed-provider handling surface it
 
