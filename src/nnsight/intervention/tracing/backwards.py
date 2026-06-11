@@ -153,11 +153,16 @@ class BackwardsTracer(Invoker):
 
         # Host runs its half and returns dL/d(activation) keyed by requester string.
         worker_grads = forward_mediator.send(Events.BACKWARD, seed) or {}
+        # The host signals "no graph at all" (forward ran without gradient tracking,
+        # e.g. generate()) distinctly from "this particular read is off the path".
+        no_graph = bool(worker_grads.pop("__nnsight_backward_no_graph__", False))
 
         mediator = BackwardsMediator(fn, self.info)
         interleaver = Interleaver([mediator], self)
         grad_patch = Patch(
-            torch.Tensor, _isolated_grad_property(provenance, worker_grads), "grad"
+            torch.Tensor,
+            _isolated_grad_property(provenance, worker_grads, no_graph),
+            "grad",
         )
         try:
             grad_patch.patch()
@@ -172,7 +177,7 @@ class BackwardsTracer(Invoker):
             interleaver.cancel()
 
 
-def _isolated_grad_property(provenance: dict, worker_grads: dict):
+def _isolated_grad_property(provenance: dict, worker_grads: dict, no_graph: bool = False):
     """A ``Tensor.grad`` property for the isolated backward block: read the gradient from
     the host-computed ``worker_grads`` by the tensor's delivery provenance (path), instead
     of registering a local autograd hook (the worker clone has no host graph)."""
@@ -186,6 +191,13 @@ def _isolated_grad_property(provenance: dict, worker_grads: dict):
                 "this tensor was derived in user code and has no host-side graph."
             )
         if path not in worker_grads:
+            if no_graph:
+                raise RuntimeError(
+                    f"no gradient available for `{path}` — the forward pass ran "
+                    f"without gradient tracking, so there is no autograd graph "
+                    f"(generate() runs grad-less; use model.trace() for gradients). "
+                    f"This matches in-process behavior, where .grad raises here too."
+                )
             raise RuntimeError(
                 f"no gradient available for `{path}` — it is off the backward path "
                 f"from the loss (its gradient never flowed during the backward pass)."

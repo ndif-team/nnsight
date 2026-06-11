@@ -1510,6 +1510,13 @@ class Mediator:
         ]
         target_tensors = [reals[p] for p in target_paths]
 
+        if reals and not target_tensors:
+            # Activations were delivered but NONE is on a graph — the forward ran
+            # without gradient tracking (e.g. generate() runs grad-less). Tell the
+            # worker so its .grad reads blame the real cause, not "off the path".
+            self.respond({"__nnsight_backward_no_graph__": True})
+            return True
+
         result: dict = {}
         if out_tensors and target_tensors:
             grads = torch.autograd.grad(

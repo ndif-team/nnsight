@@ -536,7 +536,13 @@ invoke, on-path tensor-output target, scalar loss, no swaps).
   `dL/d(swap)` to the worker, the worker tape backprops to its leaves, ships back).
 - Batched traces error with a cryptic shape mismatch (host retains the full-batch tensor, worker seeds
   the narrowed clone) — needs a clear error or narrowed retention.
-- Multi-token backward: under characterization (control test first; guard or document per outcome).
+- Multi-token backward: **not supported in-process either** (characterized 2026-06-10,
+  `test_isolated_multitoken_backward.py`) — `generate()` runs the forward without gradient tracking, so
+  the first `.grad` read fails in-process ("cannot register a hook on a tensor that doesn't require
+  gradient"); no silent-wrong is possible (there is no graph at all, so the earlier "per-step retention
+  overwrite" concern is moot). The isolated path fails at the same user line; the host signals the
+  no-graph case (`handle_backward_event` returns a marker when nothing retained requires grad) so the
+  worker's error names the real cause instead of "off the backward path".
 - Efficiency deferred: the host computes + ships grads for ALL retained reads (`retain_graph` always
   on); a large read set can overflow the 64 MB arena.
 - The `".backward("` source-substring detection can false-positive (e.g. the string in a comment),
