@@ -756,13 +756,18 @@ class TestIteratorMediatorResolution:
     """
 
     def test_iter_uses_thread_local_mediator(self):
-        from nnsight.intervention.interleaver import _active_mediator
+        from nnsight.intervention.interleaver import (
+            PPWorkerProgress,
+            _active_mediator,
+        )
         from nnsight.intervention.tracing.iterator import IteratorTracer
 
         my_mediator = MagicMock(name="my_mediator")
         other_mediator = MagicMock(name="other_mediator")
-        my_mediator._pp_worker_iteration = "untouched"
-        other_mediator._pp_worker_iteration = "untouched"
+        my_mediator.pp_progress = PPWorkerProgress()
+        other_mediator.pp_progress = PPWorkerProgress()
+        my_mediator.pp_progress.worker_iteration = "untouched"
+        other_mediator.pp_progress.worker_iteration = "untouched"
 
         interleaver = MagicMock()
         # The shared slot points at ANOTHER invoke's mediator — exactly the
@@ -783,12 +788,12 @@ class TestIteratorMediatorResolution:
             gen = iter(tracer)
             next(gen)
             # The worker's OWN mediator must carry the iteration bookkeeping...
-            assert my_mediator._pp_worker_iteration == 0, (
+            assert my_mediator.pp_progress.worker_iteration == 0, (
                 "iterator bound to interleaver.current instead of the "
                 "worker thread-local mediator"
             )
             # ...and the other invoke's mediator must be untouched.
-            assert other_mediator._pp_worker_iteration == "untouched"
+            assert other_mediator.pp_progress.worker_iteration == "untouched"
             gen.close()
         finally:
             _active_mediator.value = None

@@ -59,42 +59,6 @@ else:
     Envoy = Any
 
 
-def _pp_reset_iteration(mediator, iteration: int) -> None:
-    """Mark the start of a worker iteration for the PP readiness gate.
-
-    The worker is never gated on the forward — it runs ahead freely and the
-    forward's readiness gate waits for IT (see
-    ``GPUModelRunner._pp_wait_for_mediators``). Records the worker's current
-    iteration (``_pp_worker_iteration`` — distinct from ``iteration``, which a
-    one-shot hook clears mid-step) and clears the two per-iteration latches that
-    describe where the worker is within this iteration's
-    ``(remote)(local)(remote)`` lifecycle:
-
-    - ``_gone_remote`` — whether the forward-releasing downstream ``go_remote``
-      has already fired this step (emit it at most once).
-    - ``_pp_past_local`` — whether the worker has moved past its local part via
-      a downstream access (lets the readiness gate stop waiting for a mediator
-      with no local part this step).
-
-    No-op outside PP.
-    """
-    # Clear the per-iteration latches BEFORE publishing the new iteration
-    # number. The readiness gate (``GPUModelRunner._pp_wait_for_mediators``)
-    # reads ``_pp_worker_iteration`` as its guard and then trusts
-    # ``_pp_past_local`` / ``has_value`` as the data for that iteration. Under
-    # the GIL, publishing ``_pp_worker_iteration`` LAST guarantees any gate
-    # thread that sees ``it == k`` also sees the freshly-cleared latches — never
-    # a stale ``_pp_past_local`` left True by the previous iteration's
-    # downstream access. The reverse order opens a two-write window where the
-    # gate reads ``it == k`` with a stale ``_pp_past_local == True`` and releases
-    # the forward before this iteration's local hook is registered → the hook is
-    # missed → the value is never produced → cross-rank readiness-gate deadlock
-    # at iteration >= 1 (the batched multitoken cross-stage hang).
-    mediator._gone_remote = False
-    mediator._pp_past_local = False
-    mediator._pp_worker_iteration = iteration
-
-
 def _pp_max_iteration(iteration_range) -> float:
     """Highest iteration the worker will run, from an iter range.
 
@@ -350,7 +314,7 @@ class IteratorTracer(Tracer):
         # Same pattern as ``eproperty.__get__`` / ``_pp_lazy_access``.
         mediator = current_mediator() or self.interleaver.current
         original_iteration = mediator.iteration
-        mediator._pp_max_iteration = _pp_max_iteration(self.iteration)
+        mediator.pp_progress.max_iteration = _pp_max_iteration(self.iteration)
 
         # Register persistent hooks that increment mediator.iteration_tracker
         # on every forward pass for every module.  These are the sole source
@@ -385,7 +349,7 @@ class IteratorTracer(Tracer):
                     # The worker runs ahead freely; just record the iteration
                     # and reset the per-step PP readiness latches (the forward
                     # waits for the worker, not vice versa). No-op outside PP.
-                    _pp_reset_iteration(mediator, i)
+                    mediator.pp_progress.reset_iteration(i)
 
                     yield i
 
@@ -424,7 +388,7 @@ class IteratorTracer(Tracer):
                     mediator.iteration = i
 
                     # Per-step reset of the PP readiness latches.
-                    _pp_reset_iteration(mediator, i)
+                    mediator.pp_progress.reset_iteration(i)
 
                     yield i
 
@@ -485,7 +449,7 @@ class IteratorTracer(Tracer):
         # See ``__iter__``: resolve via the worker thread-local, never the
         # shared (reassignable) ``current`` slot.
         mediator = current_mediator() or self.interleaver.current
-        mediator._pp_max_iteration = _pp_max_iteration(self.iteration)
+        mediator.pp_progress.max_iteration = _pp_max_iteration(self.iteration)
 
         mediator.push()
 
@@ -503,7 +467,7 @@ class IteratorTracer(Tracer):
 
             # The worker runs ahead freely; record the iteration and reset the
             # per-step PP readiness latches. No-op outside PP.
-            _pp_reset_iteration(mediator, iter)
+            mediator.pp_progress.reset_iteration(iter)
 
             fn(mediator, self.info, iter)
 

@@ -259,7 +259,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 # (immune to pipeline bubbles). The readiness gate uses
                 # ``count - 1`` as the iteration THIS forward is for; the worker
                 # never waits on it.
-                mediator._pp_scheduled_count = mediator._pp_scheduled_count + 1
+                mediator.pp_progress.scheduled_count += 1
 
                 batch_start += num_tokens
 
@@ -710,52 +710,29 @@ class NNsightGPUModelRunner(GPUModelRunner):
         the monotonic iteration tracker would advance past it and the hook would
         never fire — a permanent hang).
 
-        This forward is for iteration ``k = _pp_scheduled_count - 1`` of the
-        request. A mediator is "ahead" for it when:
-
-        - it has already moved PAST iteration ``k`` (``mediator.iteration > k``
-          — the worker ran ahead, so its iteration-``k`` hooks were registered
-          and consumed), or
-        - it is ON iteration ``k`` and has reached its local part (parked at a
-          local request, ``event_queue.has_value``) or determined it has none
-          (``_pp_past_local``), or
-        - it has finished (``not alive``).
-
-        Comparing the worker's own ``iteration`` against ``k`` is what makes the
-        per-iteration ``_pp_past_local`` / ``has_value`` flags safe to read: a
-        stale flag from a previous step is ignored because the worker has
-        advanced past ``k``, and a not-yet-started next step is correctly waited
-        on (``iteration == k`` but not yet settled). We wait while the worker is
-        still in iteration ``k``'s leading-remote phase (or lagging behind),
-        which resolves on the producing rank independently of this gate.
-        Bounded so a genuine deadlock errors loudly instead of hanging.
+        This forward is for iteration ``k = pp_progress.scheduled_count - 1``
+        of the request; the "ahead" predicate itself lives with the state it
+        reads (:meth:`PPWorkerProgress.is_ahead_of`): finished, never reaching
+        ``k``, already past ``k``, or on ``k`` and settled (parked at a local
+        request, or past its local part). We wait while the worker is still in
+        iteration ``k``'s leading-remote phase (or lagging behind), which
+        resolves on the producing rank independently of this gate. Bounded so
+        a genuine deadlock errors loudly instead of hanging.
         """
         interleaver = self.nnsight_model.interleaver
 
-        def _ahead(m, k):
-            if not m.alive:
-                return True
-            # This worker never reaches iteration k (e.g. a single-shot
-            # ``model.trace`` once the engine generates past its one
-            # intervention) — don't wait for it.
-            if k > m._pp_max_iteration:
-                return True
-            # ``_pp_worker_iteration`` (not ``iteration``, which a one-shot hook
-            # clears to None) reliably tells which iteration the worker is on.
-            it = m._pp_worker_iteration
-            if it > k:
-                return True
-            return it == k and (m.event_queue.has_value or m._pp_past_local)
-
         deadline = time.monotonic() + PP_GATE_TIMEOUT_S
         for mediator in list(interleaver.mediators):
-            k = mediator._pp_scheduled_count - 1
-            while not _ahead(mediator, k):
+            progress = mediator.pp_progress
+            k = progress.scheduled_count - 1
+            while not progress.is_ahead_of(
+                k, alive=mediator.alive, parked=mediator.event_queue.has_value
+            ):
                 if time.monotonic() > deadline:
                     raise TimeoutError(
                         f"PP readiness gate: mediator {mediator.name} not ahead "
                         f"of forward (worker_iteration="
-                        f"{mediator._pp_worker_iteration}, k={k}) "
+                        f"{progress.worker_iteration}, k={k}) "
                         f"within {PP_GATE_TIMEOUT_S}s "
                         f"(raise via NNSIGHT_PP_GATE_TIMEOUT for a slow link)"
                     )

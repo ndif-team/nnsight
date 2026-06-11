@@ -418,6 +418,98 @@ def _deep_clone(value):
     return value
 
 
+class PPWorkerProgress:
+    """Per-mediator worker-progress state for pipeline parallelism.
+
+    Under PP the worker runs AHEAD of the forward — the forward waits for the
+    worker, never the reverse — and the per-step readiness gate
+    (``GPUModelRunner._pp_wait_for_mediators``) releases a forward only once
+    every scheduled mediator is "ahead" of it. This object is the single home
+    for the state that conversation: the iterator (worker thread) publishes
+    progress, ``pp_envoy`` marks cross-stage transitions, the gate (main
+    thread) reads.
+
+    Within one iteration the worker's lifecycle is
+    ``(leading-remote)(local)(trailing-remote)``; ``past_local`` records that
+    it moved past its local part, ``gone_remote`` that the forward-releasing
+    RELEASE was already posted this step (at most once).
+
+    Plain attribute reads/writes under the GIL; the one ordering invariant
+    lives in :meth:`reset_iteration`.
+    """
+
+    __slots__ = (
+        "gone_remote",
+        "past_local",
+        "scheduled_count",
+        "max_iteration",
+        "worker_iteration",
+    )
+
+    def __init__(self):
+        # Forward-releasing ``go_remote`` already posted this step (emit it at
+        # most once; once the forward finishes the interleaver context closes
+        # and later accesses must not post into it).
+        self.gone_remote = False
+        # Worker moved past its local part this step via a downstream access
+        # (the gate then stops waiting for it).
+        self.past_local = False
+        # Gate-only: how many forwards have processed THIS request (bumped in
+        # ``process_batch_groups``; immune to pipeline bubbles). The forward
+        # being gated is for iteration ``scheduled_count - 1``.
+        self.scheduled_count = 0
+        # Gate-only: the highest iteration the worker will ever run (set from
+        # the iter range; ``inf`` for unbounded ``tracer.iter[:]``). Defaults
+        # to 0 — a single-shot trace intervenes once, so the gate must not
+        # wait for it on later forwards.
+        self.max_iteration = 0
+        # The iteration the worker is currently on. Unlike
+        # ``Mediator.iteration`` (which a one-shot hook clears to ``None``
+        # after firing), this is published at each iteration start and never
+        # cleared, so the gate can reliably compare it against the forward's.
+        self.worker_iteration = 0
+
+    def reset_iteration(self, iteration: int) -> None:
+        """Mark the start of worker iteration ``iteration``.
+
+        Clears the per-iteration latches BEFORE publishing the new iteration
+        number. The gate reads ``worker_iteration`` as its guard and then
+        trusts ``past_local`` / the parked-event flag as the data for that
+        iteration; under the GIL, publishing ``worker_iteration`` LAST
+        guarantees a gate thread that sees ``worker_iteration == k`` also
+        sees freshly-cleared latches. The reverse order opens a two-write
+        window where the gate reads a stale ``past_local`` left True by the
+        previous iteration's downstream access and releases the forward
+        before this iteration's local hook is registered — the hook is
+        missed, the value never produced, and the ranks deadlock at the gate
+        (the batched multitoken cross-stage hang).
+        """
+        self.gone_remote = False
+        self.past_local = False
+        self.worker_iteration = iteration
+
+    def is_ahead_of(self, k: int, *, alive: bool, parked: bool) -> bool:
+        """Whether the worker is AHEAD of the forward for iteration ``k``.
+
+        Ahead means: finished (``not alive``), never reaching ``k``
+        (``k > max_iteration``), already past ``k``, or on ``k`` and settled —
+        parked at a local request (``parked``, the caller passes
+        ``event_queue.has_value``) or determined it has no local part this
+        step (``past_local``). Comparing ``worker_iteration`` against ``k``
+        is what makes the per-iteration flags safe to read: a stale flag from
+        a previous step is ignored because the worker has advanced past
+        ``k``, and a not-yet-started next step is correctly waited on.
+        """
+        if not alive:
+            return True
+        if k > self.max_iteration:
+            return True
+        it = self.worker_iteration
+        if it > k:
+            return True
+        return it == k and (parked or self.past_local)
+
+
 class Cancelation(Exception):
     """Exception raised when a request is canceled."""
 
@@ -1024,11 +1116,6 @@ class Mediator:
 
         self._prev = None
 
-        # PP: set once per generation step on this mediator's first DOWNSTREAM
-        # cross-stage access, so the forward-releasing ``go_remote`` is emitted
-        # exactly once per step (reset each iteration by the IteratorTracer).
-        self._gone_remote = False
-
         # PP: True while a value-injection ``respond`` (logits / samples,
         # delivered in sample_tokens/_sample) is blocked waiting for this
         # worker's next event. A worker stepping into a remote access reads it
@@ -1036,38 +1123,11 @@ class Mediator:
         # Set/cleared in :meth:`respond`.
         self._respond_pending = False
 
-        # PP readiness signal: True once this mediator has, in the current
-        # iteration, either reached its local part (parked at a local request,
-        # reflected by ``event_queue.has_value``) or moved PAST it via a
-        # downstream access. The forward's readiness gate waits until each
-        # mediator is "ahead" — parked at local OR past-local OR finished — and
-        # never waits for one with no local part this step. Reset per iteration
-        # by the IteratorTracer; set on a downstream access in
-        # ``pp_envoy._pp_signal_remote``.
-        self._pp_past_local = False
-
-        # PP readiness signal (gate-only): how many forwards have processed THIS
-        # request (bumped in ``process_batch_groups``). The worker never waits
-        # on this — it runs ahead freely — but the readiness gate reads it to
-        # know WHICH iteration the current forward is for (``count - 1``), so it
-        # compares against the worker's own ``iteration`` and can't be fooled by
-        # a stale ``_pp_past_local`` left from a previous step.
-        self._pp_scheduled_count = 0
-
-        # PP readiness signal (gate-only): the highest iteration this worker
-        # will ever run (set by the IteratorTracer from the iter range;
-        # ``float('inf')`` for unbounded ``tracer.iter[:]``). Defaults to 0 — a
-        # single-shot ``model.trace`` intervenes once and is done, so the gate
-        # must NOT wait for it on later forwards (the engine may generate more
-        # tokens than the worker has iterations).
-        self._pp_max_iteration = 0
-
-        # PP readiness signal (gate-only): the iteration the worker is currently
-        # on. Unlike ``iteration`` (which a one-shot hook clears to ``None``
-        # after firing), this is set by the IteratorTracer at each iteration and
-        # never cleared, so the readiness gate can reliably tell which iteration
-        # the worker is at vs which the forward is for.
-        self._pp_worker_iteration = 0
+        # PP worker-progress state for the per-step readiness gate; see
+        # :class:`PPWorkerProgress`. Reset per iteration by the
+        # IteratorTracer, written by ``pp_envoy``/the model runner, read by
+        # ``GPUModelRunner._pp_wait_for_mediators``.
+        self.pp_progress = PPWorkerProgress()
 
         # One-shot transform callback for the next value event. Set by
         # :meth:`eproperty.__get__` when an eproperty with a registered
@@ -1636,10 +1696,10 @@ class Mediator:
         Fire-and-forget (like :meth:`end`): posts RELEASE and returns
         immediately, so the worker continues into the blocking cross-stage
         pull while the released forward runs to completion. Emitted at most
-        once per mediator, on its first PP-missing access (guarded by
-        ``_gone_remote`` at the call site in ``pp_envoy``), because once the
-        forward finishes the interleaver context closes and later accesses
-        must not post into it.
+        once per mediator per step, on its first PP-missing access (guarded
+        by ``pp_progress.gone_remote`` at the call site in ``pp_envoy``),
+        because once the forward finishes the interleaver context closes and
+        later accesses must not post into it.
         """
         # Durably capture saves before releasing into the blocking cross-stage
         # pull. The producing rank may park on that pull and never reach
@@ -1802,13 +1862,9 @@ class Mediator:
         self._deferred_type_name = None
         self._deferred_traceback = None
         self._deferred_is_control_flow = False
-        # Runtime-only PP latches — not serialized, so initialize them here for
+        # Runtime-only PP state — not serialized, so initialize it here for
         # worker-side (deserialized) mediators just as ``__init__`` does. A
-        # single-shot trace (no iter loop, no per-iteration reset) reads these
-        # on its first cross-stage access, so they must exist.
-        self._gone_remote = False
+        # single-shot trace (no iter loop, no per-iteration reset) reads it
+        # on its first cross-stage access, so it must exist.
         self._respond_pending = False
-        self._pp_past_local = False
-        self._pp_scheduled_count = 0
-        self._pp_max_iteration = 0
-        self._pp_worker_iteration = 0
+        self.pp_progress = PPWorkerProgress()

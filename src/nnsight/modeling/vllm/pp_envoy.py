@@ -32,10 +32,10 @@ def _pp_signal_remote(obj, key: str) -> None:
 
     * **Downstream** (owner later in the pipeline) — this is the *trailing*
       remote phase: it comes after the local part in forward order, so the
-      worker has no more local hooks this step. Mark ``_pp_past_local`` (the
-      readiness gate then stops waiting for it) and release the forward once
-      (``_gone_remote`` guard) so it can run to completion and perform the
-      inter-stage send the downstream rank's value depends on.
+      worker has no more local hooks this step. Mark ``pp_progress.past_local``
+      (the readiness gate then stops waiting for it) and release the forward
+      once (``pp_progress.gone_remote`` guard) so it can run to completion and
+      perform the inter-stage send the downstream rank's value depends on.
     * **Upstream** (owner earlier) — this is the *leading* remote phase, before
       the local part; the pull resolves independently on the producing rank, so
       we do NOT mark past-local (a local access may still follow). We DO post a
@@ -62,21 +62,22 @@ def _pp_signal_remote(obj, key: str) -> None:
 
     # The worker runs ahead of the forward (the forward waits for it, never the
     # reverse), so a cross-stage access may land in the gap BETWEEN forwards
-    # (``interleaving`` False). ``_pp_past_local`` is the worker's own progress
+    # (``interleaving`` False). ``past_local`` is the worker's own progress
     # bookkeeping that the readiness gate reads, so it must be marked regardless
     # of ``interleaving`` — otherwise a worker that runs ahead into the gap never
     # marks past-local and the gate waits forever while the worker blocks on the
-    # cross-stage pull (the multi-node ``tuple_lazy_multigen`` deadlock).
+    # cross-stage pull (the multi-node multi-generation tuple-read deadlock).
     # ``go_remote`` posts into the live event protocol (it frees a blocked
     # value-injection ``respond``), which only exists while a forward is live, so
     # that part stays gated on ``interleaving``.
     interleaving = interleaver.interleaving
+    progress = mediator.pp_progress
 
     if owner > local_rank:
         # Downstream / trailing remote: past the local part.
-        mediator._pp_past_local = True
-        if interleaving and not mediator._gone_remote:
-            mediator._gone_remote = True
+        progress.past_local = True
+        if interleaving and not progress.gone_remote:
+            progress.gone_remote = True
             mediator.go_remote()
     elif owner < local_rank:
         # Upstream / leading remote: free a blocked injection respond only.
@@ -267,11 +268,11 @@ class pp_eproperty(eproperty):
         # lazy post-teardown is correct.
         if _is_pp_missing(obj, self.key):
             # Always signal: ``_pp_signal_remote`` marks worker progress
-            # (``_pp_past_local``, read by the readiness gate) regardless of
-            # ``interleaving`` and gates only its event-protocol ``go_remote``
-            # on a live forward internally. The worker may reach this access in
-            # the gap between forwards (run-ahead), where the gate still needs
-            # the past-local mark to release.
+            # (``pp_progress.past_local``, read by the readiness gate)
+            # regardless of ``interleaving`` and gates only its event-protocol
+            # ``go_remote`` on a live forward internally. The worker may reach
+            # this access in the gap between forwards (run-ahead), where the
+            # gate still needs the past-local mark to release.
             _pp_signal_remote(obj, self.key)
             return _pp_lazy_access(obj, self.key)
         return super().__get__(obj, owner)
