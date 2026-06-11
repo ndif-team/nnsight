@@ -97,9 +97,9 @@ class BackwardsTracer(Invoker):
 
         from ..isolation import worker_backward_context
 
-        ctx = worker_backward_context()
-        if ctx is not None:
-            return self._execute_isolated(fn, ctx)
+        worker_mediator = worker_backward_context()
+        if worker_mediator is not None:
+            return self._execute_isolated(fn, worker_mediator)
 
         mediator = BackwardsMediator(fn, self.info)
 
@@ -117,7 +117,7 @@ class BackwardsTracer(Invoker):
             grad_patch.restore()
             interleaver.cancel()
 
-    def _execute_isolated(self, fn: Callable, ctx: dict):
+    def _execute_isolated(self, fn: Callable, worker_mediator):
         """Run a backward block inside an isolated GPU worker.
 
         The autograd graph is split across the process boundary: the worker holds the
@@ -136,9 +136,9 @@ class BackwardsTracer(Invoker):
         """
         from ..interleaver import Events, Interleaver
 
-        forward_mediator = ctx["mediator"]
-        provenance = ctx["prov"]
-        tagged = [t for t in ctx["tagged"] if t.requires_grad]
+        forward_mediator = worker_mediator
+        provenance = worker_mediator._bwd_prov
+        tagged = [t for t in worker_mediator._bwd_tagged if t.requires_grad]
 
         # Worker half of the chain rule: seed = dL/d(delivered leaf) for leaves the loss
         # actually depends on (allow_unused drops the rest).

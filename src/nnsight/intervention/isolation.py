@@ -46,6 +46,7 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 
 from . import serialization
+from .interleaver import Mediator
 from .transport import CudaIpcHostChannel, CudaIpcWorkerChannel
 from ..util import apply
 
@@ -619,65 +620,30 @@ def _transmissible_exc(e):
         return RuntimeError(f"{type(e).__name__}: {e}")
 
 
-# Per-job worker-side state for `with tensor.backward()`. When the trace uses backward,
-# every delivered activation clone is tagged with its requester string and made to
-# require grad, so the worker can build its half of the autograd graph and compute the
-# seed gradient at the seam. ``BackwardsTracer.execute`` reads this via
-# ``worker_backward_context``. Reset per job in ``_run_one_job``.
-_WORKER_BACKWARD_CTX: Dict[str, Any] = {
-    "mediator": None,  # the forward mediator (its channel reaches the host)
-    "active": False,   # the trace contains a `.backward(` call
-    "prov": {},        # id(delivered clone) -> requester string
-    "tagged": [],      # delivered clones made to require grad (loss may depend on them)
-}
+class WorkerMediator(Mediator):
+    """The worker-process half of an isolated mediator.
 
+    A job's mediator is deserialized as a plain :class:`Mediator` and then *adopted*
+    (``__class__`` swap) into this subclass, which overrides exactly the methods whose
+    in-process behavior relies on shared memory with the host:
 
-def worker_backward_context():
-    """Return the active backward context inside an isolated worker, else None.
+    - ``end``: the worker's frame + ``Globals.saves`` live here, so the exit filter
+      runs locally and the saved dict rides the END event (worker→host saves
+      transmission).
+    - ``exception``: dynamic nnsight exceptions don't pickle; degrade before shipping.
+    - ``request``: when the trace contains ``with tensor.backward()``, tag each
+      delivered activation clone (``requires_grad_`` + id→requester provenance) so the
+      worker builds its half of the autograd graph and can seed the host backward.
 
-    Used by ``BackwardsTracer.execute`` to detect that ``.backward()`` is running in an
-    isolated worker (so it must drive the host's real backward instead of differentiating
-    its detached clones locally)."""
-    ctx = _WORKER_BACKWARD_CTX
-    if ctx["active"] and ctx["mediator"] is not None:
-        return ctx
-    return None
+    ``apply_meta`` / ``push_locals`` are the worker ends of the live host↔worker state
+    piggyback (`iter[:]` bound + cross_invoker variable store) and are bound to the
+    channel's ``on_meta`` / ``push_provider`` per job.
+    """
 
-
-def _reset_worker_backward_ctx(mediator, active: bool) -> None:
-    _WORKER_BACKWARD_CTX["mediator"] = mediator
-    _WORKER_BACKWARD_CTX["active"] = active
-    _WORKER_BACKWARD_CTX["prov"] = {}
-    _WORKER_BACKWARD_CTX["tagged"] = []
-
-
-def _tag_delivered(value, requester: str) -> None:
-    """Tag each delivered activation tensor with its requester provenance and make it
-    require grad, so worker-side ops on it build the worker's half of the graph."""
-    ctx = _WORKER_BACKWARD_CTX
-
-    def _tag(t):
-        if t.is_floating_point() and t.is_leaf:
-            t.requires_grad_(True)
-            ctx["prov"][id(t)] = requester
-            ctx["tagged"].append(t)
-        return t
-
-    apply(value, _tag, torch.Tensor)
-
-
-def _run_one_job(channel, payload, extras, opts, device) -> None:
-    """Deserialize one mediator against fresh dummies, run its intervention, and ship
-    saves at END. Any failure (including a bad payload) is reported as an EXCEPTION
-    event so the host never waits on a worker that won't speak."""
-    from .interleaver import Events
-    from .tracing.globals import Globals
-
-    try:
-        Globals.saves.clear()  # per-job reset (the only worker-side global state)
-
-        interleaver = _WorkerInterleaver(default_all=opts.get("default_all"))
-        mediator = serialization.loads(payload, _WorkerPersistent(interleaver, extras))
+    @classmethod
+    def adopt(cls, mediator, channel, interleaver, opts: dict, device) -> "WorkerMediator":
+        """Turn a freshly-deserialized mediator into this job's worker mediator."""
+        mediator.__class__ = cls
         mediator.channel = channel
         mediator.interleaver = interleaver
         mediator.idx = 0
@@ -685,79 +651,126 @@ def _run_one_job(channel, payload, extras, opts, device) -> None:
         # worker frames aren't shared across processes.
         mediator.cross_invoker = opts.get("cross_invoker", False)
         mediator._isolated_worker = True  # so Barrier sends the target count (host counts)
-        interleaver.current = mediator
-
-        # `with tensor.backward()`: when the trace differentiates, tag each delivered
-        # activation so the worker can build its half of the graph and seed the host
-        # backward (BackwardsTracer.execute reads this context). Wrap request() so every
-        # VALUE read is tagged with its requester provenance + made to require grad.
+        mediator._device = device
+        # `with tensor.backward()`: detected from the intervention source; gates the
+        # delivered-clone tagging in ``request`` (BackwardsTracer reads the provenance).
         source = "".join(mediator.info.source) if mediator.info.source else ""
-        backward_active = ".backward(" in source
-        _reset_worker_backward_ctx(mediator, backward_active)
-        if backward_active:
-            _orig_request = mediator.request
+        mediator._bwd_active = ".backward(" in source
+        mediator._bwd_prov = {}    # id(delivered clone) -> requester string
+        mediator._bwd_tagged = []  # delivered clones made to require grad
+        interleaver.current = mediator
+        return mediator
 
-            def _tagging_request(requester, __orig=_orig_request):
-                value = __orig(requester)
-                _tag_delivered(value, requester)
-                return value
+    def request(self, requester: str):
+        value = super().request(requester)
+        if self._bwd_active:
+            self._tag_delivered(value, requester)
+        return value
 
-            mediator.request = _tagging_request
+    def _tag_delivered(self, value, requester: str) -> None:
+        """Tag each delivered activation tensor with its requester provenance and make
+        it require grad, so worker-side ops on it build the worker's half of the graph."""
 
-        def _apply_meta(m):
-            # Live host state piggybacked on each response: the iter[:] bound and the
-            # cross_invoker var store (pulled into the frame so push()/pull() see it).
-            interleaver.default_all = m.get("default_all", interleaver.default_all)
-            store = m.get("xinvoke_store")
-            if store:
-                # Store tensors travel CPU-serialized (see _push_locals); move them
-                # back to the worker's device before the user code uses them.
-                restored = apply(store, lambda t: t.to(device), torch.Tensor)
-                mediator.info.frame.f_locals.update(restored)
+        def _tag(t):
+            if t.is_floating_point() and t.is_leaf:
+                t.requires_grad_(True)
+                self._bwd_prov[id(t)] = requester
+                self._bwd_tagged.append(t)
+            return t
 
-        channel.on_meta = _apply_meta
+        apply(value, _tag, torch.Tensor)
 
-        def _push_locals():
-            # cross_invoker: ship this worker's *data* locals to the host store.
-            # push() (called by send() before put_event) has already written them into
-            # the SerializedFrame's f_locals. We ship only transmittable data (tensors
-            # + basic types/containers) — framework objects (Barrier/Envoy, which hold
-            # the model) are skipped; the worker already has them via its own closure.
-            # Tensors are moved to CPU: a worker tensor cloned from the CUDA-IPC bounce
-            # buffer cannot be re-shared over IPC by the host.
-            if not mediator.cross_invoker:
-                return None
-            out = {}
-            for k, v in mediator.info.frame.f_locals.items():
-                if str(k).startswith("__nnsight"):
-                    continue
-                if not _transmittable(v):
-                    import warnings
-
-                    warnings.warn(
-                        f"cross_invoker: variable {k!r} ({type(v).__name__}) is not "
-                        f"transmittable across the isolation boundary and was not "
-                        f"shared between invokes."
-                    )
-                    continue
-                out[k] = apply(v, lambda t: t.detach().cpu(), torch.Tensor)
-            return out
-
-        channel.push_provider = _push_locals
-
+    def end(self):
         # Worker→host saves transmission: bundle .save()'d values into the END event.
-        # The intervention's compiled body calls ``mediator.end()`` on success; push()
-        # populates the SerializedFrame's f_locals, which we filter by Globals.saves.
-        def _end():
-            mediator.push()
-            flocals = mediator.info.frame.f_locals
-            saved = {k: v for k, v in flocals.items() if id(v) in Globals.saves}
-            mediator.channel.put_event((Events.END, saved))
+        # The intervention's compiled body calls ``end()`` on success; push() populates
+        # the SerializedFrame's f_locals, which we filter by Globals.saves.
+        from .interleaver import Events
+        from .tracing.globals import Globals
 
-        mediator.end = _end
+        self.push()
+        flocals = self.info.frame.f_locals
+        saved = {k: v for k, v in flocals.items() if id(v) in Globals.saves}
+        self.channel.put_event((Events.END, saved))
 
-        _orig_exception = mediator.exception
-        mediator.exception = lambda e: _orig_exception(_transmissible_exc(e))
+    def exception(self, exception: Exception):
+        super().exception(_transmissible_exc(exception))
+
+    def apply_meta(self, m: dict) -> None:
+        # Live host state piggybacked on each response: the iter[:] bound and the
+        # cross_invoker var store (pulled into the frame so push()/pull() see it).
+        self.interleaver.default_all = m.get(
+            "default_all", self.interleaver.default_all
+        )
+        store = m.get("xinvoke_store")
+        if store:
+            # Store tensors travel CPU-serialized (see push_locals); move them
+            # back to the worker's device before the user code uses them.
+            restored = apply(store, lambda t: t.to(self._device), torch.Tensor)
+            self.info.frame.f_locals.update(restored)
+
+    def push_locals(self) -> Optional[dict]:
+        # cross_invoker: ship this worker's *data* locals to the host store.
+        # push() (called by send() before put_event) has already written them into
+        # the SerializedFrame's f_locals. We ship only transmittable data (tensors
+        # + basic types/containers) — framework objects (Barrier/Envoy, which hold
+        # the model) are skipped; the worker already has them via its own closure.
+        # Tensors are moved to CPU: a worker tensor cloned from the CUDA-IPC bounce
+        # buffer cannot be re-shared over IPC by the host.
+        if not self.cross_invoker:
+            return None
+        out = {}
+        for k, v in self.info.frame.f_locals.items():
+            if str(k).startswith("__nnsight"):
+                continue
+            if not _transmittable(v):
+                import warnings
+
+                warnings.warn(
+                    f"cross_invoker: variable {k!r} ({type(v).__name__}) is not "
+                    f"transmittable across the isolation boundary and was not "
+                    f"shared between invokes."
+                )
+                continue
+            out[k] = apply(v, lambda t: t.detach().cpu(), torch.Tensor)
+        return out
+
+
+# The job currently running in this worker process (one at a time). Read by
+# ``worker_backward_context`` so BackwardsTracer can find the ambient mediator.
+_WORKER_CURRENT: Optional[WorkerMediator] = None
+
+
+def worker_backward_context() -> Optional[WorkerMediator]:
+    """Return this worker's mediator if its trace contains a backward block, else None.
+
+    Used by ``BackwardsTracer.execute`` to detect that ``.backward()`` is running in an
+    isolated worker (so it must drive the host's real backward instead of differentiating
+    its detached clones locally); the mediator carries the delivered-clone provenance
+    (``_bwd_prov`` / ``_bwd_tagged``)."""
+    med = _WORKER_CURRENT
+    if med is not None and med._bwd_active:
+        return med
+    return None
+
+
+def _run_one_job(channel, payload, extras, opts, device) -> None:
+    """Deserialize one mediator against fresh dummies, adopt it as this job's
+    :class:`WorkerMediator`, run its intervention, and ship saves at END. Any failure
+    (including a bad payload) is reported as an EXCEPTION event so the host never
+    waits on a worker that won't speak."""
+    from .interleaver import Events
+    from .tracing.globals import Globals
+
+    global _WORKER_CURRENT
+    try:
+        Globals.saves.clear()  # per-job reset (the only worker-side global state)
+
+        interleaver = _WorkerInterleaver(default_all=opts.get("default_all"))
+        mediator = serialization.loads(payload, _WorkerPersistent(interleaver, extras))
+        WorkerMediator.adopt(mediator, channel, interleaver, opts, device)
+        _WORKER_CURRENT = mediator
+        channel.on_meta = mediator.apply_meta
+        channel.push_provider = mediator.push_locals
 
         mediator.intervention(mediator, mediator.info, *mediator.args)
     except BaseException as e:  # noqa: BLE001 — contain the footgun; report it
@@ -765,6 +778,8 @@ def _run_one_job(channel, payload, extras, opts, device) -> None:
             channel.put_event((Events.EXCEPTION, _transmissible_exc(e)))
         except Exception:  # noqa: BLE001
             pass
+    finally:
+        _WORKER_CURRENT = None
 
 
 def _pool_worker_main(conn, buf, base_opts):
