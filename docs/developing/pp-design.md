@@ -102,25 +102,31 @@ serving buffer alive until every rank's worker has finished pulling.
 
 ### 4.1 `PPModuleMap` — owning-rank resolution (`pp.py`)
 
-Built once at load from `(num_hidden_layers, pp_world_size)` using vLLM's `get_pp_indices`,
-giving each rank a contiguous `[start, end)` layer range. `get_owning_rank(module_path)`:
+Ownership is **derived, not guessed from naming conventions**. The load-time meta
+exchange (§4.10's sibling, `_exchange_pp_module_meta`) allgathers each rank's real
+(non-`PPMissingLayer`) `named_modules()` names; a module reported by exactly one stage is
+owned by it (a module reported by several — containers, build-on-every-rank modules — is
+ambiguous and dropped). The runner installs the result via `set_derived_owners`, first
+injecting the only non-derivable facts: the build-on-every-rank, fire-on-last modules
+(vLLM's `logits_processor` and nnsight's own `logits`/`samples` root wrappers) are
+claimed for the **last** stage, since sampling runs there. All ownership knowledge lives
+at that one install site; non-standard names (Falcon `word_embeddings`, OPT
+`final_layer_norm`, GPT-NeoX `embed_out`) resolve with no name tables.
 
-- **Layer modules** — walks dotted parts for a layer-container name
-  (`{layers, h, block, blocks}`) followed by an integer index, and returns the rank whose
-  range contains it. So `model.model.layers.5.mlp` → owner of layer 5.
-- **First/last-rank modules** — `{embed_tokens, wte, wpe}` → rank 0;
-  `{norm, lm_head, ln_f, logits, samples, logits_processor}` → last rank.
-  `logits_processor` is in the last set because some arches (Qwen2/GPT2/OPT/Pythia/Bloom/
-  Gemma2) build it on *every* rank rather than as a stub, yet it only fires on the last —
-  so a non-last-rank access must short-circuit, not block on a hook that never fires.
-- Unknown → `None` (treated as local; safe default).
+`get_owning_rank(module_path)` strips a trailing eproperty key, canonicalizes against
+the known envoy root (every envoy path is the root component — `nnsight_model.path` —
+plus the raw `named_modules()` name), and walks up to the nearest owned ancestor
+(`model.model.layers.5.mlp` → `model.layers.5`). Results are memoized per path
+(ownership is constant for the model's life). Unknown → `None` (treated as local; a
+genuine cross-stage *consume* of an unresolvable path raises a descriptive error at pull
+time). Before `set_derived_owners` runs, every path resolves to `None` — nothing traces
+that early.
 
 `is_pp_missing(module)` detects the stub by class name (`type(m).__name__ ==
 "PPMissingLayer"`) so no hard import of a vLLM-internal class. `resolve_meta(meta_map,
-path)` looks up per-module dtype/shape metadata tolerant of the nnsight root prefix
-(strips leading path parts until a key matches) — a plain `.get` would miss
-`"model.transformer.h.8"` vs `"transformer.h.8"` and silently fall back to `float32`,
-corrupting a pulled bf16 value.
+path, root)` looks up the per-module dtype hint: exact match, else strip the single
+known root component — never "strip until something matches", which could silently hit
+a wrong entry.
 
 ### 4.2 `PPEnvoy` / `pp_eproperty` — the short-circuit (`pp_envoy.py`)
 
@@ -152,22 +158,24 @@ outside of interleaving."
    forever. Resolving from `module_key` matches `_is_pp_missing`'s own lookup. (This was the
    "logits-consume-in-iter hang"; see [pp-stress-findings.md](pp-stress-findings.md) §P1.)
 3. Builds the `LazyRemoteTensor(source_rank, provider_string, dtype)` and wires its
-   `_pull_fn` to `listener.pull_from_remote(src, prov, num_tokens=0, req_id=mediator.pp_req_id)`.
-   `num_tokens=0` forces the **legacy shape-on-wire** reply: the run-ahead worker builds a
-   lazy for a future iteration before the matching forward sets `pp_num_tokens`, so a
-   consumer-side token-count prediction is unreliable (under/over-sized recv buffer → gloo
-   abort or wrong shape); the producer sends the true shape instead.
+   `_pull_fn` to `listener.pull_from_remote(src, prov, req_id=mediator.pp_req_id)`. The
+   pull is sized entirely from the producer's reply (shape and true dtype ride the wire):
+   the run-ahead worker builds the lazy before the matching forward is scheduled, so no
+   consumer-side token-count capture can reliably match the produced value's leading dim
+   (a wrong size either under-allocates the recv buffer — gloo abort — or over-allocates
+   it — a silently wrong-shaped tensor).
 
 `_pp_signal_remote(obj, key)` runs on every cross-stage access and classifies it against the
-worker's per-step `(leading-remote)(local)(trailing-remote)` lifecycle:
+worker's per-step `(leading-remote)(local)(trailing-remote)` lifecycle, recorded on the
+mediator's `pp_progress` (`PPWorkerProgress`, §4.6):
 - **Downstream** owner (later stage) → *trailing remote*: no more local hooks this step, so
-  mark `mediator._pp_past_local = True` (the readiness gate stops waiting for it) and, once,
-  `go_remote()` to release this rank's forward so it can complete and perform the
-  inter-stage send the downstream value depends on.
+  mark `pp_progress.past_local = True` (the readiness gate stops waiting for it) and, once
+  (`pp_progress.gone_remote` guard), `go_remote()` to release this rank's forward so it can
+  complete and perform the inter-stage send the downstream value depends on.
 - **Upstream** owner (earlier stage) → *leading remote*: the pull resolves on the producing
   rank, so do **not** mark past-local (a local access may still follow); only release a
   blocked value-injection `respond` if one is pending.
-`_pp_past_local` is marked **regardless of `interleaving`** (the worker can reach the access
+`past_local` is marked **regardless of `interleaving`** (the worker can reach the access
 in the gap between forwards); only `go_remote` (which posts into the live event protocol) is
 gated on a live forward.
 
@@ -201,14 +209,14 @@ Two subtleties:
 
 When a local hook produces a value the mediator requested, `Mediator.handle_value_event`
 (the `respond` path) stores a **clone** into the rank's `pp_hook_buffer`, keyed by the
-composite `(provider_string, req_id)`, then notifies the buffer condition and
+composite `(provider_string, req_id)`, then hands it to
 `listener.dispatch_parked(key, value)` so any parked cross-rank pull unblocks:
 
 ```python
-# interleaver.py (the PP sidecar, under torch.inference_mode())
+# interleaver.py (the PP sidecar, under the buffer condition + torch.inference_mode())
 stored = _deep_clone(value)                  # see below
 self.interleaver.pp_hook_buffer[key] = stored
-listener.dispatch_parked(key, stored); cond.notify_all()
+listener.dispatch_parked(key, stored)
 ```
 
 - **Why clone:** the raw hook tensor is part of the live forward graph; vLLM (eager,
@@ -250,15 +258,22 @@ loop posting the next `recv`, freezing every other rank's request `send` at the 
 the multinode head-of-line deadlock. `dispatch_parked(key, value)` (called by the producer
 right after it writes the buffer) hands any waiters to the reply pool.
 
-**Reply** (`_serve_reply`, on a thread pool): move tensors to CPU
-(`.detach().contiguous().cpu()`), then either the **precomputed** path (flat data only,
-shape pre-known) or the **legacy** path (shape metadata then data). Consumers built via
-`_pp_lazy_access` always request `num_tokens=0` → legacy, because the produced leading dim
-(token count) isn't predictable under run-ahead.
+**Reply** (`_serve_reply`, on a thread pool): one **self-describing** format — a fixed
+shape header (tensor count, the value's *true* dtype as a wire-codec code, per-tensor
+shapes) then the flat data, both on the per-pull tag. The producer is the only side that
+knows the value's shape and dtype under run-ahead; stamping the true dtype is what keeps
+integer-valued outputs correct (sampled token ids are int32, not the model's bf16 compute
+dtype — a weight-derived guess under-sizes the recv buffer and gloo aborts). The whole
+reply is **prepared before any send**: a serialization failure (non-tensor value,
+mixed-dtype tuple, header overflow, un-encodable dtype) becomes an **error reply**
+(sentinel header + message) that makes the blocked consumer raise descriptively — never a
+partial send that desyncs its recv. A per-op gloo recv timeout cannot be the backstop:
+probed, it closes the whole peer pair on expiry. `clear_buffer` error-replies any pull
+still parked for a finalized request (its value will never be produced).
 
 **Consumer** (`pull_from_remote`): allocate a private response tag, `send` one request on
-`TAG_REQUEST`, then `recv` the reply on that tag. No lock — each mediator thread runs its
-own pull concurrently; the per-pull tag keeps replies from colliding.
+`TAG_REQUEST`, then `recv` the header and data on that tag. No lock — each mediator thread
+runs its own pull concurrently; the per-pull tag keeps replies from colliding.
 
 Measured pull cost ≈ 3.4 ms (local/SHM) / ~7 ms (cross-container TCP) per pull — cheap.
 
@@ -270,32 +285,44 @@ the reverse. So a one-shot hook is always registered before the forward reaches 
 hang). `_update_states` schedules this step's mediators (`process_batch_groups`) and, with
 PP enabled, calls the **one PP sync point**, `_pp_wait_for_mediators`, before hooks fire.
 
-For the forward of iteration `k = mediator._pp_scheduled_count - 1`, a mediator is "ahead"
-when (`_ahead(m, k)`):
+The worker-progress state the gate reads lives in one object,
+`mediator.pp_progress` (`PPWorkerProgress`, defined in `intervention/interleaver.py`):
+the per-step latches (`past_local`, `gone_remote`), the gate-only counters
+(`scheduled_count`, `max_iteration`), and `worker_iteration`. `reset_iteration()`
+encapsulates the publish-order invariant — clear the latches *before* publishing the new
+iteration number, so a gate thread that sees `worker_iteration == k` can never read a
+stale `past_local` from the previous step.
+
+For the forward of iteration `k = pp_progress.scheduled_count - 1`, a mediator is "ahead"
+when (`pp_progress.is_ahead_of(k, alive=…, parked=event_queue.has_value)`):
 - it's no longer `alive`, or
-- `k > m._pp_max_iteration` (a single-shot `model.trace` that never reaches `k`), or
-- `m._pp_worker_iteration > k` (the worker already ran past `k`, so iteration-`k` hooks were
+- `k > max_iteration` (a single-shot `model.trace` that never reaches `k`), or
+- `worker_iteration > k` (the worker already ran past `k`, so iteration-`k` hooks were
   registered), or
-- `m._pp_worker_iteration == k` **and** (`event_queue.has_value` — parked at a local module
-  — **or** `_pp_past_local` — it determined it has no local part this step).
+- `worker_iteration == k` **and** (parked at a local module — **or** `past_local` — it
+  determined it has no local part this step).
 
 The gate spins (`time.sleep(1e-4)`) until every mediator is ahead, bounded by a 30 s
-deadline that raises loudly instead of hanging. Comparing the worker's own iteration against
-`k` is what makes the per-iteration `_pp_past_local`/`has_value` flags safe to read (a stale
-flag from a prior step is ignored).
+deadline that raises loudly instead of hanging (env-overridable via
+`NNSIGHT_PP_GATE_TIMEOUT` for genuinely slow links).
 
 ### 4.7 Save collection & merge (`collect_nnsight`, `merge_saved`)
 
 `collect_nnsight(req_ids, finished_req_ids)` is invoked on **every** rank via
 `collective_rpc` (sync engine `step()` and async `_stream()`, both gated on
-`output.finished`), so all ranks see identical `finished_req_ids`. TP-rank≠0 returns early;
-only **TP-rank-0 of each PP stage** contributes saves.
+`output.finished`), so all ranks see identical `finished_req_ids`. **Every** rank —
+TP siblings included — runs the finalize teardown (its mediators, hooks, worker threads,
+and buffer entries are real and would otherwise leak); only **TP-rank-0 of each PP
+stage** *ships* saves (TP siblings carry replicated mediator state and would duplicate).
+A pure streaming collect with nothing to finalize still short-circuits on TP siblings.
 
 Each rank produces a partial save tree; non-owning slots are the `NOT_ON_THIS_RANK`
 sentinel (`strip_lazy` converts unmaterialized lazies to it). The engine merges position-
-wise with `merge_saved(a, b)`: prefer the non-`NOT_ON_THIS_RANK` leaf at each slot; recurse
-through equal-length lists/tuples and same-key dicts; on a real/real clash or structural
-mismatch, **`b` wins** (preserving "later-rank-wins" scalar semantics, degrading safely).
+wise (`collect.merge_collected_saves`, the single implementation shared by the sync
+engine, async backend, and serve handler) with `merge_saved(a, b)`: prefer the
+non-`NOT_ON_THIS_RANK` leaf at each slot; recurse through equal-length lists/tuples and
+same-key dicts; on a real/real clash or structural mismatch, **`b` wins** (preserving
+"later-rank-wins" scalar semantics, degrading safely).
 
 This is **why cross-stage reads stay correct even if a consumer's pull is abandoned**: both
 ranks save all values, the producer rank computes the remote layers locally and correctly,
