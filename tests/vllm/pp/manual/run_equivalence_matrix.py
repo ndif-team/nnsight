@@ -112,7 +112,7 @@ def _hidden(out):
     ``isinstance(out, tuple)`` is unreliable on the lazy proxy — it returns
     ``False`` even when the materialized value is a tuple. Probing tensor-ness
     first and indexing ``[0]`` on everything else matches the codebase
-    convention (see ``tests/_pp_pull_worker.py``): owning-rank tuples index
+    convention (see ``tests/vllm/pp/manual/_pp_pull_worker.py``): owning-rank tuples index
     cleanly, and ``LazyRemoteTensor[0]`` returns a deferred child lazy that
     pulls the first tuple element on materialization.
     """

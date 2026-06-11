@@ -9,7 +9,7 @@ Tests:
  11: Cross-stage read with PP=2 vs PP=1 comparison
 
 Requires at least 4 GPUs.
-Run: CUDA_VISIBLE_DEVICES=0,1,2,3 python tests/test_pp_pull.py
+Run: CUDA_VISIBLE_DEVICES=0,1,2,3 python tests/vllm/pp/manual/pull_e2e.py
 """
 
 import json

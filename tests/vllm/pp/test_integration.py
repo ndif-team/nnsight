@@ -99,8 +99,11 @@ def cosine_sim(a_list, b_list):
 # Subprocess runner
 # =============================================================================
 
-WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "_pp_worker.py")
-REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
+WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "manual", "_pp_worker.py")
+# tests/vllm/pp/ -> repo root is three levels up.
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+)
 
 # Expected failure reason for PP=2 tests
 PP2_XFAIL_REASON = (

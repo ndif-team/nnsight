@@ -6,7 +6,7 @@ Measures:
   C. Trace overhead comparison (bare, 1 save, 6 saves, multi-token)
 
 Requires 2 GPUs.
-Run: CUDA_VISIBLE_DEVICES=0,1 python tests/profile_pp_pull.py
+Run: CUDA_VISIBLE_DEVICES=0,1 python tests/vllm/pp/manual/profile_pull.py
 """
 
 if __name__ == '__main__':

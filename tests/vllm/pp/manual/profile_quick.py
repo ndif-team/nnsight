@@ -1,6 +1,6 @@
 """Quick PP pull profiling — just the essentials.
 
-Run: CUDA_VISIBLE_DEVICES=X,Y python tests/profile_pp_quick.py
+Run: CUDA_VISIBLE_DEVICES=X,Y python tests/vllm/pp/manual/profile_quick.py
 """
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@ Part 1 (A-G): Overhead profiling comparing PP=1 vs PP=2 with GPT-2.
 Part 2 (H-L): Corner case tests for LazyRemoteTensor and PP edge cases.
 
 Usage:
-    conda run -n ndif-dev python tests/test_vllm_pp_profile.py
+    conda run -n ndif-dev python tests/vllm/pp/manual/profile_and_corner_cases.py
 
 Requires: 2+ NVIDIA GPUs with >= 4 GB free each.
 
@@ -428,7 +428,7 @@ def test_pp_listener_corner_cases():
     The listener serves cross-rank pulls by parking not-yet-producible
     requests and dispatching them when the producer writes the value;
     fuller protocol coverage (per-pull tags, error replies, wire dtype)
-    lives in tests/test_vllm_pp.py.
+    lives in tests/vllm/pp/test_pp.py.
     """
     import threading
     from nnsight.modeling.vllm.pp_listener import PPListener

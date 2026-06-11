@@ -16,7 +16,7 @@ Phases:
 
 Usage:
   CUDA_VISIBLE_DEVICES=4,5,6,7 \
-    python tests/stress_pp_tp_serve.py \
+    python tests/vllm/pp/manual/stress_tp_serve.py \
       --configs tp2pp2 --phases A,C,D
 
 All client requests go through ``LanguageModel``/``VLLM`` with

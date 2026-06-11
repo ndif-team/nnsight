@@ -88,7 +88,7 @@ so it is misdirected and its `dist.recv` blocks forever.
 
 - On a non-last stage `model.logits` correctly short-circuits to a `LazyRemoteTensor` — `_is_pp_missing`
   (`pp_envoy.py:131`) resolves `lookup = f"{obj_path}.{key}"` = `"model.logits"` and `pp_module_map`
-  reports it remote. (The stale "WrapperModule" theory in `tests/test_vllm_pp_integration.py`'s docstring
+  reports it remote. (The stale "WrapperModule" theory in `tests/vllm/pp/test_integration.py`'s docstring
   is out of date; logits/samples are handled.)
 - But `_pp_lazy_access` (`pp_envoy.py:164`) resolves the pull's owner as
   `source_rank = pp_map.get_owning_rank(path or key)` — and for the root-level `logits`/`samples`

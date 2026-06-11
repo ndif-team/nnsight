@@ -1,6 +1,6 @@
 """Direct PP overhead profiling. Loads models once, runs all scenarios.
 
-Run: CUDA_VISIBLE_DEVICES=6,7 conda run -n ndif-dev python tests/run_pp_profile.py
+Run: CUDA_VISIBLE_DEVICES=6,7 conda run -n ndif-dev python tests/vllm/pp/manual/run_profile.py
 """
 import time
 import statistics

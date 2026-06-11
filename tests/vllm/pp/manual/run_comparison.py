@@ -1,6 +1,6 @@
 """PP=1 vs PP=2 comparison tests for GPT-2.
 
-Run: CUDA_VISIBLE_DEVICES=6,7 conda run -n ndif-dev python tests/run_pp_comparison.py
+Run: CUDA_VISIBLE_DEVICES=6,7 conda run -n ndif-dev python tests/vllm/pp/manual/run_comparison.py
 """
 import torch
 import os

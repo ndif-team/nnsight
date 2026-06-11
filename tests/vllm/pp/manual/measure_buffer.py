@@ -15,7 +15,7 @@ Two tests:
 Run:
   HF_HUB_CACHE=/disk/u/models CUDA_VISIBLE_DEVICES=3,4 \
     NNSIGHT_PP_BUFFER_DEBUG=1 VLLM_WORKER_MULTIPROC_METHOD=spawn MASTER_PORT=29920 \
-    conda run --no-capture-output -n ndif-dev python tests/measure_pp_buffer.py \
+    conda run --no-capture-output -n ndif-dev python tests/vllm/pp/manual/measure_buffer.py \
       --model Qwen/Qwen2.5-7B-Instruct --pp 2 --gpu-mem 0.45 \
       --bursts 40 --layers 8 --short-tokens 4 --long-tokens 256 --long-layers 12
 """

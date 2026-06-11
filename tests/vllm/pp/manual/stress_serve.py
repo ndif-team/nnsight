@@ -3,7 +3,7 @@
 Starts a server with PP=2, sends N concurrent requests with various
 intervention patterns, measures throughput and verifies correctness.
 
-Run: CUDA_VISIBLE_DEVICES=0,1 python tests/stress_pp_serve.py
+Run: CUDA_VISIBLE_DEVICES=0,1 python tests/vllm/pp/manual/stress_serve.py
 Requires 2 GPUs, uvicorn, httpx.
 """
 
