@@ -95,17 +95,35 @@ def _is_pp_missing(obj, key: str) -> bool:
        :class:`WrapperModule` stubs) but ``pp_module_map`` reports a
        different owning rank for this object's path.
 
+    The answer is **constant for the model's life** (module stage ownership, PP
+    topology, and local rank don't change after load), so it's cached per
+    lookup path on the interleaver — this runs on every per-token
+    ``.output``/``.input`` access, and the uncached path does a
+    ``get_owning_rank`` string-walk each time. ``__dict__`` access bypasses the
+    Envoy/Interleaver custom attribute machinery; the cache lives only on a
+    PP-enabled interleaver (non-PP returns before it).
+
     Args:
         obj: An :class:`Envoy`-like host. Must expose ``interleaver``;
             may expose ``_module`` and ``path``.
         key: The eproperty key (``"output"``, ``"input"``, ``"logits"``…).
-            Reserved for future per-key dispatch; currently unused.
     """
     interleaver = obj.interleaver
 
     if not getattr(interleaver, "pp_enabled", False):
         return False
 
+    obj_path = getattr(obj, "path", None) or ""
+    lookup = f"{obj_path}.{key}" if obj_path else key
+
+    cache = interleaver.__dict__.setdefault("_pp_remote_cache", {})
+    if lookup not in cache:
+        cache[lookup] = _compute_pp_missing(obj, interleaver, lookup)
+    return cache[lookup]
+
+
+def _compute_pp_missing(obj, interleaver, lookup: str) -> bool:
+    """Uncached resolution for :func:`_is_pp_missing` (see its docstring)."""
     module = getattr(obj, "_module", None)
     if module is not None and is_pp_missing(module):
         return True
@@ -118,17 +136,11 @@ def _is_pp_missing(obj, key: str) -> bool:
     if local_rank is None:
         return False
 
-    # Resolve the lookup path. ``PPModuleMap`` walks dotted parts to
-    # find layer indices or first/last-rank module names (``logits``,
-    # ``samples``, ``norm``, ``lm_head``, ``embed_tokens``, …). The
-    # eproperty ``key`` is the trailing path component that names the
-    # access target, so the right thing to look up is
-    # ``path.key`` when ``path`` is non-empty, else ``key`` alone.
-    # Examples: ``VLLM.path='model'`` + ``key='logits'`` → ``model.logits``
-    # (last rank); ``Envoy.path='model.layers.5'`` + ``key='output'`` →
-    # ``model.layers.5.output`` (layer-5's owning rank).
-    obj_path = getattr(obj, "path", None) or ""
-    lookup = f"{obj_path}.{key}" if obj_path else key
+    # ``PPModuleMap`` walks dotted parts to find layer indices or first/last-
+    # rank module names; the eproperty ``key`` is the trailing path component
+    # naming the access target (e.g. ``VLLM.path='model'`` + ``key='logits'`` →
+    # ``model.logits`` (last rank); ``path='model.layers.5'`` + ``key='output'``
+    # → ``model.layers.5.output`` (layer-5's owning rank)).
     if not pp_map.is_local(lookup, local_rank):
         return True
 

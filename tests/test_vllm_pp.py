@@ -631,6 +631,38 @@ class TestEnvoyPPMissingShortCircuit:
 
         interleaver.pp_listener.pull_from_remote.assert_not_called()
 
+    def test_is_pp_missing_cached_per_lookup(self):
+        """The remote status is constant for the model's life, so
+        ``_is_pp_missing`` must compute it once per lookup and cache it (the
+        ``get_owning_rank``/``is_local`` walk runs on every per-token access)."""
+        import torch.nn as nn
+
+        from nnsight.intervention.interleaver import Interleaver
+        from nnsight.modeling.vllm.pp_envoy import PPEnvoy, _is_pp_missing
+
+        interleaver = Interleaver()
+        interleaver.pp_enabled = True
+        interleaver.pp_local_rank = 0
+        interleaver.pp_listener = None
+        mock_map = MagicMock()
+        mock_map.is_local.return_value = False  # remote
+        interleaver.pp_module_map = mock_map
+        interleaver.pp_module_meta = {}
+
+        # NON-stub module so resolution goes through the costly is_local walk
+        # (a PPMissingLayer would short-circuit before it).
+        envoy = PPEnvoy(nn.Identity(), path="model.logits", interleaver=interleaver)
+
+        assert _is_pp_missing(envoy, "output") is True
+        assert _is_pp_missing(envoy, "output") is True
+        assert _is_pp_missing(envoy, "output") is True
+        assert mock_map.is_local.call_count == 1  # computed once, then cached
+        assert interleaver.__dict__["_pp_remote_cache"]["model.logits.output"] is True
+
+        # A different key is a distinct cache entry (computed once more).
+        assert _is_pp_missing(envoy, "input") is True
+        assert mock_map.is_local.call_count == 2
+
     def test_root_eproperty_dtype_meta_resolved_from_full_key(self):
         """The dtype hint for a root eproperty (``logits``/``samples``) must be
         looked up under the full ``{path}.{key}`` — the same lookup the
