@@ -19,8 +19,7 @@ import torch.nn as nn
 # waits for its workers to be "ahead", and a worker blocked in a slow UPSTREAM
 # cross-stage pull (huge hidden state over a degraded cross-node link) reaches
 # its local part late. That one is env-overridable. The poll/backoff are
-# internal cadence (no false-trip risk) and the local-lookup wait is test-only
-# (production uses the non-blocking dispatch_parked path), so those stay fixed.
+# internal cadence (no false-trip risk), so those stay fixed.
 #
 # The override is an env var, not ``CONFIG``/``config.yaml``: these run in the
 # vLLM WORKER process, and env vars propagate to Ray workers cross-node whereas
@@ -50,9 +49,6 @@ PP_FINALIZE_JOIN_S = 5.0
 # Internal mechanics (not user-facing):
 PP_GATE_POLL_S = 1e-4          # readiness-gate spin granularity
 PP_LISTENER_BACKOFF_S = 0.5    # listener retry after a transient error
-
-# Test-only blocking buffer wait (``local_lookup``); production never hits it.
-PP_LOCAL_LOOKUP_TIMEOUT_S = 60.0
 
 
 def resolve_meta(meta_map: dict, path: str):

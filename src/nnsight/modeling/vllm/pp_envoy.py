@@ -205,25 +205,13 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
 
     listener = getattr(interleaver, "pp_listener", None)
     if listener is not None:
-        # Size the cross-rank pull from the PRODUCER's actual value, not from a
-        # consumer-side prediction. A precomputed size needs the value's leading
-        # dim (token count) up front, but the only consumer-side source for it is
-        # ``pp_num_tokens`` -- a single per-mediator value holding the CURRENT
-        # forward's count. The worker runs AHEAD and builds this lazy for a
-        # (future) iteration before/after the matching forward sets that count,
-        # so the captured number does not reliably match the produced value
-        # (observed: a decode-iteration lazy capturing the prefill length, a
-        # prefill lazy capturing 1, etc.). A wrong size either under-allocates
-        # the recv buffer (gloo ``preamble.length > nbytes`` abort) or over-
-        # allocates it (a silently wrong-shaped tensor). The consumer cannot
-        # predict the leading dim under run-ahead, so we request ``num_tokens=0``
-        # and let the producer reply via the legacy shape-on-wire mode (part of
-        # the existing pull protocol) -- correct regardless of token count. The
-        # non-token dims and dtype still come from the load-time meta map.
-        num_tokens = 0
+        # The pull is sized entirely from the producer's reply (shape + dtype
+        # on the wire): the worker runs AHEAD and builds this lazy before the
+        # matching forward is scheduled, so no consumer-side token-count
+        # capture can reliably match the produced value's leading dim.
         req_id = getattr(mediator, "pp_req_id", None)
 
-        def _pull(src_rank, prov_str, _nt=num_tokens, _rid=req_id):
+        def _pull(src_rank, prov_str, _rid=req_id):
             # An unresolved owner means the ownership map doesn't recognize
             # this module's name (PPModuleMap resolves layer indices and a
             # fixed set of first/last-stage module names). A pull directed at
@@ -240,7 +228,7 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
                     f"The value exists on its owning rank — `.save()` without "
                     f"consuming it on this rank still works."
                 )
-            return listener.pull_from_remote(src_rank, prov_str, _nt, req_id=_rid)
+            return listener.pull_from_remote(src_rank, prov_str, req_id=_rid)
 
         lazy._pull_fn = _pull
 

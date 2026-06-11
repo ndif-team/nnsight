@@ -423,89 +423,54 @@ def test_lazy_materialization():
 
 
 def test_pp_listener_corner_cases():
-    """Corner cases for PPListener (no vLLM needed)."""
+    """Corner cases for PPListener's park/dispatch serve path (no vLLM needed).
+
+    The listener serves cross-rank pulls by parking not-yet-producible
+    requests and dispatching them when the producer writes the value;
+    fuller protocol coverage (per-pull tags, error replies, wire dtype)
+    lives in tests/test_vllm_pp.py.
+    """
     import threading
     from nnsight.modeling.vllm.pp_listener import PPListener
 
     results = []
 
-    # Immediate lookup
-    buf = {"a.output.i0": torch.randn(2, 3)}
-    cond = threading.Condition()
-    listener = PPListener(buf, cond)
-    try:
-        val = listener.local_lookup("a.output.i0", timeout=1.0)
-        results.append(("PPListener immediate lookup", torch.equal(val, buf["a.output.i0"])))
-    except Exception as e:
-        results.append(("PPListener immediate lookup", False, str(e)))
+    def make_listener(buf):
+        return PPListener(
+            buffer=buf, condition=threading.Condition(), pull_group=None,
+            local_rank=0, device=torch.device("cpu"),
+        )
 
-    # Timeout
-    buf2 = {}
-    cond2 = threading.Condition()
-    listener2 = PPListener(buf2, cond2)
-    try:
-        listener2.local_lookup("missing.key", timeout=0.1)
-        results.append(("PPListener timeout", False, "Should have raised TimeoutError"))
-    except TimeoutError:
-        results.append(("PPListener timeout -> TimeoutError", True))
-    except Exception as e:
-        results.append(("PPListener timeout", False, str(e)))
+    # Parked request is served the moment the producer dispatches its value.
+    listener = make_listener({})
+    served = []
+    listener._serve_reply = lambda req, value: served.append((req, value))
+    key = ("a.output.i0", "req0")
+    listener._parked[key] = [(1, 1024)]
+    tensor = torch.randn(2, 3)
+    listener.dispatch_parked(key, tensor)
+    listener._reply_pool.shutdown(wait=True)
+    ok = len(served) == 1 and torch.equal(served[0][1], tensor) and key not in listener._parked
+    results.append(("PPListener dispatch_parked serves parked pull", ok))
 
-    # Async value arrival
-    buf3 = {}
-    cond3 = threading.Condition()
-    listener3 = PPListener(buf3, cond3)
-    result_holder = [None]
-    error_holder = [None]
+    # Dispatch with no waiters is a no-op.
+    listener2 = make_listener({})
+    served2 = []
+    listener2._serve_reply = lambda req, value: served2.append((req, value))
+    listener2.dispatch_parked(("missing.key", "reqX"), torch.zeros(1))
+    listener2._reply_pool.shutdown(wait=True)
+    results.append(("PPListener dispatch_parked no-waiter no-op", served2 == []))
 
-    def async_lookup():
-        try:
-            result_holder[0] = listener3.local_lookup("delayed.key", timeout=5.0)
-        except Exception as e:
-            error_holder[0] = e
-
-    t = threading.Thread(target=async_lookup)
-    t.start()
-
-    time.sleep(0.1)  # let the thread start waiting
-    tensor = torch.randn(4, 5)
-    with cond3:
-        buf3["delayed.key"] = tensor
-        cond3.notify_all()
-
-    t.join(timeout=5.0)
-    if error_holder[0] is not None:
-        results.append(("PPListener async arrival", False, str(error_holder[0])))
-    elif result_holder[0] is not None:
-        results.append(("PPListener async arrival", torch.equal(result_holder[0], tensor)))
-    else:
-        results.append(("PPListener async arrival", False, "Thread did not complete"))
-
-    # Stop unblocks waiters
-    buf4 = {}
-    cond4 = threading.Condition()
-    listener4 = PPListener(buf4, cond4)
-    error_holder2 = [None]
-
-    def blocking_lookup():
-        try:
-            listener4.local_lookup("never.arriving", timeout=30.0)
-        except RuntimeError as e:
-            error_holder2[0] = e
-        except Exception as e:
-            error_holder2[0] = e
-
-    t2 = threading.Thread(target=blocking_lookup)
-    t2.start()
-    time.sleep(0.1)
-    listener4.stop()
-    t2.join(timeout=5.0)
-
-    if isinstance(error_holder2[0], RuntimeError) and "stopped" in str(error_holder2[0]).lower():
-        results.append(("PPListener stop unblocks waiter", True))
-    else:
-        results.append(("PPListener stop unblocks waiter", False,
-                         f"Got: {error_holder2[0]}"))
+    # A pull still parked when its request finalizes gets an ERROR reply
+    # (its value will never be produced), not a silent drop.
+    listener3 = make_listener({})
+    errors = []
+    listener3._serve_error_reply = lambda req, msg: errors.append((req, msg))
+    listener3._parked[("b.output.i3", "req7")] = [(1, 2048)]
+    listener3.clear_buffer(req_ids={"req7"})
+    listener3._reply_pool.shutdown(wait=True)
+    ok = len(errors) == 1 and "never produced" in errors[0][1]
+    results.append(("PPListener clear_buffer error-replies parked pull", ok))
 
     return results
 

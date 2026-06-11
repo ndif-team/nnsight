@@ -1,7 +1,6 @@
 import inspect
 import os
 import threading
-import time
 from collections import defaultdict, namedtuple
 from unittest.mock import MagicMock, patch
 
@@ -168,7 +167,7 @@ class TestProviderModulePath:
 class TestPPListener:
 
     def _make_listener(self, buffer=None):
-        """Helper: create a PPListener for local_lookup tests (no pull_group needed)."""
+        """Helper: create a PPListener with no pull group (in-process tests)."""
         if buffer is None:
             buffer = {}
         cond = threading.Condition()
@@ -180,48 +179,36 @@ class TestPPListener:
             device=torch.device("cpu"),
         ), cond
 
-    def test_serve_existing_value(self):
-        """Listener serves a value that's already in the buffer."""
-        buf = {"model.layers.5.output.i0": torch.randn(1, 5, 768)}
-        listener, cond = self._make_listener(buf)
-
-        result = listener.local_lookup("model.layers.5.output.i0")
-        assert torch.equal(result, buf["model.layers.5.output.i0"])
-
-    def test_wait_for_value(self):
-        """Listener waits until a value appears in the buffer."""
+    def test_dispatch_parked_serves_waiting_request(self):
+        """A request parked for a not-yet-produced value is handed to the
+        reply pool — with that value — the moment the producer writes it."""
         listener, cond = self._make_listener()
+        served = []
+        listener._serve_reply = lambda req, value: served.append((req, value))
 
-        result_holder = [None]
-
-        def lookup():
-            result_holder[0] = listener.local_lookup(
-                "model.layers.5.output.i0", timeout=5.0
-            )
-
-        t = threading.Thread(target=lookup)
-        t.start()
-
-        # Value not yet in buffer — thread is waiting
-        time.sleep(0.05)
-        assert result_holder[0] is None
-
-        # Add value and notify
-        tensor = torch.randn(1, 5, 768)
+        key = ("model.layers.5.output.i0", "reqA")
+        parked_req = (1, 1024)
         with cond:
-            listener._buffer["model.layers.5.output.i0"] = tensor
-            cond.notify_all()
+            listener._parked[key] = [parked_req]
 
-        t.join(timeout=5.0)
-        assert result_holder[0] is not None
-        assert torch.equal(result_holder[0], tensor)
+        tensor = torch.randn(1, 5, 768)
+        listener.dispatch_parked(key, tensor)
 
-    def test_timeout_raises(self):
-        """Listener raises TimeoutError if value never appears."""
+        listener._reply_pool.shutdown(wait=True)
+        assert len(served) == 1
+        assert served[0][0] == parked_req
+        assert torch.equal(served[0][1], tensor)
+        assert key not in listener._parked
+
+    def test_dispatch_parked_without_waiters_is_noop(self):
         listener, cond = self._make_listener()
+        served = []
+        listener._serve_reply = lambda req, value: served.append((req, value))
 
-        with pytest.raises(TimeoutError):
-            listener.local_lookup("missing.key", timeout=0.1)
+        listener.dispatch_parked(("model.norm.output.i0", "reqB"), torch.zeros(2))
+
+        listener._reply_pool.shutdown(wait=True)
+        assert served == []
 
     def test_concurrent_pulls_routed_by_tag(self):
         """Many consumer threads pulling at once each get exactly their own
@@ -239,12 +226,9 @@ class TestPPListener:
         """
         N = 12
         prov = "decoder.blocks.7.output.i0"          # non-standard naming on purpose
-        mod = "decoder.blocks.7"
-        # Precomputed-path metadata so each response is a single flat recv.
-        meta_map = {mod: {"dtype": torch.float32, "module_shapes": [(1,)], "num_outputs": 1}}
         listener = PPListener(
             buffer={}, condition=threading.Condition(), pull_group=MagicMock(),
-            local_rank=0, device=torch.device("cpu"), meta_map=meta_map,
+            local_rank=0, device=torch.device("cpu"),
         )
 
         import nnsight.modeling.vllm.pp_listener as L
@@ -255,18 +239,26 @@ class TestPPListener:
 
         def fake_send(tensor, group=None, group_dst=None, tag=None):
             if tag == L.TAG_REQUEST:
-                _rank, rtag, _hnt, key = L._decode_request(tensor)
+                _rank, rtag, key = L._decode_request(tensor)
                 idx = int(key.split("|", 1)[0][3:])     # "req<idx>" -> idx
                 with lock:
                     pending[rtag] = float(idx)
                     request_tags.append(rtag)
 
         def fake_recv(tensor, group=None, group_src=None, tag=None):
-            # Precomputed path: one flat recv on the pull's private tag.
+            # Two recvs per pull on its private tag: the shape header (int64,
+            # _META_SLOTS) then the flat data sized from it.
             with lock:
                 val = pending.get(tag)
             assert val is not None, f"recv on tag {tag!r} with no matching request"
-            tensor.fill_(val)
+            if tensor.dtype == torch.int64 and tensor.numel() == L._META_SLOTS:
+                tensor.zero_()
+                tensor[0] = 1                                       # one tensor
+                tensor[1] = L._DTYPE_TO_CODE[torch.float32]         # true dtype
+                tensor[2] = 1                                       # ndim
+                tensor[3] = 1                                       # dim 0
+            else:
+                tensor.fill_(val)
 
         fake_dist = MagicMock()
         fake_dist.send.side_effect = fake_send
@@ -276,7 +268,7 @@ class TestPPListener:
 
         def pull(i):
             out = listener.pull_from_remote(
-                source_rank=1, provider_string=prov, num_tokens=1, req_id=f"req{i}",
+                source_rank=1, provider_string=prov, req_id=f"req{i}",
             )
             got[i] = float(out.reshape(-1)[0].item())
 
@@ -357,7 +349,6 @@ class TestPPTimeoutConstants:
         assert pp.PP_FINALIZE_JOIN_S == 5.0
         assert pp.PP_GATE_POLL_S == 1e-4
         assert pp.PP_LISTENER_BACKOFF_S == 0.5
-        assert pp.PP_LOCAL_LOOKUP_TIMEOUT_S == 60.0
 
     def test_gate_timeout_honors_env_at_import(self):
         # End-to-end wiring: the module-level constant must read the documented
@@ -471,7 +462,7 @@ class TestPullErrorReply:
         # A 1-tuple holding a non-tensor (like a kwargs dict): ``.detach()`` fails.
         bad = (torch.zeros(2), {"attention_mask": 1})
         with patch.object(L, "dist", fake_dist):
-            listener._serve_reply((1, L.TAG_RESPONSE_BASE, 0), bad)
+            listener._serve_reply((1, L.TAG_RESPONSE_BASE), bad)
 
         assert len(sent) == 2, "expected an error header + message"
         header, msg_buf = sent
@@ -492,13 +483,13 @@ class TestPullErrorReply:
         # A tuple of many high-rank tensors overflows the 32-slot shape header.
         big = tuple(torch.zeros(1, 1, 1, 1, 1, 1) for _ in range(8))
         with patch.object(L, "dist", fake_dist):
-            listener._serve_reply((1, L.TAG_RESPONSE_BASE, 0), big)
+            listener._serve_reply((1, L.TAG_RESPONSE_BASE), big)
 
         assert int(sent[0][0].item()) == -1
         msg = bytes(sent[1].numpy()).decode("utf-8")
         assert "header" in msg.lower() or "slot" in msg.lower(), msg
 
-    def test_recv_legacy_raises_on_error_header(self):
+    def test_recv_reply_raises_on_error_header(self):
         import nnsight.modeling.vllm.pp_listener as L
 
         listener = self._listener(local_rank=1)
@@ -517,9 +508,9 @@ class TestPullErrorReply:
         fake_dist.recv.side_effect = fake_recv
         with patch.object(L, "dist", fake_dist):
             with pytest.raises(RuntimeError, match="owning rank|producer|detach"):
-                listener._recv_legacy(
-                    MagicMock(), 0, torch.float32, L.TAG_RESPONSE_BASE,
-                    module_path="model.layers.50", meta=None,
+                listener._recv_reply(
+                    MagicMock(), 0, L.TAG_RESPONSE_BASE,
+                    module_path="model.layers.50",
                 )
 
     def test_clear_buffer_error_replies_parked_pulls(self):
@@ -533,7 +524,7 @@ class TestPullErrorReply:
         served = []
         listener._serve_error_reply = lambda req, msg: served.append((req, msg))
         # Park a pull for req_id "r7", keyed by the composite (provider, req_id).
-        parked_req = (1, L.TAG_RESPONSE_BASE, 0)
+        parked_req = (1, L.TAG_RESPONSE_BASE)
         listener._parked[("model.logits.i9", "r7")] = [parked_req]
 
         listener.clear_buffer(req_ids={"r7"})
@@ -556,9 +547,66 @@ class TestPullErrorReply:
         fake_dist.send.side_effect = lambda t, **kw: sent.append(t.clone())
         fake_dist.is_initialized.return_value = True
         with patch.object(L, "dist", fake_dist):
-            listener._serve_reply((1, L.TAG_RESPONSE_BASE, 0), torch.arange(6.0))
+            listener._serve_reply((1, L.TAG_RESPONSE_BASE), torch.arange(6.0))
         assert int(sent[0][0].item()) == 1      # one tensor, not an error
         assert sent[1].numel() == 6
+
+    def test_wire_dtype_sizes_consumer_recv(self):
+        """Regression for the sampled-token-ids crash: an integer-valued output
+        (int32 token ids from a bf16-weighted model) must round-trip with its
+        TRUE dtype. The producer stamps the dtype in the header; the consumer
+        sizes its recv buffer from it — a weight-derived guess (bf16, 2 B/elem
+        vs int32's 4) under-sized the buffer and gloo aborted."""
+        import nnsight.modeling.vllm.pp_listener as L
+
+        producer = self._listener(local_rank=0)
+        sent = []
+        fake_dist = MagicMock()
+        fake_dist.send.side_effect = lambda t, **kw: sent.append(t.clone())
+        fake_dist.is_initialized.return_value = True
+        token_ids = torch.tensor([[11], [42], [7], [9000]], dtype=torch.int32)
+        with patch.object(L, "dist", fake_dist):
+            producer._serve_reply((1, L.TAG_RESPONSE_BASE), token_ids)
+
+        header, flat = sent
+        assert int(header[1].item()) == L._DTYPE_TO_CODE[torch.int32]
+
+        # Feed the producer's exact wire bytes to a consumer.
+        consumer = self._listener(local_rank=1)
+        seq = [header, flat]
+        state = {"i": 0}
+
+        def fake_recv(tensor, **kw):
+            tensor.copy_(seq[state["i"]])
+            state["i"] += 1
+
+        fake_dist2 = MagicMock()
+        fake_dist2.recv.side_effect = fake_recv
+        with patch.object(L, "dist", fake_dist2):
+            out = consumer._recv_reply(
+                MagicMock(), 0, L.TAG_RESPONSE_BASE,
+                module_path="sampler.output_tokens",
+            )
+        assert out.dtype == torch.int32
+        assert torch.equal(out.cpu(), token_ids)
+
+    def test_unencodable_dtype_error_replies(self):
+        """A dtype outside the wire codec cannot be sized by the consumer; the
+        producer must error-reply, never stamp an unknown code."""
+        import nnsight.modeling.vllm.pp_listener as L
+
+        listener = self._listener()
+        sent = []
+        fake_dist = MagicMock()
+        fake_dist.send.side_effect = lambda t, **kw: sent.append(t.clone())
+        fake_dist.is_initialized.return_value = True
+        odd = torch.zeros(3, dtype=torch.complex32)  # not in the codec
+        with patch.object(L, "dist", fake_dist):
+            listener._serve_reply((1, L.TAG_RESPONSE_BASE), odd)
+
+        assert int(sent[0][0].item()) == -1, "must be an error header"
+        msg = bytes(sent[1].numpy()).decode("utf-8")
+        assert "dtype" in msg.lower(), msg
 
 
 class TestEnvoyPPMissingShortCircuit:

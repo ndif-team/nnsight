@@ -235,11 +235,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # (which would point out-of-range in the smaller current batch).
             for m in self.mediators.values():
                 m.batch_group = None
-                # pp_num_tokens is the authoritative per-request token count
-                # the cross-rank PP pull sizes its transfer from. Cleared here
-                # alongside batch_group so a mediator not scheduled this step
-                # never serves a stale count; re-set below for scheduled ones.
-                m.pp_num_tokens = None
 
             batch_start = 0
 
@@ -259,13 +254,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 mediators.append(mediator)
                 mediator.batch_group = [batch_start, num_tokens]
-                # Authoritative token count for the PP pull. Unlike
-                # batch_group (which unflatten later rewrites to the
-                # prompt-level [start, 1] logits view), this is set once per
-                # step and never rewritten, so it always equals the producer's
-                # buffered leading dim. See pp_envoy._pp_lazy_access and
-                # tests/test_pp_num_tokens_unflatten.py.
-                mediator.pp_num_tokens = num_tokens
 
                 # Gate-only: count forwards that actually process this request
                 # (immune to pipeline bubbles). The readiness gate uses
@@ -523,12 +511,12 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 del self._pp_meta_model
 
             # Allgather per-module dtype across PP ranks so every rank can
-            # size pull recv-buffers and build LazyRemoteTensor placeholders.
-            # The module output shape is learned lazily from the first legacy
-            # pull of each module (see ``PPListener._cache_module_shapes``)
-            # rather than probed up front — a FakeTensorMode forward over the
-            # real TP-sharded model collides with vLLM's ``BasevLLMParameter``
-            # ``__torch_function__`` on ``aten.t`` and never completes.
+            # stamp dtype hints on LazyRemoteTensor placeholders (shape and
+            # true dtype ride the pull reply itself). Dtype comes from module
+            # parameters — probing shapes with a FakeTensorMode forward over
+            # the real TP-sharded model collides with vLLM's
+            # ``BasevLLMParameter`` ``__torch_function__`` on ``aten.t`` and
+            # never completes.
             self.pp_module_meta, _derived_owners = self._exchange_pp_module_meta()
             # Architecture-agnostic ownership: derive each module's owning stage
             # from where it is REAL (the exchange), so non-standard embedding/
@@ -564,7 +552,6 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 pull_group=self.pp_pull_group,
                 local_rank=local_rank,
                 device=torch.device(f"cuda:{torch.cuda.current_device()}"),
-                meta_map=self.pp_module_meta,
             )
             self.pp_listener.start()
 
@@ -635,13 +622,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
     def _exchange_pp_module_meta(self) -> tuple:
         """Allgather per-module dtype across PP ranks AND derive ownership.
 
-        Each rank contributes ``{path: {dtype, num_outputs, module_shapes}}``
-        for its local (non-PPMissing) modules. ``dtype`` comes from the
-        module's own parameters (no forward needed); ``module_shapes``
-        starts empty and is filled in lazily on the first legacy pull of
-        each module (``PPListener._cache_module_shapes``). The merged map
-        is identical on every rank and lets the listener size pull
-        recv-buffers and build LazyRemoteTensor placeholders.
+        Each rank contributes ``{path: {dtype}}`` for its local
+        (non-PPMissing) modules; ``dtype`` comes from the module's own
+        parameters (no forward needed). The merged map is identical on every
+        rank and provides the dtype hint stamped on LazyRemoteTensor
+        placeholders — pull replies carry their own shape and true dtype.
 
         Returns ``(merged_meta, owners)`` where ``owners`` maps each module
         real on exactly one stage to that stage index — the source of truth
@@ -657,11 +642,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             if not is_pp_missing(module):
                 param = next(module.parameters(recurse=False), None)
                 dtype = param.dtype if param is not None else self.model_config.dtype
-                local_meta[name] = {
-                    "dtype": dtype,
-                    "num_outputs": 1,
-                    "module_shapes": [],
-                }
+                local_meta[name] = {"dtype": dtype}
 
         local_bytes = pickle.dumps(local_meta)
         local_tensor = torch.tensor(
