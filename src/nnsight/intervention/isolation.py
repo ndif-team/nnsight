@@ -408,24 +408,25 @@ def _build_job(mediator) -> tuple:
     mediator.intervention.__source__ = "".join(mediator.info.source)
     payload = serialization.dumps(mediator)
 
-    from .. import CONFIG
-
     worker_opts = {
         # default_all (= generate's max_new_tokens) bounds an open-ended iter[:] on
         # the worker; it is set AFTER spawn so the live value is also piggybacked on
         # each response (meta), but seed the job with the value known now.
         "default_all": mediator.interleaver.default_all,
-        # cross_invoker matches the in-process gate (Mediator.start): multiple invokes
-        # + config enabled. The worker can't share a frame, so it pushes/pulls through
-        # the host store (see _run_one_job + meta below).
-        "cross_invoker": (
-            len(mediator.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER
-        ),
+        # Mediator.start already applied the in-process cross_invoker gate (multiple
+        # invokes + config) before acquiring the worker; reuse its decision. The
+        # worker can't share a frame, so it pushes/pulls through the host store.
+        "cross_invoker": bool(mediator.cross_invoker),
+        # `with tensor.backward()` detection — the single decision point for BOTH
+        # sides: the host gates real-activation retention, the worker gates
+        # delivered-clone tagging. (The substring can false-positive, e.g. in a
+        # comment, which only costs needless tagging; tighten it here when needed.)
+        "backward_active": ".backward(" in mediator.intervention.__source__,
     }
     return payload, extras, worker_opts
 
 
-def _wire_host_channel(mediator, iso: _PooledWorker) -> None:
+def _wire_host_channel(mediator, iso: _PooledWorker, worker_opts: dict) -> None:
     """Point the (possibly recycled) worker's host channel at THIS mediator."""
     chan = iso.channel
     chan.reset()                         # fresh single-slot buffer + startup-timeout
@@ -444,8 +445,9 @@ def _wire_host_channel(mediator, iso: _PooledWorker) -> None:
     mediator._iso = iso
     # `with tensor.backward()`: if the trace differentiates, the host must retain each
     # delivered (real, on-graph) activation so handle_backward_event can run the real
-    # backward. Detect it from the source and start with a fresh retention map.
-    mediator._iso_backward = ".backward(" in mediator.intervention.__source__
+    # backward. The decision was made once in _build_job (shared with the worker);
+    # start with a fresh retention map.
+    mediator._iso_backward = worker_opts["backward_active"]
     mediator._iso_grad_reals = {}
     # Fresh per-job host-side hook-registration state.
     iso.registered = set()
@@ -487,7 +489,7 @@ def acquire_isolated_worker(mediator) -> None:
         _POOL.forget(iso)
         iso = _acquire()
         iso.send_job(payload, extras, worker_opts)
-    _wire_host_channel(mediator, iso)
+    _wire_host_channel(mediator, iso, worker_opts)
 
 
 def release_isolated_worker(iso: _PooledWorker, dirty: bool) -> None:
@@ -652,10 +654,10 @@ class WorkerMediator(Mediator):
         mediator.cross_invoker = opts.get("cross_invoker", False)
         mediator._isolated_worker = True  # so Barrier sends the target count (host counts)
         mediator._device = device
-        # `with tensor.backward()`: detected from the intervention source; gates the
-        # delivered-clone tagging in ``request`` (BackwardsTracer reads the provenance).
-        source = "".join(mediator.info.source) if mediator.info.source else ""
-        mediator._bwd_active = ".backward(" in source
+        # `with tensor.backward()`: decided once in _build_job (host-side) and shipped
+        # with the job; gates the delivered-clone tagging in ``request``
+        # (BackwardsTracer reads the provenance).
+        mediator._bwd_active = opts["backward_active"]
         mediator._bwd_prov = {}    # id(delivered clone) -> requester string
         mediator._bwd_tagged = []  # delivered clones made to require grad
         interleaver.current = mediator
