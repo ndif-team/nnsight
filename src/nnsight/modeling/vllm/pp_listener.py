@@ -61,6 +61,16 @@ _TAG_RANGE = 1 << 20
 TAG_DRAIN = TAG_RESPONSE_BASE + _TAG_RANGE
 _META_SLOTS = 32  # legacy metadata buffer size
 
+# Error-reply sentinel in the legacy shape header's slot 0 (a real reply always
+# has >= 1 tensor there). When the producer can't serialize a requested value
+# (a non-tensor like a dict-valued ``.inputs`` read, a mixed-dtype tuple, a
+# shape too large for the header), it sends this header with the UTF-8 message
+# length in slot 1 followed by the message bytes, so the blocked consumer raises
+# instead of hanging. A per-op gloo recv timeout can't be the backstop instead:
+# it closes the whole peer pair on expiry (probed), breaking every later pull.
+_ERROR_SENTINEL = -1
+_ERROR_MSG_CAP = 2048  # bound the on-wire error message
+
 # Wire codec for the legacy shape header's dtype slot (``shape_meta[1]``). The
 # producer stamps the value's TRUE dtype here so the consumer sizes its recv
 # buffer from the truth instead of guessing from the module's weight dtype —
@@ -225,12 +235,15 @@ class PPListener:
         immediately; waiters on untouched keys see their key still
         present after the wake and continue normally.
         """
+        abandoned = []  # parked requests whose value will never be produced
         with self._condition:
             if req_ids is None:
                 self._buffer.clear()
-                # A blanket clear means the request set is done; drop any
-                # still-parked pulls so they don't leak (their value will
-                # never be produced now).
+                # A blanket clear means the request set is done; any still-parked
+                # pull will never be served now — collect them to error-reply
+                # below (a silent drop leaves the blocked consumer hung).
+                for reqs in self._parked.values():
+                    abandoned.extend(reqs)
                 self._parked.clear()
             else:
                 id_set = set(req_ids)
@@ -240,15 +253,25 @@ class PPListener:
                 ]
                 for k in to_remove:
                     del self._buffer[k]
-                # Drop parked pulls for the finished requests too (normally
-                # empty — a finished request's pulls were all served — but
-                # guards against a leak if one is cancelled mid-pull).
+                # Pulls still parked for a finished request: their value will
+                # never be produced (commonly a run-ahead worker that pulled one
+                # generation step past the end). Error-reply each instead of a
+                # silent drop, so its blocked consumer raises and its worker
+                # thread exits — otherwise it leaks (a per-op gloo recv timeout
+                # can't rescue it; it closes the whole peer pair).
                 for k in [
                     k for k in self._parked
                     if isinstance(k, tuple) and len(k) == 2 and k[1] in id_set
                 ]:
-                    del self._parked[k]
+                    abandoned.extend(self._parked.pop(k))
             self._condition.notify_all()
+
+        for req in abandoned:
+            self._reply_pool.submit(
+                self._serve_error_reply, req,
+                "value was never produced (request finalized before this "
+                "cross-stage pull resolved)",
+            )
 
     # ------------------------------------------------------------------
     # Local buffer lookup (blocks until value available)
@@ -375,47 +398,106 @@ class PPListener:
         for req in waiters:
             self._reply_pool.submit(self._serve_reply, req, value)
 
+    @staticmethod
+    def _encode_shape_header(cpu_tensors):
+        """Build the legacy shape header: slot 0 = tensor count, slot 1 = dtype
+        code, then ``[ndim, *dims]`` per tensor. Raises ``ValueError`` if the
+        value needs more slots than the fixed buffer holds (caught by
+        ``_serve_reply`` and turned into an error reply, not a wedged consumer).
+        """
+        needed = 2 + sum(1 + t.ndim for t in cpu_tensors)
+        if needed > _META_SLOTS:
+            raise ValueError(
+                f"cross-stage value needs {needed} shape-header slots > "
+                f"{_META_SLOTS} ({len(cpu_tensors)} tensors, shapes "
+                f"{[tuple(t.shape) for t in cpu_tensors]})"
+            )
+        shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
+        shape_meta[0] = len(cpu_tensors)
+        # Slot 1 carries the value's real dtype so the consumer sizes its recv
+        # buffer from the truth, not a weight-derived guess. All ``cpu_tensors``
+        # share one dtype (the ``cat`` in ``_serve_reply`` requires it).
+        shape_meta[1] = (
+            _DTYPE_TO_CODE.get(cpu_tensors[0].dtype, _DTYPE_CODE_UNKNOWN)
+            if cpu_tensors
+            else _DTYPE_CODE_UNKNOWN
+        )
+        idx = 2
+        for t in cpu_tensors:
+            shape_meta[idx] = t.ndim
+            idx += 1
+            for s in t.shape:
+                shape_meta[idx] = s
+                idx += 1
+        return shape_meta
+
+    def _serve_error_reply(self, req, message):
+        """Tell a blocked consumer its pull failed, instead of leaving it hung.
+
+        Reuses the legacy reply channel: a header with slot 0 == ``_ERROR_SENTINEL``
+        and the UTF-8 message length in slot 1, followed by the message bytes —
+        both on the pull's private response tag. The precomputed mode
+        (``num_tokens > 0``) has no header to carry the flag and is unused in
+        production (consumers always request shape-on-wire), so a failure there
+        is logged and dropped rather than corrupting a fixed-size recv.
+        """
+        requesting_rank, response_tag, num_tokens = req
+        if num_tokens != 0:
+            print(
+                f"[PPListener] precomputed serve failed, no error channel: {message}",
+                flush=True,
+            )
+            return
+        group = self._pull_group
+        msg = message.encode("utf-8")[:_ERROR_MSG_CAP]
+        header = torch.zeros(_META_SLOTS, dtype=torch.int64)
+        header[0] = _ERROR_SENTINEL
+        header[1] = len(msg)
+        try:
+            dist.send(header, group=group, group_dst=requesting_rank, tag=response_tag)
+            dist.send(
+                torch.frombuffer(bytearray(msg), dtype=torch.uint8).clone(),
+                group=group, group_dst=requesting_rank, tag=response_tag,
+            )
+        except Exception:
+            if not dist.is_initialized() or self._stop_event.is_set():
+                return
+            import traceback
+            traceback.print_exc()
+
     def _serve_reply(self, req, value):
         """Send one reply on its per-pull response tag (runs on the reply pool).
 
         Legacy mode (``num_tokens == 0``) sends shape metadata then data; the
         precomputed mode sends flat data only. The consumer's recv on this tag
         is already posted, so each ``send`` completes promptly.
+
+        The whole reply is PREPARED before any send, so a serialization failure
+        (a non-tensor value, a mixed-dtype tuple, a shape too big for the header)
+        is caught while we can still send an error reply — never after a partial
+        send that would desync the consumer's recv (and leave it hung, since a
+        gloo recv timeout can't safely rescue it — see ``_serve_error_reply``).
         """
         requesting_rank, response_tag, num_tokens = req
-        try:
-            group = self._pull_group
+        group = self._pull_group
 
+        try:
             # Normalize to list of tensors (handles both tensor and tuple).
             tensors = list(value) if isinstance(value, (tuple, list)) else [value]
             cpu_tensors = [t.detach().contiguous().cpu() for t in tensors]
-
-            if num_tokens == 0:
-                # Legacy mode: send shape metadata then data.
-                shape_meta = torch.zeros(_META_SLOTS, dtype=torch.int64)
-                shape_meta[0] = len(cpu_tensors)
-                # Slot 1 carries the value's real dtype so the consumer sizes
-                # its recv buffer from the truth, not a weight-derived guess.
-                # All ``cpu_tensors`` share one dtype (the ``cat`` below
-                # requires it).
-                shape_meta[1] = (
-                    _DTYPE_TO_CODE.get(cpu_tensors[0].dtype, _DTYPE_CODE_UNKNOWN)
-                    if cpu_tensors
-                    else _DTYPE_CODE_UNKNOWN
-                )
-                idx = 2
-                for t in cpu_tensors:
-                    shape_meta[idx] = t.ndim
-                    idx += 1
-                    for s in t.shape:
-                        shape_meta[idx] = s
-                        idx += 1
-                dist.send(shape_meta, group=group, group_dst=requesting_rank, tag=response_tag)
-
-            # Send all tensor data concatenated as one flat buffer, on the
-            # per-pull response tag carried in the request — so concurrent
-            # consumers each receive only their own reply.
+            # ``cat`` validates same-dtype/numeric up front (a mixed-dtype tuple
+            # raises here, before any send).
             flat = torch.cat([t.contiguous().view(-1) for t in cpu_tensors])
+            shape_meta = self._encode_shape_header(cpu_tensors) if num_tokens == 0 else None
+        except Exception as exc:
+            self._serve_error_reply(req, f"{type(exc).__name__}: {exc}")
+            return
+
+        try:
+            # On the per-pull response tag carried in the request, so concurrent
+            # consumers each receive only their own reply.
+            if shape_meta is not None:
+                dist.send(shape_meta, group=group, group_dst=requesting_rank, tag=response_tag)
             dist.send(flat, group=group, group_dst=requesting_rank, tag=response_tag)
         except Exception:
             if not dist.is_initialized() or self._stop_event.is_set():
@@ -584,6 +666,19 @@ class PPListener:
         dist.recv(shape_meta, group=group, group_src=source_rank, tag=tag)
 
         num_elements = int(shape_meta[0].item())
+        if num_elements == _ERROR_SENTINEL:
+            # The producer couldn't serialize this value; slot 1 is the message
+            # length, the next message is the UTF-8 message. Raise instead of
+            # hanging (a serve failure used to just print on the producer and
+            # strand this recv forever).
+            err_len = int(shape_meta[1].item())
+            err_buf = torch.zeros(err_len, dtype=torch.uint8)
+            dist.recv(err_buf, group=group, group_src=source_rank, tag=tag)
+            msg = bytes(err_buf.numpy()).decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"PP cross-stage pull of {module_path!r} failed on its owning "
+                f"rank ({source_rank}): {msg}"
+            )
         # The producer stamped the value's real dtype in slot 1; trust it over
         # the weight-derived guess in ``dtype`` (used only when the code is
         # unknown — a dtype outside the codec / an old-format sender).

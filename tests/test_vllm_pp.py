@@ -292,6 +292,125 @@ class TestPPListener:
         assert all(t >= L.TAG_RESPONSE_BASE for t in request_tags)
 
 
+class TestPullErrorReply:
+    """A producer that can't serialize a requested value must TELL the blocked
+    consumer (an error reply on the per-pull tag), not silently drop it.
+
+    A per-op gloo recv timeout is not usable as a backstop — it closes the
+    whole peer pair (probed: ``Application timeout caused pair closure``), so
+    the error must come from the producer. Triggers in practice: a dict-valued
+    ``.inputs`` cross-stage read, a mixed-dtype tuple (``torch.cat`` fails), a
+    value with more tensors/dims than the fixed shape header holds.
+    """
+
+    def _listener(self, local_rank=0):
+        return PPListener(
+            buffer={}, condition=threading.Condition(), pull_group=MagicMock(),
+            local_rank=local_rank, device=torch.device("cpu"),
+        )
+
+    def test_serve_reply_sends_error_header_for_unserializable_value(self):
+        import nnsight.modeling.vllm.pp_listener as L
+
+        listener = self._listener()
+        sent = []
+        fake_dist = MagicMock()
+        fake_dist.send.side_effect = lambda t, **kw: sent.append(t.clone())
+        fake_dist.is_initialized.return_value = True
+
+        # A 1-tuple holding a non-tensor (like a kwargs dict): ``.detach()`` fails.
+        bad = (torch.zeros(2), {"attention_mask": 1})
+        with patch.object(L, "dist", fake_dist):
+            listener._serve_reply((1, L.TAG_RESPONSE_BASE, 0), bad)
+
+        assert len(sent) == 2, "expected an error header + message"
+        header, msg_buf = sent
+        assert int(header[0].item()) == -1, "slot 0 must flag an error"
+        assert int(header[1].item()) == msg_buf.numel(), "slot 1 = message length"
+        msg = bytes(msg_buf.numpy()).decode("utf-8")
+        assert "detach" in msg or "AttributeError" in msg, msg
+
+    def test_serve_reply_error_on_header_overflow(self):
+        import nnsight.modeling.vllm.pp_listener as L
+
+        listener = self._listener()
+        sent = []
+        fake_dist = MagicMock()
+        fake_dist.send.side_effect = lambda t, **kw: sent.append(t.clone())
+        fake_dist.is_initialized.return_value = True
+
+        # A tuple of many high-rank tensors overflows the 32-slot shape header.
+        big = tuple(torch.zeros(1, 1, 1, 1, 1, 1) for _ in range(8))
+        with patch.object(L, "dist", fake_dist):
+            listener._serve_reply((1, L.TAG_RESPONSE_BASE, 0), big)
+
+        assert int(sent[0][0].item()) == -1
+        msg = bytes(sent[1].numpy()).decode("utf-8")
+        assert "header" in msg.lower() or "slot" in msg.lower(), msg
+
+    def test_recv_legacy_raises_on_error_header(self):
+        import nnsight.modeling.vllm.pp_listener as L
+
+        listener = self._listener(local_rank=1)
+        err = b"AttributeError: 'tuple' object has no attribute 'detach'"
+        header = torch.zeros(L._META_SLOTS, dtype=torch.int64)
+        header[0] = -1
+        header[1] = len(err)
+        seq = [header, torch.frombuffer(bytearray(err), dtype=torch.uint8).clone()]
+        state = {"i": 0}
+
+        def fake_recv(tensor, **kw):
+            tensor.copy_(seq[state["i"]])
+            state["i"] += 1
+
+        fake_dist = MagicMock()
+        fake_dist.recv.side_effect = fake_recv
+        with patch.object(L, "dist", fake_dist):
+            with pytest.raises(RuntimeError, match="owning rank|producer|detach"):
+                listener._recv_legacy(
+                    MagicMock(), 0, torch.float32, L.TAG_RESPONSE_BASE,
+                    module_path="model.layers.50", meta=None,
+                )
+
+    def test_clear_buffer_error_replies_parked_pulls(self):
+        """A pull still parked when its request finalizes (its value will never
+        be produced — e.g. a run-ahead worker pulling past generation end) must
+        be error-replied, not silently dropped, so the blocked consumer raises
+        and its worker exits instead of leaking."""
+        import nnsight.modeling.vllm.pp_listener as L
+
+        listener = self._listener()
+        served = []
+        listener._serve_error_reply = lambda req, msg: served.append((req, msg))
+        # Park a pull for req_id "r7", keyed by the composite (provider, req_id).
+        parked_req = (1, L.TAG_RESPONSE_BASE, 0)
+        listener._parked[("model.logits.i9", "r7")] = [parked_req]
+
+        listener.clear_buffer(req_ids={"r7"})
+
+        # Pool runs the error reply; drain it.
+        listener._reply_pool.shutdown(wait=True)
+        assert len(served) == 1, served
+        assert served[0][0] == parked_req
+        assert "never produced" in served[0][1]
+        assert ("model.logits.i9", "r7") not in listener._parked
+
+    def test_serve_reply_roundtrips_normal_value(self):
+        """The error path must not regress the normal reply: a real tensor still
+        sends header (slot0 = ntensors, NOT -1) then flat data."""
+        import nnsight.modeling.vllm.pp_listener as L
+
+        listener = self._listener()
+        sent = []
+        fake_dist = MagicMock()
+        fake_dist.send.side_effect = lambda t, **kw: sent.append(t.clone())
+        fake_dist.is_initialized.return_value = True
+        with patch.object(L, "dist", fake_dist):
+            listener._serve_reply((1, L.TAG_RESPONSE_BASE, 0), torch.arange(6.0))
+        assert int(sent[0][0].item()) == 1      # one tensor, not an error
+        assert sent[1].numel() == 6
+
+
 class TestEnvoyPPMissingShortCircuit:
 
     def _make_pp_envoy(self):
