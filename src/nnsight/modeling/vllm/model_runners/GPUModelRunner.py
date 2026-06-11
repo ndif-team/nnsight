@@ -17,6 +17,7 @@ from ....intervention.serialization import load
 from ....intervention.tracing.globals import Globals
 from ..batching import VLLMBatcher
 from ..lazy_remote_tensor import strip_lazy
+from ..pp import PP_FINALIZE_JOIN_S, PP_GATE_POLL_S, PP_GATE_TIMEOUT_S
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -755,7 +756,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 return True
             return it == k and (m.event_queue.has_value or m._pp_past_local)
 
-        deadline = time.monotonic() + 30.0
+        deadline = time.monotonic() + PP_GATE_TIMEOUT_S
         for mediator in list(interleaver.mediators):
             k = mediator._pp_scheduled_count - 1
             while not _ahead(mediator, k):
@@ -764,9 +765,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
                         f"PP readiness gate: mediator {mediator.name} not ahead "
                         f"of forward (worker_iteration="
                         f"{mediator._pp_worker_iteration}, k={k}) "
-                        f"within 30s"
+                        f"within {PP_GATE_TIMEOUT_S}s "
+                        f"(raise via NNSIGHT_PP_GATE_TIMEOUT for a slow link)"
                     )
-                time.sleep(0.0001)
+                time.sleep(PP_GATE_POLL_S)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
 
@@ -974,7 +976,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 interleaver.stop_iteration()
             for _, mediator, _ in matched:
                 if mediator.worker is not None:
-                    mediator.worker.join(timeout=5.0)
+                    mediator.worker.join(timeout=PP_FINALIZE_JOIN_S)
             # PB1 fix: hold every rank here — each still serving peers from its
             # live buffer on the listener thread — until ALL ranks' workers have
             # drained their cross-stage pulls, BEFORE any rank clears its buffer

@@ -6,9 +6,53 @@ paths to their owning PP rank.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch.nn as nn
+
+
+# ---------------------------------------------------------------------------
+# PP timeouts (one home for the previously-inline magic numbers).
+#
+# Only the readiness-gate deadline carries a real false-trip risk: a forward
+# waits for its workers to be "ahead", and a worker blocked in a slow UPSTREAM
+# cross-stage pull (huge hidden state over a degraded cross-node link) reaches
+# its local part late. That one is env-overridable. The poll/backoff are
+# internal cadence (no false-trip risk) and the local-lookup wait is test-only
+# (production uses the non-blocking dispatch_parked path), so those stay fixed.
+#
+# The override is an env var, not ``CONFIG``/``config.yaml``: these run in the
+# vLLM WORKER process, and env vars propagate to Ray workers cross-node whereas
+# the yaml would have to exist on every node.
+# ---------------------------------------------------------------------------
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float override from the environment, falling back to ``default``
+    on absence or a malformed value."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# Readiness gate: how long a forward waits for its scheduled mediators to be
+# ahead before raising loudly (vs hanging). Override: NNSIGHT_PP_GATE_TIMEOUT.
+PP_GATE_TIMEOUT_S = _env_float("NNSIGHT_PP_GATE_TIMEOUT", 30.0)
+
+# Finalize worker join — a safety net; the drain barrier normally completes the
+# in-flight pull first, so this is rarely the limiter.
+PP_FINALIZE_JOIN_S = 5.0
+
+# Internal mechanics (not user-facing):
+PP_GATE_POLL_S = 1e-4          # readiness-gate spin granularity
+PP_LISTENER_BACKOFF_S = 0.5    # listener retry after a transient error
+
+# Test-only blocking buffer wait (``local_lookup``); production never hits it.
+PP_LOCAL_LOOKUP_TIMEOUT_S = 60.0
 
 
 def resolve_meta(meta_map: dict, path: str):

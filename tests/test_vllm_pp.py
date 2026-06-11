@@ -1,4 +1,5 @@
 import inspect
+import os
 import threading
 import time
 from collections import defaultdict, namedtuple
@@ -290,6 +291,55 @@ class TestPPListener:
         # Each pull used a distinct response tag, all ≥ base, none aliasing TAG_REQUEST.
         assert len(set(request_tags)) == N, request_tags
         assert all(t >= L.TAG_RESPONSE_BASE for t in request_tags)
+
+
+class TestPPTimeoutConstants:
+    """PP timeouts live in one place (``pp.py``); only the readiness-gate
+    deadline is env-overridable (the one with a real false-trip risk — a slow
+    upstream cross-stage pull keeps a worker from reaching its local part)."""
+
+    def test_env_float_parses_override(self, monkeypatch):
+        from nnsight.modeling.vllm.pp import _env_float
+        monkeypatch.setenv("NNSIGHT_TEST_TO", "12.5")
+        assert _env_float("NNSIGHT_TEST_TO", 30.0) == 12.5
+
+    def test_env_float_default_when_absent(self, monkeypatch):
+        from nnsight.modeling.vllm.pp import _env_float
+        monkeypatch.delenv("NNSIGHT_TEST_TO", raising=False)
+        assert _env_float("NNSIGHT_TEST_TO", 30.0) == 30.0
+
+    def test_env_float_falls_back_on_malformed(self, monkeypatch):
+        from nnsight.modeling.vllm.pp import _env_float
+        monkeypatch.setenv("NNSIGHT_TEST_TO", "not-a-number")
+        assert _env_float("NNSIGHT_TEST_TO", 30.0) == 30.0  # default, not a crash
+
+    def test_named_constants_have_documented_defaults(self):
+        from nnsight.modeling.vllm import pp
+        assert pp.PP_GATE_TIMEOUT_S == 30.0
+        assert pp.PP_FINALIZE_JOIN_S == 5.0
+        assert pp.PP_GATE_POLL_S == 1e-4
+        assert pp.PP_LISTENER_BACKOFF_S == 0.5
+        assert pp.PP_LOCAL_LOOKUP_TIMEOUT_S == 60.0
+
+    def test_gate_timeout_honors_env_at_import(self):
+        # End-to-end wiring: the module-level constant must read the documented
+        # env var name (a fresh process, since the constant is import-time).
+        import subprocess
+        import sys
+
+        def _read(env):
+            r = subprocess.run(
+                [sys.executable, "-c",
+                 "import nnsight.modeling.vllm.pp as p; print(p.PP_GATE_TIMEOUT_S)"],
+                capture_output=True, text=True, env=env, timeout=120,
+            )
+            assert r.returncode == 0, r.stderr[-500:]
+            return float(r.stdout.strip().splitlines()[-1])
+
+        base = dict(os.environ)
+        base.pop("NNSIGHT_PP_GATE_TIMEOUT", None)
+        assert _read(base) == 30.0
+        assert _read({**base, "NNSIGHT_PP_GATE_TIMEOUT": "7.5"}) == 7.5
 
 
 class TestDerivedOwnership:

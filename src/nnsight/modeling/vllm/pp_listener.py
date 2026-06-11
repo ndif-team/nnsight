@@ -40,7 +40,11 @@ from typing import Any, Dict, Optional
 import torch
 import torch.distributed as dist
 
-from .pp import resolve_meta as _resolve_meta
+from .pp import (
+    PP_LISTENER_BACKOFF_S,
+    PP_LOCAL_LOOKUP_TIMEOUT_S,
+    resolve_meta as _resolve_meta,
+)
 
 # Requests all arrive on this one well-known tag (the listener can only
 # pre-post a recv on a tag it knows). Responses ride a per-pull tag carried
@@ -280,7 +284,7 @@ class PPListener:
     def local_lookup(
         self,
         key,
-        timeout: Optional[float] = 60.0,
+        timeout: Optional[float] = PP_LOCAL_LOOKUP_TIMEOUT_S,
     ) -> torch.Tensor:
         """Block until ``key`` is in the buffer, then return its value.
 
@@ -379,7 +383,7 @@ class PPListener:
                 # Wait with timeout so ``stop()`` from the main thread
                 # wakes us promptly; expire-then-retry on its own keeps
                 # the listener alive through transient failures.
-                if self._stop_event.wait(timeout=0.5):
+                if self._stop_event.wait(timeout=PP_LISTENER_BACKOFF_S):
                     return
 
     def dispatch_parked(self, key, value):
