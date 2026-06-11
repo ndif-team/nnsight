@@ -528,7 +528,13 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # rather than probed up front — a FakeTensorMode forward over the
             # real TP-sharded model collides with vLLM's ``BasevLLMParameter``
             # ``__torch_function__`` on ``aten.t`` and never completes.
-            self.pp_module_meta = self._exchange_pp_module_meta()
+            self.pp_module_meta, _derived_owners = self._exchange_pp_module_meta()
+            # Architecture-agnostic ownership: derive each module's owning stage
+            # from where it is REAL (the exchange), so non-standard embedding/
+            # norm/head names resolve without name knowledge. The name table in
+            # PPModuleMap remains only for build-on-every-rank, fire-on-last
+            # modules (logits/samples/logits_processor).
+            self.pp_module_map.set_derived_owners(_derived_owners)
 
             # Dedicated gloo group for pull requests — separate from
             # vLLM's own PP groups so the listener thread's recv() doesn't
@@ -625,8 +631,8 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
         graft(self.nnsight_model)
 
-    def _exchange_pp_module_meta(self) -> dict:
-        """Allgather per-module dtype across PP ranks.
+    def _exchange_pp_module_meta(self) -> tuple:
+        """Allgather per-module dtype across PP ranks AND derive ownership.
 
         Each rank contributes ``{path: {dtype, num_outputs, module_shapes}}``
         for its local (non-PPMissing) modules. ``dtype`` comes from the
@@ -635,6 +641,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
         each module (``PPListener._cache_module_shapes``). The merged map
         is identical on every rank and lets the listener size pull
         recv-buffers and build LazyRemoteTensor placeholders.
+
+        Returns ``(merged_meta, owners)`` where ``owners`` maps each module
+        real on exactly one stage to that stage index — the source of truth
+        for ``PPModuleMap`` ownership (name-agnostic; see ``set_derived_owners``).
         """
         import torch.distributed as dist
         from ..pp import is_pp_missing
@@ -674,12 +684,27 @@ class NNsightGPUModelRunner(GPUModelRunner):
         ]
         dist.all_gather(all_padded, padded, group=pp_group.cpu_group)
 
+        # Merge per-rank metas AND derive ownership: the allgather fills
+        # ``all_padded[i]`` with PP-stage ``i``'s real-module names, so a module
+        # reported by exactly one stage is owned by it. A module reported by
+        # several (containers like ``model``/``model.layers``, build-on-every-
+        # rank modules) is ambiguous and dropped — those stay on the name-table
+        # fallback in ``PPModuleMap``.
         merged = {}
-        for buf, size in zip(all_padded, all_sizes):
+        owners: dict = {}
+        ambiguous = set()
+        for pp_rank, (buf, size) in enumerate(zip(all_padded, all_sizes)):
             rank_meta = pickle.loads(buf[: size.item()].numpy().tobytes())
             merged.update(rank_meta)
+            for name in rank_meta:
+                if name in owners and owners[name] != pp_rank:
+                    ambiguous.add(name)
+                else:
+                    owners[name] = pp_rank
+        for name in ambiguous:
+            owners.pop(name, None)
 
-        return merged
+        return merged, owners
 
     def _pp_wait_for_mediators(self):
         """The one PP sync point: hold the forward until every scheduled mediator

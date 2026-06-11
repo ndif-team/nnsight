@@ -75,6 +75,9 @@ class PPModuleMap:
         Number of pipeline-parallel stages.
     """
 
+    # Trailing eproperty keys to strip before resolving a module path.
+    _EPROPERTY_KEYS = ("output", "input", "inputs")
+
     def __init__(self, num_hidden_layers: int, pp_world_size: int):
         from vllm.distributed.utils import get_pp_indices
 
@@ -87,8 +90,65 @@ class PPModuleMap:
             start, end = get_pp_indices(num_hidden_layers, rank, pp_world_size)
             self._rank_ranges[rank] = (start, end)
 
+        # Owning rank per REAL module path, derived from the load-time meta
+        # exchange (which module is non-``PPMissingLayer`` on which stage).
+        # Populated by ``set_derived_owners`` after the allgather; empty until
+        # then, in which case ``get_owning_rank`` uses only the legacy
+        # layer-range + name logic (so unit tests / PP-disabled are unchanged).
+        self._derived_owners: dict[str, int] = {}
+
+    def set_derived_owners(self, owners: dict) -> None:
+        """Install the per-module owning-rank map derived from the meta
+        exchange (``GPUModelRunner._exchange_pp_module_meta``).
+
+        Keys are vLLM ``named_modules()`` names (e.g. ``"model.layers.5"``,
+        ``"model.word_embeddings"``); values are PP stage indices. Modules real
+        on more than one rank (containers, build-on-every-rank modules) are
+        omitted by the exchange — those stay on the name-table fallback.
+        """
+        self._derived_owners = dict(owners)
+
+    def _strip_eproperty(self, parts: list) -> list:
+        """Drop a trailing eproperty key (``output``/``input``/``inputs``)."""
+        if parts and parts[-1] in self._EPROPERTY_KEYS:
+            return parts[:-1]
+        return parts
+
+    def _derived_owner(self, parts: list) -> Optional[int]:
+        """Resolve ownership from the derived map for the longest owned ancestor
+        of ``parts``, tolerant of the nnsight root prefix.
+
+        A submodule (``...layers.5.mlp``) inherits the stage of its nearest
+        owned ancestor (``...layers.5``); the prefix walk matches the vLLM raw
+        key (``model.layers.5``) against the prefixed nnsight path
+        (``model.model.layers.5``).
+        """
+        if not self._derived_owners:
+            return None
+        walk = list(parts)
+        while walk:
+            # Prefix-tolerant exact match (strip leading nnsight root parts).
+            for i in range(len(walk)):
+                cand = ".".join(walk[i:])
+                if cand in self._derived_owners:
+                    return self._derived_owners[cand]
+            walk = walk[:-1]
+        return None
+
     def get_owning_rank(self, module_path: str) -> Optional[int]:
         """Return the PP rank that owns *module_path*, or ``None`` if unknown.
+
+        Resolution order:
+
+        1. **Derived ownership** from the meta exchange — name-agnostic, covers
+           every module real on exactly one stage (embeddings, norms, heads,
+           layers, by their actual location regardless of naming convention).
+        2. **Layer range** — the contiguous ``[start, end)`` slice (safety net
+           and the path before any exchange).
+        3. **First/last-rank name table** — only the non-derivable cases:
+           modules built on every rank but firing only on the last
+           (``logits``/``samples``/``logits_processor``), which are not distinct
+           ``nn.Module``s in ``named_modules()``.
 
         Parameters
         ----------
@@ -96,7 +156,11 @@ class PPModuleMap:
             Dot-separated attribute path, e.g. ``"model.layers.5"`` or
             ``"model.lm_head"``.
         """
-        parts = module_path.split(".")
+        parts = self._strip_eproperty(module_path.split("."))
+
+        owner = self._derived_owner(parts)
+        if owner is not None:
+            return owner
 
         # Check for layer container (e.g. model.layers.5.attn -> layer index 5)
         for i, part in enumerate(parts):

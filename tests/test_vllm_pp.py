@@ -292,6 +292,68 @@ class TestPPListener:
         assert all(t >= L.TAG_RESPONSE_BASE for t in request_tags)
 
 
+class TestDerivedOwnership:
+    """``PPModuleMap`` must resolve a module's owning stage from the load-time
+    meta exchange (which module is REAL on which rank), not from hardcoded
+    embedding/norm/head name tables. The tables miss real architectures:
+    Falcon ``word_embeddings``, OPT ``final_layer_norm``, GPT-NeoX
+    ``embed_in``/``embed_out`` — for which the old map returns ``None`` (→ a
+    misdirected ``source_rank=None`` pull). Derived ownership is name-agnostic.
+    """
+
+    def _map(self, owners):
+        from nnsight.modeling.vllm.pp import PPModuleMap
+
+        m = PPModuleMap(num_hidden_layers=4, pp_world_size=2)
+        m.set_derived_owners(owners)
+        return m
+
+    def test_nonstandard_embed_norm_head_resolve(self):
+        # Simulated exchange: vLLM ``named_modules`` keys, NON-standard names.
+        m = self._map({
+            "model.word_embeddings": 0,     # Falcon embedding
+            "model.layers.0": 0, "model.layers.1": 0,
+            "model.layers.2": 1, "model.layers.3": 1,
+            "model.final_layer_norm": 1,    # OPT final norm
+            "embed_out": 1,                 # GPT-NeoX head
+        })
+        assert m.get_owning_rank("model.model.word_embeddings.output") == 0
+        assert m.get_owning_rank("model.model.final_layer_norm.output") == 1
+        assert m.get_owning_rank("model.embed_out.output") == 1
+
+    def test_layer_submodules_inherit_stage_from_derived_map(self):
+        m = self._map({
+            "model.layers.0": 0, "model.layers.1": 0,
+            "model.layers.2": 1, "model.layers.3": 1,
+        })
+        # A submodule resolves to its nearest owned ancestor's stage.
+        assert m.get_owning_rank("model.model.layers.3.mlp.output") == 1
+        assert m.get_owning_rank("model.model.layers.0.self_attn.output") == 0
+
+    def test_ambiguous_module_falls_through_to_name_table(self):
+        # ``logits_processor`` is built on EVERY rank (real everywhere), so the
+        # exchange can't attribute it — it must not appear in derived owners and
+        # the last-rank name rule still applies.
+        m = self._map({
+            "model.layers.0": 0, "model.layers.3": 1,
+            # no logits_processor entry (ambiguous, dropped by the exchange)
+        })
+        assert m.get_owning_rank("model.logits_processor.output") == 1  # last rank
+        assert m.get_owning_rank("model.logits.i0") == 1
+        assert m.get_owning_rank("model.samples.i0") == 1
+
+    def test_no_derived_owners_falls_back_to_legacy_logic(self):
+        from nnsight.modeling.vllm.pp import PPModuleMap
+
+        # Construction without an exchange (unit tests / PP-disabled): the
+        # layer-range + standard-name logic still works unchanged.
+        m = PPModuleMap(num_hidden_layers=4, pp_world_size=2)
+        assert m.get_owning_rank("model.layers.0.output") == 0
+        assert m.get_owning_rank("model.layers.3.output") == 1
+        assert m.get_owning_rank("model.embed_tokens.output") == 0
+        assert m.get_owning_rank("model.lm_head.output") == 1
+
+
 class TestPullErrorReply:
     """A producer that can't serialize a requested value must TELL the blocked
     consumer (an error reply on the per-pull tag), not silently drop it.
