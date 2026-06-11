@@ -50,7 +50,7 @@ instead of once per forward; see those functions for details.
 import warnings
 from typing import TYPE_CHECKING, Any, Callable, List, Union
 from .base import Tracer
-from ..interleaver import Interleaver
+from ..interleaver import Interleaver, current_mediator
 from ..hooks import add_ordered_hook, add_ordered_op_hook
 
 if TYPE_CHECKING:
@@ -342,7 +342,13 @@ class IteratorTracer(Tracer):
         correctly.
         """
 
-        mediator = self.interleaver.current
+        # Resolve via the worker's thread-local, not the shared ``current``
+        # slot: ``current`` is reassigned by every ``Mediator.start()`` and
+        # around every ``handle``, so a worker that runs concurrently with
+        # them (PP run-ahead after a leading cross-stage RELEASE) can observe
+        # ANOTHER invoke's mediator here and corrupt its iteration state.
+        # Same pattern as ``eproperty.__get__`` / ``_pp_lazy_access``.
+        mediator = current_mediator() or self.interleaver.current
         original_iteration = mediator.iteration
         mediator._pp_max_iteration = _pp_max_iteration(self.iteration)
 
@@ -476,7 +482,9 @@ class IteratorTracer(Tracer):
             stacklevel=6,
         )
 
-        mediator = self.interleaver.current
+        # See ``__iter__``: resolve via the worker thread-local, never the
+        # shared (reassignable) ``current`` slot.
+        mediator = current_mediator() or self.interleaver.current
         mediator._pp_max_iteration = _pp_max_iteration(self.iteration)
 
         mediator.push()

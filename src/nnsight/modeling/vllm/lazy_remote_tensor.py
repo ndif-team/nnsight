@@ -109,6 +109,35 @@ class LazyRemoteTensor:
     def __rmatmul__(self, other):
         return other @ self._materialize()
 
+    # --- comparisons: materialize and delegate ---
+    # Without these, ``==``/``!=`` fall back to identity (a plain bool instead
+    # of an elementwise tensor) and the orderings raise — but only on the
+    # non-owning rank, so user code branching on a comparison silently
+    # diverges between ranks rather than erroring.
+
+    def __eq__(self, other):
+        return self._materialize() == other
+
+    def __ne__(self, other):
+        return self._materialize() != other
+
+    def __lt__(self, other):
+        return self._materialize() < other
+
+    def __le__(self, other):
+        return self._materialize() <= other
+
+    def __gt__(self, other):
+        return self._materialize() > other
+
+    def __ge__(self, other):
+        return self._materialize() >= other
+
+    # Defining ``__eq__`` clears the default hash; restore identity hashing —
+    # the proxy is tracked by identity (e.g. ``Globals.saves`` stores ``id``s),
+    # never by value.
+    __hash__ = object.__hash__
+
     # --- no-op absorbers ---
 
     def __setitem__(self, key: Any, value: Any) -> None:
@@ -236,6 +265,19 @@ class _NotOnThisRankType:
 NOT_ON_THIS_RANK = _NotOnThisRankType()
 
 
+def _rebuild_sequence(original, items):
+    """Rebuild a list/tuple of ``items`` with ``original``'s type.
+
+    NamedTuple constructors take positional fields, not an iterable —
+    ``type(original)(items)`` raises TypeError for them, killing the whole
+    save-collection pass. Detect via ``_fields`` and splat.
+    """
+    cls = type(original)
+    if isinstance(original, tuple) and hasattr(original, "_fields"):
+        return cls(*items)
+    return cls(items)
+
+
 def strip_lazy(value):
     """Replace every :class:`LazyRemoteTensor` in ``value`` with the
     :data:`NOT_ON_THIS_RANK` sentinel, recursing into lists/tuples/dicts.
@@ -260,7 +302,7 @@ def strip_lazy(value):
             stripped.append(s)
             has_real |= r
             has_lazy |= l
-        return type(value)(stripped), has_real, has_lazy
+        return _rebuild_sequence(value, stripped), has_real, has_lazy
     if isinstance(value, dict):
         stripped, has_real, has_lazy = {}, False, False
         for k, item in value.items():
@@ -291,7 +333,7 @@ def merge_saved(a, b):
     if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
         return [merge_saved(x, y) for x, y in zip(a, b)]
     if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
-        return tuple(merge_saved(x, y) for x, y in zip(a, b))
+        return _rebuild_sequence(a, [merge_saved(x, y) for x, y in zip(a, b)])
     if isinstance(a, dict) and isinstance(b, dict):
         # Union the key sets, merging overlapping slots position-wise
         # (sentinel-aware) and taking each disjoint key from whichever rank

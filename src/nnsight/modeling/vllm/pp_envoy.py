@@ -204,6 +204,22 @@ def _pp_lazy_access(obj, key: str) -> LazyRemoteTensor:
         req_id = getattr(mediator, "pp_req_id", None)
 
         def _pull(src_rank, prov_str, _nt=num_tokens, _rid=req_id):
+            # An unresolved owner means the ownership map doesn't recognize
+            # this module's name (PPModuleMap resolves layer indices and a
+            # fixed set of first/last-stage module names). A pull directed at
+            # ``source_rank=None`` surfaces as a distributed hang or crash —
+            # raise a descriptive error instead. Build/save of the lazy stays
+            # harmless (never reaches here; the owning rank's real save wins
+            # in the merge); only a genuine consume trips this.
+            if src_rank is None:
+                raise RuntimeError(
+                    f"Cannot pull {prov_str!r} across PP stages: the owning "
+                    f"rank could not be resolved for this module path. Its "
+                    f"name is not recognized by the PP ownership map "
+                    f"(non-standard layer-container/embedding/norm naming). "
+                    f"The value exists on its owning rank — `.save()` without "
+                    f"consuming it on this rank still works."
+                )
             return listener.pull_from_remote(src_rank, prov_str, _nt, req_id=_rid)
 
         lazy._pull_fn = _pull
