@@ -18,18 +18,13 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import pickle
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-import zstandard as _zstd
 from fastapi import FastAPI, HTTPException, Request, Response
 
-# Worker-side ``GPUModelRunner.collect_nnsight`` returns
-# zstd-compressed pickle bytes; reuse a single decompressor.
-_ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
-
+from ..collect import merge_collected_saves
 from ....intervention.backends.base import Backend
 from ....schema.request import RequestModel
 
@@ -150,13 +145,11 @@ async def generate(request: Request):
             "collect_nnsight",
             args=([request_id], finished),
         )
-        saves = {}
-        for r in results:
-            if r is not None:
-                rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
-                per_req = rank_saves.get(request_id) if rank_saves else None
-                if per_req:
-                    saves.update(per_req)
+        # Merge each rank's partial saves (PP stages ship sentinels for slots
+        # they don't own — position-wise via ``merge_collected_saves``; the old
+        # flat ``dict.update`` here clobbered them), then pick this request.
+        merged = merge_collected_saves(results)
+        saves = merged.get(request_id, {})
 
         gen_output = {}
         if last_output is not None:

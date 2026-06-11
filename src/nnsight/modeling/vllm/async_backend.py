@@ -1,14 +1,9 @@
-import pickle
 import uuid
 from typing import TYPE_CHECKING, Any
 
-import zstandard as _zstd
-
-_ZSTD_DECOMPRESSOR = _zstd.ZstdDecompressor()
-
 from ...intervention.backends.base import Backend
 from ...intervention.tracing.util import wrap_exception
-from .lazy_remote_tensor import merge_saved
+from .collect import merge_collected_saves
 
 if TYPE_CHECKING:
     from .vllm import VLLM
@@ -83,23 +78,10 @@ class AsyncVLLMBackend(Backend):
                     "collect_nnsight",
                     args=([output.request_id], finished),
                 )
-                # Worker returns ``{base_id: {var_name: value}}``. Without
-                # PP only TP-rank-0 returns data; with PP > 1 every PP
-                # stage's TP-rank-0 contributes — each ships only the slots
-                # it owns (others are NOT_ON_THIS_RANK sentinels), so
-                # same-named saves are merged position-wise into one complete
-                # result (``merge_saved``).
-                merged: dict = {}
-                for r in results:
-                    if r is None:
-                        continue
-                    rank_saves = pickle.loads(_ZSTD_DECOMPRESSOR.decompress(r))
-                    for base_id, per_req in rank_saves.items():
-                        dst = merged.setdefault(base_id, {})
-                        for name, value in per_req.items():
-                            dst[name] = (
-                                merge_saved(dst[name], value) if name in dst else value
-                            )
+                # Assemble each rank's partial saves into one result (PP stages
+                # ship sentinels for slots they don't own; merged position-wise
+                # — see ``collect.merge_collected_saves``).
+                merged = merge_collected_saves(results)
                 per_req = merged.get(output.request_id)
                 if per_req:
                     # Surface server-side deferred exceptions before exposing

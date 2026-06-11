@@ -293,6 +293,44 @@ class TestPPListener:
         assert all(t >= L.TAG_RESPONSE_BASE for t in request_tags)
 
 
+class TestMergeCollectedSaves:
+    """The per-rank ``collect_nnsight`` result merge (one util, was triplicated;
+    the serve copy used a flat ``dict.update`` that clobbered PP sentinels)."""
+
+    def _pack(self, obj):
+        import pickle as _pk
+
+        import zstandard
+
+        return zstandard.ZstdCompressor(level=1).compress(_pk.dumps(obj))
+
+    def test_merges_sentinel_slots_across_ranks(self):
+        from nnsight.modeling.vllm.collect import merge_collected_saves
+
+        # Each rank owns one slot of a 2-element saved list; the other is a
+        # sentinel. A flat dict.update would drop one rank's real value.
+        a = {"req0": {"x": [torch.tensor(1.0), NOT_ON_THIS_RANK]}}
+        b = {"req0": {"x": [NOT_ON_THIS_RANK, torch.tensor(2.0)]}}
+        out = merge_collected_saves([None, self._pack(a), None, self._pack(b)])
+        assert set(out) == {"req0"}
+        merged = out["req0"]["x"]
+        assert merged[0].item() == 1.0 and merged[1].item() == 2.0
+
+    def test_disjoint_base_ids_and_names_combine(self):
+        from nnsight.modeling.vllm.collect import merge_collected_saves
+
+        a = {"r0": {"x": torch.tensor(1.0)}}
+        b = {"r1": {"y": torch.tensor(2.0)}}
+        out = merge_collected_saves([self._pack(a), self._pack(b)])
+        assert out["r0"]["x"].item() == 1.0
+        assert out["r1"]["y"].item() == 2.0
+
+    def test_all_none_returns_empty(self):
+        from nnsight.modeling.vllm.collect import merge_collected_saves
+
+        assert merge_collected_saves([None, None]) == {}
+
+
 class TestPPTimeoutConstants:
     """PP timeouts live in one place (``pp.py``); only the readiness-gate
     deadline is env-overridable (the one with a real false-trip risk — a slow
