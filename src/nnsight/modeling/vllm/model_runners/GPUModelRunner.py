@@ -942,16 +942,22 @@ class NNsightGPUModelRunner(GPUModelRunner):
         cancel) and cleaned up. With PP > 1, every PP stage contributes
         its rank's saves; the engine merges across stages.
         """
-        # Only TP-rank-0 of each PP stage returns data — TP siblings
-        # carry replicated mediator state and would duplicate. PP-non-zero
-        # ranks still contribute saves when PP > 1 (engine merges).
-        # ``rank_in_group`` is the rank WITHIN the TP group (0..TP-1);
-        # ``rank`` is the global rank (would gate everything but global 0).
-        if get_tp_group().rank_in_group != 0:
-            return None
-
         if finished_req_ids is None:
             finished_req_ids = []
+
+        # Only TP-rank-0 of each PP stage RETURNS saves — TP siblings carry
+        # replicated mediator state and would duplicate; the engine merges
+        # across PP stages from the TP-0 column. (``rank_in_group`` is the rank
+        # WITHIN the TP group, 0..TP-1.) BUT a TP-sibling rank still owns REAL
+        # mediators, one-shot/iter hooks, worker threads, and ``pp_hook_buffer``
+        # entries — finalizing only on TP-0 leaks all of those on TP!=0 (a
+        # confirmed ~1 zombie worker thread + buffer growth per request on a
+        # long-running TP>1 server). So TP!=0 ranks run their OWN teardown below
+        # and only the save SHIPPING is gated. Short-circuit only a pure
+        # streaming collect, where a TP-sibling has nothing to finalize.
+        is_tp0 = get_tp_group().rank_in_group == 0
+        if not is_tp0 and not finished_req_ids:
+            return None
 
         helper = self.nnsight_request_helper
         req_id_set = set(req_ids) | set(finished_req_ids)
@@ -978,8 +984,10 @@ class NNsightGPUModelRunner(GPUModelRunner):
             # timeout (a fixed ~5 s stall on >~10 cross-stage reads / forward).
             # The join above now succeeds promptly because no peer clears early;
             # it remains only as a safety net. Consistent across ranks: this runs
-            # under collective_rpc with identical finished_req_ids, on exactly the
-            # TP-rank-0 ranks that are this pull group's members.
+            # under collective_rpc with identical finished_req_ids. Each TP column
+            # is its own pull group (``pp_ranks_for_tp``), so every column barriers
+            # independently among its own PP stages — TP-0 and TP-sibling columns
+            # drain in parallel, no cross-column dependency.
             if self.pp_listener is not None:
                 self.pp_listener.drain_barrier()
 
@@ -1060,4 +1068,9 @@ class NNsightGPUModelRunner(GPUModelRunner):
                 mediator._deferred_is_control_flow = False
 
         torch.cuda.synchronize()
+
+        # TP-sibling ranks finalized their own mediators/hooks/buffer above but
+        # must NOT ship saves (replicated → would duplicate the TP-0 column).
+        if not is_tp0:
+            return None
         return _ZSTD_COMPRESSOR.compress(pickle.dumps(saves_by_req))
