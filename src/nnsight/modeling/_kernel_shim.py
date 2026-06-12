@@ -20,6 +20,14 @@ silently use a stub instead of the real kernel.
 
 The shim is a **no-op when the real kernel is installed** (e.g. on a GPU host),
 so it never shadows a genuine implementation.
+
+This is a deliberately narrow, local workaround — not a general compatibility
+layer. The actual defect is in the remote modeling code: optional CUDA kernels
+should be imported behind an availability guard (NVIDIA's adjacent kernel
+imports already are; ``rmsnorm_fn`` is not). The shim fakes only as much of the
+import machinery as the known offending files exercise; see the note at the end
+of :func:`meta_kernel_shim` for what would break first if a new file imports
+these packages differently.
 """
 
 from __future__ import annotations
@@ -33,20 +41,17 @@ import types
 from typing import Dict, List
 
 # top-level package -> {fully-qualified submodule it exposes: [members to stub]}.
-# Only the members that remote modeling files import *unconditionally* strictly
-# need stubbing; the rest are harmless and make the shim robust across the
-# several Mamba-family remote files that copy this import block.
+# Deliberately minimal: only the import the known remote files perform
+# *unconditionally* (Nemotron-H's ``rmsnorm_fn``). Their sibling kernel imports
+# (mamba_ssm selective_state_update / ssd_combined, causal_conv1d) are behind
+# availability guards that stay False when the package isn't truly installed,
+# so they never reach the stub. If a future remote file imports one of those
+# unconditionally — or a transformers version starts answering its availability
+# guard from find_spec alone (which the stub satisfies) — the meta load will
+# fail loudly with ImportError/ModuleNotFoundError; add that entry here then.
 _KERNEL_STUBS: Dict[str, Dict[str, List[str]]] = {
     "mamba_ssm": {
         "mamba_ssm.ops.triton.layernorm_gated": ["rmsnorm_fn"],
-        "mamba_ssm.ops.triton.selective_state_update": ["selective_state_update"],
-        "mamba_ssm.ops.triton.ssd_combined": [
-            "mamba_chunk_scan_combined",
-            "mamba_split_conv1d_scan_combined",
-        ],
-    },
-    "causal_conv1d": {
-        "causal_conv1d": ["causal_conv1d_fn", "causal_conv1d_update"],
     },
 }
 
@@ -123,13 +128,21 @@ def meta_kernel_shim(force: bool | None = None):
                 else:
                     _register_module(full, is_package=is_pkg, members=members, added=added)
 
-            # wire parent.child attributes so ``from a.b.c import x`` resolves
-            for name in list(sys.modules):
-                if name == top or name.startswith(top + "."):
-                    if "." in name:
-                        parent, child = name.rsplit(".", 1)
-                        if parent in sys.modules:
-                            setattr(sys.modules[parent], child, sys.modules[name])
+            # transformers availability guards (is_mamba_2_ssm_available etc.)
+            # see the stub via find_spec, find no pip metadata, and fall back to
+            # parsing the package's __version__ — which must therefore exist and
+            # be parseable. "0.0.0" fails every minimum-version comparison, so
+            # all guards correctly answer "not available".
+            sys.modules[top].__version__ = "0.0.0"
+
+            # NOTE: we do NOT set parent.child attributes (mamba_ssm.ops = <module>
+            # etc.), which a real import would set as the final step of loading a
+            # submodule. The known offending files only use the
+            # ``from a.b.c import x`` form, which resolves via the IMPORT_FROM
+            # sys.modules fallback even without those attributes. A remote file
+            # that instead does ``import mamba_ssm`` and later dereferences
+            # ``mamba_ssm.ops...`` would AttributeError here — if that ever
+            # appears, wire the parent attributes at this point.
         yield
     finally:
         for name in added:
