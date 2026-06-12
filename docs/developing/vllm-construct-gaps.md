@@ -17,10 +17,10 @@
 | 1 | unbounded `for step in tracer.iter[:]` | all saves lost (`UnboundLocalError`) | all saves lost (finished output has no `.saves`) | **FIXED 2026-06-11** — see the fix subsection below. Was undisclosed: `docs/models/vllm.md` documents the idiom as working; tests only covered the deprecated `with tracer.iter[...]` form, sync-only |
 | 2 | `tracer.barrier(n)` across invokes | **silent**: trace exits cleanly, saved dict EMPTY | loud (stacks with the async multi-prompt gate) | Open — `barrier-vllm-not-shared.md`; the silent sync flavor is new. Re-verified unchanged after the iteration fix |
 | 3 | `model.session()` un-saved cross-trace var | `UnboundLocalError` (misleading; on 0.19.1 a clearer `NameError` naming the un-saved upstream var) | broken for everything (no drain point) | Open — known gap, never localized; **saved-value flow WORKS on sync** |
-| 4 | `model.edit()` then trace | `PicklingError: source code unavailable` | same | Open — root cause precise; **crash is protective** |
-| 5 | `model.scan()` | `Unexpected keyword argument 'hook'` | same | Open — dies in input prep, not execution |
+| 4 | `model.edit()` then trace | `PicklingError: source code unavailable` | same | **GATED 2026-06-11** — `VLLM.edit()` raises `NotImplementedError` at creation; `VLLM.trace()` backstops on pending `_default_mediators` (covers `import_edits`). Real support remains open — see the LoRA-shaped design below |
+| 5 | `model.scan()` | `Unexpected keyword argument 'hook'` | same | **GATED 2026-06-11** — `VLLM.scan()` raises `NotImplementedError`. Real fake-mode support remains open |
 
-Remaining fix order: edit/scan gates → barrier registry and session implicit-saves (design items).
+Remaining fix order: barrier registry → session implicit-saves (design items).
 
 ---
 
@@ -303,7 +303,7 @@ hence the misleading `UnboundLocalError` naming the *downstream* variable.
 
 ---
 
-## 4. `model.edit()` — stored mediator can't serialize to the worker; crash is PROTECTIVE
+## 4. `model.edit()` — stored mediator can't serialize to the worker; crash is PROTECTIVE — GATED
 
 ### Symptom
 
@@ -363,19 +363,42 @@ if __name__ == "__main__":
    arrives there — so the edit would most likely be **silently dropped**. The PicklingError is
    currently the only thing standing between the user and a silently-unedited model.
 
-### Fix proposal
+### Gate (landed 2026-06-11)
+
+- `VLLM.edit()` raises `NotImplementedError` at creation time — the earliest, clearest point.
+- `VLLM.trace()` backstops on non-empty `self._default_mediators` — covers edits arriving
+  without `edit()` (`import_edits()` loads mediators from dill, `envoy.py:425`) and pins the
+  protective behavior: a future serialization-only "fix" would hit this gate instead of
+  silently dropping the edit. `tests/test_vllm.py::TestUnsupportedConstructs` locks both in.
+- **`inplace=True` probed (2026-06-11): fails identically** — the trace body's reference to the
+  model pickles the envoy by value in both forms (only raw `_module`s and the Interleaver are
+  persistent-id'd), dragging `_default_mediators` along. Loud in both forms; no pre-existing
+  silent hole.
+
+### Real fix (open) — LoRA-shaped design
 
 - **Do NOT fix only the serialization** (one line in `EditingBackend`) — that converts a loud
   failure into a silent one. Use the repro's effect-size check to verify whichever fix lands.
-- **Short-term gate:** raise `NotImplementedError("model.edit() is not supported on the vLLM
-  path")` at VLLM trace setup when the model has `_default_mediators`.
-- **Real fix:** attach `__source__` at edit time AND ship default mediators through
-  `_serialize_mediators` (include them in each request's `extra_args` payload with the request's
-  batch group) AND register them with the worker-side interleaver alongside input mediators.
+- An edit mediator has the same architectural shape as a vLLM LoRA adapter: a persistent,
+  request-scoped model modification. vLLM's LoRA answers the design questions: ship a
+  *reference* per request, cache heavy state worker-side, scope application to the request's
+  rows. nnsight's input mediators already ARE per-request shipped callbacks with `batch_group`
+  scoping, so batching is the solved part — what's missing is wiring:
+  1. attach `fn.__source__` in `EditingBackend` (serializability);
+  2. register the edit once worker-side keyed by a source hash (`NNsightRequestHelper` already
+     keeps cross-request state), each request's `extra_args` carrying just the edit-id list —
+     or inline per request as a v1;
+  3. instantiate a FRESH mediator per request from the cached function (mediators are
+     stateful), assign the request's `batch_group`, register BEFORE the input mediator
+     (matching HF's prepend order in `InterleavingTracer.compile`);
+  4. give the edited envoy persistent-id treatment (or canonicalize body references to the
+     root envoy + edit set) so the by-value pickle stops happening.
+- Note: edits are per-forward *callbacks*, never weight mutation — worker-side weight edits
+  would contaminate co-batched requests under continuous batching and are not on the table.
 
 ---
 
-## 5. `model.scan()` — dies in SamplingParams construction, never reaches fake mode
+## 5. `model.scan()` — dies in SamplingParams construction, never reaches fake mode — GATED
 
 ### Symptom
 
@@ -416,14 +439,19 @@ scan dies preparing the input, before `ScanningTracer.execute`'s fake mode is ev
 with `hook` stripped, the fake-mode forward would still need vLLM's forward context (attention
 metadata) — unwired.
 
-### Fix proposal
+### Gate (landed 2026-06-11)
 
-- **Short-term gate:** `NotImplementedError("scan is not supported on VLLM")` in `VLLM.trace` /
-  `Envoy.scan` for vLLM models; or minimally filter non-`SamplingParams` kwargs out of params
-  construction so the error is honest.
-- **Long-term:** implement scan locally on the meta model under `FakeTensorMode`, reusing the
-  dummy-run machinery vLLM itself uses for profiling (`set_forward_context` + dummy attention
-  metadata). Moderate effort; real value (shape validation with no GPU).
+`VLLM.scan()` raises `NotImplementedError` pointing to the working alternatives (a real
+`max_tokens=1` trace, or scanning the HuggingFace `LanguageModel` twin). Locked in by
+`tests/test_vllm.py::TestUnsupportedConstructs::test_scan_raises`. Note `VLLM.interleave`
+already carves out `ScanningTracer` (skips engine dispatch) — partial intent existed, but the
+kwarg path and the fake-mode forward context were never wired.
+
+### Real fix (open)
+
+Implement scan locally on the meta model under `FakeTensorMode`, reusing the dummy-run
+machinery vLLM itself uses for profiling (`set_forward_context` + dummy attention metadata).
+Moderate effort; real value (shape validation with no GPU).
 
 ---
 

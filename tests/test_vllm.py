@@ -215,6 +215,43 @@ class TestGeneration:
 
 
 # =============================================================================
+# Unsupported constructs (protective gates)
+# =============================================================================
+
+
+class TestUnsupportedConstructs:
+    """Constructs that must refuse loudly on the vLLM path.
+
+    edit: default mediators never reach the vLLM worker, so an edit
+    would be silently dropped — the gate keeps the failure loud. scan:
+    the fake-tensor forward has no vLLM forward context. These tests pin
+    the protective behavior so a future serialization-only "fix" can't
+    silently regress edit into a no-op.
+    """
+
+    def test_edit_raises(self, vllm_gpt2):
+        with pytest.raises(NotImplementedError, match="silently dropped"):
+            vllm_gpt2.edit()
+
+    def test_edit_inplace_raises(self, vllm_gpt2):
+        with pytest.raises(NotImplementedError, match="silently dropped"):
+            vllm_gpt2.edit(inplace=True)
+
+    def test_scan_raises(self, vllm_gpt2, ET_prompt: str):
+        with pytest.raises(NotImplementedError, match="scan"):
+            vllm_gpt2.scan(ET_prompt)
+
+    def test_trace_with_pending_edits_raises(self, vllm_gpt2, ET_prompt: str):
+        """Backstop: edits arriving without edit() (e.g. import_edits)."""
+        vllm_gpt2._default_mediators = [object()]
+        try:
+            with pytest.raises(NotImplementedError, match="pending edits"):
+                vllm_gpt2.trace(ET_prompt, max_tokens=1)
+        finally:
+            vllm_gpt2._default_mediators = []
+
+
+# =============================================================================
 # Sampling
 # =============================================================================
 

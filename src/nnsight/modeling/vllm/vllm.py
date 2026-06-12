@@ -449,7 +449,52 @@ class VLLM(RemoteableMixin):
         # Push the variables to the interleaver frame
         push_variables(self.interleaver.mediators[0].info.frame, saves)
 
+    def edit(self, *, inplace: bool = False):
+        """Not supported on the vLLM path.
+
+        Edits are stored as default mediators which are never shipped to
+        the vLLM worker (``_serialize_mediators`` only ships per-prompt
+        input mediators), so an edit would be SILENTLY dropped — traces
+        of the "edited" model would return unedited results. Until edits
+        ride along with each request (LoRA-style registration), refuse
+        loudly at creation time. Apply the intervention inside each
+        trace body instead.
+        """
+        raise NotImplementedError(
+            "model.edit() is not supported on the vLLM path: the edit would be "
+            "silently dropped (default mediators never reach the vLLM worker). "
+            "Apply the intervention inside each trace body instead."
+        )
+
+    def scan(self, *args, **kwargs):
+        """Not supported on the vLLM path.
+
+        ``scan``'s fake-tensor forward needs vLLM's forward context
+        (attention metadata via ``set_forward_context``), which is not
+        wired; today it dies even earlier, in ``NNsightSamplingParams``
+        construction, on the tracing-internal ``hook=True`` kwarg.
+        """
+        raise NotImplementedError(
+            "model.scan() is not supported on the vLLM path: the fake-tensor "
+            "forward requires vLLM's forward context, which is not wired. To "
+            "inspect shapes, run a real trace with max_tokens=1, or scan the "
+            "HuggingFace LanguageModel twin of this model."
+        )
+
     def trace(self, *inputs, **kwargs):
+        # Backstop for edits that arrive without VLLM.edit() — e.g.
+        # import_edits() or mediators attached to a copied envoy before
+        # it became this model. Without this, the trace fails later with
+        # a misleading PicklingError (or, if serialization is ever
+        # "fixed" naively, silently drops the edit).
+        if self._default_mediators:
+            raise NotImplementedError(
+                "Tracing a model with pending edits is not supported on the "
+                "vLLM path: default mediators never reach the vLLM worker, so "
+                "the edits would be silently dropped. Clear them with "
+                "clear_edits() and apply the intervention inside each trace "
+                "body instead."
+            )
         serve = kwargs.pop("serve", None)
         if serve is not None and kwargs.get("backend") is None:
             from ...intervention.backends.local_serve import LocalServeBackend
