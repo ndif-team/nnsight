@@ -1011,6 +1011,14 @@ class Mediator:
             if self.event_queue.has_value:
                 self.event_queue.get()
                 self.response_queue.put(Cancelation())
+                # Block until the worker acknowledges the Cancelation —
+                # its unwind lands in the compiled body's except branch,
+                # which pushes already-computed locals (saves) and posts
+                # an EXCEPTION event. A bare get() does NOT block (Value
+                # is a slot, not a queue), so without wait() the caller
+                # races ahead and reads the mediator's frame before the
+                # push lands (vLLM collect_saves saw empty frames).
+                self.event_queue.wait()
                 self.event_queue.get()
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
@@ -1392,6 +1400,14 @@ class Mediator:
         Args:
             exception: The exception that occurred
         """
+        # Publish already-computed locals before signaling, mirroring end()
+        # and stop(). Without this, any unwind of the intervention body —
+        # a Cancelation at request teardown (e.g. an unbounded iter loop
+        # blocked past the last generation step) or a deferred user
+        # exception — discards every save computed so far, since saves
+        # only leave the worker thread via push().
+        self.push()
+
         self.event_queue.put((Events.EXCEPTION, exception))
 
     @property

@@ -127,6 +127,65 @@ class TestGeneration:
         assert len(logits) == 10
 
     @torch.no_grad()
+    def test_bounded_for_iteration(self, vllm_gpt2, MSG_prompt: str):
+        """``for step in tracer.iter[0:3]`` (bounded for-form) saves per step."""
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3
+        ) as tracer:
+            logits = list().save()
+            for step in tracer.iter[0:3]:
+                logits.append(vllm_gpt2.logits)
+
+        assert vllm_gpt2.tokenizer.batch_decode(
+            [logit.argmax(dim=-1) for logit in logits]
+        ) == [" New", " York", " City"]
+
+    @torch.no_grad()
+    def test_unbounded_for_iteration(self, vllm_gpt2, MSG_prompt: str):
+        """``for step in tracer.iter[:]`` saves one value per generation step.
+
+        Regression test for the vLLM save-loss bug: with no stop bound the
+        loop overran the last generation step, blocked, and the Cancelation
+        unwind at request teardown discarded every save — the saved list
+        never bound client-side (UnboundLocalError).
+        """
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3
+        ) as tracer:
+            logits = list().save()
+            for step in tracer.iter[:]:
+                logits.append(vllm_gpt2.logits)
+
+        assert vllm_gpt2.tokenizer.batch_decode(
+            [logit.argmax(dim=-1) for logit in logits]
+        ) == [" New", " York", " City"]
+
+    @torch.no_grad()
+    def test_unbounded_for_iteration_stop_string(self, vllm_gpt2, MSG_prompt: str):
+        """A stop string ending generation before ``max_tokens`` keeps partial saves.
+
+        The per-request bound (``max_tokens=10``) never triggers; the loop
+        blocks on the step after the stop string fires and unwinds via
+        Cancelation — saves computed up to that point must still ship.
+        """
+        with vllm_gpt2.trace(
+            MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=10, stop=["York"]
+        ) as tracer:
+            logits = list().save()
+            for step in tracer.iter[:]:
+                logits.append(vllm_gpt2.logits)
+
+        # Greedy continuation is " New" then " York", so the stop string
+        # ends the request well before max_tokens (vLLM's incremental
+        # detokenizer may hold back finalization for a couple of extra
+        # steps, so the exact count is version-dependent). Every step
+        # that ran must have shipped its save.
+        assert 2 <= len(logits) < 10
+        assert vllm_gpt2.tokenizer.batch_decode(
+            [logit.argmax(dim=-1) for logit in logits[:2]]
+        ) == [" New", " York"]
+
+    @torch.no_grad()
     def test_generate_alias(self, vllm_gpt2, MSG_prompt: str):
         """``VLLM.generate`` is an alias for ``VLLM.trace`` (matches LanguageModel API)."""
         with vllm_gpt2.generate(
@@ -733,6 +792,37 @@ class TestAsyncEngine:
                 corrupted_saves["logits"].argmax(dim=-1)
             )
             assert corrupted_token != " Paris"
+
+        async_loop.run_until_complete(run())
+
+    def test_async_unbounded_for_iteration_saves(
+        self, vllm_gpt2_async, async_loop, MSG_prompt: str
+    ):
+        """Unbounded for-form iteration ships per-step saves on the async engine.
+
+        Regression test for the vLLM save-loss bug: the finished output
+        previously carried no ``saves`` attribute at all because the
+        Cancelation unwind discarded the worker-side frame before push.
+        """
+
+        async def run():
+            with vllm_gpt2_async.trace(
+                MSG_prompt, temperature=0.0, top_p=1.0, max_tokens=3
+            ) as tracer:
+                logits = list().save()
+                for step in tracer.iter[:]:
+                    logits.append(vllm_gpt2_async.logits)
+
+            last_output = None
+            async for output in tracer.backend:
+                last_output = output
+
+            assert last_output is not None and last_output.finished
+            assert hasattr(last_output, "saves") and "logits" in last_output.saves
+            steps = last_output.saves["logits"]
+            assert vllm_gpt2_async.tokenizer.batch_decode(
+                [l.argmax(dim=-1) for l in steps]
+            ) == [" New", " York", " City"]
 
         async_loop.run_until_complete(run())
 

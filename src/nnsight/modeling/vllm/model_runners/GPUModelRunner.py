@@ -119,6 +119,17 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 ctx = self.trace_contexts[trace_id]
 
+                # Bound unbounded iteration (`for step in tracer.iter[:]`) by
+                # this request's own token budget. Per-mediator all_stop (not
+                # the interleaver-wide default_all) because this interleaver
+                # is engine-lifetime and concurrently holds mediators from
+                # requests with different max_tokens. eos/stop-strings can
+                # still end generation earlier; that tail is covered by the
+                # push() in Mediator.exception() at cancelation.
+                max_tokens = new_req.sampling_params.max_tokens
+                if max_tokens is not None:
+                    mediator.all_stop = max_tokens
+
                 mediator.idx = len(model.interleaver.mediators)
                 model.interleaver.mediators.append(mediator)
                 mediator.start(model.interleaver)
