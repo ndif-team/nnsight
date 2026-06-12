@@ -1133,6 +1133,9 @@ class Mediator:
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
         self.worker = None
+        # Retained on-graph activations (isolated backward) pin the autograd graph;
+        # drop them at trace end rather than waiting for the mediator to be GC'd.
+        self._iso_grad_reals = {}
 
         # If the worker is still mid-protocol, unwind it with a Cancelation. For the
         # isolated channel the get_event/put_response calls are host-local — they do NOT
