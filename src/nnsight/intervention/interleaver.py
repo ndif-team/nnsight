@@ -1823,6 +1823,7 @@ class Mediator:
         self._isolated_worker = False
         self._iso_backward = False
         self._iso_grad_reals = {}
+        self._iso_caches = {}
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()
