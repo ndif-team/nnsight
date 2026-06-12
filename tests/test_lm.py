@@ -593,6 +593,83 @@ class TestInvokerBatching:
         assert torch.equal(batched[0, -8:], single[0, -8:])
 
     @torch.no_grad()
+    def test_user_position_ids_respected_in_trace(self, gpt2: nnsight.LanguageModel):
+        """An explicitly user-supplied ``position_ids`` must reach the model unchanged.
+
+        The left-pad correction only fills in *missing* position_ids; a researcher passing
+        their own (e.g. to probe position sensitivity) must see exactly those values at the
+        position-embedding lookup (``wpe`` receives the position_ids tensor as its input).
+        """
+        prompt = "Hello world"
+        n = gpt2.tokenizer(prompt, return_tensors="pt")["input_ids"].shape[1]
+        custom = torch.full((1, n), 5, dtype=torch.long)
+
+        with gpt2.trace(prompt, position_ids=custom):
+            used = gpt2.transformer.wpe.input.save()
+
+        assert torch.equal(used.cpu(), custom)
+
+    @torch.no_grad()
+    def test_user_position_ids_survive_invoker_batching(
+        self, gpt2: nnsight.LanguageModel, ET_prompt: str
+    ):
+        """Per-invoke user-supplied ``position_ids`` must survive batching with other invokes.
+
+        ``_batch`` re-pads all rows to a common width, so each invoke's position_ids must be
+        re-aligned into the combined batch (placed over the row's real tokens, like the
+        attention mask), not dropped and recomputed. An invoke that did NOT supply ids gets
+        mask-derived values. Constant fill values are used so a silent fallback to the
+        mask-derived cumsum (consecutive integers) cannot masquerade as a pass.
+        """
+        short = "Hello world"            # fewer tokens -> left-padded in the batch
+        long = ET_prompt
+        n_short = gpt2.tokenizer(short, return_tensors="pt")["input_ids"].shape[1]
+        n_long = gpt2.tokenizer(long, return_tensors="pt")["input_ids"].shape[1]
+        custom_short = torch.full((1, n_short), 7, dtype=torch.long)
+        custom_long = torch.full((1, n_long), 9, dtype=torch.long)
+
+        # both invokes supply ids: each row carries its values, right-aligned over real tokens
+        with gpt2.trace() as tracer:
+            with tracer.invoke(short, position_ids=custom_short):
+                used_short = gpt2.transformer.wpe.input.save()
+            with tracer.invoke(long, position_ids=custom_long):
+                used_long = gpt2.transformer.wpe.input.save()
+
+        pad = n_long - n_short
+        expected_short = torch.cat(
+            [torch.zeros(pad, dtype=torch.long), custom_short[0]]
+        ).unsqueeze(0)
+        assert torch.equal(used_short.cpu(), expected_short)
+        assert torch.equal(used_long.cpu(), custom_long)
+
+        # only one invoke supplies ids: the other row falls back to mask-derived positions
+        with gpt2.trace() as tracer:
+            with tracer.invoke(short, position_ids=custom_short):
+                used_short = gpt2.transformer.wpe.input.save()
+            with tracer.invoke(long):
+                used_long = gpt2.transformer.wpe.input.save()
+
+        assert torch.equal(used_short.cpu(), expected_short)
+        assert torch.equal(used_long.cpu(), torch.arange(n_long).unsqueeze(0))
+
+    @torch.no_grad()
+    def test_user_position_ids_reach_generate(self, gpt2: nnsight.LanguageModel):
+        """A user-supplied ``position_ids`` must pass through to ``generate``.
+
+        ``__nnsight_generate__`` strips the auto-injected left-pad correction (a static tensor
+        would freeze decode positions), but it must strip only the exact tensor nnsight injected —
+        identity-matched — never an explicit user value.
+        """
+        prompt = "Hello world"
+        n = gpt2.tokenizer(prompt, return_tensors="pt")["input_ids"].shape[1]
+        custom = torch.full((1, n), 5, dtype=torch.long)
+
+        with gpt2.generate(prompt, position_ids=custom, max_new_tokens=1, do_sample=False):
+            used = gpt2.transformer.wpe.input.save()
+
+        assert torch.equal(used.cpu(), custom)
+
+    @torch.no_grad()
     def test_invoker_input_ids(self, gpt2: nnsight.LanguageModel):
         """Test that input IDs are copied when batching."""
         with gpt2.trace() as tracer:

@@ -75,6 +75,11 @@ class LanguageModel(TransformersModel):
 
         self.tokenizer: PreTrainedTokenizer = tokenizer
 
+        # The exact tensor `_supply_left_pad_position_ids` last injected. `__nnsight_generate__`
+        # strips the left-pad correction by identity against this, so an explicit user-supplied
+        # `position_ids` is never silently dropped on the generate path.
+        self._injected_position_ids: Optional[torch.Tensor] = None
+
         super().__init__(*args, automodel=automodel, **kwargs)
 
         self.generator: Envoy = LanguageModel.Generator()
@@ -196,8 +201,14 @@ class LanguageModel(TransformersModel):
         # The left-padded-batch position_ids correction (`_supply_left_pad_position_ids`) is for the
         # bare-forward/trace path only. `generate` derives and advances `position_ids` itself across
         # decode steps; a static tensor passed in would freeze the padded rows' positions and corrupt
-        # their continuation, so drop it here and let `generate` handle left-padding as it already does.
-        kwargs.pop("position_ids", None)
+        # their continuation. Strip the correction — but only the exact tensor nnsight injected
+        # (matched by identity): a user-supplied `position_ids`, or a batched merge containing one,
+        # passes through to `generate` untouched.
+        if (
+            self._injected_position_ids is not None
+            and kwargs.get("position_ids", None) is self._injected_position_ids
+        ):
+            kwargs.pop("position_ids")
         output = self._model.generate(*args, streamer=streamer, **kwargs)
 
         if self.interleaver is not None:
@@ -297,7 +308,9 @@ class LanguageModel(TransformersModel):
         ``position_ids`` are a harmless no-op for them.
 
         This corrects the bare-forward (trace) path. ``generate`` manages ``position_ids`` itself
-        across decode steps, so ``__nnsight_generate__`` strips this value before calling it.
+        across decode steps, so ``__nnsight_generate__`` strips exactly the tensor injected here
+        (tracked via ``self._injected_position_ids``) before calling it; a user-supplied
+        ``position_ids`` is left alone on every path.
 
         No-op unless the tokenizer pads on the left, ``position_ids`` was not already supplied, and
         an ``attention_mask`` with actual padding is present.
@@ -312,6 +325,7 @@ class LanguageModel(TransformersModel):
         position_ids = mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(mask == 0, 0)
         kwargs["position_ids"] = position_ids
+        self._injected_position_ids = position_ids
         return kwargs
 
     def _prepare_input(
@@ -451,12 +465,51 @@ class LanguageModel(TransformersModel):
 
         batched_inputs.pop("input_ids", None)
         batched_inputs.pop("attention_mask", None)
-        # drop any stale per-invoke position_ids; recompute below from the final combined mask
-        batched_inputs.pop("position_ids", None)
 
-        kwargs = self._supply_left_pad_position_ids(
-            {**new_batched_inputs, **batched_inputs, "labels": batched_labels}
+        # Per-invoke `position_ids` tensors can't survive re-padding as-is: their width is the
+        # old batch's, not the combined one (stale they would crash on shape mismatch, or worse,
+        # silently broadcast one invoke's positions across the whole batch). Two cases:
+        #   - every `position_ids` seen so far was nnsight's own left-pad correction, or none
+        #     existed: drop and recompute from the final combined mask.
+        #   - an invoke explicitly supplied `position_ids`: re-align each source's rows into the
+        #     combined width with the same left/right-aligned placement used for the mask above,
+        #     deriving rows without explicit ids from the combined mask. The merged tensor counts
+        #     as user-supplied — it is not stripped before `generate`.
+        old_position_ids = batched_inputs.pop("position_ids", None)
+        new_position_ids = prepared_kwargs.get("position_ids", None)
+
+        purely_injected = new_position_ids is None and (
+            old_position_ids is None
+            or old_position_ids is self._injected_position_ids
         )
+
+        kwargs = {**new_batched_inputs, **batched_inputs, "labels": batched_labels}
+
+        if purely_injected:
+            kwargs = self._supply_left_pad_position_ids(kwargs)
+        else:
+            combined_position_ids = combined_mask.long().cumsum(-1) - 1
+            combined_position_ids.masked_fill_(combined_mask == 0, 0)
+
+            for row_start, position_ids in [
+                (0, old_position_ids),
+                (n_old, new_position_ids),
+            ]:
+                if position_ids is not None:
+                    position_ids = position_ids.to(combined_position_ids)
+                    if left:
+                        combined_position_ids[
+                            row_start : row_start + position_ids.shape[0],
+                            -position_ids.shape[1] :,
+                        ] = position_ids
+                    else:
+                        combined_position_ids[
+                            row_start : row_start + position_ids.shape[0],
+                            : position_ids.shape[1],
+                        ] = position_ids
+
+            kwargs["position_ids"] = combined_position_ids
+
         return tuple(), kwargs
 
     def _remoteable_model_key(self) -> str:
