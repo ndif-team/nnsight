@@ -140,6 +140,120 @@ class TestStripLazyContainers:
         assert torch.equal(merged.residual, torch.ones(2))
 
 
+class TestRankDivergenceTripwire:
+    """A real/real merge clash where the two ranks' copies genuinely DIFFER
+    must warn (``PPRankDivergenceWarning``) — the silent later-rank-wins pick
+    is how in-trace randomness produced plausible-but-wrong results. Identical
+    redundant copies (the normal case: every rank computed the value
+    deterministically from the same inputs) must merge silently.
+    """
+
+    def _no_warning(self, a, b):
+        import warnings as w
+
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            merged = merge_saved(a, b, label="slot")
+        assert not [
+            c for c in caught if issubclass(c.category, PPRankDivergenceWarning)
+        ], [str(c.message) for c in caught]
+        return merged
+
+    def test_identical_tensors_merge_silently(self):
+        t = torch.arange(6.0).reshape(2, 3)
+        merged = self._no_warning(t, t.clone())
+        assert torch.equal(merged, t)
+
+    def test_low_order_float_noise_is_tolerated(self):
+        # Redundant cross-rank execution of the same math may differ in the
+        # last bits; that is not divergence.
+        t = torch.randn(4, 8, dtype=torch.float32)
+        self._no_warning(t, t + 1e-8)
+
+    def test_sentinel_real_merge_silently(self):
+        t = torch.ones(3)
+        merged = self._no_warning(NOT_ON_THIS_RANK, t)
+        assert torch.equal(merged, t)
+
+    def test_divergent_tensors_warn_with_label(self):
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        a, b = torch.zeros(5), torch.ones(5)
+        with pytest.warns(PPRankDivergenceWarning, match="'noise'"):
+            merged = merge_saved(a, b, label="noise")
+        assert torch.equal(merged, b)  # later rank still wins (same degrade)
+
+    def test_divergent_scalars_warn(self):
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        with pytest.warns(PPRankDivergenceWarning, match="3 vs 7"):
+            assert merge_saved(3, 7, label="count") == 7
+
+    def test_nested_label_names_the_slot(self):
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        a = {"steps": [torch.zeros(2), torch.zeros(2)]}
+        b = {"steps": [torch.zeros(2), torch.ones(2)]}
+        with pytest.warns(PPRankDivergenceWarning, match=r"outs\['steps'\]\[1\]"):
+            merge_saved(a, b, label="outs")
+
+    def test_structural_mismatch_warns(self):
+        # The historical silent-clobber class: one rank ships a shorter list
+        # (e.g. its worker stalled mid cross-stage pull on the last step).
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        a = [torch.zeros(2), torch.zeros(2), torch.zeros(2)]
+        b = [torch.zeros(2), torch.zeros(2)]
+        with pytest.warns(PPRankDivergenceWarning, match="len 3 vs list of len 2"):
+            merge_saved(a, b, label="outs")
+
+    def test_shape_mismatch_warns(self):
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        with pytest.warns(PPRankDivergenceWarning, match="shape"):
+            merge_saved(torch.zeros(2, 3), torch.zeros(3, 2), label="h")
+
+    def test_exception_envelope_bypasses_tripwire(self):
+        # Both ranks defer the same user error with per-rank tracebacks
+        # (device names differ) — must union silently, not warn.
+        import pickle
+        import warnings as w
+
+        import zstandard
+
+        from nnsight.modeling.vllm.collect import merge_collected_saves
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        def pack(obj):
+            return zstandard.ZstdCompressor(level=1).compress(pickle.dumps(obj))
+
+        r0 = pack({"req": {"__nnsight_exceptions__": {"req": ("E", "tb cuda:0")}}})
+        r1 = pack({"req": {"__nnsight_exceptions__": {"req": ("E", "tb cuda:1")}}})
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            merged = merge_collected_saves([r0, r1])
+        assert not [
+            c for c in caught if issubclass(c.category, PPRankDivergenceWarning)
+        ]
+        assert merged["req"]["__nnsight_exceptions__"]["req"][1] == "tb cuda:1"
+
+
 class TestProviderModulePath:
     """``_provider_to_module_path`` must keep root wrapper-module names.
 

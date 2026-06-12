@@ -35,5 +35,15 @@ def merge_collected_saves(results) -> dict:
         for base_id, per_req in rank_saves.items():
             dst = merged.setdefault(base_id, {})
             for name, value in per_req.items():
-                dst[name] = merge_saved(dst[name], value) if name in dst else value
+                if name not in dst:
+                    dst[name] = value
+                elif name == "__nnsight_exceptions__":
+                    # The deferred-error envelope ships from EVERY rank whose
+                    # worker raised (the same user error raises on each PP
+                    # stage), with per-rank tracebacks that legitimately
+                    # differ (device names, addresses). Same later-rank-wins
+                    # union as merge_saved, minus the divergence tripwire.
+                    dst[name] = {**dst[name], **value}
+                else:
+                    dst[name] = merge_saved(dst[name], value, label=name)
     return merged

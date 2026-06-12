@@ -8,7 +8,8 @@ materialization via RPC pull from the source rank's listener.
 
 from __future__ import annotations
 
-from typing import Any, Tuple
+import warnings
+from typing import Any, Optional, Tuple
 
 import torch
 from torch.utils._pytree import tree_map
@@ -315,7 +316,91 @@ def strip_lazy(value):
     return value, True, False
 
 
-def merge_saved(a, b):
+class PPRankDivergenceWarning(RuntimeWarning):
+    """Two PP ranks produced *different* values for the same saved slot.
+
+    Each PP rank executes the intervention body independently; a saved value
+    not derived deterministically from model state — most commonly
+    ``torch.randn`` & friends called INSIDE the trace — differs per rank.
+    The merge keeps one rank's copy, which may not be the copy that was
+    actually applied to the model on the owning stage. Generate randomness
+    OUTSIDE the trace instead: pre-trace values are serialized with the
+    intervention and arrive identical on every rank.
+    """
+
+
+def _divergence_detail(a, b) -> Optional[str]:
+    """A short human-readable description of how ``a`` and ``b`` differ, or
+    ``None`` if they are equivalent (or cannot be compared).
+
+    Float tensors compare with a TIGHT tolerance (``rtol=1e-5, atol=1e-8``,
+    ``equal_nan=True``): redundant cross-rank execution of the same math from
+    the same inputs is deterministic up to low-order kernel noise, while the
+    divergence worth flagging (desynced RNG, per-rank environment values) is
+    orders of magnitude larger. Integer/bool tensors and scalars compare
+    exactly. Incomparable values are treated as equivalent — a tripwire must
+    not false-positive on exotic user types.
+    """
+    if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
+        if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
+            return f"type mismatch: {type(a).__name__} vs {type(b).__name__}"
+        if a.shape != b.shape or a.dtype != b.dtype:
+            return (
+                f"tensor mismatch: shape {tuple(a.shape)}/{a.dtype} vs "
+                f"{tuple(b.shape)}/{b.dtype}"
+            )
+        try:
+            x, y = a.detach(), b.detach()
+            if x.device != y.device:
+                x, y = x.cpu(), y.cpu()
+            if x.dtype.is_floating_point or x.dtype.is_complex:
+                if not torch.allclose(x, y, rtol=1e-5, atol=1e-8, equal_nan=True):
+                    return f"max|Δ| = {(x - y).abs().max().item():.3g}"
+            elif not torch.equal(x, y):
+                return "integer/bool tensors differ"
+        except Exception:
+            return None
+        return None
+    if isinstance(a, (list, tuple, dict)) or isinstance(b, (list, tuple, dict)):
+        # Only structurally-mismatched containers reach the leaf fallthrough
+        # (matched ones recursed above) — report the shape of the mismatch
+        # rather than deep-comparing (elements may be tensors).
+        def _desc(v):
+            return (
+                f"{type(v).__name__} of len {len(v)}"
+                if isinstance(v, (list, tuple, dict))
+                else type(v).__name__
+            )
+
+        return f"structure mismatch: {_desc(a)} vs {_desc(b)}"
+    try:
+        if bool(a == b):
+            return None
+        ra, rb = repr(a)[:80], repr(b)[:80]
+        return f"{ra} vs {rb}"
+    except Exception:
+        return None
+
+
+def _warn_divergence(label, detail):
+    warnings.warn(
+        f"PP merge: ranks returned different values for saved slot "
+        f"'{label or '<unnamed>'}' ({detail}). Each PP rank runs the "
+        f"intervention body independently; the value kept is one rank's copy "
+        f"and may not be the one applied to the model. If this comes from "
+        f"randomness inside the trace (torch.randn etc.), generate it "
+        f"OUTSIDE the trace — pre-trace values ship identically to every "
+        f"rank. See docs/models/vllm.md (pipeline-parallel semantics).",
+        PPRankDivergenceWarning,
+        stacklevel=2,
+    )
+
+
+def _extend(label, part):
+    return f"{label}{part}" if label else None
+
+
+def merge_saved(a, b, label: Optional[str] = None):
     """Position-wise merge of two same-shaped saved values from different PP
     ranks, preferring the non-:data:`NOT_ON_THIS_RANK` leaf at each slot.
 
@@ -325,15 +410,30 @@ def merge_saved(a, b):
     dropped). If both sides are real leaves (or the structures don't line
     up), ``b`` wins — preserving the previous "later-rank-wins" merge
     semantics for scalars and degrading safely on mismatch.
+
+    A real/real slot whose two copies genuinely DIFFER is the rank-divergence
+    tripwire: it emits :class:`PPRankDivergenceWarning` (with ``label``
+    naming the slot, e.g. ``"noise"`` or ``"outs[2]"``) instead of silently
+    keeping an arbitrary copy. Identical redundant copies — the normal case
+    for every value both ranks computed deterministically — merge silently.
     """
     if a is NOT_ON_THIS_RANK:
         return b
     if b is NOT_ON_THIS_RANK:
         return a
     if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
-        return [merge_saved(x, y) for x, y in zip(a, b)]
+        return [
+            merge_saved(x, y, _extend(label, f"[{i}]"))
+            for i, (x, y) in enumerate(zip(a, b))
+        ]
     if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
-        return _rebuild_sequence(a, [merge_saved(x, y) for x, y in zip(a, b)])
+        return _rebuild_sequence(
+            a,
+            [
+                merge_saved(x, y, _extend(label, f"[{i}]"))
+                for i, (x, y) in enumerate(zip(a, b))
+            ],
+        )
     if isinstance(a, dict) and isinstance(b, dict):
         # Union the key sets, merging overlapping slots position-wise
         # (sentinel-aware) and taking each disjoint key from whichever rank
@@ -355,9 +455,21 @@ def merge_saved(a, b):
         merged = {}
         for k in dict.__iter__(a):
             other = dict.__getitem__(b, k) if dict.__contains__(b, k) else NOT_ON_THIS_RANK
-            merged[k] = merge_saved(dict.__getitem__(a, k), other)
+            merged[k] = merge_saved(
+                dict.__getitem__(a, k), other, _extend(label, f"[{k!r}]")
+            )
         for k in dict.__iter__(b):
             if not dict.__contains__(a, k):
                 merged[k] = dict.__getitem__(b, k)
         return merged
+
+    # Leaf fallthrough: both sides are real. Identical redundant copies are
+    # the normal case (every rank computed the value deterministically from
+    # the same inputs); a genuine difference means the ranks diverged —
+    # in-trace randomness, a per-rank side effect, or structurally mismatched
+    # save trees (e.g. one rank's worker appended fewer iteration steps).
+    # ``b`` still wins (degrade the same way as before), but loudly.
+    detail = _divergence_detail(a, b)
+    if detail is not None:
+        _warn_divergence(label, detail)
     return b

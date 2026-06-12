@@ -406,10 +406,24 @@ both workers finish pulling.
 
 ## 6. Correctness properties
 
-- **Non-determinism is safe.** Both ranks run the same body independently; `torch.randn` etc.
-  differ per rank. Writes only take effect on the owning rank (lazy writes are no-ops);
-  saves come from the owning rank (lazy saves merge away); reads materialize from the owning
-  rank's buffer. So the surfaced result is deterministic per owner.
+- **Model-derived values are deterministic per owner.** Writes only take effect on the
+  owning rank (lazy writes are no-ops); saves of module values come from the owning rank
+  (lazy saves merge away); reads materialize from the owning rank's buffer.
+- **Pure-local values are redundant copies — verified at merge.** A value not derived
+  from module state (a constant, a counter, an in-trace `torch.randn`) is "real" on every
+  rank, and the merge keeps one copy. The two copies are normally identical: deterministic
+  Python computes the same result everywhere, and even in-trace RNG agrees in practice
+  because vLLM seeds every worker identically and the ranks draw in lockstep — though that
+  is incidental, not contractual (any asymmetric generator consumption desyncs it; the
+  user contract says hoist randomness out of the trace, where it ships identically to all
+  ranks by serialization). If the copies genuinely differ — desynced RNG, per-rank
+  environment values like `os.getpid()`, or structurally mismatched save trees — the
+  merge emits `PPRankDivergenceWarning` naming the slot instead of silently keeping an
+  arbitrary copy (`lazy_remote_tensor._divergence_detail`; float compare uses tight
+  tolerance so low-order kernel noise stays silent). User-facing semantics:
+  [docs/models/vllm.md](../models/vllm.md) § Pipeline parallelism.
+- **Side effects are per-rank by construction.** A `print` / file write / API call in the
+  body runs once per stage — inherent to redundant execution, documented in the user doc.
 - **Tuple-element reads** are correct because `__getitem__` returns a child lazy that pulls
   the (deep-cloned) parent once and indexes it — not the residual stream.
 - **Abandoned pulls don't corrupt results** — the cross-rank `merge_saved` fills each slot

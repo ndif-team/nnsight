@@ -27,7 +27,7 @@ Use `VLLM` when:
 
 Do not use `VLLM` when:
 - You only have a single prompt and don't need throughput — `LanguageModel` is simpler.
-- You need features vLLM doesn't fully support yet: gradients (no backward in workers), source tracing on fused CUDA kernels, model editing, scan mode, or pipeline parallelism (PP > 1 is not supported; see `IDEAS.md`).
+- You need features vLLM doesn't fully support yet: gradients (no backward in workers), source tracing on fused CUDA kernels, model editing, or scan mode.
 - You can't accept `enforce_eager=True` (see Limitations below). vLLM's CUDA graph optimization is incompatible with arbitrary PyTorch hooks, so NNsight forces eager mode.
 - You're doing diffusion or VLM work — vLLM in NNsight is currently text-only.
 
@@ -53,7 +53,7 @@ VLLM(
     mode="sync",                           # "sync" or "async"
     dispatch=False,                        # eager weight loading
     tensor_parallel_size=1,
-    pipeline_parallel_size=1,              # NOT SUPPORTED — must be 1
+    pipeline_parallel_size=1,              # PP supported; see "Pipeline parallelism"
     gpu_memory_utilization=0.9,
     distributed_executor_backend=None,     # "mp" (default), "ray", or an Executor class
     enforce_eager=True,                    # forced internally; required for hooks
@@ -70,7 +70,7 @@ VLLM(
 | `mode` | `"sync"` (default) creates a `vllm.LLM` and runs synchronous generation; `"async"` creates a `vllm.v1.engine.async_llm.AsyncLLM` and yields a streaming async generator from `tracer.backend()`. See `vllm.py:70` and the [Async mode](#async-mode) section below. |
 | `dispatch` | If `True`, real weights load now via vLLM's standard loader. If `False`, only the meta model is built (using vLLM's `DummyModelLoader` with `device="meta"`) — no GPU memory used until first trace. See `vllm.py:135`. |
 | `tensor_parallel_size` | Number of GPUs to shard across. Tensor parallelism is **transparent** to your intervention code thanks to `VLLMBatcher` (`batching.py:15`). |
-| `pipeline_parallel_size` | Currently must be `1`. Pipeline parallelism is on the roadmap but not yet supported (`IDEAS.md`). |
+| `pipeline_parallel_size` | Number of pipeline stages. PP is **transparent** to your intervention code — cross-stage reads, writes, and saves work with single-GPU-style traces; composes with TP and Ray. Read [Pipeline parallelism](#pipeline-parallelism) for the execution semantics (your trace body runs once per stage). |
 | `gpu_memory_utilization` | vLLM's KV-cache memory budget (default 0.9). Lower it (e.g. 0.1) for small models or shared GPUs. |
 | `distributed_executor_backend` | `None` / `"mp"` (multiprocessing, default) or `"ray"` (Ray distributed executor; required for multi-node TP). When you pass `"ray"`, NNsight automatically swaps in `NNsightRayExecutor` to work around a vLLM/Ray actor crash. See `vllm.py:179` and `executors/ray_workaround.py`. |
 | `enforce_eager` | Always set to `True` internally (`vllm.py:202`). CUDA graphs are incompatible with PyTorch hooks. |
@@ -257,7 +257,6 @@ Order of `output.request_id`s is **not** the order of your invokes — match by 
 - `remote=True` is incompatible with `mode="async"` — `VLLM.trace` skips async-backend injection if `remote` is passed (`vllm.py:449`). NDIF currently runs the sync vLLM path only.
 - The underlying generator is **single-shot**. Once iterated to completion, calling `tracer.backend()` again will not restart generation.
 - `output.saves` only contains values on the **finished** output (`output.finished == True`). Intermediate outputs have an empty / sparsely-populated saves dict.
-- Pipeline parallelism (`pipeline_parallel_size > 1`) is not supported.
 
 ### Ray distributed executor
 
@@ -404,10 +403,37 @@ entry = cache["model.model.layers.6"]
 
 A module that fires on prefill **and** each decode step yields a **list** of `Entry` objects; sum the dual streams (`e.output[0] + e.output[1]`) and concatenate across entries for every captured token. `include_inputs=`, `device=`, and `dtype=` work as in [cache](../usage/cache.md).
 
+## Pipeline parallelism
+
+`pipeline_parallel_size > 1` is supported and **transparent**: cross-stage reads, writes, and saves work with single-GPU-style trace code, across single/multi-token generation, batching, sync/async, the serve path, TP, and multi-node Ray. You never write rank-aware code:
+
+```python
+model = VLLM("meta-llama/Llama-3.1-70B", tensor_parallel_size=4, pipeline_parallel_size=2)
+
+with model.trace("Hello") as tracer:
+    h5 = model.model.layers[5].output[0]            # produced on stage 0
+    model.model.layers[60].mlp.output = h5 * 2      # consumed + written on stage 1
+    logits = model.logits.save()                    # produced on stage 1
+```
+
+How it works (full design: `docs/developing/pp-design.md`): accesses to modules on another stage return a lazy placeholder that materializes — a cross-rank pull — only when genuinely consumed; writes and saves of remote values are local no-ops because the owning stage performs the real ones.
+
+### Execution semantics — the fine print
+
+**Your trace body runs once per PP stage.** Each stage executes the same Python independently; nnsight reconciles the results (writes/saves take effect only on the stage that owns the module; saved values are merged across stages). Tensor results are deterministic, but three things follow from per-stage execution:
+
+- **Side effects run once per stage.** A `print`, a file append, an external API call inside the trace executes `pipeline_parallel_size` times, in different processes (possibly on different machines under Ray).
+- **Per-stage environment values diverge.** `os.getpid()`, `time.time()`, device queries, hostnames — each stage sees its own. If you *save* such a value, the result is one stage's copy.
+- **In-trace randomness: generate it OUTSIDE the trace.** A tensor created before `with model.trace(...)` is serialized with the intervention and arrives **identical on every stage** — this is the supported way to use noise (and what paired-comparison methods like causal-tracing corruption want anyway: the same noise across runs). `torch.randn` *inside* the trace happens to agree across stages today — vLLM seeds every worker identically and the stages draw in lockstep — but this is incidental, not contractual; any asymmetric consumption of the generator desyncs it. Treat in-trace RNG as unspecified under PP.
+
+**The divergence tripwire.** If two stages ship *different* values for the same saved variable, the merge emits a `PPRankDivergenceWarning` naming the slot (e.g. `saved slot 'noise' (max|Δ| = 1.7)`) instead of silently keeping an arbitrary copy. If you see it, the saved value is not trustworthy — hoist the offending computation out of the trace. Identical redundant copies (the normal case) merge silently; float comparison uses a tight tolerance so low-order kernel noise never warns.
+
+PP performance characteristics are in `docs/developing/pp-design.md` §7 — notably, PP=2 plain generation is *faster* than PP=1 under `enforce_eager`, and cross-stage reads cost ~3–7 ms per pulled value.
+
 ## Limitations
 
 - **`enforce_eager=True` is forced.** vLLM's CUDA graph optimization is incompatible with arbitrary PyTorch hooks. This costs you some throughput on decode-heavy workloads (see `DISCUSSION.md` for context).
-- **Pipeline parallelism (PP > 1) is not supported.** A single mediator thread can't span multiple PP stages because each stage has only its own modules. Future work — see `IDEAS.md`.
+- **PP runs your trace body once per stage.** Side effects and per-stage environment values are per-rank; in-trace RNG is unspecified (hoist it). See [Pipeline parallelism](#pipeline-parallelism).
 - **One prompt per invoke.** Unlike `LanguageModel`, you cannot pass `tracer.invoke(["a", "b"])`. Each invoke = one vLLM request. Use a loop of invokes for multiple prompts (`vllm.py:267`).
 - **No backward / gradients.** Backward tracing is not supported in vLLM workers (`IDEAS.md`).
 - **No `.scan()` or module editing yet.** These work at the tracing layer but haven't been validated on the vLLM path. See `IDEAS.md` for the parity gap table. (`tracer.cache()` **is** supported — see [Intervention recipes](#intervention-recipes).)
@@ -456,7 +482,6 @@ A module that fires on prefill **and** each decode step yields a **list** of `En
 
 The vLLM integration's `IDEAS.md` lists features explicitly **not** implemented today:
 
-- **Pipeline parallelism (PP > 1)** — needs per-stage mediator copies and rank-guarded interventions
 - **Scan mode** — works at the tracing layer, hasn't been wired to vLLM
 - **Module renaming** — config forwarding only
 - **Model editing (`model.edit()`)** — Envoy already wraps the model, but persistence isn't tested
@@ -483,7 +508,7 @@ If you need any of these, file an issue or read `IDEAS.md` for the design sketch
 - [docs/remote/](../remote/) — running traces on NDIF (an NDIF deployment may be vLLM-backed)
 - `src/nnsight/modeling/vllm/README.md` — full architectural reference (file structure, key classes, execution flow, mediator transport, batch group management, multiple interleaving phases, tensor parallelism, continuous batching, multi-token generation, async engine, Ray executor, multi-node)
 - `src/nnsight/modeling/vllm/DISCUSSION.md` — the philosophy: production-grade interpretability vs. SAE-based steering APIs
-- `src/nnsight/modeling/vllm/IDEAS.md` — feature parity gaps and future directions (PP, multi-modal, speculative decoding, online serving)
+- `src/nnsight/modeling/vllm/IDEAS.md` — feature parity gaps and future directions (multi-modal, speculative decoding, online serving)
 - `src/nnsight/modeling/vllm/vllm.py` — `VLLM` class
 - `src/nnsight/modeling/vllm/batching.py` — `VLLMBatcher` (TP gather/scatter)
 - `src/nnsight/modeling/vllm/sampling.py` — `NNsightSamplingParams`
