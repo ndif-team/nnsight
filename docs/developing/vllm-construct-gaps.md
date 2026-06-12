@@ -375,15 +375,20 @@ if __name__ == "__main__":
   persistent-id'd), dragging `_default_mediators` along. Loud in both forms; no pre-existing
   silent hole.
 
-### Real fix (open) — LoRA-shaped design
+### Real fix (open) — three channels, three different batching stories
 
-- **Do NOT fix only the serialization** (one line in `EditingBackend`) — that converts a loud
-  failure into a silent one. Use the repro's effect-size check to verify whichever fix lands.
-- An edit mediator has the same architectural shape as a vLLM LoRA adapter: a persistent,
-  request-scoped model modification. vLLM's LoRA answers the design questions: ship a
-  *reference* per request, cache heavy state worker-side, scope application to the request's
-  rows. nnsight's input mediators already ARE per-request shipped callbacks with `batch_group`
-  scoping, so batching is the solved part — what's missing is wiring:
+What "editing" means on the transformers path is not one mechanism but three, and they behave
+completely differently under vLLM's continuous batching. Any real edit support must decide
+per channel:
+
+**Channel 1 — `edit()` callback replay (the `_default_mediators` mechanism).** The edit body
+is compiled into an intervention function and replayed per trace as an extra mediator — a
+transient activation rewrite during each forward; weights and module tree untouched. This is
+the channel the batching machinery already handles: nnsight's input mediators ARE per-request
+shipped callbacks scoped by `batch_group` (`batcher.narrow`/`swap` confine reads and writes to
+the request's rows — how batched interventions work today). Supporting it is wiring, not
+research, and vLLM's LoRA shows the transport pattern (ship a per-request *reference*, cache
+heavy state worker-side):
   1. attach `fn.__source__` in `EditingBackend` (serializability);
   2. register the edit once worker-side keyed by a source hash (`NNsightRequestHelper` already
      keeps cross-request state), each request's `extra_args` carrying just the edit-id list —
@@ -393,8 +398,34 @@ if __name__ == "__main__":
      (matching HF's prepend order in `InterleavingTracer.compile`);
   4. give the edited envoy persistent-id treatment (or canonicalize body references to the
      root envoy + edit set) so the by-value pickle stops happening.
-- Note: edits are per-forward *callbacks*, never weight mutation — worker-side weight edits
-  would contaminate co-batched requests under continuous batching and are not on the table.
+  **Do NOT fix only the serialization** (one line in `EditingBackend`) — that converts a loud
+  failure into a silent one. Use the repro's effect-size check to verify whichever fix lands.
+
+**Channel 2 — module attachment (true in-place structural mutation, computationally inert).**
+`envoy.attachment = SomeModule()` routes through `Envoy.__setattr__` → `_add_envoy` →
+`setattr(self._module, name, module)` (`envoy.py:736`) — it permanently mutates the real
+`nn.Module` tree (`clear_edits()` does not undo it). This is the SAE/probe pattern, exercised
+by `tests/test_lm.py::TestEditing::test_edit_with_attachment`, and the canonical HF edit
+workflow is a HYBRID: attach in-place, then `edit()` to wire the attachment into the forward
+via a callback. Under batching this is engine-wide state but batch-SAFE, because the attached
+module never runs in the base forward — only a request's own callback invokes it. Supporting
+it on vLLM needs a one-time worker-side mutation mechanism (RPC at registration, analogous to
+loading adapter weights) — separate design work from channel 1, tractable. What attachment
+does on vLLM TODAY is untested (the client envoy wraps the meta model; the attachment may
+partially ride the by-value envoy pickle or silently not exist worker-side) — probe before
+designing.
+
+**Channel 3 — module replacement / weight mutation (true in-place, computationally active).**
+The same `__setattr__` makes `envoy.mlp = CustomMLP()` replace the child on the real model,
+and non-module writes mirror to it (`setattr(self._module, key, value)`, `envoy.py:1067`) —
+so parameter assignment is genuine weight mutation. Works on single-process HF. Under
+continuous batching this is the genuinely hard case and is OUT OF SCOPE for edit support:
+one shared weight copy means co-batched requests cannot see different weights (that requires
+LoRA-style structured deltas with custom batched kernels), and even engine-wide application
+contaminates in-flight requests mid-generation, stales KV/prefix-cache entries computed under
+the old weights, and invalidates CUDA graphs. The only sound forms are drain-and-swap weight
+reloading (vLLM's RLHF-style update path; engine-wide, between batches) or native LoRA — both
+outside the edit-tracer abstraction.
 
 ---
 
