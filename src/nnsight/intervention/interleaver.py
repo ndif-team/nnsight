@@ -891,6 +891,15 @@ class Mediator:
         self.args = list()
         self.cross_invoker = None
 
+        # Number of invokes in this mediator's trace, when known. The vLLM
+        # worker sets this per request (from the trace's expected_count) so
+        # cross_invoker can be derived from the trace shape rather than from
+        # how many mediators happen to be co-scheduled in the engine-lifetime
+        # interleaver at start() time. None on the HF path (single trace,
+        # mediators all registered before start), where the list-length
+        # heuristic below is correct.
+        self.expected_count: Optional[int] = None
+
         self.original_globals = {}
 
         # Set by ``handle_exception_event`` when the interleaver is in
@@ -953,9 +962,22 @@ class Mediator:
             k: all_globals[k] for k in co_names if k in all_globals
         }
 
-        self.cross_invoker = (
-            len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER
-        )
+        # A mediator shares state with sibling invokes when its trace has more
+        # than one invoke. Prefer the trace's own invoke count (expected_count,
+        # set per request on the vLLM worker) over the count of currently
+        # registered mediators: the vLLM interleaver is engine-lifetime and
+        # concurrently holds mediators from unrelated requests, so the list
+        # length is scheduling-dependent — spuriously >1 for an independent
+        # request on a busy engine, and 1 for a multi-invoke trace's first
+        # mediator that starts before its siblings register. Fall back to the
+        # list-length heuristic on the HF path, where expected_count is unset
+        # and all of a trace's mediators are registered before any start().
+        if self.expected_count is not None:
+            multi_invoke = self.expected_count > 1
+        else:
+            multi_invoke = len(self.interleaver.mediators) > 1
+
+        self.cross_invoker = multi_invoke and CONFIG.APP.CROSS_INVOKER
 
         # Capture the current CUDA stream so the worker thread uses it.
         # Worker threads default to the NULL stream (stream 0), but

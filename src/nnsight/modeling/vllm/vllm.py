@@ -33,7 +33,6 @@ from .engines.engine import NNsightLLMEngine
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
 
-CONFIG.APP.CROSS_INVOKER = False
 if TYPE_CHECKING:
     from torch.nn import Module
 

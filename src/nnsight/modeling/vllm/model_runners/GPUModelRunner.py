@@ -14,6 +14,7 @@ from vllm.distributed.parallel_state import get_tp_group
 
 from ....intervention.serialization import load
 from ....intervention.tracing.globals import Globals
+from ....intervention.tracing.tracer import Barrier
 from ..batching import VLLMBatcher
 
 if TYPE_CHECKING:
@@ -91,33 +92,69 @@ class NNsightGPUModelRunner(GPUModelRunner):
 
                 saved_names = extra_args.get("nnsight_saved_names", [])
 
-                # First mediator for this trace: create context and register
-                # its __globals__ as canonical for shared variable grafting.
+                # Create the trace context on first arrival. canonical_saves /
+                # canonical_barriers map each shared name to the one Python
+                # object the whole trace must agree on; the first mediator that
+                # REFERENCES a name owns it. We cannot assume the first-arriving
+                # mediator carries every shared name — an invoke that never
+                # touches a saved var (e.g. the producer side of a barrier,
+                # which hands an activation to a later invoke without saving it)
+                # won't have that var in its compiled __globals__ at all, so its
+                # id would never get registered if we only looked at the first.
                 if trace_id not in self.trace_contexts:
-                    canonical_globals = mediator.intervention.__globals__
-
-                    for name in saved_names:
-                        if name in canonical_globals:
-                            Globals.saves.add(id(canonical_globals[name]))
-
                     self.trace_contexts[trace_id] = {
                         "saved_names": saved_names,
-                        "canonical_globals": canonical_globals,
+                        "canonical_saves": {},
+                        "canonical_barriers": {},
+                        # The first mediator's frame is the canonical mailbox;
+                        # subsequent mediators share it so unsaved cross-invoke
+                        # locals (e.g. the activation a barrier pattern hands
+                        # from one invoke to the next) flow through push/pull,
+                        # matching the single shared frame on the HF path.
+                        "canonical_frame": mediator.info.frame,
                         "expected_count": extra_args.get("nnsight_expected_count", 1),
                         "received_count": 0,
                         "pending_req_ids": set(),
                     }
-                else:
-                    # Subsequent mediator: graft saved vars from canonical
-                    # globals so all mediators share the same Python objects.
-                    ctx = self.trace_contexts[trace_id]
-                    canonical = ctx["canonical_globals"]
-                    med_globals = mediator.intervention.__globals__
-                    for name in saved_names:
-                        if name in canonical:
-                            med_globals[name] = canonical[name]
 
                 ctx = self.trace_contexts[trace_id]
+                med_globals = mediator.intervention.__globals__
+
+                # Graft shared objects so every invoke sees one identity.
+                # Saved values: the first mediator carrying a name registers it
+                # in Globals.saves and becomes canonical; later mediators are
+                # re-pointed at that object (and a later mediator carrying a name
+                # the earlier ones lacked adopts it then).
+                canonical_saves = ctx["canonical_saves"]
+                for name in saved_names:
+                    if name not in med_globals:
+                        continue
+                    if name in canonical_saves:
+                        med_globals[name] = canonical_saves[name]
+                    else:
+                        canonical_saves[name] = med_globals[name]
+                        Globals.saves.add(id(med_globals[name]))
+
+                # Barriers are not saved values, so they aren't in saved_names,
+                # but their identity must be shared too: pickling gave each
+                # invoke a private Barrier copy, so the participant count never
+                # reached n and post-barrier code was silently dropped. Sharing
+                # one Barrier lets the count converge and the existing
+                # engine-agnostic release walk fire.
+                canonical_barriers = ctx["canonical_barriers"]
+                for name, val in list(med_globals.items()):
+                    if isinstance(val, Barrier):
+                        if name in canonical_barriers:
+                            med_globals[name] = canonical_barriers[name]
+                        else:
+                            canonical_barriers[name] = val
+
+                # Share the canonical frame (no-op for the first mediator).
+                mediator.info.frame = ctx["canonical_frame"]
+
+                # Let cross_invoker be derived from the trace's invoke count
+                # rather than the engine-lifetime mediator-list length.
+                mediator.expected_count = ctx["expected_count"]
 
                 # Bound unbounded iteration (`for step in tracer.iter[:]`) by
                 # this request's own token budget. Per-mediator all_stop (not
@@ -310,14 +347,11 @@ class NNsightGPUModelRunner(GPUModelRunner):
                             and ctx["received_count"] == ctx["expected_count"]
                         )
                         if trace_fully_done:
-                            canonical = ctx["canonical_globals"]
                             per_req = saves_by_req.setdefault(owning_base, {})
-                            for name in ctx["saved_names"]:
-                                if name in canonical:
-                                    value = canonical[name]
-                                    if id(value) in Globals.saves:
-                                        per_req[name] = value
-                                        removals.append(id(value))
+                            for name, value in ctx["canonical_saves"].items():
+                                if id(value) in Globals.saves:
+                                    per_req[name] = value
+                                    removals.append(id(value))
                         break
 
             return saves_by_req, removals

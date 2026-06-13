@@ -692,6 +692,61 @@ class TestCrossInvokeSharedState:
 
 
 # =============================================================================
+# Barrier (cross-invoke synchronization + value transfer)
+# =============================================================================
+
+
+class TestBarrier:
+    """``tracer.barrier(n)`` synchronizes invokes so one can hand an
+    (unsaved) activation to another within the same forward.
+
+    Regression test for the silent vLLM drop: each invoke deserialized a
+    private Barrier copy, so the participant count never reached n,
+    post-barrier code never ran, and the saved dict came back empty with
+    no error. The fix grafts one shared Barrier across the trace's
+    mediators, shares their frame so the unsaved hidden state transfers
+    via push/pull, and derives cross_invoker from the trace's invoke
+    count.
+    """
+
+    @torch.no_grad()
+    def test_barrier_cross_invoke_patch(self, vllm_gpt2, ET_prompt: str):
+        clean_prompt = ET_prompt
+        corrupt_prompt = "The Colosseum is in"
+        layer = 5
+
+        # Baseline: corrupt prompt with no patching.
+        with vllm_gpt2.trace(corrupt_prompt, temperature=0.0, top_p=1, max_tokens=1):
+            baseline = vllm_gpt2.logits.save()
+
+        # Patch the corrupt run's last-token hidden state at `layer` with the
+        # clean run's, handed across the barrier as an UNSAVED local.
+        with vllm_gpt2.trace(temperature=0.0, top_p=1, max_tokens=1) as tracer:
+            res = dict().save()
+            barrier = tracer.barrier(2)
+            with tracer.invoke(clean_prompt):
+                out = vllm_gpt2.transformer.h[layer].output
+                clean_hs = (out[0] if isinstance(out, tuple) else out)[-1:, :]
+                barrier()
+            with tracer.invoke(corrupt_prompt):
+                barrier()
+                out = vllm_gpt2.transformer.h[layer].output
+                hs = (out[0] if isinstance(out, tuple) else out).clone()
+                hs[-1:, :] = clean_hs
+                vllm_gpt2.transformer.h[layer].output = (
+                    (hs, *out[1:]) if isinstance(out, tuple) else hs
+                )
+                res["patched"] = vllm_gpt2.logits
+
+        # Post-barrier code ran and its save survived (not the silent drop).
+        assert "patched" in res
+        assert res["patched"].shape[-1] == 50257
+        # The cross-invoke activation was actually applied: patching layer 5's
+        # last-token hidden with a different prompt's must move the logits.
+        assert not torch.allclose(res["patched"].float(), baseline.float())
+
+
+# =============================================================================
 # Async Engine
 # =============================================================================
 

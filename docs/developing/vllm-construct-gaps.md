@@ -15,12 +15,12 @@
 | # | construct | sync engine | async engine | status |
 |---|---|---|---|---|
 | 1 | unbounded `for step in tracer.iter[:]` | all saves lost (`UnboundLocalError`) | all saves lost (finished output has no `.saves`) | **FIXED 2026-06-11** — see the fix subsection below. Was undisclosed: `docs/models/vllm.md` documents the idiom as working; tests only covered the deprecated `with tracer.iter[...]` form, sync-only |
-| 2 | `tracer.barrier(n)` across invokes | **silent**: trace exits cleanly, saved dict EMPTY | loud (stacks with the async multi-prompt gate) | Open — `barrier-vllm-not-shared.md`; the silent sync flavor is new. Re-verified unchanged after the iteration fix |
+| 2 | `tracer.barrier(n)` across invokes | ~~**silent**: trace exits cleanly, saved dict EMPTY~~ | loud (stacks with the async multi-prompt gate) | **FIXED 2026-06-12 (sync)** — see the fix subsection below. Async barrier still open (stacks with the async multi-prompt submission gate) |
 | 3 | `model.session()` un-saved cross-trace var | `UnboundLocalError` (misleading; on 0.19.1 a clearer `NameError` naming the un-saved upstream var) | broken for everything (no drain point) | Open — known gap, never localized; **saved-value flow WORKS on sync** |
 | 4 | `model.edit()` then trace | `PicklingError: source code unavailable` | same | **GATED 2026-06-11** — `VLLM.edit()` raises `NotImplementedError` at creation; `VLLM.trace()` backstops on pending `_default_mediators` (covers `import_edits`). Real support remains open — see the LoRA-shaped design below |
 | 5 | `model.scan()` | `Unexpected keyword argument 'hook'` | same | **GATED 2026-06-11** — `VLLM.scan()` raises `NotImplementedError`. Real fake-mode support remains open |
 
-Remaining fix order: barrier registry → session implicit-saves (design items).
+Remaining: async barrier, session implicit-saves (design items).
 
 ---
 
@@ -165,7 +165,7 @@ deadlock from the cancel synchronization).
 
 ---
 
-## 2. `tracer.barrier(n)` — sync engine drops post-barrier saves SILENTLY
+## 2. `tracer.barrier(n)` — sync engine drops post-barrier saves SILENTLY — FIXED (sync)
 
 ### Symptom
 
@@ -218,14 +218,63 @@ if __name__ == "__main__":
     main()
 ```
 
-### Root cause / fix
+### Root cause
 
-As documented in `barrier-vllm-not-shared.md`: the Barrier object is serialized per invoke, so
-each mediator holds a private copy with its own participants set; the count never reaches n and
-post-barrier code never runs. Preferred fix from that doc stands: an **interleaver-owned barrier
-registry keyed by a serialization-stable id** (alternative: graft the Barrier into canonical
-globals). The `finally`-push from gap 1 would additionally convert "saved dict silently empty"
-into "partial saves survive", but the registry is the real fix.
+The original diagnosis (`barrier-vllm-not-shared.md`) was correct but incomplete: the silent
+empty dict had FOUR stacked causes, uncovered by instrumenting the worker step by step. Each had
+to be fixed; fixing only the first three still produced an empty dict with no error.
+
+1. **Private Barrier copies.** Each invoke's mediator is pickled separately, so each gets its own
+   `Barrier` with its own participants set. The count never reaches n; the release walk
+   (`handle_barrier_event`, engine-agnostic, already correct) never fires.
+2. **No unsaved-local transport.** The barrier pattern hands an *unsaved* activation from the
+   producer invoke to the consumer (`clean_hs` here; `embeddings` in the docstring example). On HF
+   this rides a single shared frame via `push`/`pull`; on the worker each mediator had its own
+   pickled `SerializedFrame`, so the value never crossed.
+3. **`cross_invoker` globally disabled on vLLM.** `vllm.py` set `CONFIG.APP.CROSS_INVOKER = False`
+   at import — correct when frames weren't shared (push/pull to a private frame is useless
+   overhead), but it also meant the synchronized push/pull never ran even once frames *were*
+   shared. And the underlying `cross_invoker = len(interleaver.mediators) > 1` heuristic is wrong
+   on vLLM regardless: the engine-lifetime interleaver concurrently holds mediators from unrelated
+   requests, so the count is scheduling-dependent (spuriously >1 for an independent request on a
+   busy engine; 1 for a multi-invoke trace's first mediator that starts before its siblings).
+4. **Save-id registration only looked at the first mediator (pre-existing, latent).**
+   `process_new_reqs` registered `id(saved_value)` in `Globals.saves` only for names present in
+   the *first-arriving* mediator's `__globals__`. The barrier producer invoke never references the
+   result dict (`res`), so if it arrived first, `res`'s id was never registered and the trace's
+   shared save was never collected — empty dict even after 1–3 were fixed. The control trace
+   worked only because *both* its invokes touched `res`.
+
+### Fix (landed 2026-06-12, verified on vllm 0.19.1)
+
+All in `process_new_reqs` (`GPUModelRunner.py`) except the `cross_invoker` derivation and the
+config default:
+
+- **Graft one shared Barrier** across a trace's mediators (re-point later mediators'
+  pickled-copy Barrier at the first one), so the participant count converges.
+- **Share the canonical frame** (later mediators' `info.frame` ← the first mediator's), so unsaved
+  cross-invoke locals transport through the existing `push`/`pull` at barrier `send`/release time.
+- **Derive `cross_invoker` from the trace's invoke count** (`Mediator.expected_count`, set per
+  request from the trace's `expected_count`) instead of the co-scheduled mediator-list length, and
+  **remove the blunt `CONFIG.APP.CROSS_INVOKER = False`** so the per-mediator gate can take effect.
+  Single-invoke vLLM traces stay `cross_invoker=False`; only genuine multi-invoke traces pay the
+  push/pull cost.
+- **Track a per-saved-name canonical object across all of a trace's mediators**, not just the
+  first: the first mediator that *references* a given saved name registers it in `Globals.saves`
+  and owns it; later mediators graft to it (and a later mediator carrying a name the earlier ones
+  lacked adopts it then). Trace-shared collection reads this map.
+
+Verified: `barrier_repro.py` flips to `keys=['patched']`; the patched cross-invoke logits differ
+from an unpatched baseline (the value genuinely flowed and applied);
+`tests/test_vllm.py::TestBarrier` plus the cross-invoke and batching suites pass; the full vLLM
+suite is 36 passed / 8 skipped with no regressions. (`test_batched_multi_token_with_iter` is a
+pre-existing cold-engine isolation flake — `len 5 vs 6` for a batched with-form `iter[1:7]` — that
+fails identically with and without this change when run alone and passes in the full suite; not
+related.)
+
+### Out of scope
+
+Async barrier still stacks with the async multi-prompt submission gate — a separate, larger fix.
 
 ---
 
