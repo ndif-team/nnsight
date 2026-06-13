@@ -58,7 +58,7 @@ def _per_step(model, iso):
     step's sum-of-logits loss."""
 
     def body():
-        ctx = isolate_mediators(timeout=60) if iso else _null()
+        ctx = isolate_mediators(fast_lane=False, timeout=60) if iso else _null()
         with ctx:
             with model.generate(PROMPT, max_new_tokens=N) as t:
                 grads = []
@@ -78,7 +78,7 @@ def _post_loop(model, iso):
     from the step-1 activation itself; .grad read in the backward block."""
 
     def body():
-        ctx = isolate_mediators(timeout=60) if iso else _null()
+        ctx = isolate_mediators(fast_lane=False, timeout=60) if iso else _null()
         with ctx:
             with model.generate(PROMPT, max_new_tokens=N) as t:
                 hs = []

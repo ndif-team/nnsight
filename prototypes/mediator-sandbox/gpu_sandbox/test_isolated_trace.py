@@ -26,7 +26,7 @@ PROMPT = "The Eiffel Tower is in the city of"
 def test_read(model):
     with model.trace(PROMPT):
         ref = model.transformer.h[6].output[0].save()
-    with isolate_mediators():
+    with isolate_mediators(fast_lane=False):
         with model.trace(PROMPT):
             got = model.transformer.h[6].output[0].save()
     d = (ref.float() - got.float()).abs().max().item()
@@ -44,7 +44,7 @@ def test_swap(model):
     with model.trace(PROMPT):
         model.transformer.h[6].output = model.transformer.h[6].output * 2
         ref = model.transformer.h[7].output[0].save()
-    with isolate_mediators():
+    with isolate_mediators(fast_lane=False):
         with model.trace(PROMPT):
             model.transformer.h[6].output = model.transformer.h[6].output * 2
             got = model.transformer.h[7].output[0].save()

@@ -47,7 +47,7 @@ def test_nonstandard_names():
 
     with model.trace(x):
         ref = model.decoder_blocks[1].output.save()
-    with isolate_mediators():
+    with isolate_mediators(fast_lane=False):
         with model.trace(x):
             got = model.decoder_blocks[1].output.save()
     ok = torch.equal(ref, got)
@@ -62,7 +62,7 @@ def test_multi_invoke(model):
             a_ref = model.transformer.h[5].output[0].save()
         with t.invoke("The Eiffel Tower is in"):
             b_ref = model.transformer.h[5].output[0].save()
-    with isolate_mediators():
+    with isolate_mediators(fast_lane=False):
         with model.trace() as t:
             with t.invoke("The capital of France is"):
                 a_got = model.transformer.h[5].output[0].save()
@@ -78,7 +78,7 @@ def test_exception(model):
     # A footgun (ValueError) in user code must surface in the user's context.
     raised = None
     try:
-        with isolate_mediators():
+        with isolate_mediators(fast_lane=False):
             with model.trace(PROMPT):
                 _ = model.transformer.h[6].output[0]
                 raise ValueError("boom-from-user-code")
@@ -94,7 +94,7 @@ def test_timeout(model):
     t0 = time.time()
     killed = None
     try:
-        with isolate_mediators(timeout=5):
+        with isolate_mediators(fast_lane=False, timeout=5):
             with model.trace(PROMPT):
                 out = model.transformer.h[6].output[0]
                 while True:  # footgun: hang

@@ -27,7 +27,7 @@ RENAME = {"transformer.h": "decoder_blocks", "lm_head": "output_projection"}
 def test_read(model):
     with model.trace(PROMPT):
         ref = model.decoder_blocks[6].output[0].save()
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         with model.trace(PROMPT):
             got = model.decoder_blocks[6].output[0].save()
     ok = torch.equal(ref, got)
@@ -39,7 +39,7 @@ def test_iterN(model):
     with model.generate(PROMPT, max_new_tokens=3) as t:
         for step in t.iter[1]:
             ref = model.decoder_blocks[6].output[0].save()
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         with model.generate(PROMPT, max_new_tokens=3) as t:
             for step in t.iter[1]:
                 got = model.decoder_blocks[6].output[0].save()

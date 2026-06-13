@@ -29,7 +29,7 @@ def main():
     mpc.SpawnProcess.start = timed_start
 
     def one_iso():
-        with isolate_mediators():
+        with isolate_mediators(fast_lane=False):
             with model.trace(PROMPT):
                 _ = model.transformer.h[6].output[0].save()
 

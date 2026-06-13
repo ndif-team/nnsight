@@ -29,6 +29,7 @@ class AppConfigModel(BaseModel):
     CACHE_DIR: str = "~/.cache/nnsight/"
     CROSS_INVOKER: bool = True
     TRACE_CACHING: bool = False
+    FAST_LANE: bool = True
 
     def __setattr__(self, name, value):
         if name == "TRACE_CACHING" and value is True:

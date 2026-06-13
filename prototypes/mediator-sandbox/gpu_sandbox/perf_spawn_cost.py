@@ -165,7 +165,7 @@ def measure_real(n, device):
         spawn_times.append((time.perf_counter() - t0) * 1e3)
 
     def one_isolated():
-        with isolate_mediators():
+        with isolate_mediators(fast_lane=False):
             with model.trace(PROMPT):
                 _ = model.transformer.h[6].output[0].save()
 

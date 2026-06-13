@@ -38,7 +38,7 @@ def _read_backward(model):
 
 def test_read_backward(model):
     ref = _read_backward(model)
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         got = _read_backward(model)
 
     ok = (
@@ -71,7 +71,7 @@ def test_read_backward_nonstd():
         return g
 
     ref = body()
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         got = body()
     ok = torch.is_tensor(ref) and torch.is_tensor(got) and torch.equal(ref, got)
     delta = (ref - got).abs().max().item() if ok or (torch.is_tensor(ref) and torch.is_tensor(got)) else float("nan")
@@ -115,7 +115,7 @@ def main():
 
 
 def _derived_isolated(model):
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         return test_derived_target_fails_clean(model)
 
 

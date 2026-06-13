@@ -46,7 +46,7 @@ def test_xinvoke(model):
 
     rs, rv = _run(body)
     def iso():
-        with isolate_mediators(timeout=20):
+        with isolate_mediators(fast_lane=False, timeout=20):
             return body()
     gs, gv = _run(iso)
     ok = rs == "ok" and gs == "ok" and torch.equal(rv[0], gv[0]) and torch.equal(rv[1], gv[1])
@@ -69,7 +69,7 @@ def test_barrier_only(model):
 
     rs, rv = _run(body)
     def iso():
-        with isolate_mediators(timeout=20):
+        with isolate_mediators(fast_lane=False, timeout=20):
             return body()
     gs, gv = _run(iso)
     ok = (

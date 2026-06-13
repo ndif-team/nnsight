@@ -29,7 +29,7 @@ def test_one(model):
     h6 = model.transformer.h[6]
     with model.trace(PROMPT) as t:
         ref = t.cache(modules=[h6]).save()
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         with model.trace(PROMPT) as t:
             got = t.cache(modules=[h6]).save()
     key = h6.path  # derive the key from the envoy path, don't hardcode the prefix
@@ -45,7 +45,7 @@ def test_multi(model):
     mods = [model.transformer.h[2], model.transformer.h[5], model.transformer.h[9]]
     with model.trace(PROMPT) as t:
         ref = t.cache(modules=mods).save()
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         with model.trace(PROMPT) as t:
             got = t.cache(modules=mods).save()
     paths = [m.path for m in mods]
@@ -61,7 +61,7 @@ def test_inputs(model):
     h4 = model.transformer.h[4]
     with model.trace(PROMPT) as t:
         ref = t.cache(modules=[h4], include_inputs=True).save()
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         with model.trace(PROMPT) as t:
             got = t.cache(modules=[h4], include_inputs=True).save()
     key = h4.path

@@ -29,7 +29,7 @@ def test_steps(model):
         with model.generate(PROMPT, max_new_tokens=N) as t:
             for step in t.iter[step_n]:
                 ref = model.transformer.h[6].output[0].save()
-        with isolate_mediators(timeout=30):
+        with isolate_mediators(fast_lane=False, timeout=30):
             with model.generate(PROMPT, max_new_tokens=N) as t:
                 for step in t.iter[step_n]:
                     got = model.transformer.h[6].output[0].save()
@@ -47,7 +47,7 @@ def test_swap(model):
         for step in t.iter[1]:
             model.transformer.h[6].output = model.transformer.h[6].output * 2
             ref = model.transformer.h[7].output[0].save()
-    with isolate_mediators(timeout=30):
+    with isolate_mediators(fast_lane=False, timeout=30):
         with model.generate(PROMPT, max_new_tokens=N) as t:
             for step in t.iter[1]:
                 model.transformer.h[6].output = model.transformer.h[6].output * 2
@@ -59,7 +59,7 @@ def test_swap(model):
 
 def test_allsaved(model):
     def run(iso):
-        ctx = isolate_mediators(timeout=30) if iso else _null()
+        ctx = isolate_mediators(fast_lane=False, timeout=30) if iso else _null()
         with ctx:
             with model.generate(PROMPT, max_new_tokens=N) as t:
                 hs = []

@@ -96,6 +96,12 @@ class IsoOptions:
     gpu_mem_fraction: float = 0.3
     lockdown: bool = False   # functional-first; seccomp lockdown enabled separately
     timeout: float = 60.0    # per-step wall-clock cap on user code (hang containment)
+    # Fast lane: confirmed-safe interventions run IN-PROCESS (full model access, no
+    # worker, no per-hook channel) instead of in the GPU worker. Without it, isolation
+    # cannot run the weight-reading interp majority at all (the worker is weightless).
+    fast_lane: bool = True
+    trust: str = "local"     # only "local" provenance is fast-lane-eligible
+    fast_lane_timeout: float = 120.0  # whole-intervention watchdog bound for the fast lane
 
     @property
     def pool_key(self) -> tuple:
@@ -133,6 +139,9 @@ def isolate_mediators(
     timeout: float = 60.0,
     lockdown: bool = False,
     pool_size: int = 0,
+    fast_lane: bool = True,
+    trust: str = "local",
+    fast_lane_timeout: float = 120.0,
 ):
     """Run interventions inside ``with model.trace(...)`` in an isolated GPU worker.
 
@@ -151,6 +160,19 @@ def isolate_mediators(
             Under ``lockdown=True`` a pooled worker locks its import set at warm time, so
             a job whose user code triggers a NEW import fails (consistently across the
             pool) — stricter than the cold path, which deserializes before lockdown.
+        fast_lane: if True (default), a per-mediator static classifier
+            (:mod:`nnsight.intervention.fastlane`) confirms interventions that use only
+            whitelisted ops / host-model access / nnsight primitives and runs THOSE
+            in-process (full model + weights, no worker, no per-hook channel), isolating
+            only the unconfirmable remainder. This is what lets isolation run the
+            weight-reading interp majority at all — the worker holds weightless dummy
+            modules. The override only ever moves a mediator from isolate to in-process;
+            set ``fast_lane=False`` to force pure isolation.
+        trust: only ``"local"`` provenance is fast-lane-eligible; the static gate is a
+            footgun selector, not a malice boundary, so any other value disables the fast
+            lane wholesale (everything isolates).
+        fast_lane_timeout: whole-intervention wall-clock bound for a fast-laned thread
+            (a best-effort watchdog restoring loop-containment in-process).
     """
     prev = dict(_STATE)
     _STATE.update(
@@ -162,12 +184,51 @@ def isolate_mediators(
             gpu_mem_fraction=gpu_mem_fraction,
             lockdown=lockdown,
             timeout=timeout,
+            fast_lane=fast_lane,
+            trust=trust,
+            fast_lane_timeout=fast_lane_timeout,
         ),
     )
     try:
         yield
     finally:
         _STATE.update(prev)
+
+
+def fast_lane_enabled() -> bool:
+    """True if confirmed-safe mediators should run in-process. Gated on the context
+    option, the ``trust="local"`` provenance cordon, and the global config flag (a server
+    can force pure isolation without code changes)."""
+    opts = _STATE["opts"]
+    if not opts.fast_lane or opts.trust != "local":
+        return False
+    try:
+        from .. import CONFIG
+
+        return bool(getattr(CONFIG.APP, "FAST_LANE", True))
+    except Exception:  # noqa: BLE001 — config unavailable => default-on
+        return True
+
+
+def classify_for_fast_lane(mediator):
+    """Run the static classifier on ``mediator`` (host-side, before any serialization).
+    Returns a :class:`fastlane.Verdict`. Cached on the intervention code object so a
+    re-run of the same trace pays the walk once."""
+    from . import fastlane
+
+    code = getattr(mediator.intervention, "__code__", None)
+    cache = _FASTLANE_VERDICT_CACHE
+    if code is not None and code in cache:
+        return cache[code]
+    verdict = fastlane.classify(mediator)
+    if code is not None:
+        cache[code] = verdict
+    return verdict
+
+
+# Verdict cache keyed by the intervention code object identity (per-trace-shape, stable
+# across re-runs of the same trace); bounded implicitly by the number of distinct traces.
+_FASTLANE_VERDICT_CACHE: Dict[Any, Any] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -432,11 +493,22 @@ def _build_job(mediator) -> tuple:
         "cross_invoker": bool(mediator.cross_invoker),
         # `with tensor.backward()` detection — the single decision point for BOTH
         # sides: the host gates real-activation retention, the worker gates
-        # delivered-clone tagging. (The substring can false-positive, e.g. in a
-        # comment, which only costs needless tagging; tighten it here when needed.)
-        "backward_active": ".backward(" in mediator.intervention.__source__,
+        # delivered-clone tagging. Prefer the fast-lane classifier's closure-aware flag
+        # (it resolves through build()/capture() closures the substring is blind to);
+        # fall back to the source substring when the classifier did not run.
+        "backward_active": _backward_active(mediator),
     }
     return payload, extras, worker_opts
+
+
+def _backward_active(mediator) -> bool:
+    """Closure-aware `with tensor.backward()` detection for the isolated job, preferring
+    the fast-lane classifier's verdict (which walks through user closures) over the
+    source substring (blind to a backward hidden in a build()/capture() closure)."""
+    verdict = getattr(mediator, "_fastlane_verdict", None)
+    if verdict is not None:
+        return verdict.differentiate
+    return ".backward(" in mediator.intervention.__source__
 
 
 def _wire_host_channel(mediator, iso: _PooledWorker, worker_opts: dict) -> None:

@@ -45,7 +45,7 @@ def test_reuse(model):
 
     # Cold one-shot trace (no pool): pays the full ~4 s spawn.
     t0 = time.perf_counter()
-    with isolate_mediators(pool_size=0):
+    with isolate_mediators(fast_lane=False, pool_size=0):
         with model.trace(PROMPT):
             cold = model.transformer.h[6].output[0].save()
     cold_s = time.perf_counter() - t0
@@ -56,7 +56,7 @@ def test_reuse(model):
     got = None
     for _ in range(4):
         t0 = time.perf_counter()
-        with isolate_mediators(pool_size=2):
+        with isolate_mediators(fast_lane=False, pool_size=2):
             with model.trace(PROMPT):
                 got = model.transformer.h[6].output[0].save()
             # the worker that just served this trace
@@ -85,7 +85,7 @@ def test_concurrent(model):
     warm_worker_pool(3, device="cuda")
     pids_during = []
     got = []
-    with isolate_mediators(pool_size=3):
+    with isolate_mediators(fast_lane=False, pool_size=3):
         with model.trace() as tracer:
             for _ in range(3):
                 with tracer.invoke(PROMPT):
@@ -107,7 +107,7 @@ def test_retire(model):
     # A hung intervention: exceed the 2 s timeout -> the worker is killed, not recycled.
     timed_out = False
     try:
-        with isolate_mediators(pool_size=1, timeout=2.0):
+        with isolate_mediators(fast_lane=False, pool_size=1, timeout=2.0):
             with model.trace(PROMPT):
                 h = model.transformer.h[6].output[0]
                 # spin forever in user code on the worker
@@ -122,7 +122,7 @@ def test_retire(model):
     retired = before not in survivors
 
     # The pool re-warms lazily and the NEXT trace still works, bit-identical.
-    with isolate_mediators(pool_size=1):
+    with isolate_mediators(fast_lane=False, pool_size=1):
         with model.trace(PROMPT):
             got = model.transformer.h[6].output[0].save()
     recovered = torch.equal(ref, got)
@@ -149,7 +149,7 @@ def test_nonstd():
     with model.trace(x):
         ref = model.decoder_blocks[1].output.save()
     warm_worker_pool(1, device="cuda")
-    with isolate_mediators(pool_size=1):
+    with isolate_mediators(fast_lane=False, pool_size=1):
         with model.trace(x):
             got = model.decoder_blocks[1].output.save()
     ok = torch.equal(ref, got)
@@ -175,7 +175,7 @@ def test_dead_idle(model):
     victim_pid = victim.pid
     victim.kill(); victim.join(timeout=5)  # simulate OOM-kill/crash while idle
 
-    with isolate_mediators(pool_size=1):
+    with isolate_mediators(fast_lane=False, pool_size=1):
         with model.trace(PROMPT):
             got = model.transformer.h[6].output[0].save()
     ok = torch.equal(ref, got)
@@ -196,7 +196,7 @@ def test_exception_recycle(model):
 
     raised = False
     try:
-        with isolate_mediators(pool_size=1):
+        with isolate_mediators(fast_lane=False, pool_size=1):
             with model.trace(PROMPT):
                 _ = model.transformer.h[6].output[0].save()
                 raise ValueError("boom")
@@ -206,7 +206,7 @@ def test_exception_recycle(model):
     pids_after = {w.proc.pid for w in isolation._POOL._all[key]}
     recycled = pid_before in pids_after and len(pids_after) == 1
 
-    with isolate_mediators(pool_size=1):
+    with isolate_mediators(fast_lane=False, pool_size=1):
         with model.trace(PROMPT):
             got = model.transformer.h[6].output[0].save()
     reused = next(iter(isolation._POOL._all[key])).proc.pid == pid_before

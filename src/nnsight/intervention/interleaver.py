@@ -992,6 +992,11 @@ class Mediator:
         self._iso_backward = False
         self._iso_grad_reals: dict = {}
 
+        # Fast lane: the static safety verdict (set in start when fast_lane is on) and the
+        # wall-clock watchdog for a confirmed-safe in-process run.
+        self._fastlane_verdict = None
+        self._fastlane_watchdog = None
+
         # True only inside an isolated worker process (set by _run_one_job). Lets
         # cross-process-aware logic (e.g. Barrier) know it can't count locally.
         self._isolated_worker = False
@@ -1088,31 +1093,44 @@ class Mediator:
         from .isolation import isolation_state
 
         if isolation_state()["on"]:
-            # Isolated path: run the intervention in an isolated GPU worker process
-            # (a warm pooled worker when pool_size>0, else a cold one-shot worker).
-            # Sets self.channel (host end), self.worker (the process), self._iso.
-            from .isolation import acquire_isolated_worker
-
-            acquire_isolated_worker(self)
-            self.interleaver.current = self
-        else:
-            _intervention = self.intervention
-            _args = (self, self.info, *self.args)
-
-            def _worker_target():
-                if _caller_stream is not None:
-                    torch.cuda.set_stream(_caller_stream)
-                _intervention(*_args)
-
-            # Start the worker thread.
-            self.worker = Thread(
-                target=_worker_target,
-                daemon=True,
-                name=self.name,
+            # Three execution tiers under isolation. The fast lane classifies each
+            # mediator once: a CONFIRMED-safe intervention runs IN-PROCESS (full model +
+            # weights, no worker, no per-hook channel) — the ONLY tier that can run the
+            # weight-reading interp majority, since the worker holds weightless dummy
+            # modules — while the unconfirmable remainder isolates and an introspection
+            # escape is rejected. The classifier is a footgun selector, never a malice
+            # boundary (see fastlane.py); it only moves a mediator isolate -> in-process.
+            from .fastlane import FAST, REJECT, FastLaneRejected, Watchdog
+            from .isolation import (
+                acquire_isolated_worker,
+                classify_for_fast_lane,
+                fast_lane_enabled,
             )
 
-            self.interleaver.current = self
-            self.worker.start()
+            tier = "isolate"
+            if fast_lane_enabled():
+                verdict = classify_for_fast_lane(self)
+                self._fastlane_verdict = verdict
+                if verdict.tier == REJECT:
+                    raise FastLaneRejected(
+                        f"intervention cannot be confirmed for the in-process fast lane: "
+                        f"{verdict.reason}. Rewrite without introspection, or run without "
+                        f"isolate_mediators()."
+                    )
+                tier = verdict.tier
+
+            if tier == FAST:
+                deadline = isolation_state()["opts"].fast_lane_timeout
+                self._fastlane_watchdog = Watchdog(deadline)
+                self._run_in_process(_caller_stream, watchdog=self._fastlane_watchdog)
+            else:
+                # Isolated path: run the intervention in an isolated GPU worker process
+                # (warm pooled worker when pool_size>0, else a cold one-shot worker).
+                # Sets self.channel (host end), self.worker (the process), self._iso.
+                acquire_isolated_worker(self)
+                self.interleaver.current = self
+        else:
+            self._run_in_process(_caller_stream)
 
         self.channel.wait_event()
 
@@ -1123,6 +1141,31 @@ class Mediator:
             pass
 
         self.interleaver.current = None
+
+    def _run_in_process(self, caller_stream, watchdog=None):
+        """Launch the intervention in a daemon thread (the in-process path, shared by the
+        isolation-off default and the confirmed-safe fast lane). ``watchdog`` (fast lane
+        only) bounds a runaway pure-Python loop: it is armed on the thread after start and
+        disarmed when the body returns (the ``finally``) — and again at ``cancel`` as a
+        backstop. The body's own ``try/except`` (invoker.compile) routes an injected
+        :class:`fastlane.FastLaneTimeout` through ``mediator.exception`` like any error."""
+        _intervention = self.intervention
+        _args = (self, self.info, *self.args)
+
+        def _worker_target():
+            try:
+                if caller_stream is not None:
+                    torch.cuda.set_stream(caller_stream)
+                _intervention(*_args)
+            finally:
+                if watchdog is not None:
+                    watchdog.disarm()
+
+        self.worker = Thread(target=_worker_target, daemon=True, name=self.name)
+        self.interleaver.current = self
+        self.worker.start()
+        if watchdog is not None:
+            watchdog.arm(self.worker.ident)
 
     ### Provider Methods ###
 
@@ -1136,6 +1179,11 @@ class Mediator:
         # Retained on-graph activations (isolated backward) pin the autograd graph;
         # drop them at trace end rather than waiting for the mediator to be GC'd.
         self._iso_grad_reals = {}
+        # Disarm the fast-lane watchdog (backstop to the thread-target finally) so a
+        # generous deadline can't fire into an unrelated later computation.
+        if self._fastlane_watchdog is not None:
+            self._fastlane_watchdog.disarm()
+            self._fastlane_watchdog = None
 
         # If the worker is still mid-protocol, unwind it with a Cancelation. For the
         # isolated channel the get_event/put_response calls are host-local — they do NOT
@@ -1824,6 +1872,8 @@ class Mediator:
         self._iso_backward = False
         self._iso_grad_reals = {}
         self._iso_caches = {}
+        self._fastlane_verdict = None
+        self._fastlane_watchdog = None
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()

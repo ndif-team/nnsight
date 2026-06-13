@@ -7,7 +7,7 @@
   net        — socket()/connect() in user code is blocked.
 
 (The standalone seccomp primitive is separately proven by gpu_sandbox/test_safety.py;
-this checks it is correctly wired into model.trace via isolate_mediators(lockdown=True).)
+this checks it is correctly wired into model.trace via isolate_mediators(fast_lane=False, lockdown=True).)
 
 Run:
   CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src \
@@ -29,7 +29,7 @@ PROBE = "/tmp/nnsight_escape_probe_sp1"
 def test_functional_under_lockdown(model):
     with model.trace(PROMPT):
         ref = model.transformer.h[6].output[0].save()
-    with isolate_mediators(lockdown=True):
+    with isolate_mediators(fast_lane=False, lockdown=True):
         with model.trace(PROMPT):
             got = model.transformer.h[6].output[0].save()
     ok = torch.equal(ref, got)
@@ -42,7 +42,7 @@ def test_fs_blocked(model):
         os.remove(PROBE)
     raised = None
     try:
-        with isolate_mediators(lockdown=True):
+        with isolate_mediators(fast_lane=False, lockdown=True):
             with model.trace(PROMPT):
                 with open(PROBE, "w") as f:  # should be EPERM under seccomp
                     f.write("escaped")
@@ -60,7 +60,7 @@ def test_fs_blocked(model):
 def test_net_blocked(model):
     raised = None
     try:
-        with isolate_mediators(lockdown=True):
+        with isolate_mediators(fast_lane=False, lockdown=True):
             with model.trace(PROMPT):
                 import socket
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # should be EPERM
