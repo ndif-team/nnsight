@@ -235,6 +235,15 @@ benign CudaIPC release warning.
 
 ## 8. Support matrix (what works under `isolate_mediators()` today, and how)
 
+> **Fast lane (2026-06-13, [fast-lane.md](fast-lane.md)).** `isolate_mediators()` now runs each
+> mediator on one of three tiers: a static classifier confirms safe interventions and runs them
+> **in-process** (FAST — full model + weights), isolates the unconfirmable remainder in the GPU worker
+> (ISOLATE), and rejects introspection escapes (REJECT). This is what lets the **weight-reading interp
+> majority** (logit lens, steering, ablation, activation patching, attribution) run under isolation at
+> all — the worker holds weightless dummy modules, so those workloads can only run on the fast lane.
+> The matrix below describes the **ISOLATE (worker) tier**; a row marked weight-reading/host-module is
+> served by the FAST tier. Default-on; `fast_lane=False` forces the worker tier.
+
 | Feature | Cross-process mechanism | Status |
 |---|---|---|
 | read / swap (`=`) / `.save()` (tensors) / skip / exception | six events over the channel; host-side hook registration; worker→host saves transmission at END | ✅ bit-identical |
