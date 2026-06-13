@@ -278,18 +278,25 @@ Async barrier still stacks with the async multi-prompt submission gate — a sep
 
 ---
 
-## 3. `model.session()` — un-saved cross-trace variable flow is broken (saved flow works)
+## 3. `model.session()` — un-saved cross-trace variable flow (error clarity FIXED; .save() required)
 
 ### Symptom
 
-The session contract is that trace-body locals flow across traces. On vLLM (sync), only the
-`.save()`d half of the contract holds:
+The session contract is that trace-body locals flow across traces. On vLLM, the worker is a
+process boundary — like remote NDIF, where `.save()` is the transmission mechanism — so only the
+`.save()`d half of the contract can hold, and an un-saved cross-trace value is a user error. The
+fix makes that error CLEAR instead of misleading:
 
 - ✅ `.save()` inside a session trace + read after session exit → real tensor, works.
 - ✅ assigning a saved value into a pre-existing outer container inside the session body → works.
-- ❌ an **un-saved** variable from trace 1 consumed in trace 2 → the second trace dies and the
-  session surfaces `UnboundLocalError: cannot access local variable '<your-saved-var>'` —
-  misleading, since the actual problem is the un-saved upstream variable.
+- ⚠️ an **un-saved** variable from trace 1 consumed in trace 2 → trace 2's worker body raises
+  `NameError` on the upstream variable. **Before the fix** the sync path swallowed that deferred
+  worker exception, so the user saw a misleading downstream `UnboundLocalError` on trace 2's
+  *saved* name (which never got assigned). **After the fix** (2026-06-12) the real `NameError`
+  naming the un-saved upstream variable surfaces. The correct user action is to `.save()` the
+  value — the same rule as remote.
+  (The earlier table claim that 0.19.1 already gave a clean NameError was a pp-on-dev artifact;
+  on this dev-based worktree the pre-fix error was the misleading `UnboundLocalError`.)
 - ❌ async engine: broken for everything — there is no drain point (`async for ... in
   tracer.backend` cannot be compiled inside a captured session body: "'async for' outside async
   function"; the tracer handles are also body-locals and don't survive to the caller frame).
@@ -333,22 +340,40 @@ if __name__ == "__main__":
 
 ### Root cause
 
-On HF the trace body executes in-process and `push()` returns ALL body locals to the session
-frame — un-saved flow is free. On vLLM the body executes in the EngineCore worker and only values
-registered in `Globals.saves` ship back (`GPUModelRunner.collect_saves` filters frame locals on
-`id(value) in Globals.saves`). The un-saved variable never materializes client-side; the second
-trace's body references a value that doesn't exist, dies, and its own saved variable never binds —
-hence the misleading `UnboundLocalError` naming the *downstream* variable.
+Two layers. The *semantic* layer: on HF the trace body executes in-process and `push()` returns
+ALL body locals to the session frame — un-saved flow is free. On vLLM the body executes in the
+EngineCore worker and only values registered in `Globals.saves` ship back
+(`GPUModelRunner.collect_saves` filters frame locals on `id(value) in Globals.saves`). The
+un-saved variable never materializes client-side; trace 2 references a name that doesn't exist and
+its worker body raises `NameError`. This is intrinsic to the process boundary — the same reason
+remote requires `.save()`.
 
-### Fix proposal
+The *clarity* layer (the actual bug, now fixed): that worker-side `NameError` was **swallowed** on
+the sync path. `VLLM.__call__` collected the deferred-exception envelope
+(`saves["__nnsight_exceptions__"]`, shipped by `collect_nnsight`) but treated it as just another
+saved value — `save()`-ing and `push_variables`-ing it into the frame instead of surfacing it.
+The serve path already surfaced these (`local_serve.py`), with a comment naming this exact
+failure mode; the in-process sync path didn't. With the error swallowed, trace 2's saved name
+never bound and the user saw a downstream `UnboundLocalError` on it.
 
-- **Short-term:** detect "session + vLLM + cross-trace reference to an un-saved trace local" and
-  raise a clear error instructing `.save()` — converts a confusing UnboundLocalError into a
-  documented requirement. (Cheapest version: document it; the saved-flow path already works.)
-- **Real fix:** on the vLLM path, implicitly add session-trace body locals to `saved_names` so
-  the worker ships them (correct but ships every local tensor; can be narrowed to locals actually
-  referenced by later session code via the dependency analysis the cross-invoker already does).
-- **Async sessions** need a design decision (session-owned draining); bigger than a patch.
+### Fix (landed 2026-06-12)
+
+Sync `VLLM.__call__` now pops `__nnsight_exceptions__` out of each output's saves and calls
+`surface_server_errors` before pushing the rest — mirroring the serve path. The real `NameError`
+naming the un-saved upstream variable now surfaces. `surface_server_errors` filters control-flow
+entries (Cancelation/EarlyStopException), so the iteration partial-saves / eos-early behavior is
+unaffected (verified). This is not session-specific: it fixes deferred-error surfacing for **all**
+sync vLLM traces. `tests/test_vllm.py::TestSession` covers both the working saved-flow and the
+clear-error unsaved case; the full suite is unchanged.
+
+The `.save()`-required contract is the intended semantics (consistent with remote), so transparent
+un-saved cross-trace flow is deliberately NOT implemented: shipping every worker-side local back
+would be expensive, often non-picklable, and would make vLLM diverge from remote.
+
+### Out of scope
+
+**Async sessions** are still broken for everything and need a design decision (session-owned
+draining; `async for` cannot be compiled inside a captured session body) — bigger than a patch.
 
 ---
 

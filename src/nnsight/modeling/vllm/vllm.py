@@ -434,11 +434,34 @@ class VLLM(RemoteableMixin):
         )
 
         saves = {}
+        exc_entries = []
 
         # Some of the output objects will have a saves attribute, which contains the saved variables
         for output in outputs:
             if hasattr(output, "saves"):
-                saves.update(output.saves)
+                out_saves = dict(output.saves)
+                # An intervention that errored on the worker comes back in
+                # defer mode as a typed envelope under this key rather than as
+                # a raised exception. Collect it out of the saves so it doesn't
+                # get treated as a saved value, then surface it below.
+                exc_map = out_saves.pop("__nnsight_exceptions__", None)
+                if exc_map:
+                    exc_entries.extend(exc_map.values())
+                saves.update(out_saves)
+
+        # Surface worker-side intervention errors before pushing saves, so the
+        # client sees the original cause (e.g. a NameError on a cross-trace
+        # value that was never `.save()`d) instead of a downstream
+        # UnboundLocalError on a saved name that never got assigned. The serve
+        # path does the same (`local_serve.py`); the in-process sync path used
+        # to swallow these, pushing the envelope into the frame as a plain
+        # variable. Control-flow entries (Cancelation/EarlyStopException) are
+        # filtered inside surface_server_errors, so partial saves from an
+        # early-terminated iteration still survive.
+        if exc_entries:
+            from ...intervention.errors import surface_server_errors
+
+            surface_server_errors(exc_entries, context="[vLLM]")
 
         # Save the variables in our local environment
         for value in saves.values():

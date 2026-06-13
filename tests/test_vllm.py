@@ -747,6 +747,55 @@ class TestBarrier:
 
 
 # =============================================================================
+# Session (cross-trace value flow)
+# =============================================================================
+
+
+class TestSession:
+    """``model.session()`` bundles multiple traces. Across the vLLM worker
+    boundary, ``.save()`` is the transmission mechanism (as with remote):
+    a saved value read after the trace works; an UNSAVED trace local cannot
+    flow to a later trace.
+    """
+
+    @torch.no_grad()
+    def test_session_saved_value_flows(self, vllm_gpt2, ET_prompt: str):
+        """A .save()d value is available after its trace within a session."""
+        with vllm_gpt2.session():
+            with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1):
+                lg = vllm_gpt2.logits.save()
+        assert lg.shape[-1] == 50257
+
+    @torch.no_grad()
+    def test_session_unsaved_cross_trace_surfaces_real_error(
+        self, vllm_gpt2, ET_prompt: str
+    ):
+        """An unsaved trace local referenced by a later trace raises an error
+        naming the real undefined variable.
+
+        Regression test: the worker-side error (the upstream variable is
+        undefined because it was never saved across the process boundary) used
+        to be swallowed on the sync path, so the user saw a misleading
+        downstream UnboundLocalError on the *saved* name instead. The sync
+        path now surfaces the worker's deferred exception.
+        """
+        with pytest.raises(Exception) as exc_info:
+            with vllm_gpt2.session():
+                with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1):
+                    unsaved_upstream = vllm_gpt2.logits  # NOT saved
+                with vllm_gpt2.trace(ET_prompt, temperature=0.0, top_p=1, max_tokens=1):
+                    downstream_saved = (vllm_gpt2.logits - unsaved_upstream).save()
+
+        # The surfaced error is the real cause: the upstream variable is not
+        # defined. Pre-fix, the swallowed worker error left only a downstream
+        # UnboundLocalError on the saved name, with no mention of the upstream
+        # variable at all.
+        msg = str(exc_info.value)
+        assert "unsaved_upstream" in msg
+        assert "not defined" in msg
+
+
+# =============================================================================
 # Async Engine
 # =============================================================================
 
