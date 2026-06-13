@@ -207,18 +207,6 @@ class TestRankDivergenceTripwire:
         with pytest.warns(PPRankDivergenceWarning, match=r"outs\['steps'\]\[1\]"):
             merge_saved(a, b, label="outs")
 
-    def test_structural_mismatch_warns(self):
-        # The historical silent-clobber class: one rank ships a shorter list
-        # (e.g. its worker stalled mid cross-stage pull on the last step).
-        from nnsight.modeling.vllm.lazy_remote_tensor import (
-            PPRankDivergenceWarning,
-        )
-
-        a = [torch.zeros(2), torch.zeros(2), torch.zeros(2)]
-        b = [torch.zeros(2), torch.zeros(2)]
-        with pytest.warns(PPRankDivergenceWarning, match="len 3 vs list of len 2"):
-            merge_saved(a, b, label="outs")
-
     def test_shape_mismatch_warns(self):
         from nnsight.modeling.vllm.lazy_remote_tensor import (
             PPRankDivergenceWarning,
@@ -252,6 +240,112 @@ class TestRankDivergenceTripwire:
             c for c in caught if issubclass(c.category, PPRankDivergenceWarning)
         ]
         assert merged["req"]["__nnsight_exceptions__"]["req"][1] == "tb cuda:1"
+
+
+class TestMergeUnion:
+    """The merge is a positional union over the sentinel (= stage-ownership)
+    encoding: prefer real over sentinel at every position, recurse where both
+    are real, length-tolerant for lists. Each test maps to one way two ranks'
+    save trees can legitimately differ in structure.
+    """
+
+    NOR = NOT_ON_THIS_RANK
+
+    def _merge_quiet(self, a, b, label="outs"):
+        import warnings as w
+
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter("always")
+            out = merge_saved(a, b, label=label)
+        warned = [
+            c for c in caught if issubclass(c.category, PPRankDivergenceWarning)
+        ]
+        return out, warned
+
+    def test_owner_real_beats_nonowner_sentinels_equal_length(self):
+        # The common per-step append of a single-stage module value: the owner
+        # has reals, every other rank has same-length all-sentinel lists.
+        owner = [torch.tensor([float(i)]) for i in range(4)]
+        other = [self.NOR] * 4
+        out, warned = self._merge_quiet(other, owner)  # non-owner is 'a'
+        assert not warned
+        assert [t.item() for t in out] == [0.0, 1.0, 2.0, 3.0]
+
+    def test_overshoot_sentinel_tail_dropped_silently(self):
+        # Run-ahead: one rank looped one step past generation end and appended
+        # an unconsumed lazy (-> sentinel). Effective lengths match -> silent;
+        # the overshoot tail is dropped.
+        a = [torch.zeros(2), torch.ones(2), self.NOR]   # 2 real + overshoot
+        b = [torch.zeros(2), torch.ones(2)]
+        out, warned = self._merge_quiet(a, b)
+        assert not warned
+        assert len(out) == 2 and torch.equal(out[1], torch.ones(2))
+
+    def test_stalled_worker_shorter_real_list_warns_but_keeps_complete(self):
+        # Mechanism 1/3: a worker stalled (or errored) before the last step, so
+        # its list is genuinely one real entry short. The union keeps the
+        # complete side AND announces the gap.
+        complete = [torch.tensor([0.0]), torch.tensor([1.0]), torch.tensor([2.0])]
+        short = [torch.tensor([0.0]), torch.tensor([1.0])]
+        out, warned = self._merge_quiet(short, complete)
+        assert len(warned) == 1
+        assert "never reached" in str(warned[0].message)
+        assert [t.item() for t in out] == [0.0, 1.0, 2.0]
+
+    def test_empty_vs_populated_keeps_populated(self):
+        # The historical clobber: one rank's list stayed empty. Populated wins
+        # (data not lost), and the asymmetry is announced.
+        out, warned = self._merge_quiet([], [torch.ones(2), torch.ones(2)])
+        assert len(out) == 2
+        assert len(warned) == 1
+
+    def test_mixed_stage_list_unions_per_position(self):
+        # Each step appends a cross-stage pair: stage A owns even indices,
+        # stage B owns odd (sentinel where not owned). Union reconstructs the
+        # full interleaved list with no warning.
+        a = [torch.tensor([0.0]), self.NOR, torch.tensor([2.0]), self.NOR]
+        b = [self.NOR, torch.tensor([1.0]), self.NOR, torch.tensor([3.0])]
+        out, warned = self._merge_quiet(a, b)
+        assert not warned
+        assert [t.item() for t in out] == [0.0, 1.0, 2.0, 3.0]
+
+    def test_nested_list_in_dict_unions(self):
+        # tracer.cache-style: per-stage dicts with disjoint keys, each value a
+        # per-step list. Union by key, union each list, no warning.
+        a = {"s0": [torch.zeros(1), torch.zeros(1)]}
+        b = {"s1": [torch.ones(1), torch.ones(1)]}
+        out, warned = self._merge_quiet(a, b)
+        assert not warned
+        assert set(out) == {"s0", "s1"} and len(out["s0"]) == 2
+
+    def test_type_clash_keeps_more_real_and_warns(self):
+        # The one non-union path: incompatible structures at one slot. Keep the
+        # side with more real data, loudly.
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        richer = [torch.zeros(2), torch.zeros(2)]   # 2 real leaves
+        poorer = torch.zeros(2)                      # 1 real leaf
+        with pytest.warns(PPRankDivergenceWarning, match="incompatible structures"):
+            kept = merge_saved(poorer, richer, label="x")
+        assert isinstance(kept, list) and len(kept) == 2
+
+    def test_equal_length_divergent_prefix_still_warns(self):
+        # Length-tolerant union must not mask a value divergence on a shared
+        # position — the per-element tripwire still fires.
+        from nnsight.modeling.vllm.lazy_remote_tensor import (
+            PPRankDivergenceWarning,
+        )
+
+        a = [torch.zeros(2), torch.zeros(2)]
+        b = [torch.zeros(2), torch.ones(2)]
+        with pytest.warns(PPRankDivergenceWarning, match=r"outs\[1\]"):
+            merge_saved(a, b, label="outs")
 
 
 class TestProviderModulePath:

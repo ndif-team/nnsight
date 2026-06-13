@@ -400,32 +400,121 @@ def _extend(label, part):
     return f"{label}{part}" if label else None
 
 
+def _has_real(v) -> bool:
+    """Whether ``v`` contains any real (non-:data:`NOT_ON_THIS_RANK`) leaf.
+
+    A value owned by no rank at this position — a bare sentinel, or a
+    container of nothing but sentinels — carries no data. Used to tell a
+    rank's genuine contribution apart from run-ahead overshoot (a worker that
+    looped one step past generation end appends an unconsumed lazy, which
+    strips to a sentinel).
+    """
+    if v is NOT_ON_THIS_RANK:
+        return False
+    if isinstance(v, (list, tuple)):
+        return any(_has_real(x) for x in v)
+    if isinstance(v, dict):
+        return any(_has_real(x) for x in dict.values(v))
+    return True
+
+
+def _count_real(v) -> int:
+    """Number of real leaves in ``v`` — the tie-breaker for the one case a
+    positional union can't resolve (a structural-type clash at one slot)."""
+    if v is NOT_ON_THIS_RANK:
+        return 0
+    if isinstance(v, (list, tuple)):
+        return sum(_count_real(x) for x in v)
+    if isinstance(v, dict):
+        return sum(_count_real(x) for x in dict.values(v))
+    return 1
+
+
+def _real_beyond_common(a, b) -> int:
+    """How many positions that only ONE of ``a``/``b`` reached carry real data.
+
+    This is the genuine real-data-asymmetry signal, and it cleanly separates
+    the three ways two ranks' list lengths can differ:
+
+    * a non-owner's same-length all-sentinel list (it owns none of these
+      positions) — no positions beyond the common range, so 0;
+    * run-ahead overshoot (a trailing sentinel past generation end) — the
+      extra position has no real data, so 0;
+    * a stalled/errored worker, or stage-divergent control flow (one rank has
+      real entries the other never produced) — those positions are beyond the
+      common range AND real, so > 0.
+
+    Only the last is worth flagging; the first two merge silently.
+    """
+    m = min(len(a), len(b))
+    return sum(_has_real(x) for x in a[m:]) + sum(_has_real(x) for x in b[m:])
+
+
+def _union_sequence(a, b, label):
+    """Positional union of two sequences of possibly-unequal length: merge
+    each shared position, take a position only one side reached as-is, then
+    drop the trailing no-real overshoot tail. Returns a plain ``list``.
+    """
+    merged = []
+    for i in range(max(len(a), len(b))):
+        x = a[i] if i < len(a) else NOT_ON_THIS_RANK
+        y = b[i] if i < len(b) else NOT_ON_THIS_RANK
+        merged.append(merge_saved(x, y, _extend(label, f"[{i}]")))
+    while merged and not _has_real(merged[-1]):
+        merged.pop()
+    return merged
+
+
 def merge_saved(a, b, label: Optional[str] = None):
-    """Position-wise merge of two same-shaped saved values from different PP
-    ranks, preferring the non-:data:`NOT_ON_THIS_RANK` leaf at each slot.
+    """Position-wise union of two saved values from different PP ranks.
 
-    Used by the engine to assemble one complete result from each rank's
-    partial contribution. Lists/tuples merge element-wise; dicts merge by
-    key union (so disjoint-keyed per-stage CacheDicts are combined, not
-    dropped). If both sides are real leaves (or the structures don't line
-    up), ``b`` wins — preserving the previous "later-rank-wins" merge
-    semantics for scalars and degrading safely on mismatch.
+    Every PP stage runs the intervention body and contributes a partial save
+    tree; this assembles them. The organizing principle is **stage
+    ownership, encoded by the sentinel**: a value owned by another stage is
+    :data:`NOT_ON_THIS_RANK` here, so "prefer the real leaf over the sentinel"
+    *is* "trust the owning rank". The cross-stage pull guarantees a non-owning
+    rank that holds a real copy of a model-derived value holds the SAME value
+    (it materialized the owner's), so two real copies of anything derived from
+    model state are equal — only model-INDEPENDENT values (in-trace RNG,
+    per-rank env values) can genuinely differ, and those trip the warning.
 
-    A real/real slot whose two copies genuinely DIFFER is the rank-divergence
-    tripwire: it emits :class:`PPRankDivergenceWarning` (with ``label``
-    naming the slot, e.g. ``"noise"`` or ``"outs[2]"``) instead of silently
-    keeping an arbitrary copy. Identical redundant copies — the normal case
-    for every value both ranks computed deterministically — merge silently.
+    The merge is therefore a faithful positional union over the sentinel
+    encoding, applied uniformly to every container:
+
+    - **dicts** union by key (disjoint per-stage ``tracer.cache()`` keys
+      combine; shared keys recurse);
+    - **lists** union by position, length-tolerant — shared positions recurse,
+      a position only one rank reached is taken as-is, and a trailing
+      no-real overshoot tail (run-ahead past generation end) is dropped;
+    - **tuples** of equal length recurse and rebuild (NamedTuple-safe); unequal
+      lengths are pathological (module outputs have fixed arity) and fall to
+      the structural fallback;
+    - **leaves** prefer real over sentinel, and two reals merge silently when
+      equal or emit :class:`PPRankDivergenceWarning` (``label`` names the slot,
+      e.g. ``"noise"`` / ``"outs[2]"``) when they differ.
+
+    The only non-union path left is a **structural-type clash** at one slot
+    (list vs tuple, tensor vs dict) — impossible for model-derived values
+    (same code builds the same type), so it keeps the side with more real
+    leaves and warns. A list whose effective length differs across ranks
+    (a stalled/errored worker dropped real entries) also warns: the union
+    keeps the complete side, but the data gap is announced.
     """
     if a is NOT_ON_THIS_RANK:
         return b
     if b is NOT_ON_THIS_RANK:
         return a
-    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
-        return [
-            merge_saved(x, y, _extend(label, f"[{i}]"))
-            for i, (x, y) in enumerate(zip(a, b))
-        ]
+    if isinstance(a, list) and isinstance(b, list):
+        extra = _real_beyond_common(a, b)
+        if extra:
+            _warn_divergence(
+                label,
+                f"one rank produced {extra} real list entr"
+                f"{'y' if extra == 1 else 'ies'} the other never reached "
+                f"(a stalled or errored worker, or control flow that diverged "
+                f"across stages); kept the complete side",
+            )
+        return _union_sequence(a, b, label)
     if isinstance(a, tuple) and isinstance(b, tuple) and len(a) == len(b):
         return _rebuild_sequence(
             a,
@@ -463,12 +552,27 @@ def merge_saved(a, b, label: Optional[str] = None):
                 merged[k] = dict.__getitem__(b, k)
         return merged
 
-    # Leaf fallthrough: both sides are real. Identical redundant copies are
-    # the normal case (every rank computed the value deterministically from
-    # the same inputs); a genuine difference means the ranks diverged —
-    # in-trace randomness, a per-rank side effect, or structurally mismatched
-    # save trees (e.g. one rank's worker appended fewer iteration steps).
-    # ``b`` still wins (degrade the same way as before), but loudly.
+    # Structural-type clash (list vs tuple, tensor vs dict, unequal-length
+    # tuples): both real but incompatible shapes, so no positional union
+    # applies. Impossible for model-derived values — the same code builds the
+    # same structure on every rank — so this signals genuine divergence. Keep
+    # the side with more real data and announce it.
+    if isinstance(a, (list, tuple, dict)) or isinstance(b, (list, tuple, dict)):
+        ra, rb = _count_real(a), _count_real(b)
+        keep = a if ra > rb else b
+        _warn_divergence(
+            label,
+            f"incompatible structures ({type(a).__name__} vs "
+            f"{type(b).__name__}); kept the side with more real data "
+            f"({max(ra, rb)} vs {min(ra, rb)} leaves)",
+        )
+        return keep
+
+    # Leaf: both sides are real scalars/tensors. Identical redundant copies
+    # are the normal case (every rank computed the value deterministically
+    # from the same inputs); a genuine difference is model-independent
+    # divergence (in-trace RNG, per-rank env value). ``b`` still wins (same
+    # degrade as before), but loudly.
     detail = _divergence_detail(a, b)
     if detail is not None:
         _warn_divergence(label, detail)
