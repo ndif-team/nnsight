@@ -357,6 +357,7 @@ class Events(Enum):
     BARRIER = "barrier"  # Signal that a barrier should be set
     CACHE = "cache"  # Register a tracer.cache() on the host's real modules (isolation)
     BACKWARD = "backward"  # Run the backward pass on the host's real graph (isolation)
+    UNEMBED = "unembed"  # Run norm+unembed on the host's real weights (isolation)
 
 
 class Cancelation(Exception):
@@ -1278,6 +1279,8 @@ class Mediator:
                 process = self.handle_cache_event(data)
             elif event == Events.BACKWARD:
                 process = self.handle_backward_event(data)
+            elif event == Events.UNEMBED:
+                process = self.handle_unembed_event(data)
             elif event == Events.END:
                 process = self.handle_end_event(data)
 
@@ -1577,6 +1580,46 @@ class Mediator:
             }
 
         self.respond(result)  # ack -> worker's send() returns the grad dict
+        return True
+
+    def handle_unembed_event(self, data):
+        """Run a residual through the host's REAL final-norm + unembed (isolation).
+
+        The worker holds weightless dummy modules, so a ``F.linear(normed, head.weight)``
+        readout — what every logit-lens / steering-direction / attribution-metric cell
+        does — cannot run there. The worker instead ships the residual VALUE plus the
+        module PATHS via ``Events.UNEMBED``; the host resolves the real envoys, runs
+        ``head(norm(residual))`` on the real weights, and ships back only the logits.
+        Weights never cross the boundary (no containment regression, no model-binding of
+        the generic worker); only the result does. ``spec`` =
+        ``{"norm_path", "head_path", "formulation"}`` (``formulation`` ∈ weight|module).
+        """
+        import torch.nn.functional as F
+
+        from .isolation import path_to_envoy
+
+        residual, spec = data
+        p2e = path_to_envoy(self)
+        head = p2e.get(spec["head_path"])
+        if head is None:
+            self.respond(
+                KeyError(f"unembed: head path {spec['head_path']!r} not found on the model")
+            )
+            return True
+        norm = p2e.get(spec["norm_path"]) if spec.get("norm_path") else None
+        if spec.get("norm_path") and norm is None:
+            self.respond(
+                KeyError(f"unembed: norm path {spec['norm_path']!r} not found on the model")
+            )
+            return True
+
+        normed = norm._module(residual) if norm is not None else residual
+        if spec["formulation"] == "weight":
+            logits = F.linear(normed, head._module.weight)
+        else:
+            logits = head._module(normed)
+
+        self.respond(logits)  # ack -> worker's send() returns the logits
         return True
 
     def handle_end_event(self, saves: Optional[Any] = None):

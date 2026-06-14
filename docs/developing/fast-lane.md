@@ -112,25 +112,49 @@ backstop. Armed after thread start, disarmed in the thread's `finally` and again
 The unifying pattern across all of them: **confirm once up front, then run free** behind a small,
 explicit, enumerable fallback to the heavy tier.
 
-## 6. Part 2 — declarative primitives (designed; next increment)
+## 6. Part 2 — declarative primitives
 
 The fast lane already runs the weight-reading workloads in-process, so they need no new APIs *for the
 fast lane*. The declarative primitives' value is (a) making the workloads runnable on the **isolated**
 tier too, and (b) collapsing common raw-compute patterns into named calls the gate whitelists trivially:
 
-| primitive | signature | taxonomy primitive | role |
-|---|---|---|---|
-| `tracer.unembed` | `(residual, norm, head) → logits` | host-weight read + module call | the projection every logit-lens / steering-direction / attribution metric does |
-| `tracer.steer` | `(envoy, direction, alpha)` | boundary write (injection) | always a replacement swap — fixes in-place's silent no-op under isolation |
-| `tracer.patch` | `(envoy, value)` | boundary write (transplant) | whole-tuple replacement |
-| `tracer.ablate` | `(envoy, mode)` | boundary write (injection) | zero/mean knockout |
-| `tracer.capture` | `(value) → handle` | read + run↔run transfer | cross-trace handoff; non-transmittable → clean fail, not silent drop |
+| primitive | signature | taxonomy primitive | role | status |
+|---|---|---|---|---|
+| `tracer.unembed` | `(residual, norm, head, formulation="weight") → logits` | host-weight read + module call | the projection every logit-lens / steering-direction / attribution metric does | **built** |
+| `tracer.steer` | `(envoy, direction, alpha)` | boundary write (injection) | always a replacement swap — fixes in-place's silent no-op under isolation | designed |
+| `tracer.patch` | `(envoy, value)` | boundary write (transplant) | whole-tuple replacement | designed |
+| `tracer.ablate` | `(envoy, mode)` | boundary write (injection) | zero/mean knockout | designed |
+| `tracer.capture` | `(value) → handle` | read + run↔run transfer | cross-trace handoff; non-transmittable → clean fail, not silent drop | designed |
 
 Each mirrors the existing `tracer.cache()` shape: in-process it resolves the real envoys and runs
 directly (the fast-lane execution); isolated it ships a spec via a new event whose host handler runs the
-real op host-side — which **also** closes the standing weight-read blocker for the heavy lane. Building
-those host event handlers is the increment; the protocol slot pattern already exists (`Events.CACHE` /
-`handle_cache_event`).
+real op host-side.
+
+### `tracer.unembed` — host-routed readout (built, 2026-06-14)
+
+The first primitive, and the one that closes the standing weight-read blocker on the **isolated** tier.
+`tracer.unembed(residual, norm, head)` projects a residual through the final norm + unembed:
+
+- **In-process / fast lane** (`mediator._isolated_worker` is False): runs the real modules directly —
+  `F.linear(norm(residual), head.weight)` (or `head(norm(residual))` with `formulation="module"`).
+  This is the same compute the workloads write by hand; `tracer.unembed` just names it.
+- **Isolated worker** (weightless dummies): ships the residual VALUE plus the module **paths**
+  (`{norm_path, head_path, formulation}`) via a new `Events.UNEMBED` request. The host's
+  `handle_unembed_event` resolves the real envoys (`path_to_envoy`), runs the real norm + unembed on the
+  **real weights**, and ships back only the logits over the bounce buffer (clone-on-receive both ways,
+  like any VALUE/BACKWARD round-trip). **Weights never cross the boundary** — so the readout works on
+  the isolated tier without binding the generic warm worker to a model or placing host weight memory in
+  the less-trusted worker (the two costs that ruled out shipping/sharing weights — see §1, §7). Paths
+  resolve through renames host-side (the wire path is always the real path), so renamed models work.
+
+Touch points: `Events.UNEMBED`; `handle()` dispatch + `handle_unembed_event` (interleaver.py); the
+`tracer.unembed` method with the isolated/in-process branch (tracer.py). Shaped exactly like
+`Events.CACHE` / `handle_cache_event`.
+
+**Verified (`test_isolated_unembed.py`, all under forced isolation `fast_lane=False`, gpt2 + renamed
+model):** single-layer, 3-layer-interleaved, `formulation="module"`, `norm=None`, and renamed-model
+readouts all isolated-vs-in-process `max|Δ|=0`; `tracer.unembed` equals the manual
+`F.linear(norm(x), head.weight)` it replaces.
 
 ## 7. What was deliberately deferred
 
@@ -140,7 +164,8 @@ those host event handlers is the increment; the protocol slot pattern already ex
   fast-laned code. Documented as future hardening; the static gate is the confirmation.
 - **A frozen-namespace `Compartment`** (SES-style) for fast-lane execution. The first slice relies on
   the static pass + the `trust` cordon; namespace shadowing is a later refinement.
-- **The five primitives' isolated event handlers** (§6).
+- **The remaining primitives' isolated event handlers** (§6) — `steer`/`patch`/`ablate`/`capture`;
+  `unembed` is built.
 
 ## 8. Verification
 

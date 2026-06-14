@@ -652,6 +652,55 @@ class InterleavingTracer(Tracer):
 
         return cache_obj.cache
 
+    def unembed(self, residual, norm, head, formulation: str = "weight"):
+        """Project ``residual`` through the final norm + unembed → logits, on the host's
+        REAL weights even when the intervention is isolated.
+
+        The readout every logit-lens / steering-direction / attribution-metric cell does
+        — ``F.linear(norm(residual), head.weight)`` — reads the host model's real
+        weights. In-process (incl. the fast lane) that just runs the real modules. In an
+        isolated worker the modules are weightless dummies, so this ships the residual
+        VALUE plus the module PATHS to the host (``Events.UNEMBED``); the host runs the
+        real norm + unembed and ships back only the logits. Weights never cross the
+        boundary — so this works on the isolated tier without binding the generic worker
+        to a model or placing host weight memory in the (less-trusted) worker.
+
+        Args:
+            residual: the residual-stream tensor to project (a block ``.output``; a tuple
+                is untupled to ``[0]``).
+            norm: the final-norm Envoy (e.g. ``model.transformer.ln_f``), or ``None`` to
+                skip normalization.
+            head: the unembed Envoy (e.g. ``model.lm_head``).
+            formulation: ``"weight"`` → ``F.linear(normed, head.weight)`` (portable; the
+                form the workloads use); ``"module"`` → ``head(normed)``.
+
+        Returns:
+            The logits tensor.
+        """
+        import torch.nn.functional as F
+
+        if isinstance(residual, tuple):
+            residual = residual[0]
+
+        mediator = self.model.interleaver.current
+
+        if mediator._isolated_worker:
+            # the worker's modules are dummies — route the real compute to the host.
+            from ..interleaver import Events
+
+            spec = {
+                "norm_path": norm.path if norm is not None else None,
+                "head_path": head.path,
+                "formulation": formulation,
+            }
+            return mediator.send(Events.UNEMBED, (residual, spec))
+
+        # in-process / fast lane: the real modules + weights are right here.
+        normed = norm(residual) if norm is not None else residual
+        if formulation == "weight":
+            return F.linear(normed, head.weight)
+        return head(normed)
+
     def barrier(self, n_participants: int):
         """
         nnsight barrier: A synchronization primitive for coordinating multiple concurrent invocations in nnsight.
