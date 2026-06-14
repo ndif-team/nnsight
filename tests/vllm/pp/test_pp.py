@@ -322,18 +322,19 @@ class TestMergeUnion:
         assert not warned
         assert set(out) == {"s0", "s1"} and len(out["s0"]) == 2
 
-    def test_type_clash_keeps_more_real_and_warns(self):
-        # The one non-union path: incompatible structures at one slot. Keep the
-        # side with more real data, loudly.
+    def test_type_clash_warns_and_falls_through_to_leaf_degrade(self):
+        # The one non-union path: incompatible structures at one slot. No
+        # positional union applies, so it falls through to the leaf degrade —
+        # _divergence_detail describes the mismatch, the warning fires, b wins.
         from nnsight.modeling.vllm.lazy_remote_tensor import (
             PPRankDivergenceWarning,
         )
 
-        richer = [torch.zeros(2), torch.zeros(2)]   # 2 real leaves
-        poorer = torch.zeros(2)                      # 1 real leaf
-        with pytest.warns(PPRankDivergenceWarning, match="incompatible structures"):
-            kept = merge_saved(poorer, richer, label="x")
-        assert isinstance(kept, list) and len(kept) == 2
+        a = torch.zeros(2)                       # tensor
+        b = [torch.zeros(2), torch.zeros(2)]     # list
+        with pytest.warns(PPRankDivergenceWarning, match="mismatch"):
+            kept = merge_saved(a, b, label="x")
+        assert kept is b
 
     def test_equal_length_divergent_prefix_still_warns(self):
         # Length-tolerant union must not mask a value divergence on a shared

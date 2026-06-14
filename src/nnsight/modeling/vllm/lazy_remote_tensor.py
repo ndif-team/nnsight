@@ -341,6 +341,11 @@ def _divergence_detail(a, b) -> Optional[str]:
     exactly. Incomparable values are treated as equivalent — a tripwire must
     not false-positive on exotic user types.
     """
+    if a is b:
+        # The same object reached both sides (a slot that passed through an
+        # earlier stage's merge unchanged in a 3+-stage union) — equal by
+        # identity, skip the elementwise compare.
+        return None
     if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
         if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
             return f"type mismatch: {type(a).__name__} vs {type(b).__name__}"
@@ -418,18 +423,6 @@ def _has_real(v) -> bool:
     return True
 
 
-def _count_real(v) -> int:
-    """Number of real leaves in ``v`` — the tie-breaker for the one case a
-    positional union can't resolve (a structural-type clash at one slot)."""
-    if v is NOT_ON_THIS_RANK:
-        return 0
-    if isinstance(v, (list, tuple)):
-        return sum(_count_real(x) for x in v)
-    if isinstance(v, dict):
-        return sum(_count_real(x) for x in dict.values(v))
-    return 1
-
-
 def _real_beyond_common(a, b) -> int:
     """How many positions that only ONE of ``a``/``b`` reached carry real data.
 
@@ -494,11 +487,13 @@ def merge_saved(a, b, label: Optional[str] = None):
       e.g. ``"noise"`` / ``"outs[2]"``) when they differ.
 
     The only non-union path left is a **structural-type clash** at one slot
-    (list vs tuple, tensor vs dict) — impossible for model-derived values
-    (same code builds the same type), so it keeps the side with more real
-    leaves and warns. A list whose effective length differs across ranks
-    (a stalled/errored worker dropped real entries) also warns: the union
-    keeps the complete side, but the data gap is announced.
+    (list vs tuple, tensor vs dict, unequal-length tuples) — impossible for
+    model-derived values (same code builds the same type), so it falls through
+    to the leaf degrade: ``_divergence_detail`` describes the mismatch, the
+    warning fires, and ``b`` wins. A list where one rank holds real entries the
+    other never reached (a stalled/errored worker, or stage-divergent control
+    flow) also warns: the union keeps the complete side, but the gap is
+    announced.
     """
     if a is NOT_ON_THIS_RANK:
         return b
@@ -552,27 +547,13 @@ def merge_saved(a, b, label: Optional[str] = None):
                 merged[k] = dict.__getitem__(b, k)
         return merged
 
-    # Structural-type clash (list vs tuple, tensor vs dict, unequal-length
-    # tuples): both real but incompatible shapes, so no positional union
-    # applies. Impossible for model-derived values — the same code builds the
-    # same structure on every rank — so this signals genuine divergence. Keep
-    # the side with more real data and announce it.
-    if isinstance(a, (list, tuple, dict)) or isinstance(b, (list, tuple, dict)):
-        ra, rb = _count_real(a), _count_real(b)
-        keep = a if ra > rb else b
-        _warn_divergence(
-            label,
-            f"incompatible structures ({type(a).__name__} vs "
-            f"{type(b).__name__}); kept the side with more real data "
-            f"({max(ra, rb)} vs {min(ra, rb)} leaves)",
-        )
-        return keep
-
-    # Leaf: both sides are real scalars/tensors. Identical redundant copies
-    # are the normal case (every rank computed the value deterministically
-    # from the same inputs); a genuine difference is model-independent
-    # divergence (in-trace RNG, per-rank env value). ``b`` still wins (same
-    # degrade as before), but loudly.
+    # Everything that didn't union above: two real leaves (the normal case —
+    # equal redundant copies merge silently), or a structural-type clash that
+    # has no positional union (list vs tuple, tensor vs dict, unequal-length
+    # tuples — impossible for model-derived values, so it signals divergence).
+    # ``_divergence_detail`` already classifies both: ``None`` for equal
+    # leaves, a "type mismatch" / "structure mismatch" / "max|Δ|" string
+    # otherwise. ``b`` wins on a clash, but loudly.
     detail = _divergence_detail(a, b)
     if detail is not None:
         _warn_divergence(label, detail)

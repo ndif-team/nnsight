@@ -109,9 +109,12 @@ def test_merge_nested_dict():
     assert merged["h"][0] is real0 and merged["h"][1] is real1
 
 
-def test_merge_structure_mismatch_falls_back_to_b():
-    # Defensive: different shapes (pathological rank-divergent code) -> last wins.
+def test_merge_unequal_lists_union_keeps_complete_side():
+    # A length-mismatched list is unioned, not clobbered: the complete side's
+    # extra real entry is kept (and the gap is announced via a warning, which
+    # the dedicated union tests in test_pp.py assert). Both orders converge.
     assert merge_saved([1, 2], [1, 2, 3]) == [1, 2, 3]
+    assert merge_saved([1, 2, 3], [1, 2]) == [1, 2, 3]
 
 
 if __name__ == "__main__":
