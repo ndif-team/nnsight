@@ -610,64 +610,59 @@ class TestInvokerBatching:
         assert torch.equal(used.cpu(), custom)
 
     @torch.no_grad()
-    def test_user_position_ids_survive_invoker_batching(
+    def test_user_position_ids_rejected_when_batching(
         self, gpt2: nnsight.LanguageModel, ET_prompt: str
     ):
-        """Per-invoke user-supplied ``position_ids`` must survive batching with other invokes.
+        """A user-supplied ``position_ids`` is rejected for a multi-prompt / batched input.
 
-        ``_batch`` re-pads all rows to a common width, so each invoke's position_ids must be
-        re-aligned into the combined batch (placed over the row's real tokens, like the
-        attention mask), not dropped and recomputed. An invoke that did NOT supply ids gets
-        mask-derived values. Constant fill values are used so a silent fallback to the
-        mask-derived cumsum (consecutive integers) cannot masquerade as a pass.
+        Custom position_ids are only honored for a single, unpadded prompt. When batching, nnsight
+        left-pads the combined batch and re-derives position_ids from the attention mask, so a
+        per-prompt position_ids cannot be safely aligned — passing one must raise rather than be
+        silently dropped or mis-aligned across the batch. Both shapes of batching are covered: a
+        single invoke holding multiple prompts, and multiple single-prompt invokes one of which
+        supplies position_ids.
         """
-        short = "Hello world"            # fewer tokens -> left-padded in the batch
+        short = "Hello world"
         long = ET_prompt
         n_short = gpt2.tokenizer(short, return_tensors="pt")["input_ids"].shape[1]
         n_long = gpt2.tokenizer(long, return_tensors="pt")["input_ids"].shape[1]
-        custom_short = torch.full((1, n_short), 7, dtype=torch.long)
-        custom_long = torch.full((1, n_long), 9, dtype=torch.long)
 
-        # both invokes supply ids: each row carries its values, right-aligned over real tokens
-        with gpt2.trace() as tracer:
-            with tracer.invoke(short, position_ids=custom_short):
-                used_short = gpt2.transformer.wpe.input.save()
-            with tracer.invoke(long, position_ids=custom_long):
-                used_long = gpt2.transformer.wpe.input.save()
+        # one invoke holding two prompts, with position_ids for the (left-padded) batch
+        with pytest.raises(ValueError):
+            with gpt2.trace(
+                [short, long], position_ids=torch.zeros(2, n_long, dtype=torch.long)
+            ):
+                gpt2.lm_head.output.save()
 
-        pad = n_long - n_short
-        expected_short = torch.cat(
-            [torch.zeros(pad, dtype=torch.long), custom_short[0]]
-        ).unsqueeze(0)
-        assert torch.equal(used_short.cpu(), expected_short)
-        assert torch.equal(used_long.cpu(), custom_long)
-
-        # only one invoke supplies ids: the other row falls back to mask-derived positions
-        with gpt2.trace() as tracer:
-            with tracer.invoke(short, position_ids=custom_short):
-                used_short = gpt2.transformer.wpe.input.save()
-            with tracer.invoke(long):
-                used_long = gpt2.transformer.wpe.input.save()
-
-        assert torch.equal(used_short.cpu(), expected_short)
-        assert torch.equal(used_long.cpu(), torch.arange(n_long).unsqueeze(0))
+        # two single-prompt invokes, one supplying position_ids, batched together
+        with pytest.raises(ValueError):
+            with gpt2.trace() as tracer:
+                with tracer.invoke(
+                    short, position_ids=torch.zeros(1, n_short, dtype=torch.long)
+                ):
+                    gpt2.lm_head.output.save()
+                with tracer.invoke(long):
+                    gpt2.lm_head.output.save()
 
     @torch.no_grad()
-    def test_user_position_ids_reach_generate(self, gpt2: nnsight.LanguageModel):
-        """A user-supplied ``position_ids`` must pass through to ``generate``.
+    def test_user_position_ids_rejected_in_generate(self, gpt2: nnsight.LanguageModel):
+        """A user-supplied ``position_ids`` is rejected on the ``generate`` path.
 
-        ``__nnsight_generate__`` strips the auto-injected left-pad correction (a static tensor
-        would freeze decode positions), but it must strip only the exact tensor nnsight injected —
-        identity-matched — never an explicit user value.
+        ``generate`` derives and advances position_ids itself across decode steps, so a static
+        user tensor would freeze the decode positions. Passing one must raise rather than be
+        honored or silently dropped. (nnsight's own left-pad correction, injected only for a
+        multi-row batch, is still stripped here — that path is exercised by
+        ``test_batched_generation_matches_single_prompt``.)
         """
         prompt = "Hello world"
         n = gpt2.tokenizer(prompt, return_tensors="pt")["input_ids"].shape[1]
         custom = torch.full((1, n), 5, dtype=torch.long)
 
-        with gpt2.generate(prompt, position_ids=custom, max_new_tokens=1, do_sample=False):
-            used = gpt2.transformer.wpe.input.save()
-
-        assert torch.equal(used.cpu(), custom)
+        with pytest.raises(ValueError):
+            with gpt2.generate(
+                prompt, position_ids=custom, max_new_tokens=1, do_sample=False
+            ):
+                gpt2.generator.output.save()
 
     @torch.no_grad()
     def test_invoker_input_ids(self, gpt2: nnsight.LanguageModel):

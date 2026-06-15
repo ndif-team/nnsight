@@ -75,11 +75,6 @@ class LanguageModel(TransformersModel):
 
         self.tokenizer: PreTrainedTokenizer = tokenizer
 
-        # The exact tensor `_supply_left_pad_position_ids` last injected. `__nnsight_generate__`
-        # strips the left-pad correction by identity against this, so an explicit user-supplied
-        # `position_ids` is never silently dropped on the generate path.
-        self._injected_position_ids: Optional[torch.Tensor] = None
-
         super().__init__(*args, automodel=automodel, **kwargs)
 
         self.generator: Envoy = LanguageModel.Generator()
@@ -198,17 +193,31 @@ class LanguageModel(TransformersModel):
 
         streamer = kwargs.pop("streamer", self.generator.streamer._module)
 
-        # The left-padded-batch position_ids correction (`_supply_left_pad_position_ids`) is for the
-        # bare-forward/trace path only. `generate` derives and advances `position_ids` itself across
-        # decode steps; a static tensor passed in would freeze the padded rows' positions and corrupt
-        # their continuation. Strip the correction — but only the exact tensor nnsight injected
-        # (matched by identity): a user-supplied `position_ids`, or a batched merge containing one,
-        # passes through to `generate` untouched.
-        if (
-            self._injected_position_ids is not None
-            and kwargs.get("position_ids", None) is self._injected_position_ids
-        ):
-            kwargs.pop("position_ids")
+        # `generate` derives and advances `position_ids` itself across decode steps, so a
+        # user-supplied `position_ids` is not supported here — reject it rather than freeze the
+        # padded rows' positions and corrupt their continuation. nnsight's own left-pad correction
+        # (added by `_supply_left_pad_position_ids`) must still be stripped so `generate` manages
+        # positions on its own. That correction is exactly the mask-derived left-pad position_ids,
+        # so strip a value that matches it (nnsight's own — or a user value identical to it, which
+        # `generate` would recompute anyway) and reject anything else. Matching by value (not object
+        # identity) survives the `.to(device)` copy applied before this runs, and a model that never
+        # injects (e.g. a VLM, which overrides input prep) rejects every user value rather than
+        # silently dropping it.
+        position_ids = kwargs.get("position_ids", None)
+        if position_ids is not None:
+            mask = kwargs.get("attention_mask", None)
+            injected = (
+                self._mask_derived_position_ids(mask)
+                if isinstance(mask, torch.Tensor) and mask.dim() == 2
+                else None
+            )
+            if injected is not None and torch.equal(position_ids, injected):
+                kwargs.pop("position_ids")
+            else:
+                raise ValueError(
+                    "Custom `position_ids` is not supported with `.generate()`: generate derives "
+                    "and advances position_ids itself across decode steps. Omit `position_ids`."
+                )
         output = self._model.generate(*args, streamer=streamer, **kwargs)
 
         if self.interleaver is not None:
@@ -308,25 +317,54 @@ class LanguageModel(TransformersModel):
         ``position_ids`` are a harmless no-op for them.
 
         This corrects the bare-forward (trace) path. ``generate`` manages ``position_ids`` itself
-        across decode steps, so ``__nnsight_generate__`` strips exactly the tensor injected here
-        (tracked via ``self._injected_position_ids``) before calling it; a user-supplied
-        ``position_ids`` is left alone on every path.
+        across decode steps, so ``__nnsight_generate__`` strips this correction (identified by
+        value, via :meth:`_mask_derived_position_ids`) before calling it.
 
         No-op unless the tokenizer pads on the left, ``position_ids`` was not already supplied, and
-        an ``attention_mask`` with actual padding is present.
+        a multi-row ``attention_mask`` with actual padding is present. Only multi-row batches are
+        corrected: a single sequence is never padded against others, and restricting injection to
+        multi-row batches lets the batched path treat any single-row ``position_ids`` as
+        unambiguously user-supplied (see :meth:`_is_user_position_ids`).
         """
         if self.tokenizer.padding_side != "left":
             return kwargs
         if kwargs.get("position_ids", None) is not None:
             return kwargs
         mask = kwargs.get("attention_mask", None)
-        if not isinstance(mask, torch.Tensor) or mask.dim() != 2 or bool(mask.all()):
+        if (
+            not isinstance(mask, torch.Tensor)
+            or mask.dim() != 2
+            or mask.shape[0] <= 1
+            or bool(mask.all())
+        ):
             return kwargs
-        position_ids = mask.long().cumsum(-1) - 1
-        position_ids.masked_fill_(mask == 0, 0)
-        kwargs["position_ids"] = position_ids
-        self._injected_position_ids = position_ids
+        kwargs["position_ids"] = self._mask_derived_position_ids(mask)
         return kwargs
+
+    @staticmethod
+    def _mask_derived_position_ids(mask: torch.Tensor) -> torch.Tensor:
+        """The left-padding ``position_ids`` for a 2D attention ``mask``.
+
+        Each real token gets its true 0-based position (``cumsum`` of the mask minus one); padded
+        slots are set to 0. This is the standard left-padding correction and the exact tensor
+        :meth:`_supply_left_pad_position_ids` injects, so ``__nnsight_generate__`` can recognize
+        nnsight's own correction by value.
+        """
+        position_ids = mask.long().cumsum(-1) - 1
+        return position_ids.masked_fill(mask == 0, 0)
+
+    @staticmethod
+    def _is_user_position_ids(position_ids: Optional[torch.Tensor]) -> bool:
+        """Whether a ``position_ids`` reaching the batched (:meth:`_batch`) path is user-supplied.
+
+        :meth:`_supply_left_pad_position_ids` only ever injects its correction for a multi-row
+        batch, and a multi-row user-supplied ``position_ids`` is already rejected up front in
+        :meth:`_prepare_input`. So any single-row ``position_ids`` arriving here is necessarily the
+        user's. (This is :meth:`_batch`-only — it is sound because that path is reached only by
+        :class:`LanguageModel`, which is the model that injects; ``__nnsight_generate__`` is shared
+        with models that never inject, so it instead matches the correction by value.)
+        """
+        return position_ids is not None and position_ids.shape[0] == 1
 
     def _prepare_input(
         self,
@@ -400,10 +438,23 @@ class LanguageModel(TransformersModel):
                 "Pass a non-empty prompt or non-empty `input_ids`."
             )
 
-        kwargs = self._supply_left_pad_position_ids(
-            {**inputs, "labels": labels, **remaining_kwargs}
-        )
-        return (tuple(), kwargs, len(inputs["input_ids"]))
+        batch_size = len(inputs["input_ids"])
+
+        kwargs = {**inputs, "labels": labels, **remaining_kwargs}
+
+        # A user-supplied `position_ids` can only be honored for a single, unpadded prompt: once a
+        # batch is left-padded, a per-prompt `position_ids` cannot be safely placed into it. Reject
+        # it here for multi-prompt invokes rather than silently dropping or mis-aligning it.
+        if kwargs.get("position_ids", None) is not None and batch_size > 1:
+            raise ValueError(
+                "Custom `position_ids` is not supported for a multi-prompt (batched) input. "
+                "nnsight left-pads the batch and derives position_ids from the attention mask; a "
+                "per-prompt position_ids cannot be safely aligned. Run each prompt in its own "
+                "trace, or omit `position_ids`."
+            )
+
+        kwargs = self._supply_left_pad_position_ids(kwargs)
+        return (tuple(), kwargs, batch_size)
 
     def _batch(
         self,
@@ -466,49 +517,28 @@ class LanguageModel(TransformersModel):
         batched_inputs.pop("input_ids", None)
         batched_inputs.pop("attention_mask", None)
 
-        # Per-invoke `position_ids` tensors can't survive re-padding as-is: their width is the
-        # old batch's, not the combined one (stale they would crash on shape mismatch, or worse,
-        # silently broadcast one invoke's positions across the whole batch). Two cases:
-        #   - every `position_ids` seen so far was nnsight's own left-pad correction, or none
-        #     existed: drop and recompute from the final combined mask.
-        #   - an invoke explicitly supplied `position_ids`: re-align each source's rows into the
-        #     combined width with the same left/right-aligned placement used for the mask above,
-        #     deriving rows without explicit ids from the combined mask. The merged tensor counts
-        #     as user-supplied — it is not stripped before `generate`.
+        # A per-invoke `position_ids` can't survive re-padding into the combined batch: its width is
+        # the source invoke's, not the combined one. nnsight's own left-pad correction (only ever
+        # injected for a multi-row batch) is meant to be dropped here and recomputed from the
+        # combined mask below. A single-row `position_ids` is therefore user-supplied (a multi-row
+        # user value is already rejected in `_prepare_input`) — reject it rather than silently drop
+        # it or mis-align it across the batch.
         old_position_ids = batched_inputs.pop("position_ids", None)
         new_position_ids = prepared_kwargs.get("position_ids", None)
 
-        purely_injected = new_position_ids is None and (
-            old_position_ids is None
-            or old_position_ids is self._injected_position_ids
+        if self._is_user_position_ids(old_position_ids) or self._is_user_position_ids(
+            new_position_ids
+        ):
+            raise ValueError(
+                "Custom `position_ids` is not supported when batching multiple invokes. nnsight "
+                "re-pads the combined batch and derives position_ids from the attention mask; a "
+                "per-invoke position_ids cannot be safely aligned. Run the prompt in its own "
+                "trace, or omit `position_ids`."
+            )
+
+        kwargs = self._supply_left_pad_position_ids(
+            {**new_batched_inputs, **batched_inputs, "labels": batched_labels}
         )
-
-        kwargs = {**new_batched_inputs, **batched_inputs, "labels": batched_labels}
-
-        if purely_injected:
-            kwargs = self._supply_left_pad_position_ids(kwargs)
-        else:
-            combined_position_ids = combined_mask.long().cumsum(-1) - 1
-            combined_position_ids.masked_fill_(combined_mask == 0, 0)
-
-            for row_start, position_ids in [
-                (0, old_position_ids),
-                (n_old, new_position_ids),
-            ]:
-                if position_ids is not None:
-                    position_ids = position_ids.to(combined_position_ids)
-                    if left:
-                        combined_position_ids[
-                            row_start : row_start + position_ids.shape[0],
-                            -position_ids.shape[1] :,
-                        ] = position_ids
-                    else:
-                        combined_position_ids[
-                            row_start : row_start + position_ids.shape[0],
-                            : position_ids.shape[1],
-                        ] = position_ids
-
-            kwargs["position_ids"] = combined_position_ids
 
         return tuple(), kwargs
 
