@@ -701,6 +701,51 @@ class InterleavingTracer(Tracer):
             return F.linear(normed, head.weight)
         return head(normed)
 
+    def steer(self, envoy, direction, alpha: float = 1.0):
+        """Add ``alpha * direction`` to ``envoy``'s output residual via a **replacement**
+        boundary write — the activation-steering / injection every steering cell does, made
+        to work on the isolated tier where an in-place ``hidden[:] = …`` silently no-ops.
+
+        Steering reads the delivered activation and writes a modified one back. Done in
+        place (``hidden[:] = hidden + …``) that mutation never crosses the isolation
+        boundary: the worker mutates its *delivered clone*, no SWAP fires, and the host's
+        real activation is untouched — a silent no-op (the save of the steered residual
+        looks right, but nothing downstream changes). ``tracer.steer`` always performs a
+        *replacement* swap (assign ``envoy.output``), which ships the steered value back
+        over the existing ``Events.SWAP`` path, so it is correct in-process, on the fast
+        lane, AND in the isolated worker. Unlike :meth:`unembed`, steering touches no host
+        weights — only the delivered activation — so it needs no host round-trip and no
+        isolated/in-process branch: the eproperty setter routes the swap on either tier.
+
+        Tuple outputs (attention modules, and transformer blocks on transformers <5) are
+        replaced whole — element ``[0]`` is steered and the rest of the tuple rides through
+        unchanged.
+
+        Args:
+            envoy: the module whose output residual to steer (e.g.
+                ``model.transformer.h[6]``).
+            direction: the steering vector, broadcast over the residual and cast to its
+                dtype/device (so a float32 direction steers a float16 residual cleanly).
+            alpha: the steering coefficient — a scalar or any tensor broadcastable over the
+                residual. Defaults to ``1.0``.
+
+        Returns:
+            The steered residual tensor (element ``[0]`` for tuple outputs).
+        """
+        out = envoy.output
+        is_tuple = isinstance(out, tuple)
+        hidden = out[0] if is_tuple else out
+
+        direction = direction.to(dtype=hidden.dtype, device=hidden.device)
+        steered = hidden + alpha * direction
+
+        if is_tuple:
+            envoy.output = (steered, *out[1:])
+        else:
+            envoy.output = steered
+
+        return steered
+
     def barrier(self, n_participants: int):
         """
         nnsight barrier: A synchronization primitive for coordinating multiple concurrent invocations in nnsight.

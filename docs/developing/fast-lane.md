@@ -121,14 +121,17 @@ tier too, and (b) collapsing common raw-compute patterns into named calls the ga
 | primitive | signature | taxonomy primitive | role | status |
 |---|---|---|---|---|
 | `tracer.unembed` | `(residual, norm, head, formulation="weight") → logits` | host-weight read + module call | the projection every logit-lens / steering-direction / attribution metric does | **built** |
-| `tracer.steer` | `(envoy, direction, alpha)` | boundary write (injection) | always a replacement swap — fixes in-place's silent no-op under isolation | designed |
+| `tracer.steer` | `(envoy, direction, alpha=1.0)` | boundary write (injection) | always a replacement swap — fixes in-place's silent no-op under isolation | **built** |
 | `tracer.patch` | `(envoy, value)` | boundary write (transplant) | whole-tuple replacement | designed |
 | `tracer.ablate` | `(envoy, mode)` | boundary write (injection) | zero/mean knockout | designed |
 | `tracer.capture` | `(value) → handle` | read + run↔run transfer | cross-trace handoff; non-transmittable → clean fail, not silent drop | designed |
 
-Each mirrors the existing `tracer.cache()` shape: in-process it resolves the real envoys and runs
-directly (the fast-lane execution); isolated it ships a spec via a new event whose host handler runs the
-real op host-side.
+Most mirror the existing `tracer.cache()` shape: in-process they resolve the real envoys and run
+directly (the fast-lane execution); isolated they ship a spec via a new event whose host handler runs the
+real op host-side. The exception is `tracer.steer` (and the boundary-write `patch`/`ablate`): steering
+touches **no host weights** — only the *delivered* activation — so it needs no host round-trip and no new
+event. It rides the existing `Events.SWAP`: a *replacement* write (assign `envoy.output`) ships the
+steered value back, which is what makes it cross the boundary where an in-place `[:] =` silently no-ops.
 
 ### `tracer.unembed` — host-routed readout (built, 2026-06-14)
 
@@ -156,6 +159,43 @@ model):** single-layer, 3-layer-interleaved, `formulation="module"`, `norm=None`
 readouts all isolated-vs-in-process `max|Δ|=0`; `tracer.unembed` equals the manual
 `F.linear(norm(x), head.weight)` it replaces.
 
+### `tracer.steer` — replacement-swap injection (built, 2026-06-15)
+
+`tracer.steer(envoy, direction, alpha=1.0)` adds `alpha * direction` to a module's output residual —
+the activation-steering / injection every steering cell does. It is the simplest of the part-2
+primitives and the structural opposite of `unembed`: it touches **no host weights**, only the delivered
+activation, so it needs **no new event and no isolated/in-process branch**. The method just performs a
+*replacement* boundary write:
+
+```python
+out = envoy.output
+hidden = out[0] if isinstance(out, tuple) else out
+steered = hidden + alpha * direction.to(dtype=hidden.dtype, device=hidden.device)
+envoy.output = (steered, *out[1:]) if isinstance(out, tuple) else steered
+```
+
+The eproperty setter routes that assignment through `mediator.swap` → `Events.SWAP` on **either** tier:
+in-process it swaps into the batcher directly; isolated, the worker ships the steered value back over the
+existing SWAP path (`pack_cuda` walks the tuple, carrying a `None` tail through untouched). The same code
+is therefore correct in-process, on the fast lane, and in the isolated worker.
+
+The point is the **replacement** swap. The hand-written additive form is in-place
+(`block.output[:, -1, :] += direction` — the canonical nnsight steering); under isolation that mutates
+only the worker's *delivered clone*, no SWAP fires, the host's real activation is untouched, and the
+steering silently no-ops (the save of the steered residual even looks right — only the downstream forward
+reveals nothing changed). `tracer.steer` makes the steering cross the boundary by construction. Tuple
+outputs (most attention modules — `(tensor, None)` here) are replaced whole, steering element `[0]`.
+
+Touch points: just the `tracer.steer` method (tracer.py). No event, no host handler — it reuses
+`Events.SWAP` and the eproperty setter.
+
+**Verified (`test_isolated_steer.py`, gpt2 + renamed model):** steering one block, an attention tuple
+output, and three blocks at once are all isolated-vs-in-process `max|Δ|=0` and propagate through later
+layers; `tracer.steer` equals the manual untuple + whole-tuple replacement. The crux case proves the
+motivation under forced isolation: the in-place form leaves the downstream residual == the unsteered
+baseline (silent no-op) while `tracer.steer` changes it (steering took effect) to exactly the in-process
+result.
+
 ## 7. What was deliberately deferred
 
 - **The process-global `sys.addaudithook` backstop.** Its own failure mode (a leaked thread-local flag
@@ -164,8 +204,9 @@ readouts all isolated-vs-in-process `max|Δ|=0`; `tracer.unembed` equals the man
   fast-laned code. Documented as future hardening; the static gate is the confirmation.
 - **A frozen-namespace `Compartment`** (SES-style) for fast-lane execution. The first slice relies on
   the static pass + the `trust` cordon; namespace shadowing is a later refinement.
-- **The remaining primitives' isolated event handlers** (§6) — `steer`/`patch`/`ablate`/`capture`;
-  `unembed` is built.
+- **The remaining primitives** (§6) — `patch`/`ablate`/`capture`. `unembed` and `steer` are built
+  (`steer` rides `Events.SWAP`, so it needed no new handler; `patch`/`ablate` will too, `capture` needs
+  a run↔run handoff).
 
 ## 8. Verification
 
@@ -178,6 +219,10 @@ readouts all isolated-vs-in-process `max|Δ|=0`; `tracer.unembed` equals the man
   (`fast_lane=False`) — proving the fast lane is the enabling tier; in-place steering bit-identical;
   renamed-model lens bit-identical; a footgun routes off the fast lane and the host survives; an
   introspection escape is rejected; a runaway loop is killed by the watchdog and the host survives.
+- **Isolated steer** (`test_isolated_steer.py`, gpt2 + a renamed model) — 6/6: steering a block, an
+  attention tuple output, and three blocks at once are isolated-vs-in-process `max|Δ|=0`; `tracer.steer`
+  equals the manual whole-tuple replacement; and the crux — under forced isolation the in-place form is a
+  no-op (downstream == unsteered baseline) while `tracer.steer` takes effect and matches in-process.
 - **Existing isolated WORKER path** — 9/9 still bit-identical, pinned with `fast_lane=False` so they
   keep exercising the worker (otherwise the simple read/swap/save cells would now fast-lane).
 - **In-process core** — 51 passed (the default in-process path is untouched).
