@@ -165,19 +165,32 @@ outside of interleaving."
    (a wrong size either under-allocates the recv buffer — gloo abort — or over-allocates
    it — a silently wrong-shaped tensor).
 
-`_pp_signal_remote(obj, key)` runs on every cross-stage access and classifies it against the
-worker's per-step `(leading-remote)(local)(trailing-remote)` lifecycle, recorded on the
-mediator's `pp_progress` (`PPWorkerProgress`, §4.6):
-- **Downstream** owner (later stage) → *trailing remote*: no more local hooks this step, so
-  mark `pp_progress.past_local = True` (the readiness gate stops waiting for it) and, once
+`_pp_signal_remote(obj, key)` runs on every cross-stage access and advances the worker's
+per-iteration phase (`pp_progress.phase`, a `WorkerPhase`; the full lifecycle is in §4.6):
+- **Downstream** owner (later stage) → *trailing remote*: no more local hooks this iteration,
+  so set `phase = PAST_LOCAL` (the readiness gate stops waiting for it) and, once
   (`pp_progress.gone_remote` guard), `go_remote()` to release this rank's forward so it can
   complete and perform the inter-stage send the downstream value depends on.
 - **Upstream** owner (earlier stage) → *leading remote*: the pull resolves on the producing
-  rank, so do **not** mark past-local (a local access may still follow); only release a
+  rank, so the phase stays `LEADING` (a local access may still follow); only release a
   blocked value-injection `respond` if one is pending.
-`past_local` is marked **regardless of `interleaving`** (the worker can reach the access
-in the gap between forwards); only `go_remote` (which posts into the live event protocol) is
-gated on a live forward.
+The phase advances **regardless of `interleaving`** (the worker can reach the access in the
+gap between forwards); only `go_remote` (which posts into the live event protocol) is gated on
+a live forward.
+
+`_pp_check_order(obj, key)` runs on every **local** access (the `super().__get__`/`__set__`
+path, after `_is_pp_missing` is False) and enforces forward-pass order: `PAST_LOCAL` means a
+downstream module was already accessed this iteration, so a local access while `PAST_LOCAL` is
+out of forward order (a later-stage module was read before this earlier-stage one). The
+released forward already fired-and-passed this module's hook, so the worker's blocking
+`request` could only be served by the next forward — which the gate holds waiting for this
+worker — the iter/batched cross-stage deadlock. The guard raises `Mediator.OutOfOrderError`
+(the same error single-GPU gives; under run-ahead the base end-of-forward detection can't fire
+because the forward tore down before the worker reached the out-of-order line). The raise
+unwinds to the body's exception handler, which marks the worker `TERMINATED` (§4.6) so the
+gate stops waiting for it — later forwards run unintervened, the partner stage unwedges, and
+the deferred error ships at collect. Upstream accesses keep the phase `LEADING`, so
+upstream-then-local is not flagged (no false positive).
 
 ### 4.3 `LazyRemoteTensor` (`lazy_remote_tensor.py`)
 
@@ -286,21 +299,31 @@ hang). `_update_states` schedules this step's mediators (`process_batch_groups`)
 PP enabled, calls the **one PP sync point**, `_pp_wait_for_mediators`, before hooks fire.
 
 The worker-progress state the gate reads lives in one object,
-`mediator.pp_progress` (`PPWorkerProgress`, defined in `intervention/interleaver.py`):
-the per-step latches (`past_local`, `gone_remote`), the gate-only counters
-(`scheduled_count`, `max_iteration`), and `worker_iteration`. `reset_iteration()`
-encapsulates the publish-order invariant — clear the latches *before* publishing the new
-iteration number, so a gate thread that sees `worker_iteration == k` can never read a
-stale `past_local` from the previous step.
+`mediator.pp_progress` (`PPWorkerProgress`, defined in `intervention/interleaver.py`): the
+worker's lifecycle is a `WorkerPhase` (`LEADING` → `PAST_LOCAL` within an iteration;
+`TERMINATED` once the body exits) paired with the monotonic `worker_iteration`, plus the
+`gone_remote` once-guard and the gate-only counters (`scheduled_count`, `max_iteration`,
+written by the forward thread). A fourth lifecycle position — blocked at a local hook — is not
+stored; the gate observes it as `parked` (`event_queue.has_value`). The transitions:
+`reset_iteration()` re-arms `LEADING` at each iteration start; `_pp_signal_remote` sets
+`PAST_LOCAL` on a downstream access (§4.2); the body-exit handlers `end()` / `exception()`
+call `terminate()` (normal completion, `tracer.stop()`, or any raise incl. the out-of-order
+guard). `reset_iteration()` encapsulates the publish-order invariant — re-arm `LEADING`
+*before* publishing the new `worker_iteration`, so a gate thread that sees
+`worker_iteration == k` pairs it with the fresh `LEADING`, never the previous iteration's
+settled phase.
 
 For the forward of iteration `k = pp_progress.scheduled_count - 1`, a mediator is "ahead"
-when (`pp_progress.is_ahead_of(k, alive=…, parked=event_queue.has_value)`):
-- it's no longer `alive`, or
+when (`pp_progress.is_ahead_of(k, parked=event_queue.has_value)`):
+- `phase is TERMINATED` — the body exited (end / stop / error); no more hooks for any
+  iteration. This subsumes the cancelled-at-finalize and errored-mid-generation cases in one
+  state, and is why the gate no longer reads `alive` (which stays True until `cancel()` at
+  finalize and so can't tell a still-running worker from a dead one), or
 - `k > max_iteration` (a single-shot `model.trace` that never reaches `k`), or
 - `worker_iteration > k` (the worker already ran past `k`, so iteration-`k` hooks were
   registered), or
-- `worker_iteration == k` **and** (parked at a local module — **or** `past_local` — it
-  determined it has no local part this step).
+- `worker_iteration == k` **and** settled — parked at a local module **or** `phase is
+  PAST_LOCAL` (it determined it has no local part this iteration).
 
 The gate spins (`time.sleep(1e-4)`) until every mediator is ahead, bounded by a 30 s
 deadline that raises loudly instead of hanging (env-overridable via

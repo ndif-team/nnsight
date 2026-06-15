@@ -428,6 +428,8 @@ How it works (full design: `docs/developing/pp-design.md`): accesses to modules 
 
 **The divergence tripwire.** If two stages ship *different* values for the same saved variable, the merge emits a `PPRankDivergenceWarning` naming the slot (e.g. `saved slot 'noise' (max|Δ| = 1.7)`) instead of silently keeping an arbitrary copy. If you see it, the saved value is not trustworthy — hoist the offending computation out of the trace. Identical redundant copies (the normal case) merge silently; float comparison uses a tight tolerance so low-order kernel noise never warns.
 
+**Access modules in forward-pass order.** The base nnsight rule — access modules in the order the forward fires them within one invoke — extends *across stages* under PP: read earlier-stage modules before later-stage ones, and `model.logits` / `model.samples` last. Reading a later-stage module before an earlier-stage one in the same iteration (e.g. `model.logits` *then* a stage-0 layer inside a `tracer.iter` loop) raises `OutOfOrderError` — the same error single-GPU gives for out-of-order access. Reorder the accesses (earlier-stage first), or split them across separate invokes.
+
 PP performance characteristics are in `docs/developing/pp-design.md` §7 — notably, PP=2 plain generation is *faster* than PP=1 under `enforce_eager`, and cross-stage reads cost ~3–7 ms per pulled value.
 
 ## Limitations

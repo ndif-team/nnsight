@@ -18,7 +18,12 @@ import torch
 
 from ...intervention.envoy import Envoy
 from ...intervention.hooks import requires_input, requires_output
-from ...intervention.interleaver import current_mediator, eproperty
+from ...intervention.interleaver import (
+    Mediator,
+    WorkerPhase,
+    current_mediator,
+    eproperty,
+)
 from .lazy_remote_tensor import LazyRemoteTensor
 from .pp import is_pp_missing, resolve_meta
 
@@ -32,14 +37,15 @@ def _pp_signal_remote(obj, key: str) -> None:
 
     * **Downstream** (owner later in the pipeline) — this is the *trailing*
       remote phase: it comes after the local part in forward order, so the
-      worker has no more local hooks this step. Mark ``pp_progress.past_local``
-      (the readiness gate then stops waiting for it) and release the forward
-      once (``pp_progress.gone_remote`` guard) so it can run to completion and
-      perform the inter-stage send the downstream rank's value depends on.
+      worker has no more local hooks this iteration. Advance the phase to
+      ``PAST_LOCAL`` (the readiness gate then stops waiting for it) and release
+      the forward once (``pp_progress.gone_remote`` guard) so it can run to
+      completion and perform the inter-stage send the downstream rank's value
+      depends on.
     * **Upstream** (owner earlier) — this is the *leading* remote phase, before
       the local part; the pull resolves independently on the producing rank, so
-      we do NOT mark past-local (a local access may still follow). We DO post a
-      RELEASE if a value-injection ``respond`` is currently blocked on this
+      the phase stays ``LEADING`` (a local access may still follow). We DO post
+      a RELEASE if a value-injection ``respond`` is currently blocked on this
       worker (``_respond_pending``) — otherwise that ``respond`` wedges when the
       worker steps into the (event-less) pull. The flag self-clears once the
       ``respond`` returns, so this fires at most once per blocked respond.
@@ -62,11 +68,11 @@ def _pp_signal_remote(obj, key: str) -> None:
 
     # The worker runs ahead of the forward (the forward waits for it, never the
     # reverse), so a cross-stage access may land in the gap BETWEEN forwards
-    # (``interleaving`` False). ``past_local`` is the worker's own progress
-    # bookkeeping that the readiness gate reads, so it must be marked regardless
-    # of ``interleaving`` — otherwise a worker that runs ahead into the gap never
-    # marks past-local and the gate waits forever while the worker blocks on the
-    # cross-stage pull (the multi-node multi-generation tuple-read deadlock).
+    # (``interleaving`` False). The phase is the worker's own progress
+    # bookkeeping that the readiness gate reads, so it advances regardless of
+    # ``interleaving`` — a worker that runs ahead into the gap must still reach
+    # ``PAST_LOCAL`` there, or the gate waits forever while the worker blocks on
+    # the cross-stage pull (the multi-node multi-generation tuple-read deadlock).
     # ``go_remote`` posts into the live event protocol (it frees a blocked
     # value-injection ``respond``), which only exists while a forward is live, so
     # that part stays gated on ``interleaving``.
@@ -75,7 +81,7 @@ def _pp_signal_remote(obj, key: str) -> None:
 
     if owner > local_rank:
         # Downstream / trailing remote: past the local part.
-        progress.past_local = True
+        progress.phase = WorkerPhase.PAST_LOCAL
         if interleaving and not progress.gone_remote:
             progress.gone_remote = True
             mediator.go_remote()
@@ -83,6 +89,49 @@ def _pp_signal_remote(obj, key: str) -> None:
         # Upstream / leading remote: free a blocked injection respond only.
         if interleaving and mediator._respond_pending:
             mediator.go_remote()
+
+
+def _pp_check_order(obj, key: str) -> None:
+    """Raise ``OutOfOrderError`` if a LOCAL access follows a downstream
+    (later-stage) access within the same iteration.
+
+    A downstream access advances the phase to ``PAST_LOCAL`` (in
+    ``_pp_signal_remote``) and releases this rank's forward (``go_remote``) on
+    the contract that no local hooks remain this iteration (the trailing-remote
+    phase). A LOCAL access while ``PAST_LOCAL`` is therefore out of forward-pass
+    order: a later-stage module was read before this earlier-stage one. By the
+    time the worker reaches it the local hook has already fired-and-passed the
+    (released) forward, so its blocking ``request`` can only be served by the
+    next forward — which is itself gated waiting for this worker to advance.
+    That is the iter/batched cross-stage deadlock.
+
+    Single-GPU nnsight rejects the same later-before-earlier access with
+    ``OutOfOrderError`` (a ``MissedProviderError``) — under run-ahead that
+    detection (a pending request at end-of-forward) can't fire, because the
+    forward tore down before the worker reached the out-of-order line. Surface
+    the SAME error here, at the access site, so PP matches single-GPU and the
+    user gets an instant, descriptive failure instead of a hang.
+
+    The raise unwinds to the body's exception handler, which marks the worker
+    ``TERMINATED``; the gate then releases the remaining forwards so the partner
+    stage unwedges and the deferred error ships at collect.
+
+    Cheap on the hot path: the phase is read once per local access, and is
+    ``LEADING`` for the whole forward-order common case.
+    """
+    mediator = current_mediator()
+    if mediator is None or mediator.pp_progress.phase is not WorkerPhase.PAST_LOCAL:
+        return
+
+    obj_path = getattr(obj, "path", None) or ""
+    lookup = f"{obj_path}.{key}" if obj_path else key
+    raise Mediator.OutOfOrderError(
+        f"Accessed local module `{lookup}` after a later-stage (downstream) "
+        f"module in the same iteration. Under pipeline parallelism modules must "
+        f"be accessed in forward-pass order — read earlier-stage modules before "
+        f"later-stage ones, and `model.logits`/`model.samples` last. Reorder "
+        f"these accesses (or split them across separate invokes)."
+    )
 
 
 def _is_pp_missing(obj, key: str) -> bool:
@@ -267,14 +316,18 @@ class pp_eproperty(eproperty):
         # ``.save()`` is a no-op merged from the owning rank, so returning a
         # lazy post-teardown is correct.
         if _is_pp_missing(obj, self.key):
-            # Always signal: ``_pp_signal_remote`` marks worker progress
-            # (``pp_progress.past_local``, read by the readiness gate)
-            # regardless of ``interleaving`` and gates only its event-protocol
-            # ``go_remote`` on a live forward internally. The worker may reach
-            # this access in the gap between forwards (run-ahead), where the
-            # gate still needs the past-local mark to release.
+            # Always signal: ``_pp_signal_remote`` advances the worker phase
+            # (``pp_progress.phase``, read by the readiness gate) regardless of
+            # ``interleaving`` and gates only its event-protocol ``go_remote``
+            # on a live forward internally. The worker may reach this access in
+            # the gap between forwards (run-ahead), where the gate still needs
+            # the ``PAST_LOCAL`` phase to release.
             _pp_signal_remote(obj, self.key)
             return _pp_lazy_access(obj, self.key)
+        # Local access: reject a read that comes AFTER a downstream access this
+        # iteration (out of forward-pass order) instead of deadlocking on a hook
+        # the released forward already fired-and-passed.
+        _pp_check_order(obj, self.key)
         return super().__get__(obj, owner)
 
     def __set__(self, obj, value):
@@ -296,6 +349,10 @@ class pp_eproperty(eproperty):
             # ``_pp_signal_remote`` gates only ``go_remote`` on a live forward.
             _pp_signal_remote(obj, self.key)
             return
+        # Local write: same out-of-order guard as the read path — a local write
+        # after a downstream access this iteration can't land on the released
+        # forward.
+        _pp_check_order(obj, self.key)
         super().__set__(obj, value)
 
 

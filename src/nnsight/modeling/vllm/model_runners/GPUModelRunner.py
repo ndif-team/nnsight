@@ -752,7 +752,7 @@ class NNsightGPUModelRunner(GPUModelRunner):
             progress = mediator.pp_progress
             k = progress.scheduled_count - 1
             while not progress.is_ahead_of(
-                k, alive=mediator.alive, parked=mediator.event_queue.has_value
+                k, parked=mediator.event_queue.has_value
             ):
                 if time.monotonic() > deadline:
                     raise TimeoutError(

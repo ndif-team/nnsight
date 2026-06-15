@@ -418,6 +418,28 @@ def _deep_clone(value):
     return value
 
 
+class WorkerPhase(Enum):
+    """The worker's position within (or past) its current iteration.
+
+    The readiness gate reads this to decide whether to release a forward (see
+    :meth:`PPWorkerProgress.is_ahead_of`). A fourth phase, "at a local hook", is
+    not stored: a worker blocked in :meth:`Mediator.request` is observably
+    parked (``event_queue.has_value``), which the gate reads directly.
+    """
+
+    # In the current iteration, before reaching the local part: a local hook
+    # may still register, so the forward for this iteration must wait. The
+    # iteration starts here (and a leading upstream access stays here, since the
+    # pull resolves on the producing rank and a local access may still follow).
+    LEADING = "leading"
+    # Reached a downstream (later-stage) access this iteration: no local hooks
+    # remain (the trailing-remote phase), so the forward may proceed.
+    PAST_LOCAL = "past_local"
+    # The body exited — normal completion, ``tracer.stop()``, or a raised
+    # error. The worker will never register another hook for any iteration.
+    TERMINATED = "terminated"
+
+
 class PPWorkerProgress:
     """Per-mediator worker-progress state for pipeline parallelism.
 
@@ -425,38 +447,39 @@ class PPWorkerProgress:
     worker, never the reverse — and the per-step readiness gate
     (``GPUModelRunner._pp_wait_for_mediators``) releases a forward only once
     every scheduled mediator is "ahead" of it. This object is the single home
-    for the state that conversation: the iterator (worker thread) publishes
-    progress, ``pp_envoy`` marks cross-stage transitions, the gate (main
+    for that conversation: the iterator (worker thread) publishes the iteration
+    and re-arms the phase, ``pp_envoy`` advances the phase on cross-stage
+    transitions, the body-exit handlers mark termination, and the gate (main
     thread) reads.
 
-    Within one iteration the worker's lifecycle is
-    ``(leading-remote)(local)(trailing-remote)``; ``past_local`` records that
-    it moved past its local part, ``gone_remote`` that the forward-releasing
-    RELEASE was already posted this step (at most once).
+    The worker's lifecycle is a :class:`WorkerPhase` paired with the monotonic
+    ``worker_iteration``; ``gone_remote`` records that the forward-releasing
+    RELEASE was already posted this iteration (at most once).
 
-    Plain attribute reads/writes under the GIL; the one ordering invariant
-    lives in :meth:`reset_iteration`.
+    Plain attribute reads/writes under the GIL (one writer: the worker thread,
+    except the gate-only counters below); the one ordering invariant lives in
+    :meth:`reset_iteration`.
     """
 
     __slots__ = (
         "gone_remote",
-        "past_local",
+        "phase",
         "scheduled_count",
         "max_iteration",
         "worker_iteration",
     )
 
     def __init__(self):
-        # Forward-releasing ``go_remote`` already posted this step (emit it at
-        # most once; once the forward finishes the interleaver context closes
+        # Forward-releasing ``go_remote`` already posted this iteration (emit it
+        # at most once; once the forward finishes the interleaver context closes
         # and later accesses must not post into it).
         self.gone_remote = False
-        # Worker moved past its local part this step via a downstream access
-        # (the gate then stops waiting for it).
-        self.past_local = False
-        # Gate-only: how many forwards have processed THIS request (bumped in
-        # ``process_batch_groups``; immune to pipeline bubbles). The forward
-        # being gated is for iteration ``scheduled_count - 1``.
+        # Where the worker is within its current iteration (see WorkerPhase).
+        self.phase = WorkerPhase.LEADING
+        # Gate-only (written by the forward thread): how many forwards have
+        # processed THIS request (bumped in ``process_batch_groups``; immune to
+        # pipeline bubbles). The forward being gated is for iteration
+        # ``scheduled_count - 1``.
         self.scheduled_count = 0
         # Gate-only: the highest iteration the worker will ever run (set from
         # the iter range; ``inf`` for unbounded ``tracer.iter[:]``). Defaults
@@ -470,44 +493,55 @@ class PPWorkerProgress:
         self.worker_iteration = 0
 
     def reset_iteration(self, iteration: int) -> None:
-        """Mark the start of worker iteration ``iteration``.
+        """Re-arm the per-iteration phase at the start of worker iteration
+        ``iteration``.
 
-        Clears the per-iteration latches BEFORE publishing the new iteration
-        number. The gate reads ``worker_iteration`` as its guard and then
-        trusts ``past_local`` / the parked-event flag as the data for that
-        iteration; under the GIL, publishing ``worker_iteration`` LAST
-        guarantees a gate thread that sees ``worker_iteration == k`` also
-        sees freshly-cleared latches. The reverse order opens a two-write
-        window where the gate reads a stale ``past_local`` left True by the
-        previous iteration's downstream access and releases the forward
-        before this iteration's local hook is registered — the hook is
-        missed, the value never produced, and the ranks deadlock at the gate
-        (the batched multitoken cross-stage hang).
+        Publish the re-armed ``LEADING`` phase BEFORE the new
+        ``worker_iteration``: under the GIL a gate thread that observes the new
+        ``worker_iteration == k`` then also observes the fresh ``LEADING``, so
+        it waits for this iteration's local hook to register. (Writing
+        ``worker_iteration`` first would let the gate pair the new iteration
+        with the previous iteration's settled phase and release the forward
+        before the hook registers — the missed hook then deadlocks the ranks,
+        the batched multitoken cross-stage hang.)
         """
         self.gone_remote = False
-        self.past_local = False
+        self.phase = WorkerPhase.LEADING
         self.worker_iteration = iteration
 
-    def is_ahead_of(self, k: int, *, alive: bool, parked: bool) -> bool:
+    def is_ahead_of(self, k: int, *, parked: bool) -> bool:
         """Whether the worker is AHEAD of the forward for iteration ``k``.
 
-        Ahead means: finished (``not alive``), never reaching ``k``
-        (``k > max_iteration``), already past ``k``, or on ``k`` and settled —
-        parked at a local request (``parked``, the caller passes
-        ``event_queue.has_value``) or determined it has no local part this
-        step (``past_local``). Comparing ``worker_iteration`` against ``k``
-        is what makes the per-iteration flags safe to read: a stale flag from
-        a previous step is ignored because the worker has advanced past
-        ``k``, and a not-yet-started next step is correctly waited on.
+        Ahead means the forward may fire hooks now because the worker will not
+        register a new local hook for iteration ``k``:
+
+        * ``TERMINATED`` — the body exited (end / stop / error); no more hooks
+          for any iteration.
+        * ``k > max_iteration`` — the worker's range ends before ``k``.
+        * ``worker_iteration > k`` — iteration ``k`` already ran, so its hooks
+          registered.
+        * ``worker_iteration == k`` and settled — blocked at a local hook
+          (``parked``, the caller passes ``event_queue.has_value``) or
+          ``PAST_LOCAL`` (determined no local part this iteration).
+
+        Otherwise (behind ``k``, or on ``k`` and still ``LEADING``) the forward
+        waits. Comparing ``worker_iteration`` against ``k`` is what makes the
+        phase safe to read: a phase from another iteration is ignored because
+        the iteration numbers don't match.
         """
-        if not alive:
+        if self.phase is WorkerPhase.TERMINATED:
             return True
         if k > self.max_iteration:
             return True
         it = self.worker_iteration
         if it > k:
             return True
-        return it == k and (parked or self.past_local)
+        return it == k and (parked or self.phase is WorkerPhase.PAST_LOCAL)
+
+    def terminate(self) -> None:
+        """Mark the body exited (end / stop / error). Final: the gate then
+        releases every remaining forward so the request can finish."""
+        self.phase = WorkerPhase.TERMINATED
 
 
 class Cancelation(Exception):
@@ -1686,6 +1720,10 @@ class Mediator:
 
         self.push()
 
+        # Body exited normally: the worker registers no more hooks. The gate
+        # then releases any remaining forwards for this request.
+        self.pp_progress.terminate()
+
         self.event_queue.put((Events.END, None))
 
     def go_remote(self):
@@ -1715,6 +1753,12 @@ class Mediator:
         Args:
             exception: The exception that occurred
         """
+        # Body exited via a raise (including ``tracer.stop()``'s
+        # EarlyStopException and the PP out-of-order error): the worker
+        # registers no more hooks, so the gate releases the remaining forwards
+        # and the request finishes — shipping this deferred error at collect.
+        self.pp_progress.terminate()
+
         self.event_queue.put((Events.EXCEPTION, exception))
 
     @property

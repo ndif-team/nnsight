@@ -207,12 +207,36 @@ def scenario_multigen_hidden(model, prompt, max_tokens, layer):
     }
 
 
+def scenario_multigen_ooo(model, prompt, max_tokens):
+    """Out-of-forward-order access inside ``tracer.iter``.
+
+    Each step reads a DOWNSTREAM module (``model.logits``, owned by the last
+    stage) BEFORE a LOCAL early layer (``transformer.h[2]``, owned by stage 0) —
+    i.e. a later-stage module before an earlier-stage one within one iteration.
+
+    Single-GPU nnsight rejects this with ``OutOfOrderError``. Under PP it used to
+    deadlock (stage 0's downstream access released the forward early, so the
+    later local hook was missed and never re-fired). The PP path must surface the
+    SAME ``OutOfOrderError`` promptly instead of hanging.
+    """
+    with model.trace(
+        prompt, temperature=0.0, top_p=1, max_tokens=max_tokens
+    ) as tracer:
+        toks = list().save()
+        early = list().save()
+        for _ in tracer.iter[0:max_tokens]:
+            toks.append(model.logits.argmax(dim=-1))      # downstream (last stage)
+            early.append(model.transformer.h[2].output[0])  # local (stage 0)
+
+    return {"num_steps": len(toks)}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", choices=[
         "logits", "hidden", "hidden_only", "cross_stage", "cross_stage_no_logits",
         "downstream_read", "tuple_lazy",
-        "multigen", "multigen_hidden",
+        "multigen", "multigen_hidden", "multigen_ooo",
     ])
     parser.add_argument("--pp", type=int, required=True)
     parser.add_argument("--prompt", type=str, required=True)
@@ -242,6 +266,8 @@ def main():
             result = scenario_multigen(model, args.prompt, args.max_tokens)
         elif args.scenario == "multigen_hidden":
             result = scenario_multigen_hidden(model, args.prompt, args.max_tokens, args.layer)
+        elif args.scenario == "multigen_ooo":
+            result = scenario_multigen_ooo(model, args.prompt, args.max_tokens)
         else:
             result = {"error": f"Unknown scenario: {args.scenario}"}
 
