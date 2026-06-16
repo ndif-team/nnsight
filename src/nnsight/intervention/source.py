@@ -233,9 +233,7 @@ def wrap_operation(
     def inner(*args, **kwargs):
 
         actual_fn = (
-            op_accessor.fn_replacement
-            if op_accessor.fn_replacement is not None
-            else fn
+            op_accessor.fn_replacement if op_accessor.fn_replacement is not None else fn
         )
 
         # Consume the one-shot replacement *now*, before invoking actual_fn.
@@ -288,7 +286,10 @@ class OperationAccessor:
     - ``pre_hooks`` — appended by :func:`operation_input_hook`. Each is
       called with ``(args, kwargs)``; non-``None`` return replaces them.
     - ``post_hooks`` — appended by :func:`operation_output_hook`. Each is
-      called with the return value; non-``None`` return replaces it.
+      called with the return value; non-``None`` return replaces it. Also
+      holds the persistent per-mediator iteration counter installed by an
+      active iter loop (:func:`register_op_counters`), ordered last via
+      ``mediator_idx = inf`` so it bumps the tracker after the user hooks.
     - ``fn_hooks`` — appended by :func:`operation_fn_hook` for recursive
       source tracing. Each receives the current fn and returns a
       (possibly replaced) fn.
@@ -296,10 +297,10 @@ class OperationAccessor:
       :attr:`OperationEnvoy.source`. When set, :func:`wrap_operation` uses
       it in place of the original fn for one call, then clears it.
 
-    All input/output/fn hooks are one-shot and self-remove when they
-    fire. The ``hooked`` property is True if any list is non-empty;
-    :class:`SourceAccessor.wrap` checks it to take the zero-overhead
-    fast path for unhooked sites.
+    User input/output/fn hooks are one-shot and self-remove when they fire;
+    the iter counter persists for the loop. The ``hooked`` property is True
+    if any list is non-empty; :class:`SourceAccessor.wrap` checks it to take
+    the zero-overhead fast path for unhooked sites.
     """
 
     def __init__(self, name: str, source: str, line_number: int):
@@ -328,7 +329,13 @@ class OperationAccessor:
 
     @property
     def hooked(self) -> bool:
-        """True if the op has any active hook or a pending fn replacement."""
+        """True if the op has any active hook or a pending fn replacement.
+
+        An active iter loop's persistent counter lives in ``post_hooks``, so
+        an op being iterated stays hooked even on fires the user did not
+        directly observe — that is what lets the counter advance the tracker
+        for sparse iteration (e.g. ``iter[[0, 2]]``) and generation steps.
+        """
         return bool(
             self.pre_hooks
             or self.post_hooks
@@ -395,9 +402,7 @@ class SourceAccessor:
         self.operations: Dict[str, OperationAccessor] = {}
         for op_short_name, line in line_numbers.items():
             full_name = f"{path}.{op_short_name}" if path else op_short_name
-            self.operations[full_name] = OperationAccessor(
-                full_name, source, line
-            )
+            self.operations[full_name] = OperationAccessor(full_name, source, line)
 
     def wrap(self, fn: Callable, **kwargs) -> Callable:
         """Per-call-site dispatcher baked into the injected forward.
@@ -447,14 +452,10 @@ class SourceAccessor:
         self._forward = injected
 
         for op_short_name, line in line_numbers.items():
-            full_name = (
-                f"{self.path}.{op_short_name}" if self.path else op_short_name
-            )
+            full_name = f"{self.path}.{op_short_name}" if self.path else op_short_name
             existing = self.operations.get(full_name)
             if existing is None:
-                self.operations[full_name] = OperationAccessor(
-                    full_name, source, line
-                )
+                self.operations[full_name] = OperationAccessor(full_name, source, line)
             else:
                 existing.line_number = line
                 existing.source_code = source
@@ -486,9 +487,7 @@ class SourceAccessor:
         )
 
         source_lines = self.source.split("\n")
-        formatted_lines = [
-            " " * (max_name_length + 6) + "* " + source_lines[0]
-        ]
+        formatted_lines = [" " * (max_name_length + 6) + "* " + source_lines[0]]
 
         operations_by_line: Dict[int, List[str]] = {}
         for name, line_number in self.line_numbers.items():
@@ -645,6 +644,7 @@ class OperationEnvoy:
         """
         # Local import to avoid circular dependency at module import time.
         from .hooks import operation_fn_hook
+        from .tracing.iterator import register_counters_for_active_iters
 
         if self.interleaver is None or self.interleaver.current is None:
             raise ValueError(
@@ -672,6 +672,10 @@ class OperationEnvoy:
 
             nested = SourceAccessor(fn, self.path)
             accessor._source_accessor = nested
+
+            # Wire the nested accessor's operations into any in-progress iter
+            # loop so recursive `.source` ops count per-fire like top-level ones.
+            register_counters_for_active_iters(self.interleaver, nested)
 
             # Substitute the injected fn into the currently-running op
             # (handled by :meth:`Mediator.handle_swap_event` and the
@@ -722,9 +726,7 @@ class SourceEnvoy:
         self._operations_by_name: Dict[str, OperationEnvoy] = {}
 
         for short_name in accessor.line_numbers.keys():
-            full_name = (
-                f"{accessor.path}.{short_name}" if accessor.path else short_name
-            )
+            full_name = f"{accessor.path}.{short_name}" if accessor.path else short_name
             op_accessor = accessor.operations[full_name]
             op_envoy = OperationEnvoy(op_accessor, interleaver=interleaver)
             setattr(self, short_name, op_envoy)

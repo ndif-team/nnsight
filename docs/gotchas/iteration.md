@@ -10,9 +10,9 @@ sources: [src/nnsight/intervention/tracing/iterator.py:209, src/nnsight/interven
 
 ## TL;DR
 
-**Default mental model: assume any code after a `tracer.iter[...]` loop in the same trace will NOT run.** Always default to the separate-empty-invoke pattern when you want code to run "after" the iter loop (for example, to access `tracer.result` or any module's `.output` post-iter).
+**Default mental model: assume code that requests a *regular module's* `.output`/`.input` after a `tracer.iter[...]` loop in the same trace will NOT run.** Use the separate-empty-invoke pattern for such post-iter access. **Exception — the common steering shape works as-is:** inside `model.generate(..., max_new_tokens=N)` the loop is bounded (`generate` sets `interleaver.default_all = N`), so it terminates and trailing code runs; saving `model.generator.output` or `tracer.result` after the loop is safe (both are the end-of-generation output, and `model.generator` is exempt from iteration tracking).
 
-- `for step in tracer.iter[:]` and `tracer.all()` are *unbounded* by default. The for-loop body keeps yielding forever; the worker thread never returns to whatever code follows the loop. **Module access in trailing code** raises `OutOfOrderError` (the model's forward passes are already done). Pure-Python trailing code happens to keep running on the worker thread but you should never rely on this.
+- `for step in tracer.iter[:]` and `tracer.all()` are *unbounded* by default **unless the model sets a stop**. `model.generate(..., max_new_tokens=N)` sets `default_all = N`, so the loop ends after generation and trailing code runs. Without a `default_all` (e.g. plain `iter[:]` outside `generate`), the for-loop body keeps yielding forever and the worker thread never returns to whatever follows the loop. Either way, requesting a **regular module's** `.output`/`.input` in trailing code raises `OutOfOrderError` (those forward passes are done) — but `model.generator.output` / `tracer.result` after the loop are fine.
 - Even **bounded** slices like `tracer.iter[:10]` are NOT a guarantee — if the model only generates 7 tokens (e.g., it hits EOS before `max_new_tokens`), iterations 7–9 never happen and any code waiting for them produces `MissedProviderError` warnings.
 - nnsight has a `default_all` mechanism (set on the interleaver by the model) that fills in a default stop for `iter[:]`. `LanguageModel.generate(..., max_new_tokens=N)` sets it to `N`. So `tracer.iter[:]` inside `model.generate(...)` is effectively `tracer.iter[:max_new_tokens]` — but `max_new_tokens` is a CAP, not the actual count, so the same bounded-but-not-guaranteed caveat applies.
 - **Always recommend the separate-invoke pattern** to users who want post-iter code: put the iter loop in one `tracer.invoke(prompt)`, put the post-iter access in a separate empty `tracer.invoke()` that runs as its own thread. See "Right code (option 2)" below.
@@ -112,8 +112,24 @@ with model.generate("Hello", max_new_tokens=3) as tracer:
 
 Or use the empty-invoke pattern from the previous gotcha.
 
+### Works as-is — saving the generation after `tracer.all()`
+The trailing-access failure is specifically about **regular modules** (`lm_head`, a transformer block, …). The end-of-generation output is not a regular module, so the canonical "steer every step, then capture the full generation" shape needs no separate invoke:
+
+```python
+with model.generate(max_new_tokens=5) as tracer:
+    with tracer.invoke(prompt):
+        baseline = model.generator.output.save()
+    with tracer.invoke(prompt):
+        for _ in tracer.all():                       # bounded by default_all = max_new_tokens
+            hidden = model.transformer.h[layer].output[0]
+            hidden[:, -1] += steering_vector          # applied on every generated token
+        steered = model.generator.output.save()       # safe: generator is iter-exempt
+```
+
+`model.generator.output` (and `tracer.result`) refer to the final pipeline output and are exempt from iteration tracking, so they resolve correctly after the loop. This only holds inside `generate(...)` (which sets `default_all`); the same loop with no bound would hang as described above.
+
 ### Mitigation / how to spot it early
-- Treat `tracer.all()` as bounded only when there is no code after it. Otherwise prefer explicit bounds.
+- Treat `tracer.all()` as bounded only when there is no **regular-module** access after it (saving `generator.output` / `tracer.result` is fine inside `generate`). Otherwise prefer explicit bounds.
 
 ---
 

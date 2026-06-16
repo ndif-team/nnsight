@@ -537,6 +537,134 @@ class TestInvokerBatching:
         assert torch.allclose(list_logits3, invoke_logits3, atol=1e-5)
 
     @torch.no_grad()
+    def test_batched_positions_match_single_prompt(
+        self, gpt2: nnsight.LanguageModel, ET_prompt: str
+    ):
+        """A prompt's next-token logits in a mixed-length batch must match running it alone.
+
+        The batch is left-padded, so a shorter prompt's real tokens land at shifted positions unless
+        ``position_ids`` are derived from the attention mask. Without that, GPT-2's learned absolute
+        position embeddings make the padded row's logits diverge from the single-prompt result — a
+        silent per-prompt error. This is a stronger check than ``test_invoke_list_attention_mask``,
+        which compares batched paths to each other: both share the same padding, so they agree even
+        when both are wrong. The single-prompt run is the real ground truth.
+        """
+        short = "Hello world"            # fewer tokens -> left-padded in the batch
+        long = ET_prompt
+
+        with gpt2.trace([short, long]):
+            batched = gpt2.lm_head.output[:, -1].save()        # [2, vocab]
+        with gpt2.trace(short):
+            short_alone = gpt2.lm_head.output[:, -1].save()    # [1, vocab]
+        with gpt2.trace(long):
+            long_alone = gpt2.lm_head.output[:, -1].save()
+
+        # the padded (shorter) row is the one the position shift corrupts
+        assert (batched[0] - short_alone[0]).abs().max() < 1e-1
+        assert torch.equal(batched[0].argmax(-1), short_alone[0].argmax(-1))
+        # the longest (unpadded) row is unaffected either way; check it stays correct
+        assert (batched[1] - long_alone[0]).abs().max() < 1e-1
+        assert torch.equal(batched[1].argmax(-1), long_alone[0].argmax(-1))
+
+    @torch.no_grad()
+    def test_batched_generation_matches_single_prompt(
+        self, gpt2: nnsight.LanguageModel, ET_prompt: str
+    ):
+        """Mixed-length batched generation must produce the same continuation for a prompt as
+        generating it alone.
+
+        The left-padded-batch ``position_ids`` correction is for the bare-forward (trace) path only.
+        ``generate`` derives and advances ``position_ids`` itself across decode steps, so if the
+        correction leaks into ``generate`` the padded row's positions freeze and its decode diverges.
+        This guards that the correction is stripped before ``generate`` (the trace fix must not break
+        generation)."""
+        short = "Hello world"           # fewer tokens -> left-padded in the batch
+        long = ET_prompt
+
+        with gpt2.generate(max_new_tokens=8, do_sample=False) as tracer:
+            with tracer.invoke([short, long]):
+                batched = gpt2.generator.output.save()
+        with gpt2.generate(max_new_tokens=8, do_sample=False) as tracer:
+            with tracer.invoke(short):
+                single = gpt2.generator.output.save()
+
+        # the last 8 columns are the newly generated tokens; the padded (short) row must match
+        # the standalone run token-for-token.
+        assert torch.equal(batched[0, -8:], single[0, -8:])
+
+    @torch.no_grad()
+    def test_user_position_ids_respected_in_trace(self, gpt2: nnsight.LanguageModel):
+        """An explicitly user-supplied ``position_ids`` must reach the model unchanged.
+
+        The left-pad correction only fills in *missing* position_ids; a researcher passing
+        their own (e.g. to probe position sensitivity) must see exactly those values at the
+        position-embedding lookup (``wpe`` receives the position_ids tensor as its input).
+        """
+        prompt = "Hello world"
+        n = gpt2.tokenizer(prompt, return_tensors="pt")["input_ids"].shape[1]
+        custom = torch.full((1, n), 5, dtype=torch.long)
+
+        with gpt2.trace(prompt, position_ids=custom):
+            used = gpt2.transformer.wpe.input.save()
+
+        assert torch.equal(used.cpu(), custom)
+
+    @torch.no_grad()
+    def test_user_position_ids_rejected_when_batching(
+        self, gpt2: nnsight.LanguageModel, ET_prompt: str
+    ):
+        """A user-supplied ``position_ids`` is rejected for a multi-prompt / batched input.
+
+        Custom position_ids are only honored for a single, unpadded prompt. When batching, nnsight
+        left-pads the combined batch and re-derives position_ids from the attention mask, so a
+        per-prompt position_ids cannot be safely aligned — passing one must raise rather than be
+        silently dropped or mis-aligned across the batch. Both shapes of batching are covered: a
+        single invoke holding multiple prompts, and multiple single-prompt invokes one of which
+        supplies position_ids.
+        """
+        short = "Hello world"
+        long = ET_prompt
+        n_short = gpt2.tokenizer(short, return_tensors="pt")["input_ids"].shape[1]
+        n_long = gpt2.tokenizer(long, return_tensors="pt")["input_ids"].shape[1]
+
+        # one invoke holding two prompts, with position_ids for the (left-padded) batch
+        with pytest.raises(ValueError):
+            with gpt2.trace(
+                [short, long], position_ids=torch.zeros(2, n_long, dtype=torch.long)
+            ):
+                gpt2.lm_head.output.save()
+
+        # two single-prompt invokes, one supplying position_ids, batched together
+        with pytest.raises(ValueError):
+            with gpt2.trace() as tracer:
+                with tracer.invoke(
+                    short, position_ids=torch.zeros(1, n_short, dtype=torch.long)
+                ):
+                    gpt2.lm_head.output.save()
+                with tracer.invoke(long):
+                    gpt2.lm_head.output.save()
+
+    @torch.no_grad()
+    def test_user_position_ids_rejected_in_generate(self, gpt2: nnsight.LanguageModel):
+        """A user-supplied ``position_ids`` is rejected on the ``generate`` path.
+
+        ``generate`` derives and advances position_ids itself across decode steps, so a static
+        user tensor would freeze the decode positions. Passing one must raise rather than be
+        honored or silently dropped. (nnsight's own left-pad correction, injected only for a
+        multi-row batch, is still stripped here — that path is exercised by
+        ``test_batched_generation_matches_single_prompt``.)
+        """
+        prompt = "Hello world"
+        n = gpt2.tokenizer(prompt, return_tensors="pt")["input_ids"].shape[1]
+        custom = torch.full((1, n), 5, dtype=torch.long)
+
+        with pytest.raises(ValueError):
+            with gpt2.generate(
+                prompt, position_ids=custom, max_new_tokens=1, do_sample=False
+            ):
+                gpt2.generator.output.save()
+
+    @torch.no_grad()
     def test_invoker_input_ids(self, gpt2: nnsight.LanguageModel):
         """Test that input IDs are copied when batching."""
         with gpt2.trace() as tracer:

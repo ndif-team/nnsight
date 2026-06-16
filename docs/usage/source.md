@@ -82,13 +82,21 @@ Operation names follow `<dotted_callee>_<index>`, where the index disambiguates 
 
 ### Iteration support
 
-Source operations participate in `tracer.iter[...]`. The iteration tracker is bumped for every operation under a `SourceAccessor` after each forward pass (`bump_source_paths`, `src/nnsight/intervention/iterator.py:75`), so `.source.<op>.output` inside `for step in tracer.iter[2]:` targets step 2.
+Source operations participate in `tracer.iter[...]`. Operation iteration counts **invocations**, not forward passes — a per-fire counter (`register_op_counters`, `src/nnsight/intervention/tracing/iterator.py`) advances each op's tracker once per call. So if an op runs once per forward (the usual case), `.source.<op>.output` inside `for step in tracer.iter[2]:` targets generation step 2; and if an op loops *within* a single forward (e.g. a Mixture-of-Experts expert loop), `iter[i]` targets the i-th invocation in that forward.
+
+```python
+# MoE-style: experts.<op> fires once per active expert in one forward.
+with model.trace(prompt) as tracer:
+    states = nnsight.save([])
+    for i in tracer.iter[:n_active]:
+        states.append(experts.source.current_hidden_states_to_0.output)
+```
 
 ## Gotchas
 
 - **Don't call `.source` on a module from within another `.source`.** The recursive `.source` chain only follows plain functions; if the operation's target is a `torch.nn.Module`, nnsight raises `ValueError("Don't call .source on a module ... Call it directly with: <path>.source")` (`src/nnsight/intervention/source.py:660`). Access the submodule directly instead.
 - **Decorators on the original forward are stripped** during AST rewriting, since they may fail when re-executed outside the original class context (e.g. `@auto_docstring`). The compute is identical; the decorator side effects are lost (`src/nnsight/intervention/source.py:174`).
-- **Op-path tracker can miss the first hit if `.source` is built mid-iter-loop.** If the user's first ever `.source` access on a module happens at step N>0, the operation tracker starts at 0 and that one access misses. Subsequent steps work. Touch `.source` on the module before entering the iter loop to avoid this (`src/nnsight/intervention/iterator.py:125`).
+- **Mid-loop first-`.source` access only misses a step in *generation* loops.** If the first ever `.source` access on a module happens at step N>0 of a multi-forward (generation) iter loop, the operation tracker starts at 0 and that one access misses; touch `.source` before the loop to avoid it. Single-forward in-loop iteration (the MoE case) is at step 0, so this doesn't arise (`src/nnsight/intervention/tracing/iterator.py`, `register_counters_for_active_iters`).
 - **Hooks installed by `.source` access are one-shot** and self-remove. Re-accessing `.source.<op>.output` re-registers the hook for the next forward.
 - See [docs/gotchas/integrations.md](../gotchas/integrations.md) for the full set.
 

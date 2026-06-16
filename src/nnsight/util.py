@@ -13,9 +13,7 @@ T = TypeVar("T")
 C = TypeVar("C", bound=Collection[T])
 
 
-def apply(
-    data: C, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
-) -> C:
+def apply(data: C, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False) -> C:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
@@ -49,8 +47,7 @@ def apply(
                 data[key] = apply(value, fn, cls, inplace=inplace)
             return data
         return {
-            key: apply(value, fn, cls, inplace=inplace)
-            for key, value in data.items()
+            key: apply(value, fn, cls, inplace=inplace) for key, value in data.items()
         }
 
     elif data_type == slice:
@@ -63,9 +60,7 @@ def apply(
     return data
 
 
-def applyn(
-    data: C, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False
-) -> C:
+def applyn(data: C, fn: Callable[[T], Any], cls: Type[T], inplace: bool = False) -> C:
     """Applies some function to all members of a collection of a give type (or types)
 
     Args:
@@ -88,11 +83,19 @@ def applyn(
         #     for idx, _data in enumerate(data):
         #         data[idx] = apply(_data, fn, cls, inplace=inplace)
         #     return data
-        
-        return [applyn([_data[i] for _data in data], fn, cls, inplace=inplace) for i in range(len(data[0]))]
+
+        return [
+            applyn([_data[i] for _data in data], fn, cls, inplace=inplace)
+            for i in range(len(data[0]))
+        ]
 
     elif data_type == tuple:
-        return tuple([applyn([_data[i] for _data in data], fn, cls, inplace=inplace) for i in range(len(data[0]))])
+        return tuple(
+            [
+                applyn([_data[i] for _data in data], fn, cls, inplace=inplace)
+                for i in range(len(data[0]))
+            ]
+        )
 
     elif data_type == dict:
         # if inplace:
@@ -112,6 +115,7 @@ def applyn(
     #     )
 
     return data[0]
+
 
 def fetch_attr(object: object, target: str) -> Any:
     """Retrieves an attribute from an object hierarchy given an attribute path. Levels are separated by '.' e.x (transformer.h.1)
@@ -137,6 +141,7 @@ def fetch_attr(object: object, target: str) -> Any:
 
     return object
 
+
 def to_import_path(type: type) -> str:
 
     return f"{type.__module__}.{type.__name__}"
@@ -159,14 +164,19 @@ class Patch:
         parent (Any): Module or class to replace attribute.
     """
 
-    def __init__(self, parent: Any, replacement: Any=None, key: str=None, as_dict:bool=False) -> None:
+    def __init__(
+        self,
+        parent: Any,
+        replacement: Any = None,
+        key: str = None,
+        as_dict: bool = False,
+    ) -> None:
         self.parent = parent
         self.replacement = replacement
         self.key = key
-        
 
         self.as_dict = as_dict
-        
+
         if self.as_dict:
             self.orig = self.parent[key]
         else:
@@ -188,10 +198,14 @@ class Patch:
     def restore(self) -> None:
         """Carries out the restoration of the original object on the objects module/class."""
 
-        if self.as_dict:
-            self.parent[self.key] = self.orig
-        else:
-            setattr(self.parent, self.key, self.orig)
+        try:
+            if self.as_dict:
+                self.parent[self.key] = self.orig
+            else:
+                setattr(self.parent, self.key, self.orig)
+        except Exception as e:
+            pass
+
 
 class Patcher(AbstractContextManager):
     """Context manager that patches from a list of Patches on __enter__ and restores the patch on __exit__.
@@ -202,7 +216,7 @@ class Patcher(AbstractContextManager):
 
     def __init__(self, patches: Optional[List[Patch]] = None) -> None:
         self.patches = patches or []
-        
+
         self.entered = False
 
     def add(self, patch: Patch) -> None:
@@ -224,7 +238,7 @@ class Patcher(AbstractContextManager):
         """
         if not self.entered:
             self.entered = True
-            
+
             for patch in self.patches:
                 patch.patch()
 
@@ -232,7 +246,7 @@ class Patcher(AbstractContextManager):
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         """Calls `.restore()` on all patches."""
-        
+
         if self.entered:
             self.entered = False
             for patch in self.patches:
@@ -240,10 +254,10 @@ class Patcher(AbstractContextManager):
 
 
 class WrapperModule(torch.nn.Module):
-    
+
     def forward(self, *args, **kwargs):
-        
+
         if len(args) == 1:
             return args[0]
-        
+
         return args, kwargs
