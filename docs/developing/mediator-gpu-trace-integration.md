@@ -260,6 +260,8 @@ benign CudaIPC release warning.
 | `tracer.cache()` (`modules=`, `include_inputs=`) | ✅ bit-identical — CACHE event → host registers the real cache hooks; the forward fills the host CacheDict in-place (§15) |
 | `.source` operation-level access (`...attn.split_1.output`) | 🔜 not yet (op paths aren't in `model.modules()`) |
 | in-place `[:]=` | ⛔ use explicit `=` (clone semantics, §4) |
+| Triton-kernel models (MoE / SSM / `torch.compile`) | ✅ host-side forward compiles Triton unrestricted — §16 |
+| user-code Triton (kernel inside the intervention) | ⛔ blocked under lockdown by design — §16 |
 
 Not-yet-supported features fail **cleanly** (missed-provider error or the per-step timeout), not as a
 silent deadlock — the lifecycle (timeout + `finally: cancel()`) is the safety net until each feature lands.
@@ -487,3 +489,67 @@ regression (trace/acceptance/multitoken/cross-invoke/pool) unchanged.
 **Not covered:** a cache placeholder nested inside a container save (`got = [t.cache().save()]`) — the swap
 matches a top-level saved `CacheDict`; nesting would need a recursive walk. `cross_invoker` + cache is
 untested. `modules=None` (cache *all* modules) registers a hook per module on the host — correct but heavy.
+
+---
+
+## 16. Triton-kernel models — the deployment motivation (and why this beats the in-process whitelist)
+
+**Why this is urgent.** Frontier GPU model execution increasingly runs **Triton JIT kernels**, by three
+independent routes: (1) architectures whose core op has no fast eager form ship Triton kernels — fused MoE
+(vLLM `fused_moe`: Mixtral, DeepSeek-V2/V3/R1, Qwen-MoE, Llama-4, …) and SSM selective-scan (HF `mamba2`
+imports `mamba_ssm.ops.triton.selective_state_update`; Jamba/Bamba/FalconMamba/Zamba); (2) HF's `kernels`
+library + `kernelize(model, mode=inference)` pulls Triton kernels from the Hub as drop-in
+norm/activation/attention replacements (Liger fuses RMSNorm/RoPE/SwiGLU/CE); (3) `torch.compile` →
+TorchInductor, whose GPU codegen target *is* Triton. The triton-free path is essentially limited to a plain
+dense transformer in eager mode with SDPA / precompiled-CUDA FlashAttention (which is an AOT library call,
+not runtime codegen).
+
+**Why the in-process whitelist can't serve them.** NDIF's sandbox
+(`ndif:src/ndif/services/ray/nn/security/`) is a Python import whitelist that wraps the ENTIRE
+`tracer.execute(model)` — the forward runs *inside* the Protector (unavoidable in-process: user
+interventions interleave with the forward in one call stack). Triton's first-use compilation needs
+`subprocess`+ptxas, `tempfile`, `os`, `importlib`, `open()` — none whitelisted, several hard-blocked by the
+audit hook. So the model's own Triton kernels, firing during the sandboxed forward, are denied. A
+pre-warmed kernel cache doesn't save it: per-request shapes recompile, and even a cache *hit* still needs
+`os`/`open`/`importlib` to load the cached `.so`.
+
+**Why this backend fixes it — the trust boundary aligns with the capability boundary.** The forward runs on
+the TRUSTED host (unrestricted → Triton compiles normally); only UNTRUSTED user intervention code runs in
+the worker. The split lands on the seam the whitelist couldn't find in-process: the thing needing dangerous
+capability (runtime codegen) is the *model* (trusted); the thing we distrust is *user code*. The worker's
+lockdown level is therefore **orthogonal** to whether Triton models run — worker security can be cranked to
+the max without touching model Triton.
+
+**Strictly better than upstream on the module-restriction axis.** Against the right baseline (upstream
+*sandboxed* NDIF, not un-sandboxed nnsight):
+
+| | Upstream whitelist | This backend (lockdown on) |
+|---|---|---|
+| user-code imports | restricted (allowlist) | restricted (seccomp import-freeze) — match-or-stricter |
+| model serving stack | **also restricted** → Triton broken | **unrestricted** (host-side) → Triton works |
+| user escape past Python layer | reaches host / tenants (whitelist README concedes C-level escapes; suite: 10/10 escapes succeed) | contained in a refless, killable process |
+
+The seccomp **import-freeze** (under lockdown, only warm-time-loaded modules are importable, since
+import == `open()`, which seccomp then blocks) is therefore *not a regression* — upstream restricts user
+imports at least as hard. The one parity item is *which* modules a legit user may reach; close it with
+`isolate_mediators(..., preimport=(...))` (and the matching `warm_worker_pool(..., preimport=(...))`), which
+loads the deployment's allowed-module set at warm time, before lockdown. User-code Triton is **doubly
+blocked** (import wall if not pre-warmed + compile wall: ptxas execve / cache open) — intended containment,
+documented as unsupported.
+
+**Verified properties (code, not just design):**
+- *Timeout directionality is correct for slow host compiles.* The worker waits on the host with **no
+  timeout** (`CudaIpcWorkerChannel.wait_response` — a blocking `recv`); the timeout lives only on the host
+  (`CudaIpcHostChannel.wait_event`) and measures worker think-time. Host-side Triton compilation happens
+  during the host's *forward execution* — never while the host is in `wait_event` — so a multi-second cold
+  MoE autotune never false-trips the worker's hang-detector, in either direction.
+- *Lockdown ordering / cold-vs-pool.* `lock_down()` runs once after warm-up, before the job loop, in the
+  unified `_pool_worker_main` (the only worker entrypoint, used for cold via `poolable=False` and pooled via
+  `poolable=True`). So the import set is frozen at warm time for **both** paths — there is no
+  "cold deserializes before lockdown" advantage; the cold-vs-pool difference is recycle-vs-retire. (The
+  earlier §7 note describing a cold deserialize-before-lockdown window predates the warm-pool unification.)
+
+**Coverage:** `prototypes/mediator-sandbox/gpu_sandbox/test_isolated_triton_model.py` — `host_compiles`
+(isolated + `lockdown=True` Triton-kernel model bit-identical to in-process, with a cold `TRITON_CACHE_DIR`
+shown to populate during the isolated run) and `user_contained` (worker-side Triton blocked under
+lockdown, exercising `preimport=`). Requires a GPU + a Triton install.

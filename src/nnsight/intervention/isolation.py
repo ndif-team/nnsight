@@ -84,6 +84,7 @@ _STATE: Dict[str, Any] = {
     "timeout": 60.0,    # per-step wall-clock cap on user code (hang containment)
     "lockdown": False,  # functional-first; seccomp lockdown enabled separately
     "pool_size": 0,     # 0 => cold one-shot worker per trace; >0 => warm pool cap
+    "preimport": (),    # modules to load at warm time, before lockdown freezes imports
 }
 
 
@@ -99,6 +100,7 @@ def isolate_mediators(
     timeout: float = 60.0,
     lockdown: bool = False,
     pool_size: int = 0,
+    preimport: tuple = (),
 ):
     """Run interventions inside ``with model.trace(...)`` in an isolated GPU worker.
 
@@ -110,13 +112,19 @@ def isolate_mediators(
         timeout: per-step wall-clock cap on user code; a worker that produces no
             event within ``timeout`` is presumed hung and killed (the host survives).
         pool_size: if > 0, draw workers from a process-global warm pool capped at
-            ``pool_size`` per (device, arena_bytes, gpu_mem_fraction, lockdown)
-            signature (auto-grown lazily, persists across traces, falls back to a cold
-            one-shot worker past the cap). 0 (default) spawns a cold worker per trace —
-            the original behavior. Use :func:`warm_worker_pool` to pre-warm at startup.
-            Under ``lockdown=True`` a pooled worker locks its import set at warm time, so
-            a job whose user code triggers a NEW import fails (consistently across the
-            pool) — stricter than the cold path, which deserializes before lockdown.
+            ``pool_size`` per (device, arena_bytes, gpu_mem_fraction, lockdown,
+            preimport) signature (auto-grown lazily, persists across traces, falls back
+            to a cold one-shot worker past the cap). 0 (default) spawns a cold worker per
+            trace — the original behavior. Use :func:`warm_worker_pool` to pre-warm at
+            startup.
+        preimport: module names to import at worker warm time, before seccomp lockdown
+            freezes new file opens. Under ``lockdown=True`` the import set is frozen at
+            warm time (import == ``open()``, which seccomp then blocks), so a job whose
+            user code triggers a NEW import fails; list here the modules interventions
+            are allowed to use, to bring user-facing import capability to parity with an
+            in-process whitelist. The freeze holds for the cold path too (cold and pooled
+            share the unified worker, which locks down before any job deserializes) — the
+            cold-vs-pool difference is recycle-vs-retire, not lockdown timing.
     """
     prev = dict(_STATE)
     _STATE.update(
@@ -127,6 +135,7 @@ def isolate_mediators(
         timeout=timeout,
         lockdown=lockdown,
         pool_size=pool_size,
+        preimport=tuple(preimport),
     )
     try:
         yield
@@ -142,6 +151,7 @@ def _base_opts() -> Dict[str, Any]:
         "gpu_mem_fraction": _STATE["gpu_mem_fraction"],
         "lockdown": _STATE["lockdown"],
         "timeout": _STATE["timeout"],
+        "preimport": _STATE["preimport"],
     }
 
 
@@ -211,9 +221,10 @@ class _WorkerPool:
 
     def __init__(self):
         # Keyed by base-opts signature: workers are interchangeable ONLY within the
-        # same (device, arena_bytes, gpu_mem_fraction, lockdown) — the bounce buffer is
-        # device- and size-specific, so reusing a worker across devices would copy into
-        # the wrong-device buffer (silent corruption).
+        # same (device, arena_bytes, gpu_mem_fraction, lockdown, preimport) — the bounce
+        # buffer is device- and size-specific, so reusing a worker across devices would
+        # copy into the wrong-device buffer (silent corruption); and a worker's frozen
+        # import set must match the requested preimport list.
         self._idle: Dict[tuple, deque] = defaultdict(deque)
         self._all: Dict[tuple, set] = defaultdict(set)
         self._lock = threading.Lock()
@@ -226,6 +237,7 @@ class _WorkerPool:
             int(base_opts["arena_bytes"]),
             float(base_opts["gpu_mem_fraction"]),
             bool(base_opts.get("lockdown", False)),
+            tuple(sorted(base_opts.get("preimport", ()))),
         )
 
     def warm(self, n: int, base_opts: dict) -> None:
@@ -321,12 +333,15 @@ def warm_worker_pool(
     gpu_mem_fraction: float = 0.3,
     lockdown: bool = False,
     timeout: float = 60.0,
+    preimport: tuple = (),
 ) -> None:
     """Pre-warm ``size`` generic workers (blocks until each is ready).
 
     Call once at server startup so the first request pays no spawn cost. The base
     options here fix the pool's per-worker configuration. Each worker costs ~0.55 GiB
-    GPU per GPU it touches — size the pool as a GPU-memory budget.
+    GPU per GPU it touches — size the pool as a GPU-memory budget. ``preimport`` and
+    ``lockdown`` must match the values later passed to :func:`isolate_mediators` or the
+    pre-warmed workers won't match its pool signature and fresh ones are spawned.
     """
     _POOL.warm(
         size,
@@ -336,6 +351,7 @@ def warm_worker_pool(
             "gpu_mem_fraction": gpu_mem_fraction,
             "lockdown": lockdown,
             "timeout": timeout,
+            "preimport": tuple(preimport),
         },
     )
 
@@ -724,6 +740,21 @@ def _pool_worker_main(conn, buf, base_opts):
     cloudpickle.loads(cloudpickle.dumps(lambda _t: _t))
 
     _ensure_mounted()  # install Object.save so `.save()` resolves in the worker
+
+    # User-configurable warm-time pre-imports: load modules interventions may need
+    # BEFORE seccomp freezes new file opens (import == open()). Under lockdown a module
+    # not loaded here is unimportable in any job, so pre-warming the deployment's
+    # allowed-module set brings user-facing import capability to parity with an
+    # in-process whitelist. A failed pre-import is non-fatal (warn + skip).
+    if base_opts.get("preimport"):
+        import importlib
+        import warnings
+
+        for _mod in base_opts["preimport"]:
+            try:
+                importlib.import_module(_mod)
+            except Exception as _e:  # noqa: BLE001
+                warnings.warn(f"isolated worker pre-import of {_mod!r} failed: {_e!r}")
 
     if base_opts.get("gpu_mem_fraction") and torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(base_opts["gpu_mem_fraction"])
