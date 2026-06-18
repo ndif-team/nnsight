@@ -1,4 +1,3 @@
-from peft import PeftModel
 from .huggingface import HuggingFaceModel
 from ..intervention.envoy import Envoy
 
@@ -9,6 +8,22 @@ from typing import Type
 from transformers.models.auto import modeling_auto
 from transformers import AutoModel
 import warnings
+
+
+def _import_peft_model():
+    """Lazily import ``peft.PeftModel``.
+
+    ``peft`` is an optional dependency, only needed when a ``peft=<repo_id>``
+    adapter is requested. Import it on demand so nnsight works without it.
+    """
+    try:
+        from peft import PeftModel
+    except ImportError as e:
+        raise ImportError(
+            "Using `peft=<repo_id>` requires the optional `peft` package, "
+            "which is not installed. Install it with `pip install peft`."
+        ) from e
+    return PeftModel
 
 
 class TransformersModel(HuggingFaceModel):
@@ -99,7 +114,7 @@ class TransformersModel(HuggingFaceModel):
             )
 
         if requested:
-            peft_model = PeftModel.from_pretrained(self._module, requested)
+            peft_model = _import_peft_model().from_pretrained(self._module, requested)
             Envoy.__init__(self, peft_model, interleaver=self.interleaver)
 
         self.peft = requested
@@ -131,7 +146,7 @@ class TransformersModel(HuggingFaceModel):
 
             warnings.filterwarnings("ignore", category=UserWarning)
 
-            model = PeftModel.from_pretrained(model, self.peft)
+            model = _import_peft_model().from_pretrained(model, self.peft)
 
             warnings.filterwarnings("default", category=UserWarning)
 
@@ -153,7 +168,7 @@ class TransformersModel(HuggingFaceModel):
         if self.peft is not None:
             warnings.filterwarnings("ignore", category=UserWarning)
 
-            model = PeftModel.from_pretrained(model, self.peft)
+            model = _import_peft_model().from_pretrained(model, self.peft)
 
             warnings.filterwarnings("default", category=UserWarning)
 
