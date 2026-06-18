@@ -249,13 +249,16 @@ benign CudaIPC release warning.
 | read / swap (`=`) / `.save()` (tensors) / skip / exception | six events over the channel; host-side hook registration; worker→host saves transmission at END | ✅ bit-identical |
 | multi-invoke + batch narrowing | per-invoke worker + host mediator; Batcher stays host-side | ✅ bit-identical |
 | single-forward `generate(...)` (no iter) | same as trace | ✅ verified |
-| seccomp lockdown (fs/net/exec) | `_sandbox.lock_down` after warm-up | ⚠️ broken since the warm-pool unification (§14): the worker locks down BEFORE receiving its first job, and unpickling the job's extras (Tokenizer) triggers a new `transformers` submodule import that seccomp blocks → the worker dies at job-recv. Pre-dates the 2026-06-10 refactors (reproduced on the pre-refactor commit). Needs a fix decision: warm the model's transformers modules before lockdown, or restore deserialize-before-lockdown for cold workers. |
+| seccomp lockdown (fs/net/exec) | `_sandbox.lock_down` after warm-up | ⚠️ broken since the warm-pool unification (§14): the worker locks down BEFORE receiving its first job, and unpickling the job's extras (Tokenizer) triggers a new `transformers` submodule import that seccomp blocks → the worker dies at job-recv. Pre-dates the 2026-06-10 refactors (reproduced on the pre-refactor commit). Mitigation now available: list the needed modules in `preimport=` so they load before lockdown ([threat-models](mediator-threat-models.md) §8); a default fix (auto-warm the model's transformers modules) is still open. |
 | `iter`/`all`/`next` (multi-token) | step stamped in the requester; host iter-hooks bump the tracker; live `default_all` piggyback (§9) | ✅ bit-identical (`iter[N]`, `iter[:]`, per-step swap) |
 | `tracer.barrier()` | worker sends the target count; host accumulates participants + runs the coordination loop (§10) | ✅ |
 | `cross_invoker` variable sharing | host variable store; worker pushes data locals, pulls the merged store; transmittable data only (§10) | ✅ |
 | warm worker pool (`pool_size=N`, `warm_worker_pool`) | generic workers receive serialized mediators as jobs; clean-END recycle (§14) | ✅ ~21× faster per request once warm |
 | `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path (§16) | ✅ read-path bit-identical (scalar loss; single invoke; no swap-then-backward; `.grad` editing raises) |
 | `tracer.cache()` (`modules=`, `include_inputs=`) | CACHE event → host registers the real cache hooks; host CacheDict swapped in at END, filled in-place by the forward (§15) | ✅ bit-identical |
+| `tracer.unembed` / `tracer.steer` | host-routed weight read (UNEMBED event) / replacement-swap injection (rides SWAP) — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (isolated and in-process) |
+| Triton-kernel models (MoE / SSM / `torch.compile`) | host-side forward compiles/runs Triton unrestricted (the worker holds only the intervention) | ✅ — §17 |
+| user-code Triton (kernel inside the intervention) | — (compiling a kernel needs `open`/`subprocess`/ptxas, which lockdown blocks by design) | ⛔ under lockdown — §17 |
 | `.source` operation-level access (`...attn.split_1.output`) | — (op paths aren't in `model.modules()`) | 🔜 not yet |
 | in-place `[:]=` | — (clone-on-receive semantics; use explicit `=`, §4) | ⛔ |
 | MPS / `isolate_mediators()` further polish | — | planned |
@@ -547,3 +550,66 @@ invoke, on-path tensor-output target, scalar loss, no swaps).
   on); a large read set can overflow the 64 MB arena.
 - The `".backward("` source-substring detection can false-positive (e.g. the string in a comment),
   which only costs needless tagging — tightening is planned alongside the gate consolidation.
+---
+
+## 17. Triton-kernel models — the deployment motivation (and why this beats the in-process whitelist)
+
+**Why this is urgent.** Frontier GPU model execution increasingly runs **Triton JIT kernels**, by three
+independent routes: (1) architectures whose core op has no fast eager form ship Triton kernels — fused MoE
+(vLLM `fused_moe`: Mixtral, DeepSeek-V2/V3/R1, Qwen-MoE, Llama-4, …) and SSM selective-scan (HF `mamba2`
+imports `mamba_ssm.ops.triton.selective_state_update`; Jamba/Bamba/FalconMamba/Zamba); (2) HF's `kernels`
+library + `kernelize(model, mode=inference)` pulls Triton kernels from the Hub as drop-in
+norm/activation/attention replacements (Liger fuses RMSNorm/RoPE/SwiGLU/CE); (3) `torch.compile` →
+TorchInductor, whose GPU codegen target *is* Triton. The triton-free path is essentially limited to a plain
+dense transformer in eager mode with SDPA / precompiled-CUDA FlashAttention (which is an AOT library call,
+not runtime codegen).
+
+**Why the in-process whitelist can't serve them.** NDIF's sandbox
+(`ndif:src/ndif/services/ray/nn/security/`) is a Python import whitelist that wraps the ENTIRE
+`tracer.execute(model)` — the forward runs *inside* the Protector (unavoidable in-process: user
+interventions interleave with the forward in one call stack). Triton's first-use compilation needs
+`subprocess`+ptxas, `tempfile`, `os`, `importlib`, `open()` — none whitelisted, several hard-blocked by the
+audit hook. So the model's own Triton kernels, firing during the sandboxed forward, are denied. A
+pre-warmed kernel cache doesn't save it: per-request shapes recompile, and even a cache *hit* still needs
+`os`/`open`/`importlib` to load the cached `.so`.
+
+**Why this backend fixes it — the trust boundary aligns with the capability boundary.** The forward runs on
+the TRUSTED host (unrestricted → Triton compiles normally); only UNTRUSTED user intervention code runs in
+the worker. The split lands on the seam the whitelist couldn't find in-process: the thing needing dangerous
+capability (runtime codegen) is the *model* (trusted); the thing we distrust is *user code*. The worker's
+lockdown level is therefore **orthogonal** to whether Triton models run — worker security can be cranked to
+the max without touching model Triton.
+
+**Strictly better than upstream on the module-restriction axis.** Against the right baseline (upstream
+*sandboxed* NDIF, not un-sandboxed nnsight):
+
+| | Upstream whitelist | This backend (lockdown on) |
+|---|---|---|
+| user-code imports | restricted (allowlist) | restricted (seccomp import-freeze) — match-or-stricter |
+| model serving stack | **also restricted** → Triton broken | **unrestricted** (host-side) → Triton works |
+| user escape past Python layer | reaches host / tenants (whitelist README concedes C-level escapes; suite: 10/10 escapes succeed) | contained in a refless, killable process |
+
+The seccomp **import-freeze** (under lockdown, only warm-time-loaded modules are importable, since
+import == `open()`, which seccomp then blocks) is therefore *not a regression* — upstream restricts user
+imports at least as hard. The one parity item is *which* modules a legit user may reach; close it with
+`isolate_mediators(..., preimport=(...))` (and the matching `warm_worker_pool(..., preimport=(...))`), which
+loads the deployment's allowed-module set at warm time, before lockdown. User-code Triton is **doubly
+blocked** (import wall if not pre-warmed + compile wall: ptxas execve / cache open) — intended containment,
+documented as unsupported.
+
+**Verified properties (code, not just design):**
+- *Timeout directionality is correct for slow host compiles.* The worker waits on the host with **no
+  timeout** (`CudaIpcWorkerChannel.wait_response` — a blocking `recv`); the timeout lives only on the host
+  (`CudaIpcHostChannel.wait_event`) and measures worker think-time. Host-side Triton compilation happens
+  during the host's *forward execution* — never while the host is in `wait_event` — so a multi-second cold
+  MoE autotune never false-trips the worker's hang-detector, in either direction.
+- *Lockdown ordering / cold-vs-pool.* `lock_down()` runs once after warm-up, before the job loop, in the
+  unified `_pool_worker_main` (the only worker entrypoint, used for cold via `poolable=False` and pooled via
+  `poolable=True`). So the import set is frozen at warm time for **both** paths — there is no
+  "cold deserializes before lockdown" advantage; the cold-vs-pool difference is recycle-vs-retire. (The
+  earlier §7 note describing a cold deserialize-before-lockdown window predates the warm-pool unification.)
+
+**Coverage:** `prototypes/mediator-sandbox/gpu_sandbox/test_isolated_triton_model.py` — `host_compiles`
+(isolated + `lockdown=True` Triton-kernel model bit-identical to in-process, with a cold `TRITON_CACHE_DIR`
+shown to populate during the isolated run) and `user_contained` (worker-side Triton blocked under
+lockdown, exercising `preimport=`). Requires a GPU + a Triton install.

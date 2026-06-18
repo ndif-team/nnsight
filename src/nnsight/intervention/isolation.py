@@ -84,17 +84,20 @@ class IsoOptions:
     context, the pool key, spawn, and the worker bootstrap — previously four
     hand-copied dicts).
 
-    ``device``/``arena_bytes``/``gpu_mem_fraction``/``lockdown`` are **warm-time**:
-    fixed when the worker process spawns, and they define pool interchangeability
-    (:attr:`pool_key`). ``timeout`` is **per-job**: re-applied to the host channel
-    each trace in ``_wire_host_channel`` (it also sizes the channel's first-event
-    budget at spawn).
+    ``device``/``arena_bytes``/``gpu_mem_fraction``/``lockdown``/``preimport`` are
+    **warm-time**: fixed when the worker process spawns, and they define pool
+    interchangeability (:attr:`pool_key`). ``timeout`` is **per-job**: re-applied to the
+    host channel each trace in ``_wire_host_channel`` (it also sizes the channel's
+    first-event budget at spawn).
     """
 
     device: str = "cuda"
     arena_bytes: int = 64 << 20
     gpu_mem_fraction: float = 0.3
     lockdown: bool = False   # functional-first; seccomp lockdown enabled separately
+    # Modules to import at worker warm time, before seccomp lockdown freezes new file
+    # opens (import == open()); warm-time, so part of pool_key.
+    preimport: tuple = ()
     timeout: float = 60.0    # per-step wall-clock cap on user code (hang containment)
     # Fast lane: confirmed-safe interventions run IN-PROCESS (full model access, no
     # worker, no per-hook channel) instead of in the GPU worker. Without it, isolation
@@ -113,6 +116,7 @@ class IsoOptions:
             int(self.arena_bytes),
             float(self.gpu_mem_fraction),
             bool(self.lockdown),
+            tuple(sorted(self.preimport)),
         )
 
 
@@ -142,6 +146,7 @@ def isolate_mediators(
     fast_lane: bool = True,
     trust: str = "local",
     fast_lane_timeout: float = 120.0,
+    preimport: tuple = (),
 ):
     """Run interventions inside ``with model.trace(...)`` in an isolated GPU worker.
 
@@ -153,13 +158,14 @@ def isolate_mediators(
         timeout: per-step wall-clock cap on user code; a worker that produces no
             event within ``timeout`` is presumed hung and killed (the host survives).
         pool_size: if > 0, draw workers from a process-global warm pool capped at
-            ``pool_size`` per (device, arena_bytes, gpu_mem_fraction, lockdown)
-            signature (auto-grown lazily, persists across traces, falls back to a cold
-            one-shot worker past the cap). 0 (default) spawns a cold worker per trace —
-            the original behavior. Use :func:`warm_worker_pool` to pre-warm at startup.
-            Under ``lockdown=True`` a pooled worker locks its import set at warm time, so
-            a job whose user code triggers a NEW import fails (consistently across the
-            pool) — stricter than the cold path, which deserializes before lockdown.
+            ``pool_size`` per (device, arena_bytes, gpu_mem_fraction, lockdown,
+            preimport) signature (auto-grown lazily, persists across traces, falls back
+            to a cold one-shot worker past the cap). 0 (default) spawns a cold worker per
+            trace — the original behavior. Use :func:`warm_worker_pool` to pre-warm at
+            startup. Under ``lockdown=True`` the worker freezes its import set at warm
+            time (cold and pooled share the unified worker, which locks down before any
+            job deserializes), so a job whose user code triggers a NEW import fails — the
+            cold-vs-pool difference is recycle-vs-retire, not lockdown timing.
         fast_lane: if True (default), a per-mediator static classifier
             (:mod:`nnsight.intervention.fastlane`) confirms interventions that use only
             whitelisted ops / host-model access / nnsight primitives and runs THOSE
@@ -173,6 +179,10 @@ def isolate_mediators(
             lane wholesale (everything isolates).
         fast_lane_timeout: whole-intervention wall-clock bound for a fast-laned thread
             (a best-effort watchdog restoring loop-containment in-process).
+        preimport: module names to import at worker warm time, before seccomp lockdown
+            freezes new file opens (import == ``open()``). Lets isolated interventions use
+            those modules under ``lockdown=True``, bringing import capability to parity
+            with an in-process whitelist; also part of the pool signature.
     """
     prev = dict(_STATE)
     _STATE.update(
@@ -187,6 +197,7 @@ def isolate_mediators(
             fast_lane=fast_lane,
             trust=trust,
             fast_lane_timeout=fast_lane_timeout,
+            preimport=tuple(preimport),
         ),
     )
     try:
@@ -298,8 +309,11 @@ class _WorkerPool:
     """
 
     def __init__(self):
-        # Keyed by IsoOptions.pool_key (the warm-time signature): workers are
-        # interchangeable only within it — see IsoOptions.
+        # Keyed by IsoOptions.pool_key — the warm-time signature (device, arena_bytes,
+        # gpu_mem_fraction, lockdown, preimport): workers are interchangeable ONLY within
+        # it. The bounce buffer is device- and size-specific (reusing across devices would
+        # copy into the wrong-device buffer — silent corruption), and a worker's frozen
+        # import set must match the requested preimport list. See IsoOptions.
         self._idle: Dict[tuple, deque] = defaultdict(deque)
         self._all: Dict[tuple, set] = defaultdict(set)
         self._lock = threading.Lock()
@@ -398,12 +412,15 @@ def warm_worker_pool(
     gpu_mem_fraction: float = 0.3,
     lockdown: bool = False,
     timeout: float = 60.0,
+    preimport: tuple = (),
 ) -> None:
     """Pre-warm ``size`` generic workers (blocks until each is ready).
 
     Call once at server startup so the first request pays no spawn cost. The base
     options here fix the pool's per-worker configuration. Each worker costs ~0.55 GiB
-    GPU per GPU it touches — size the pool as a GPU-memory budget.
+    GPU per GPU it touches — size the pool as a GPU-memory budget. ``preimport`` and
+    ``lockdown`` must match the values later passed to :func:`isolate_mediators` or the
+    pre-warmed workers won't match its pool signature and fresh ones are spawned.
     """
     _POOL.warm(
         size,
@@ -413,6 +430,7 @@ def warm_worker_pool(
             gpu_mem_fraction=gpu_mem_fraction,
             lockdown=lockdown,
             timeout=timeout,
+            preimport=tuple(preimport),
         ),
     )
 
@@ -903,6 +921,21 @@ def _pool_worker_main(conn, buf, worker_iso_opts: IsoOptions):
     cloudpickle.loads(cloudpickle.dumps(lambda _t: _t))
 
     _ensure_mounted()  # install Object.save so `.save()` resolves in the worker
+
+    # User-configurable warm-time pre-imports: load modules interventions may need
+    # BEFORE seccomp freezes new file opens (import == open()). Under lockdown a module
+    # not loaded here is unimportable in any job, so pre-warming the deployment's
+    # allowed-module set brings user-facing import capability to parity with an
+    # in-process whitelist. A failed pre-import is non-fatal (warn + skip).
+    if worker_iso_opts.preimport:
+        import importlib
+        import warnings
+
+        for _mod in worker_iso_opts.preimport:
+            try:
+                importlib.import_module(_mod)
+            except Exception as _e:  # noqa: BLE001
+                warnings.warn(f"isolated worker pre-import of {_mod!r} failed: {_e!r}")
 
     if worker_iso_opts.gpu_mem_fraction and torch.cuda.is_available():
         torch.cuda.set_per_process_memory_fraction(worker_iso_opts.gpu_mem_fraction)

@@ -23,9 +23,17 @@ half of :class:`~nnsight.intervention.interleaver.MediatorChannel`:
 Frame codec: length-prefixed ``pickle``.  This socket path forks the worker, so both ends
 are mutually trusted and pickle-both-ways is fine.  Two follow-ups (see the plan):
 
-1. **Security:** once the worker is untrusted, the *jail->host* direction MUST NOT
-   ``pickle.loads`` arbitrary objects — restrict the host-side decoder to
-   tensors/known frames.  (jail<-host is host-authored, so the jail trusting it is ok.)
+1. **Security:** the *worker->host* direction MUST NOT plain-``pickle.loads`` untrusted
+   worker bytes (a ``__reduce__`` gadget would be a host-side RCE).  **Done for the active
+   GPU path** (:class:`CudaIpcHostChannel` / :class:`CudaIpcWorkerChannel`): worker->host
+   frames are tensor-free (tensors ride the GPU buffer / safetensors) and the small
+   remaining structure is decoded with the **restricted unpickler**
+   (:class:`_RestrictedUnpickler` / :func:`_safe_loads`) whose ``find_class`` allows ONLY
+   torch dtype/device; host->worker stays a normal pickle (host-authored, trusted).  The
+   legacy AF_UNIX socket channels below (:class:`SocketHostChannel`,
+   :class:`ShmSocketHostChannel`) are NOT used by ``isolate_mediators`` and still
+   plain-``pickle.loads`` — route them through :func:`_safe_loads` before wiring them to an
+   untrusted worker.
 
 2. **Performance (measured):** ``pickle`` of a torch tensor is the per-hook
    bottleneck — ``dumps``+``loads`` ~22 ms per direction at 16.8 MB and **superlinear**;
@@ -37,6 +45,8 @@ are mutually trusted and pickle-both-ways is fine.  Two follow-ups (see the plan
 
 from __future__ import annotations
 
+import builtins
+import io
 import mmap
 import os
 import pickle
@@ -46,7 +56,7 @@ from typing import Any, Optional
 
 import torch
 
-from .interleaver import MediatorChannel
+from .interleaver import Events, MediatorChannel
 
 try:
     from safetensors.torch import load as _st_load
@@ -343,6 +353,111 @@ def unpack_cuda(skel: Any, table: dict, buf: torch.Tensor) -> Any:
     return _merge_tensors(skel, tensors)
 
 
+# --------------------------------------------------------------------------- #
+# Safe worker->host frame codec — restricted unpickler, tight allowlist        #
+# --------------------------------------------------------------------------- #
+# The worker runs UNTRUSTED user code, so the host MUST NOT do a plain
+# ``pickle.loads`` of its frames (a ``__reduce__`` gadget = host RCE). Tensors
+# travel out-of-band (the GPU bounce buffer / safetensors), so a worker->host
+# frame is TENSOR-FREE and carries only plain data plus, at most, a torch
+# ``dtype`` / ``device`` (the ``tracer.cache()`` spec). We decode it with a
+# restricted Unpickler whose ``find_class`` allows ONLY torch dtype/device and
+# refuses every other class/function. ``find_class`` is consulted to resolve a
+# global BEFORE the ``REDUCE`` opcode could call it, so a gadget (``os.system``
+# etc.) is refused before it can execute. The event crosses as its string
+# ``.value`` (no enum class) and exceptions as a (type-name, message) sentinel
+# (no class), so the allowlist stays just {torch dtype, torch device}.
+# (host->worker stays a normal pickle: that direction is host-authored, trusted.)
+
+_EXC_TAG = "__nnsight_iso_exc__"
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Unpickler for UNTRUSTED worker->host frames. Reconstructs only torch
+    dtype/device globals; every other class/function is refused — so no gadget
+    callable is ever resolved and the ``REDUCE`` that would call it never runs."""
+
+    def find_class(self, module: str, name: str):
+        if module == "torch":
+            obj = getattr(torch, name, None)
+            if obj is torch.device or isinstance(obj, torch.dtype):
+                return obj
+        raise pickle.UnpicklingError(
+            f"refusing to unpickle {module}.{name} from an isolated worker — only "
+            f"tensors (out-of-band) + basic data types cross the isolation boundary "
+            f"(a torch dtype/device is allowed; a custom object / numpy / framework "
+            f"type is not transmittable from a worker)"
+        )
+
+
+def _safe_loads(data: bytes) -> Any:
+    """Unpickle UNTRUSTED worker bytes with the restricted (allowlist) unpickler."""
+    return _RestrictedUnpickler(io.BytesIO(data)).load()
+
+
+def _rebuild_exc(name: str, msg: str) -> BaseException:
+    """Rebuild an exception from a (type-name, message) pair, host side. Resolves
+    ONLY builtin exception types (never an arbitrary callable); else RuntimeError."""
+    cls = getattr(builtins, name, None)
+    if isinstance(cls, type) and issubclass(cls, BaseException):
+        try:
+            return cls(msg)
+        except Exception:  # noqa: BLE001 — some exceptions have non-(str,) __init__
+            pass
+    return RuntimeError(f"{name}: {msg}")
+
+
+def _encode_worker_frame(event: Events, data: Any, push: Any, buf: torch.Tensor) -> tuple:
+    """Build the worker->host frame: tensors into ``buf`` (D2D) / safetensors (push
+    CPU tensors) so the pickled part is TENSOR-FREE, the rest pickled (decoded host-
+    side with the restricted Unpickler). Returns ``(frame_bytes, had_tensors)``; the
+    caller must ``cuda.synchronize()`` before sending if ``had_tensors`` (the host
+    clones from ``buf`` on a separate context)."""
+    if event is Events.EXCEPTION:
+        # The exception object may be an arbitrary class; ship only (type-name,
+        # message) so the restricted unpickler never has to resolve its class.
+        data = {_EXC_TAG: [type(data).__name__, str(data)]}
+    skel, table = pack_cuda(data, buf)
+    if push is not None:
+        pstore: dict = {}
+        pskel = _split_tensors(push, pstore)
+        if pstore and not _HAS_SAFETENSORS:
+            raise RuntimeError(
+                "safetensors is required to transmit cross_invoker tensors from an "
+                "isolated worker"
+            )
+        pblob = _st_save(pstore) if pstore else b""
+    else:
+        pskel, pblob = None, b""
+    # The event rides as its string ``.value`` (not the enum) so the allowlist need
+    # not include the Events class. Encoding with pickle is safe — only *decoding*
+    # untrusted bytes is dangerous, and that is what _safe_loads restricts.
+    payload = pickle.dumps(
+        (event.value, skel, table, pskel), protocol=pickle.HIGHEST_PROTOCOL
+    )
+    return _HEADER.pack(len(payload)) + payload + pblob, bool(table)
+
+
+def _decode_worker_frame(raw: bytes, buf: torch.Tensor) -> tuple:
+    """Reverse of :func:`_encode_worker_frame`, host side. The pickled part is decoded
+    with the RESTRICTED unpickler (untrusted). Returns ``(event, data, push)``."""
+    (plen,) = _HEADER.unpack(raw[: _HEADER.size])
+    off = _HEADER.size
+    event_value, skel, table, pskel = _safe_loads(raw[off : off + plen])
+    pblob = raw[off + plen :]
+    event = Events(event_value)
+    data = unpack_cuda(skel, table, buf)
+    if event is Events.EXCEPTION and isinstance(data, dict) and _EXC_TAG in data:
+        name, msg = data[_EXC_TAG]
+        data = _rebuild_exc(name, msg)
+    if pskel is None:
+        push = None
+    else:
+        ptensors = _st_load(pblob) if pblob else {}
+        push = _merge_tensors(pskel, ptensors)
+    return event, data, push
+
+
 class CudaIpcHostChannel(MediatorChannel):
     """Host (main-thread) end of the GPU-bounce-buffer channel.
 
@@ -389,7 +504,7 @@ class CudaIpcHostChannel(MediatorChannel):
                     f"— worker presumed hung (e.g. an infinite loop in user code)"
                 )
             try:
-                event, skel, table, push = self._conn.recv()
+                raw = self._conn.recv_bytes()
             except (EOFError, OSError) as e:
                 # The pipe broke mid-protocol => the worker died (e.g. a segfault
                 # in user C-code, or the GPU process was OOM-killed). Surface a
@@ -398,10 +513,13 @@ class CudaIpcHostChannel(MediatorChannel):
                 raise RuntimeError(
                     "sandboxed intervention worker died during execution"
                 ) from e
+            # SECURITY: the worker is untrusted — decode with the no-pickle safe
+            # codec (a pickle.loads here would be a host-side RCE sink).
+            event, data, push = _decode_worker_frame(raw, self._buf)
             if push is not None and self.on_push is not None:
                 self.on_push(push)  # cross_invoker: merge into the host var store
             self._started = True
-            self._pending = (event, unpack_cuda(skel, table, self._buf))
+            self._pending = (event, data)
             self._has = True
 
     @property
@@ -473,13 +591,15 @@ class CudaIpcWorkerChannel(MediatorChannel):
     # --- worker -> main ---
     def put_event(self, item: Any) -> None:
         event, data = item
-        skel, table = pack_cuda(data, self._buf)
-        if table:
+        push = self.push_provider() if self.push_provider is not None else None
+        # SECURITY: encode WITHOUT pickle — the host must never unpickle untrusted
+        # worker data. Tensors ride the shared GPU buffer; only tagged JSON crosses.
+        frame, had_tensors = _encode_worker_frame(event, data, push, self._buf)
+        if had_tensors:
             # Async D2D copies must finish before the HOST (separate CUDA context)
             # clones them out of the buffer. See CudaIpcHostChannel.put_response.
             torch.cuda.synchronize()
-        push = self.push_provider() if self.push_provider is not None else None
-        self._conn.send((event, skel, table, push))
+        self._conn.send_bytes(frame)
 
     # --- main -> worker ---
     def wait_response(self) -> None:
