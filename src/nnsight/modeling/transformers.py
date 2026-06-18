@@ -65,7 +65,9 @@ class TransformersModel(HuggingFaceModel):
 
         self._load_config(repo_id, revision=revision, **kwargs)
 
-        model = self.automodel.from_config(self.config, trust_remote_code=True)
+        model = self.automodel.from_config(
+            self.config, trust_remote_code=kwargs.get("trust_remote_code", False)
+        )
 
         self.__dict__["config"] = model.config
 
