@@ -43,6 +43,7 @@ dependencies = [
     "ipython",
     "rich",
     "zstandard",
+    "peft",
 ]
 
 [project.optional-dependencies]
