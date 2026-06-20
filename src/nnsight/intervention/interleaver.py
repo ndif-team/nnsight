@@ -360,6 +360,14 @@ class Events(Enum):
     UNEMBED = "unembed"  # Run norm+unembed on the host's real weights (isolation)
 
 
+# A ``tracer.cache()`` placeholder is a custom ``CacheDict`` object that is NOT in the
+# worker->host value algebra (only data crosses, never live objects). The worker ships its
+# token as a plain-dict marker ``{_ISO_CACHE_TAG: token}`` instead; the host swaps in its
+# own forward-filled CacheDict by token in ``handle_end_event``. (Same shape as the
+# EXCEPTION ``(type, message)`` sentinel — a value standing in for an object.)
+_ISO_CACHE_TAG = "__nnsight_iso_cache__"
+
+
 class Cancelation(Exception):
     """Exception raised when a request is canceled."""
 
@@ -1640,18 +1648,14 @@ class Mediator:
             self._iso.clean = True
             if saves:
                 if self._iso_caches:
-                    # tracer.cache(): the worker shipped an EMPTY placeholder CacheDict;
-                    # swap in the HOST cache (matched by token), which the forward fills
-                    # in-place after this injection. The user's variable then IS the
-                    # forward-filled host cache.
-                    from .tracing.tracer import Cache
-
+                    # tracer.cache(): the worker shipped a ``{_ISO_CACHE_TAG: token}``
+                    # marker in place of its placeholder CacheDict; swap in the HOST cache
+                    # (matched by token), which the forward fills in-place after this
+                    # injection. The user's variable then IS the forward-filled host cache.
                     saves = dict(saves)
                     for name, val in list(saves.items()):
-                        if isinstance(val, Cache.CacheDict):
-                            host_cache = self._iso_caches.get(
-                                getattr(val, "_iso_cache_token", None)
-                            )
+                        if isinstance(val, dict) and _ISO_CACHE_TAG in val:
+                            host_cache = self._iso_caches.get(val[_ISO_CACHE_TAG])
                             if host_cache is not None:
                                 saves[name] = host_cache.cache
                 tracer = self.interleaver.tracer

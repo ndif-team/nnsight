@@ -26,14 +26,15 @@ are mutually trusted and pickle-both-ways is fine.  Two follow-ups (see the plan
 1. **Security:** the *worker->host* direction MUST NOT plain-``pickle.loads`` untrusted
    worker bytes (a ``__reduce__`` gadget would be a host-side RCE).  **Done for the active
    GPU path** (:class:`CudaIpcHostChannel` / :class:`CudaIpcWorkerChannel`): worker->host
-   frames are tensor-free (tensors ride the GPU buffer / safetensors) and the small
-   remaining structure is decoded with the **restricted unpickler**
-   (:class:`_RestrictedUnpickler` / :func:`_safe_loads`) whose ``find_class`` allows ONLY
-   torch dtype/device; host->worker stays a normal pickle (host-authored, trusted).  The
-   legacy AF_UNIX socket channels below (:class:`SocketHostChannel`,
-   :class:`ShmSocketHostChannel`) are NOT used by ``isolate_mediators`` and still
-   plain-``pickle.loads`` — route them through :func:`_safe_loads` before wiring them to an
-   untrusted worker.
+   frames carry array data out-of-band (the GPU buffer / safetensors) and the small
+   remaining structure is a **closed value algebra** decoded WITHOUT a pickle VM
+   (:func:`_codec_dumps` / :func:`_codec_loads`) — only primitives / containers / torch
+   dtype-device / out-of-band array headers cross; anything else is rejected at the worker
+   at encode (:class:`BoundaryValueError`).  host->worker stays a normal pickle
+   (host-authored, trusted).  The legacy AF_UNIX socket channels below
+   (:class:`SocketHostChannel`, :class:`ShmSocketHostChannel`) are NOT used by
+   ``isolate_mediators`` and still plain-``pickle.loads`` — route them through the value
+   codec before wiring them to an untrusted worker.
 
 2. **Performance (measured):** ``pickle`` of a torch tensor is the per-hook
    bottleneck — ``dumps``+``loads`` ~22 ms per direction at 16.8 MB and **superlinear**;
@@ -46,7 +47,6 @@ are mutually trusted and pickle-both-ways is fine.  Two follow-ups (see the plan
 from __future__ import annotations
 
 import builtins
-import io
 import mmap
 import os
 import pickle
@@ -65,6 +65,14 @@ try:
     _HAS_SAFETENSORS = True
 except Exception:  # pragma: no cover
     _HAS_SAFETENSORS = False
+
+try:
+    import numpy as _np
+
+    _HAS_NUMPY = True
+except Exception:  # pragma: no cover
+    _np = None
+    _HAS_NUMPY = False
 
 _HEADER = struct.Struct("!I")  # 4-byte big-endian length prefix
 
@@ -313,9 +321,24 @@ def pack_cuda(value: Any, buf: torch.Tensor) -> tuple:
     state = {"offset": 0}
 
     def walk(obj: Any) -> Any:
+        # The "Array" leaf of the boundary value algebra: any contiguous typed buffer —
+        # a torch.Tensor OR a numpy.ndarray — travels OUT-OF-BAND in ``buf``; only a small
+        # ``(offset, nbytes, shape, dtype, kind)`` header rides in the skeleton. numpy is
+        # bridged through torch (zero-copy view); the host re-materializes the right kind.
+        t = kind = None
         if torch.is_tensor(obj):
+            t, kind = obj.detach().contiguous(), "torch"
+        elif _HAS_NUMPY and isinstance(obj, _np.ndarray):
+            try:
+                t = torch.from_numpy(_np.ascontiguousarray(obj))
+            except (TypeError, ValueError) as e:
+                raise BoundaryValueError(
+                    f"a numpy array of dtype {obj.dtype} is not transmittable across the "
+                    f"isolation boundary (torch has no matching dtype): {e}"
+                )
+            kind = "numpy"
+        if t is not None:
             i = len(table)
-            t = obj.detach().contiguous()
             flat = t.reshape(-1).view(torch.uint8)
             n = int(flat.numel())
             offset = (state["offset"] + 15) & ~15  # 16-byte align
@@ -326,7 +349,7 @@ def pack_cuda(value: Any, buf: torch.Tensor) -> tuple:
                 )
             if n:
                 buf[offset : offset + n].copy_(flat)
-            table[str(i)] = (offset, n, tuple(t.shape), str(t.dtype))
+            table[str(i)] = (offset, n, tuple(t.shape), str(t.dtype), kind)
             state["offset"] = offset + n
             return {_TENSOR_TAG: i}
         if type(obj) is tuple:
@@ -346,53 +369,215 @@ def unpack_cuda(skel: Any, table: dict, buf: torch.Tensor) -> Any:
     later reuse of the single buffer can't corrupt it — the clone-on-receive
     rule) and re-injected into the skeleton."""
     tensors: dict = {}
-    for k, (offset, n, shape, dtype_str) in table.items():
+    for k, meta in table.items():
+        offset, n, shape, dtype_str = meta[0], meta[1], meta[2], meta[3]
+        kind = meta[4] if len(meta) > 4 else "torch"
         dtype = _dtype_from_str(dtype_str)
         view = buf[offset : offset + n].view(dtype).reshape(shape)
-        tensors[k] = view.clone()
+        # CLONE out of the shared single-slot buffer (so a later reuse can't corrupt it);
+        # a numpy "Array" leaf is re-materialized on the CPU as an ndarray.
+        tensors[k] = view.clone().cpu().numpy() if kind == "numpy" else view.clone()
     return _merge_tensors(skel, tensors)
 
 
 # --------------------------------------------------------------------------- #
-# Safe worker->host frame codec — restricted unpickler, tight allowlist        #
+# Worker->host frame codec — closed value algebra, no pickle VM                #
 # --------------------------------------------------------------------------- #
-# The worker runs UNTRUSTED user code, so the host MUST NOT do a plain
-# ``pickle.loads`` of its frames (a ``__reduce__`` gadget = host RCE). Tensors
-# travel out-of-band (the GPU bounce buffer / safetensors), so a worker->host
-# frame is TENSOR-FREE and carries only plain data plus, at most, a torch
-# ``dtype`` / ``device`` (the ``tracer.cache()`` spec). We decode it with a
-# restricted Unpickler whose ``find_class`` allows ONLY torch dtype/device and
-# refuses every other class/function. ``find_class`` is consulted to resolve a
-# global BEFORE the ``REDUCE`` opcode could call it, so a gadget (``os.system``
-# etc.) is refused before it can execute. The event crosses as its string
-# ``.value`` (no enum class) and exceptions as a (type-name, message) sentinel
-# (no class), so the allowlist stays just {torch dtype, torch device}.
-# (host->worker stays a normal pickle: that direction is host-authored, trusted.)
+# The worker runs UNTRUSTED user code, so the host must never run pickle's VM on
+# its frames (a ``__reduce__`` gadget = host RCE). Instead the boundary transmits
+# a CLOSED VALUE ALGEBRA — never live objects — so there is no opcode that can
+# call a function in the first place:
+#
+#   Value = None | bool | int | float | str | bytes          (primitives)
+#         | list | tuple | dict | set  of Value              (containers)
+#         | torch.dtype | torch.device                       (value leaves)
+#         | Array(...)  -> {_TENSOR_TAG: i}                   (bulk, OUT-OF-BAND)
+#
+# Array leaves (torch tensors, numpy arrays) are already pulled out-of-band by
+# ``pack_cuda``/``_split_tensors`` into the GPU buffer / safetensors, leaving only
+# a ``{_TENSOR_TAG: i}`` header in the skeleton — itself plain data. So this codec
+# only has to (de)serialize the algebra above; anything outside it is rejected at
+# the WORKER, at ENCODE, with a clear message (``BoundaryValueError``) — never an
+# encode-ok / decode-refuse split. Decoding is pure data assembly: no globals, no
+# ``find_class``, no ``REDUCE``. A size cap + bounds-checked reads contain a
+# decode bomb (DoS). (host->worker stays a normal pickle: host-authored, trusted.)
 
 _EXC_TAG = "__nnsight_iso_exc__"
 
+# Max bytes for the codec part of a worker->host frame (the structured envelope;
+# bulk array data is out-of-band, so this stays tiny). Caps decode-time allocation.
+_MAX_CODEC_BYTES = 64 << 20
 
-class _RestrictedUnpickler(pickle.Unpickler):
-    """Unpickler for UNTRUSTED worker->host frames. Reconstructs only torch
-    dtype/device globals; every other class/function is refused — so no gadget
-    callable is ever resolved and the ``REDUCE`` that would call it never runs."""
+# Value-algebra tags (one byte each).
+_T_NONE, _T_FALSE, _T_TRUE, _T_INT, _T_FLOAT, _T_STR, _T_BYTES = range(7)
+_T_LIST, _T_TUPLE, _T_DICT, _T_SET, _T_DTYPE, _T_DEVICE = range(7, 13)
 
-    def find_class(self, module: str, name: str):
-        if module == "torch":
-            obj = getattr(torch, name, None)
-            if obj is torch.device or isinstance(obj, torch.dtype):
-                return obj
-        raise pickle.UnpicklingError(
-            f"refusing to unpickle {module}.{name} from an isolated worker — only "
-            f"tensors (out-of-band) + basic data types cross the isolation boundary "
-            f"(a torch dtype/device is allowed; a custom object / numpy / framework "
-            f"type is not transmittable from a worker)"
+
+class BoundaryValueError(TypeError):
+    """A value outside the boundary algebra was handed to the worker->host codec
+    (e.g. a custom object / framework type ``.save()``-d in the worker). Raised at
+    ENCODE, in the worker, so the failure names the offending value at its source."""
+
+
+class BoundaryDecodeError(ValueError):
+    """A worker->host frame was malformed, oversized, or carried an unknown tag.
+    Raised at DECODE, host-side, instead of trusting attacker-shaped bytes."""
+
+
+def _w_uvarint(out: bytearray, n: int) -> None:
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | 0x80 if n else b)
+        if not n:
+            return
+
+
+def _codec_dumps(value: Any) -> bytes:
+    out = bytearray()
+
+    def enc(v: Any) -> None:
+        # bool BEFORE int (bool is a subclass of int); identity check is exact.
+        if v is None:
+            out.append(_T_NONE)
+        elif v is True:
+            out.append(_T_TRUE)
+        elif v is False:
+            out.append(_T_FALSE)
+        elif type(v) is int:
+            out.append(_T_INT)
+            b = v.to_bytes((v.bit_length() + 8) // 8 or 1, "little", signed=True)
+            _w_uvarint(out, len(b))
+            out.extend(b)
+        elif type(v) is float:
+            out.append(_T_FLOAT)
+            out.extend(struct.pack("<d", v))
+        elif type(v) is str:
+            b = v.encode("utf-8")
+            out.append(_T_STR)
+            _w_uvarint(out, len(b))
+            out.extend(b)
+        elif type(v) in (bytes, bytearray):
+            out.append(_T_BYTES)
+            _w_uvarint(out, len(v))
+            out.extend(v)
+        elif type(v) in (list, tuple):
+            out.append(_T_LIST if type(v) is list else _T_TUPLE)
+            _w_uvarint(out, len(v))
+            for x in v:
+                enc(x)
+        elif type(v) is dict:
+            out.append(_T_DICT)
+            _w_uvarint(out, len(v))
+            for k, x in v.items():
+                enc(k)
+                enc(x)
+        elif type(v) in (set, frozenset):
+            out.append(_T_SET)
+            _w_uvarint(out, len(v))
+            for x in v:
+                enc(x)
+        elif isinstance(v, torch.dtype):
+            b = str(v).encode("ascii")  # "torch.float32"
+            out.append(_T_DTYPE)
+            _w_uvarint(out, len(b))
+            out.extend(b)
+        elif isinstance(v, torch.device):
+            b = str(v).encode("ascii")  # "cuda:0"
+            out.append(_T_DEVICE)
+            _w_uvarint(out, len(b))
+            out.extend(b)
+        else:
+            raise BoundaryValueError(
+                f"{type(v).__module__}.{type(v).__qualname__} is not a value in the "
+                f"isolation boundary algebra and cannot cross from an isolated worker. "
+                f"Transmittable: tensors / numpy arrays (out-of-band), basic Python data "
+                f"(None/bool/int/float/str/bytes/list/tuple/dict/set), and torch "
+                f"dtype/device. Save a tensor or basic data instead."
+            )
+
+    enc(value)
+    return bytes(out)
+
+
+def _codec_loads(data: bytes) -> Any:
+    if len(data) > _MAX_CODEC_BYTES:
+        raise BoundaryDecodeError(
+            f"worker->host frame {len(data)} B exceeds the {_MAX_CODEC_BYTES} B cap"
         )
+    pos = 0
+    n = len(data)
 
+    def need(k: int) -> int:
+        nonlocal pos
+        if pos + k > n:
+            raise BoundaryDecodeError("truncated worker->host frame")
+        start = pos
+        pos += k
+        return start
 
-def _safe_loads(data: bytes) -> Any:
-    """Unpickle UNTRUSTED worker bytes with the restricted (allowlist) unpickler."""
-    return _RestrictedUnpickler(io.BytesIO(data)).load()
+    def ruvarint() -> int:
+        nonlocal pos
+        result = shift = 0
+        while True:
+            if pos >= n:
+                raise BoundaryDecodeError("truncated varint")
+            b = data[pos]
+            pos += 1
+            result |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return result
+            shift += 7
+            if shift > 63:  # lengths/counts fit in 64 bits — reject a runaway varint
+                raise BoundaryDecodeError("varint too long")
+
+    def dec() -> Any:
+        nonlocal pos
+        if pos >= n:
+            raise BoundaryDecodeError("truncated worker->host frame")
+        tag = data[pos]
+        pos += 1
+        if tag == _T_NONE:
+            return None
+        if tag == _T_TRUE:
+            return True
+        if tag == _T_FALSE:
+            return False
+        if tag == _T_INT:
+            k = ruvarint()
+            return int.from_bytes(data[need(k) : pos], "little", signed=True)
+        if tag == _T_FLOAT:
+            return struct.unpack("<d", data[need(8) : pos])[0]
+        if tag == _T_STR:
+            k = ruvarint()
+            return data[need(k) : pos].decode("utf-8")
+        if tag == _T_BYTES:
+            k = ruvarint()
+            return bytes(data[need(k) : pos])
+        if tag == _T_LIST:
+            return [dec() for _ in range(ruvarint())]
+        if tag == _T_TUPLE:
+            return tuple(dec() for _ in range(ruvarint()))
+        if tag == _T_DICT:
+            return {dec(): dec() for _ in range(ruvarint())}
+        if tag == _T_SET:
+            return {dec() for _ in range(ruvarint())}
+        if tag == _T_DTYPE:
+            k = ruvarint()
+            name = data[need(k) : pos].decode("ascii").split(".")[-1]
+            d = getattr(torch, name, None)
+            if not isinstance(d, torch.dtype):
+                raise BoundaryDecodeError(f"not a torch dtype: {name!r}")
+            return d
+        if tag == _T_DEVICE:
+            k = ruvarint()
+            return torch.device(data[need(k) : pos].decode("ascii"))
+        raise BoundaryDecodeError(f"unknown boundary tag {tag}")
+
+    value = dec()
+    if pos != n:
+        raise BoundaryDecodeError("trailing bytes in worker->host frame")
+    return value
 
 
 def _rebuild_exc(name: str, msg: str) -> BaseException:
@@ -408,14 +593,15 @@ def _rebuild_exc(name: str, msg: str) -> BaseException:
 
 
 def _encode_worker_frame(event: Events, data: Any, push: Any, buf: torch.Tensor) -> tuple:
-    """Build the worker->host frame: tensors into ``buf`` (D2D) / safetensors (push
-    CPU tensors) so the pickled part is TENSOR-FREE, the rest pickled (decoded host-
-    side with the restricted Unpickler). Returns ``(frame_bytes, had_tensors)``; the
-    caller must ``cuda.synchronize()`` before sending if ``had_tensors`` (the host
-    clones from ``buf`` on a separate context)."""
+    """Build the worker->host frame: array data (torch/numpy) into ``buf`` (D2D) /
+    safetensors (push CPU tensors) so the structured part is ARRAY-FREE, the rest
+    encoded with the closed value-algebra codec (decoded host-side without a pickle
+    VM). Returns ``(frame_bytes, had_tensors)``; the caller must ``cuda.synchronize()``
+    before sending if ``had_tensors`` (the host clones from ``buf`` on a separate
+    context)."""
     if event is Events.EXCEPTION:
         # The exception object may be an arbitrary class; ship only (type-name,
-        # message) so the restricted unpickler never has to resolve its class.
+        # message) — both strings, in the value algebra — so no class crosses.
         data = {_EXC_TAG: [type(data).__name__, str(data)]}
     skel, table = pack_cuda(data, buf)
     if push is not None:
@@ -429,21 +615,20 @@ def _encode_worker_frame(event: Events, data: Any, push: Any, buf: torch.Tensor)
         pblob = _st_save(pstore) if pstore else b""
     else:
         pskel, pblob = None, b""
-    # The event rides as its string ``.value`` (not the enum) so the allowlist need
-    # not include the Events class. Encoding with pickle is safe — only *decoding*
-    # untrusted bytes is dangerous, and that is what _safe_loads restricts.
-    payload = pickle.dumps(
-        (event.value, skel, table, pskel), protocol=pickle.HIGHEST_PROTOCOL
-    )
+    # The event rides as its string ``.value`` (not the enum). The codec only emits the
+    # value algebra; a value outside it raises ``BoundaryValueError`` HERE, in the
+    # worker, naming the offending object at its source.
+    payload = _codec_dumps((event.value, skel, table, pskel))
     return _HEADER.pack(len(payload)) + payload + pblob, bool(table)
 
 
 def _decode_worker_frame(raw: bytes, buf: torch.Tensor) -> tuple:
-    """Reverse of :func:`_encode_worker_frame`, host side. The pickled part is decoded
-    with the RESTRICTED unpickler (untrusted). Returns ``(event, data, push)``."""
+    """Reverse of :func:`_encode_worker_frame`, host side. The structured part is decoded
+    with the value-algebra codec (no pickle VM on untrusted bytes). Returns
+    ``(event, data, push)``."""
     (plen,) = _HEADER.unpack(raw[: _HEADER.size])
     off = _HEADER.size
-    event_value, skel, table, pskel = _safe_loads(raw[off : off + plen])
+    event_value, skel, table, pskel = _codec_loads(raw[off : off + plen])
     pblob = raw[off + plen :]
     event = Events(event_value)
     data = unpack_cuda(skel, table, buf)

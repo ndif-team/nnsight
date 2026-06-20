@@ -797,12 +797,19 @@ class WorkerMediator(Mediator):
         # Worker→host saves transmission: bundle .save()'d values into the END event.
         # The intervention's compiled body calls ``end()`` on success; push() populates
         # the SerializedFrame's f_locals, which we filter by Globals.saves.
-        from .interleaver import Events
+        from .interleaver import Events, _ISO_CACHE_TAG
         from .tracing.globals import Globals
+        from .tracing.tracer import Cache
 
         self.push()
         flocals = self.info.frame.f_locals
         saved = {k: v for k, v in flocals.items() if id(v) in Globals.saves}
+        # A tracer.cache() placeholder CacheDict is a live object, not a value — ship its
+        # token as a plain-dict marker so the value codec accepts it; the host swaps in its
+        # own forward-filled cache by token (top-level saves only, as the host handler is).
+        for k, v in list(saved.items()):
+            if isinstance(v, Cache.CacheDict):
+                saved[k] = {_ISO_CACHE_TAG: getattr(v, "_iso_cache_token", None)}
         self.channel.put_event((Events.END, saved))
 
     def exception(self, exception: Exception):
