@@ -746,6 +746,108 @@ class InterleavingTracer(Tracer):
 
         return steered
 
+    def patch(self, envoy, value):
+        """Transplant ``value`` into ``envoy``'s output residual via a **replacement**
+        boundary write — the activation-patching / resampling transplant every patching cell
+        does, made to work on the isolated tier where an in-place ``hidden[:] = value``
+        silently no-ops.
+
+        Patching replaces a module's delivered activation with one captured elsewhere (a clean
+        run, a different prompt, a precomputed mean). Done in place that write never crosses the
+        isolation boundary: the worker mutates its *delivered clone*, no SWAP fires, and the
+        host's real activation is untouched — a silent no-op. ``tracer.patch`` always performs a
+        *replacement* swap (assign ``envoy.output``), which ships the transplanted value back
+        over the existing ``Events.SWAP`` path, so it is correct in-process, on the fast lane,
+        AND in the isolated worker. Like :meth:`steer`, it touches no host weights — only the
+        delivered activation — so it needs no host round-trip and no isolated/in-process branch.
+
+        ``value`` replaces the residual whole (element ``[0]`` for tuple outputs); construct a
+        full-shape value (e.g. clone the residual and edit a slice) for partial patches, the
+        standard nnsight idiom. The value is cast to the residual's dtype/device, so a value
+        precomputed on CPU (the isolation case) transplants cleanly.
+
+        Tuple outputs (attention modules, and transformer blocks on transformers <5) are
+        replaced whole — element ``[0]`` is transplanted and the rest of the tuple rides
+        through unchanged.
+
+        Args:
+            envoy: the module whose output residual to replace (e.g.
+                ``model.transformer.h[6]``).
+            value: the replacement activation, broadcast/cast to the residual's dtype/device.
+                Must match the residual's shape (element ``[0]`` for tuple outputs).
+
+        Returns:
+            The transplanted residual tensor (element ``[0]`` for tuple outputs).
+        """
+        out = envoy.output
+        is_tuple = isinstance(out, tuple)
+        hidden = out[0] if is_tuple else out
+
+        value = value.to(dtype=hidden.dtype, device=hidden.device)
+
+        if is_tuple:
+            envoy.output = (value, *out[1:])
+        else:
+            envoy.output = value
+
+        return value
+
+    def ablate(self, envoy, mode: str = "zero"):
+        """Knock out ``envoy``'s output residual via a **replacement** boundary write — the
+        lesion-study ablation every ablation cell does, made to work on the isolated tier where
+        an in-place ``hidden[:] = 0`` silently no-ops.
+
+        Ablation replaces a component's output with a baseline to measure how the prediction
+        degrades. Done in place that write never crosses the isolation boundary: the worker
+        mutates its *delivered clone*, no SWAP fires, and the host's real activation is
+        untouched — a silent no-op (the model never sees the lesion). ``tracer.ablate`` always
+        performs a *replacement* swap, riding the existing ``Events.SWAP`` path, so it is
+        correct in-process, on the fast lane, AND in the isolated worker. Like :meth:`steer`, it
+        touches no host weights, so it needs no host round-trip and no isolated/in-process
+        branch.
+
+        Modes:
+            ``"zero"`` — replace with zeros (zero ablation; pushes the residual off-distribution
+                but is the simplest knockout).
+            ``"mean"`` — replace with the within-sequence mean: each position becomes the
+                per-example mean over the token dimension, keeping the average magnitude while
+                removing position-specific deviation. This is the *self-contained* mean. For
+                *reference-distribution* mean ablation (the mean activation over a dataset, per
+                docs/patterns/ablation.md), precompute that mean and transplant it via
+                :meth:`patch` — that mean is not derivable from a single forward.
+
+        Tuple outputs (attention modules, and transformer blocks on transformers <5) are
+        replaced whole — element ``[0]`` is ablated and the rest of the tuple rides through
+        unchanged.
+
+        Args:
+            envoy: the module whose output residual to ablate (e.g.
+                ``model.transformer.h[6]``).
+            mode: ``"zero"`` (default) or ``"mean"``.
+
+        Returns:
+            The ablated residual tensor (element ``[0]`` for tuple outputs).
+        """
+        out = envoy.output
+        is_tuple = isinstance(out, tuple)
+        hidden = out[0] if is_tuple else out
+
+        if mode == "zero":
+            ablated = torch.zeros_like(hidden)
+        elif mode == "mean":
+            ablated = hidden.mean(dim=-2, keepdim=True).expand_as(hidden).contiguous()
+        else:
+            raise ValueError(
+                f"tracer.ablate mode must be 'zero' or 'mean', got {mode!r}"
+            )
+
+        if is_tuple:
+            envoy.output = (ablated, *out[1:])
+        else:
+            envoy.output = ablated
+
+        return ablated
+
     def barrier(self, n_participants: int):
         """
         nnsight barrier: A synchronization primitive for coordinating multiple concurrent invocations in nnsight.

@@ -122,8 +122,8 @@ tier too, and (b) collapsing common raw-compute patterns into named calls the ga
 |---|---|---|---|---|
 | `tracer.unembed` | `(residual, norm, head, formulation="weight") → logits` | host-weight read + module call | the projection every logit-lens / steering-direction / attribution metric does | **built** |
 | `tracer.steer` | `(envoy, direction, alpha=1.0)` | boundary write (injection) | always a replacement swap — fixes in-place's silent no-op under isolation | **built** |
-| `tracer.patch` | `(envoy, value)` | boundary write (transplant) | whole-tuple replacement | designed |
-| `tracer.ablate` | `(envoy, mode)` | boundary write (injection) | zero/mean knockout | designed |
+| `tracer.patch` | `(envoy, value)` | boundary write (transplant) | whole-tuple replacement | **built** |
+| `tracer.ablate` | `(envoy, mode="zero")` | boundary write (injection) | zero/mean knockout | **built** |
 | `tracer.capture` | `(value) → handle` | read + run↔run transfer | cross-trace handoff; non-transmittable → clean fail, not silent drop | designed |
 
 Most mirror the existing `tracer.cache()` shape: in-process they resolve the real envoys and run
@@ -196,6 +196,78 @@ motivation under forced isolation: the in-place form leaves the downstream resid
 baseline (silent no-op) while `tracer.steer` changes it (steering took effect) to exactly the in-process
 result.
 
+### `tracer.patch` — replacement-swap transplant (built, 2026-06-20)
+
+`tracer.patch(envoy, value)` replaces a module's output residual with a precomputed `value` — the
+activation-patching / resampling transplant every patching cell does. It is the structural twin of
+`tracer.steer`: a boundary write that touches **no host weights** (only the *delivered* activation is
+replaced), so it needs **no new event and no isolated/in-process branch** and rides the existing
+`Events.SWAP`. The only difference from `steer` is the source of the new value — `steer` computes it from
+the delivered activation (`hidden + alpha*direction`), `patch` takes it from the caller:
+
+```python
+out = envoy.output
+hidden = out[0] if isinstance(out, tuple) else out
+value = value.to(dtype=hidden.dtype, device=hidden.device)
+envoy.output = (value, *out[1:]) if isinstance(out, tuple) else value
+```
+
+The point, as with `steer`, is the **replacement** swap. The hand-written form is in-place
+(`block.output[0][:] = clean_act`); under isolation that mutates only the worker's *delivered clone*, no
+SWAP fires, and the host's real activation is untouched — the transplant silently no-ops. `tracer.patch`
+ships the value back over SWAP, so it crosses the boundary by construction. The value is cast to the
+residual's dtype/device, so a value precomputed **on CPU** — the isolation-relevant case, where the
+clean/source activation is captured in a prior run outside the trace — transplants cleanly. `value`
+replaces the residual whole (element `[0]` for tuple outputs); partial patches construct a full-shape
+value (clone + edit a slice), the standard nnsight idiom.
+
+Touch points: just the `tracer.patch` method (tracer.py). No event, no host handler — it reuses
+`Events.SWAP` and the eproperty setter.
+
+**Verified (`test_isolated_patch.py`, gpt2 + renamed model):** transplanting into one block, an attention
+tuple output, and three blocks at once are all isolated-vs-in-process `max|Δ|=0` and propagate through
+later layers; `tracer.patch` equals the manual untuple + whole-tuple replacement (with the same cast). The
+crux case proves the motivation under forced isolation: the in-place form leaves the downstream residual
+== the unpatched baseline (silent no-op) while `tracer.patch` changes it (transplant took effect) to
+exactly the in-process result.
+
+### `tracer.ablate` — replacement-swap knockout (built, 2026-06-20)
+
+`tracer.ablate(envoy, mode="zero")` replaces a module's output residual with a baseline — the lesion-study
+knockout every ablation cell does. Same shape as `patch`/`steer`: a boundary write riding `Events.SWAP`,
+no new event, no isolated/in-process branch. Two self-contained modes:
+
+```python
+out = envoy.output
+hidden = out[0] if isinstance(out, tuple) else out
+if mode == "zero":
+    ablated = torch.zeros_like(hidden)
+elif mode == "mean":                                         # within-sequence mean
+    ablated = hidden.mean(dim=-2, keepdim=True).expand_as(hidden).contiguous()
+else:
+    raise ValueError(...)                                    # no silent wrong-ablation
+envoy.output = (ablated, *out[1:]) if isinstance(out, tuple) else ablated
+```
+
+`mode="mean"` is the **within-sequence** mean (each position → the per-example mean over the token
+dimension), the only mean derivable from a single forward. The reduction decision that §6 flagged resolves
+here: **reference-distribution** mean ablation (the mean activation over a *dataset*, per
+`docs/patterns/ablation.md`) is not a single-forward quantity, so it is precomputed and transplanted via
+`tracer.patch(envoy, mean_act)` — not this mode. Keeping the two distinct avoids a silent-semantics trap
+(a user expecting dataset-mean getting sequence-mean). An unknown mode raises `ValueError` rather than
+silently picking a baseline. Under isolation the worker computes the mean from its delivered clone (==
+the host's real activation) and ships the result back over SWAP, so isolated == in-process bit-identically.
+
+Touch points: just the `tracer.ablate` method (tracer.py). No event, no host handler.
+
+**Verified (`test_isolated_ablate.py`, gpt2 + renamed model):** zero- and mean-ablating a block, an
+attention tuple output, and the renamed model are all isolated-vs-in-process `max|Δ|=0` and change the
+downstream forward vs the un-ablated baseline (the knockout took effect across the boundary);
+`tracer.ablate` equals the manual `zeros_like` / mean-over-seq replacement; an unknown mode raises
+`ValueError`. The crux case proves the motivation under forced isolation: the in-place zero leaves the
+downstream residual == the un-ablated baseline (silent no-op) while `tracer.ablate` changes it to exactly
+the in-process result.
+
 ## 7. What was deliberately deferred
 
 - **The process-global `sys.addaudithook` backstop.** Its own failure mode (a leaked thread-local flag
@@ -204,9 +276,10 @@ result.
   fast-laned code. Documented as future hardening; the static gate is the confirmation.
 - **A frozen-namespace `Compartment`** (SES-style) for fast-lane execution. The first slice relies on
   the static pass + the `trust` cordon; namespace shadowing is a later refinement.
-- **The remaining primitives** (§6) — `patch`/`ablate`/`capture`. `unembed` and `steer` are built
-  (`steer` rides `Events.SWAP`, so it needed no new handler; `patch`/`ablate` will too, `capture` needs
-  a run↔run handoff).
+- **The last primitive** (§6) — `capture`. `unembed`, `steer`, `patch`, and `ablate` are built; the
+  boundary-write trio (`steer`/`patch`/`ablate`) all ride `Events.SWAP` with no new handler. `capture`
+  remains because it needs a run↔run handoff (not a single boundary write) and would collide with the
+  existing `Tracer.capture(frame)` AST method — both a new mechanism and a naming decision.
 
 ## 8. Verification
 
@@ -223,6 +296,15 @@ result.
   attention tuple output, and three blocks at once are isolated-vs-in-process `max|Δ|=0`; `tracer.steer`
   equals the manual whole-tuple replacement; and the crux — under forced isolation the in-place form is a
   no-op (downstream == unsteered baseline) while `tracer.steer` takes effect and matches in-process.
+- **Isolated patch** (`test_isolated_patch.py`, gpt2 + a renamed model) — 6/6: transplanting into a block,
+  an attention tuple output, and three blocks at once are isolated-vs-in-process `max|Δ|=0`; `tracer.patch`
+  equals the manual whole-tuple replacement (with the dtype/device cast); and the crux — the in-place
+  transplant is a no-op under isolation while `tracer.patch` takes effect and matches in-process.
+- **Isolated ablate** (`test_isolated_ablate.py`, gpt2 + a renamed model) — 7/7: zero/mean knockout of a
+  block, an attention tuple output, and the renamed model are isolated-vs-in-process `max|Δ|=0` and change
+  the downstream forward vs the un-ablated baseline; `tracer.ablate` equals the manual `zeros_like` /
+  mean-over-seq replacement; an unknown mode raises `ValueError`; and the crux — the in-place zero is a
+  no-op under isolation while `tracer.ablate` takes effect and matches in-process.
 - **Existing isolated WORKER path** — 9/9 still bit-identical, pinned with `fast_lane=False` so they
   keep exercising the worker (otherwise the simple read/swap/save cells would now fast-lane).
 - **In-process core** — 51 passed (the default in-process path is untouched).
