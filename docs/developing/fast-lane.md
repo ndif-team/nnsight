@@ -124,7 +124,7 @@ tier too, and (b) collapsing common raw-compute patterns into named calls the ga
 | `tracer.steer` | `(envoy, direction, alpha=1.0)` | boundary write (injection) | always a replacement swap — fixes in-place's silent no-op under isolation | **built** |
 | `tracer.patch` | `(envoy, value)` | boundary write (transplant) | whole-tuple replacement | **built** |
 | `tracer.ablate` | `(envoy, mode="zero")` | boundary write (injection) | zero/mean knockout | **built** |
-| `tracer.capture` | `(value) → handle` | read + run↔run transfer | cross-trace handoff; non-transmittable → clean fail, not silent drop | designed |
+| `x.carry()` / `nnsight.carry(x)` | `(value) → value` | read + run↔run transfer | session cross-trace handoff under isolation (and `.save()` now crosses too) | **built** |
 
 Most mirror the existing `tracer.cache()` shape: in-process they resolve the real envoys and run
 directly (the fast-lane execution); isolated they ship a spec via a new event whose host handler runs the
@@ -268,6 +268,50 @@ downstream forward vs the un-ablated baseline (the knockout took effect across t
 downstream residual == the un-ablated baseline (silent no-op) while `tracer.ablate` changes it to exactly
 the in-process result.
 
+### `.carry()` — session cross-trace handoff (built, 2026-06-21)
+
+The last part-2 primitive started as a designed `tracer.capture(value) → handle`, but investigating the
+actual gap reframed it. Cross-run handoff across **separate** `model.trace()` calls already works under
+isolation — `.save()` ships the value home and the next trace re-receives it (the basis of
+`tracer.patch`). The only broken capability was handoff **inside `model.session()`**, which two isolation
+bugs killed:
+
+- **Saved value used cross-trace** → the host wrote it into the session frame but never re-registered its
+  host-side id in `Globals.saves`, so the session's exit-push (which filters `id(v) in Globals.saves`)
+  dropped it (`UnboundLocalError`).
+- **Non-saved value used cross-trace** → the isolated worker's `end()` ships only `Globals.saves`-filtered
+  locals, so a non-saved var never reached the host session frame (`NameError`).
+
+In-process both work, because each inner trace's `push` is `is_root=False` and pushes *all* its locals up
+to the session frame (so the next trace's `pull` sees them), while only the session's final root-push
+filters to saves. The isolation END-writeback implemented the root semantics only.
+
+The fix restores the in-process two-hop semantics on the isolated path, plus an explicit primitive for the
+non-saved case:
+
+- **Saved-case fix:** when the END target is a nested/session frame (`__nnsight_tracing_info__` present),
+  the host writes the worker's values into it AND re-registers the saved values' host ids in
+  `Globals.saves`, so the session's exit-push keeps them. Root (single-trace) writeback is unchanged. This
+  makes the documented `hs = x.save()` → use `hs` session pattern work under isolation.
+- **`.carry()`** (mounted universally like `.save()`, plus `nnsight.carry(x)`): marks a value to cross to a
+  later trace in the session **without** surfacing it as an output. The worker's `end()` now ships saved ∪
+  carried locals as `(values, saved_names)`; the host writes all of them to the session frame (so the next
+  trace sees them) but registers only the saved ones, so carried values drop at session exit — exactly the
+  in-process non-saved semantics, made explicit. With no `.carry()` in use the payload is exactly the prior
+  saved-only one, so the single-trace path is unchanged. `.carry()` is **portable**: harmless in-process
+  (non-saved vars already cross there), load-bearing under isolation.
+
+Touch points: `Globals.shared` + `carry()` + `Object.carry` + mount (globals.py); `nnsight.carry` export;
+`Globals.shared` cleared at the root push (base.py) and per-job worker reset (isolation.py); the worker
+`end()` payload (isolation.py); `handle_end_event` nested-registration + carried handling (interleaver.py).
+
+**Verified (`test_isolated_session_handoff.py`, gpt2 + renamed model):** the saved (`.save()`) and carried
+(`.carry()`) session handoffs are isolated-vs-in-process `max|Δ|=0` and change the downstream forward;
+`nnsight.carry(x)` equals the method form; a carried value does **not** surface to the caller frame while a
+saved one does; `.carry()` is in-process == isolated. No regression across the isolated suite (trace,
+cache, backward, multitoken-iter, cross-invoke, acceptance, steer, patch, ablate) — the END-payload change
+is transparent to the single-trace path — and the in-process core (`test_lm.py`) is 75/75.
+
 ## 7. What was deliberately deferred
 
 - **The process-global `sys.addaudithook` backstop.** Its own failure mode (a leaked thread-local flag
@@ -276,10 +320,10 @@ the in-process result.
   fast-laned code. Documented as future hardening; the static gate is the confirmation.
 - **A frozen-namespace `Compartment`** (SES-style) for fast-lane execution. The first slice relies on
   the static pass + the `trust` cordon; namespace shadowing is a later refinement.
-- **The last primitive** (§6) — `capture`. `unembed`, `steer`, `patch`, and `ablate` are built; the
-  boundary-write trio (`steer`/`patch`/`ablate`) all ride `Events.SWAP` with no new handler. `capture`
-  remains because it needs a run↔run handoff (not a single boundary write) and would collide with the
-  existing `Tracer.capture(frame)` AST method — both a new mechanism and a naming decision.
+- *(none — the part-2 primitive set is complete.)* `unembed`, `steer`, `patch`, `ablate` are built, and
+  the run↔run handoff shipped as `.carry()` + the session saved-case fix (the original `tracer.capture`
+  name was dropped — it collided with the existing `Tracer.capture(frame)` AST method, and the realized
+  primitive is a value method parallel to `.save()`, not a tracer-level handle).
 
 ## 8. Verification
 
@@ -305,6 +349,10 @@ the in-process result.
   the downstream forward vs the un-ablated baseline; `tracer.ablate` equals the manual `zeros_like` /
   mean-over-seq replacement; an unknown mode raises `ValueError`; and the crux — the in-place zero is a
   no-op under isolation while `tracer.ablate` takes effect and matches in-process.
+- **Isolated session handoff** (`test_isolated_session_handoff.py`, gpt2 + a renamed model) — 6/6: the
+  `.save()` and `.carry()` session cross-trace handoffs are isolated-vs-in-process `max|Δ|=0` and change
+  the downstream forward; `nnsight.carry(x)` equals the method form; a carried value does not surface to
+  the caller frame while a saved one does; `.carry()` is in-process == isolated.
 - **Existing isolated WORKER path** — 9/9 still bit-identical, pinned with `fast_lane=False` so they
   keep exercising the worker (otherwise the simple read/swap/save cells would now fast-lane).
-- **In-process core** — 51 passed (the default in-process path is untouched).
+- **In-process core** — `test_lm.py` 75 passed (the default in-process path is untouched).

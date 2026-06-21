@@ -794,9 +794,9 @@ class WorkerMediator(Mediator):
         apply(value, _tag, torch.Tensor)
 
     def end(self):
-        # Worker→host saves transmission: bundle .save()'d values into the END event.
-        # The intervention's compiled body calls ``end()`` on success; push() populates
-        # the SerializedFrame's f_locals, which we filter by Globals.saves.
+        # Worker→host saves transmission: bundle .save()'d (and .carry()'d) values into the
+        # END event. The intervention's compiled body calls ``end()`` on success; push()
+        # populates the SerializedFrame's f_locals, which we filter by Globals.saves/shared.
         from .interleaver import Events, _ISO_CACHE_TAG
         from .tracing.globals import Globals
         from .tracing.tracer import Cache
@@ -804,13 +804,23 @@ class WorkerMediator(Mediator):
         self.push()
         flocals = self.info.frame.f_locals
         saved = {k: v for k, v in flocals.items() if id(v) in Globals.saves}
+        # Carried (.carry()) values: cross-trace handoffs within a session. Ship them too so
+        # the host can write them to the session frame for the next trace, but tag which are
+        # SAVED (saved_names) so the host surfaces only those to the user frame. With no
+        # .carry() in play this is exactly the prior payload (saved only) — no regression for
+        # the single-trace path.
+        carried = {
+            k: v for k, v in flocals.items()
+            if id(v) in Globals.shared and id(v) not in Globals.saves
+        }
+        values = {**saved, **carried}
         # A tracer.cache() placeholder CacheDict is a live object, not a value — ship its
         # token as a plain-dict marker so the value codec accepts it; the host swaps in its
         # own forward-filled cache by token (top-level saves only, as the host handler is).
-        for k, v in list(saved.items()):
+        for k, v in list(values.items()):
             if isinstance(v, Cache.CacheDict):
-                saved[k] = {_ISO_CACHE_TAG: getattr(v, "_iso_cache_token", None)}
-        self.channel.put_event((Events.END, saved))
+                values[k] = {_ISO_CACHE_TAG: getattr(v, "_iso_cache_token", None)}
+        self.channel.put_event((Events.END, (values, list(saved.keys()))))
 
     def exception(self, exception: Exception):
         super().exception(_transmissible_exc(exception))
@@ -884,6 +894,7 @@ def _run_one_job(channel, payload, extras, opts, device) -> None:
     global _WORKER_CURRENT
     try:
         Globals.saves.clear()  # per-job reset (the only worker-side global state)
+        Globals.shared.clear()
 
         interleaver = _WorkerInterleaver(default_all=opts.get("default_all"))
         mediator = serialization.loads(payload, _WorkerPersistent(interleaver, extras))

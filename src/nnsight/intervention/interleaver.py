@@ -1630,34 +1630,45 @@ class Mediator:
         self.respond(logits)  # ack -> worker's send() returns the logits
         return True
 
-    def handle_end_event(self, saves: Optional[Any] = None):
+    def handle_end_event(self, payload: Optional[Any] = None):
         """
         Handle an end event by stopping the mediator.
 
-        Worker→host saves transmission: in the isolated path the worker bundles its ``.save()``'d values
-        (already filtered by ``Globals.saves``) into the END event, since the
-        worker's frame + ``Globals.saves`` live in another process. The host
-        injects them directly into the real **user** frame — the tracer's
-        ``info.frame`` (where the in-process two-hop push ultimately lands saved
-        vars). The worker already applied the ``Globals.saves`` filter, so no
-        second filtering hop is needed here.
+        Worker→host saves transmission: in the isolated path the worker bundles its
+        ``.save()``'d and ``.carry()``'d values into the END event as
+        ``(values, saved_names)``, since the worker's frame + ``Globals`` live in another
+        process. ``values`` is the union of saved + carried locals; ``saved_names`` is the
+        ``.save()``'d subset.
+
+        The host injects these into the tracer's ``info.frame`` — the **user** frame for a
+        root trace, or the **session** frame for an inner trace within ``model.session()``.
+        For an inner trace (the target carries ``__nnsight_tracing_info__``), it replicates
+        the in-process two-hop push: write ALL values so the next trace sees them, and
+        re-register the SAVED values' host ids in ``Globals.saves`` so the session's exit-push
+        keeps them (the worker's ids live in another process; without this the session's
+        root filter would drop everything). Carried values are written for the next trace but
+        not registered, so they drop at session exit — matching in-process non-saved
+        semantics. For a root trace, only the saved subset surfaces to the user frame.
         """
+        from .tracing.globals import Globals
+
         if self._iso is not None:
             # A consumed END means the worker ended cleanly => recyclable by the pool.
             # cancel() (below) reads this to recycle vs retire the worker.
             self._iso.clean = True
-            if saves:
+            values, saved_names = (payload if payload else ({}, []))
+            if values:
                 if self._iso_caches:
                     # tracer.cache(): the worker shipped a ``{_ISO_CACHE_TAG: token}``
                     # marker in place of its placeholder CacheDict; swap in the HOST cache
                     # (matched by token), which the forward fills in-place after this
                     # injection. The user's variable then IS the forward-filled host cache.
-                    saves = dict(saves)
-                    for name, val in list(saves.items()):
+                    values = dict(values)
+                    for name, val in list(values.items()):
                         if isinstance(val, dict) and _ISO_CACHE_TAG in val:
                             host_cache = self._iso_caches.get(val[_ISO_CACHE_TAG])
                             if host_cache is not None:
-                                saves[name] = host_cache.cache
+                                values[name] = host_cache.cache
                 tracer = self.interleaver.tracer
                 user_frame = (
                     tracer.info.frame
@@ -1665,7 +1676,18 @@ class Mediator:
                     else self.info.frame
                 )
                 if user_frame is not None:
-                    push_variables(user_frame, saves)
+                    nested = "__nnsight_tracing_info__" in user_frame.f_locals
+                    if nested:
+                        # inner trace in a session: all values cross to the next trace;
+                        # only saved values are registered so they survive the session push.
+                        push_variables(user_frame, values)
+                        for name in saved_names:
+                            if name in values:
+                                Globals.saves.add(id(values[name]))
+                    else:
+                        # root trace: only saved values surface to the user frame.
+                        saved_only = {k: values[k] for k in saved_names if k in values}
+                        push_variables(user_frame, saved_only)
 
         self.cancel()
 
