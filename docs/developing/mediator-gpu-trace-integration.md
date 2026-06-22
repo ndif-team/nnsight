@@ -254,9 +254,10 @@ benign CudaIPC release warning.
 | `tracer.barrier()` | worker sends the target count; host accumulates participants + runs the coordination loop (§10) | ✅ |
 | `cross_invoker` variable sharing | host variable store; worker pushes data locals, pulls the merged store; transmittable data only (§10) | ✅ |
 | warm worker pool (`pool_size=N`, `warm_worker_pool`) | generic workers receive serialized mediators as jobs; clean-END recycle (§14) | ✅ ~21× faster per request once warm |
-| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path (§16) | ✅ read-path bit-identical (scalar loss; single invoke; no swap-then-backward; `.grad` editing raises) |
+| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path (§16) | ✅ read-path bit-identical (scalar loss; single invoke); multi-token backward is a clean-fail (in-process doesn't support it either); **grad through a swap** cleanly errors (the swapped value is a host-side leaf, so the host graph is severed at the seam) — §16 |
 | `tracer.cache()` (`modules=`, `include_inputs=`) | CACHE event → host registers the real cache hooks; host CacheDict swapped in at END, filled in-place by the forward (§15) | ✅ bit-identical |
-| `tracer.unembed` / `tracer.steer` | host-routed weight read (UNEMBED event) / replacement-swap injection (rides SWAP) — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (isolated and in-process) |
+| part-2 primitives: `tracer.unembed` / `tracer.steer` / `tracer.patch` / `tracer.ablate` | host-routed weight read (UNEMBED event); replacement-swap injection/transplant/knockout (ride SWAP, no new event) — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (isolated and in-process) |
+| session cross-trace handoff (`.save()` used in a later trace; `.carry()` / `nnsight.carry(x)`) | inner-trace END writeback to the session frame: saved values re-registered host-side so the session exit-push keeps them; carried (non-saved) values written for the next trace only — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (`.carry()` is portable: harmless in-process, load-bearing under isolation) |
 | Triton-kernel models (MoE / SSM / `torch.compile`) | host-side forward compiles/runs Triton unrestricted (the worker holds only the intervention) | ✅ — §17 |
 | user-code Triton (kernel inside the intervention) | — (compiling a kernel needs `open`/`subprocess`/ptxas, which lockdown blocks by design) | ⛔ under lockdown — §17 |
 | `.source` operation-level access (`...attn.split_1.output`) | — (op paths aren't in `model.modules()`) | 🔜 not yet |
@@ -324,8 +325,11 @@ regression PASS (4-tuple event).
 **Findings:** the variable-sharing push must filter to transmittable data (else the `Barrier` local pulls
 in the whole model) AND move tensors to CPU (CUDA-IPC tensors can't be re-shared by the host). The
 `_xinvoke_store` is per-interleaver (reset each trace) so no cross-trace leak today; the warm pool (§14)
-rebuilds the interleaver + dummy modules per job and clears `Globals.saves`, so there is no cross-trace
-leak under reuse either. Known coverage gaps: no tests yet for
+rebuilds the interleaver + dummy modules per job and clears `Globals.saves`/`Globals.shared`, so there is
+no cross-trace leak between *unrelated* traces under reuse either. (Intentional cross-trace handoff
+*within a `model.session()`* — a `.save()`d value used in a later trace, or `.carry()` — is a separate,
+supported path: the worker ships those values to the session frame at END; see the §8 support matrix and
+[fast-lane.md](fast-lane.md) §6.) Known coverage gaps: no tests yet for
 multi-barrier-in-one-trace, 3+ participants, multi-token + barrier, or variable sharing without a barrier;
 the store grows monotonically per trace and ships all shared tensors CPU-serialized on every response (a
 perf cliff for large cross-invoke tensors).
