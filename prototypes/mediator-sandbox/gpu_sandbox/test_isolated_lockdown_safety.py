@@ -73,6 +73,29 @@ def test_net_blocked(model):
     return ok
 
 
+def test_warm_pool_under_lockdown(model):
+    """Lockdown is one-way and installed after the FIRST job's deserialize, so a warm pool
+    must keep serving later jobs under that lockdown. Three traces on one pooled worker:
+    job 1 deserializes (imports the model's modules) then locks down; jobs 2-3 reuse the
+    locked worker — their deserialize needs no NEW import (same model), so they work."""
+    from nnsight.intervention.isolation import shutdown_worker_pool
+
+    with model.trace(PROMPT):
+        ref = model.transformer.h[6].output[0].save()
+    got = []
+    try:
+        with isolate_mediators(fast_lane=False, lockdown=True, pool_size=1):
+            for _ in range(3):
+                with model.trace(PROMPT):
+                    g = model.transformer.h[6].output[0].save()
+                got.append(g)
+    finally:
+        shutdown_worker_pool()
+    ok = len(got) == 3 and all(torch.equal(ref, g) for g in got)
+    print(f"[pool]  3 traces on one pooled worker under lockdown all bit-identical: {ok}")
+    return ok
+
+
 def main():
     assert torch.cuda.is_available()
     model = LanguageModel("gpt2", device_map="cuda", dispatch=True)
@@ -80,6 +103,7 @@ def main():
         "func": test_functional_under_lockdown(model),
         "fs": test_fs_blocked(model),
         "net": test_net_blocked(model),
+        "pool": test_warm_pool_under_lockdown(model),
     }
     ok = all(results.values())
     print("=" * 72)

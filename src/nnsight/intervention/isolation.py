@@ -869,6 +869,12 @@ class WorkerMediator(Mediator):
 # ``worker_backward_context`` so BackwardsTracer can find the ambient mediator.
 _WORKER_CURRENT: Optional[WorkerMediator] = None
 
+# Whether this worker has installed its (one-way) seccomp lockdown yet. Lockdown is
+# deferred to the first job — after the job's host-authored payload is deserialized, before
+# its user code runs — so the deserialize's imports (e.g. transformers' lazy submodules,
+# loaded only at unpickle time) are not blocked. See ``_run_one_job``.
+_LOCKED_DOWN: bool = False
+
 
 def worker_backward_context() -> Optional[WorkerMediator]:
     """Return this worker's mediator if its trace contains a backward block, else None.
@@ -883,15 +889,21 @@ def worker_backward_context() -> Optional[WorkerMediator]:
     return None
 
 
-def _run_one_job(channel, payload, extras, opts, device) -> None:
+def _run_one_job(channel, payload, extras, opts, device, lockdown: bool = False) -> None:
     """Deserialize one mediator against fresh dummies, adopt it as this job's
     :class:`WorkerMediator`, run its intervention, and ship saves at END. Any failure
     (including a bad payload) is reported as an EXCEPTION event so the host never
-    waits on a worker that won't speak."""
+    waits on a worker that won't speak.
+
+    Under ``lockdown`` the seccomp filter is installed HERE — after the (host-authored,
+    trusted) payload is deserialized, before the (untrusted) user intervention runs — so
+    deserialization's own imports succeed. It is one-way and installed once; in a warm pool
+    later jobs run under the first job's lockdown, so their deserialize must not need a NEW
+    import (true for a homogeneous model; otherwise pre-load via ``preimport=``)."""
     from .interleaver import Events
     from .tracing.globals import Globals
 
-    global _WORKER_CURRENT
+    global _WORKER_CURRENT, _LOCKED_DOWN
     try:
         Globals.saves.clear()  # per-job reset (the only worker-side global state)
         Globals.shared.clear()
@@ -902,6 +914,15 @@ def _run_one_job(channel, payload, extras, opts, device) -> None:
         _WORKER_CURRENT = mediator
         channel.on_meta = mediator.apply_meta
         channel.push_provider = mediator.push_locals
+
+        # Footgun containment: seccomp-block new fs/net/exec syscalls NOW — the trusted
+        # payload is deserialized (its imports done), the untrusted user code is next. CUDA
+        # + the control Pipe + the IPC buffer use already-open fds, so they keep working.
+        if lockdown and not _LOCKED_DOWN:
+            from ._sandbox import lock_down
+
+            lock_down()
+            _LOCKED_DOWN = True
 
         mediator.intervention(mediator, mediator.info, *mediator.args)
     except BaseException as e:  # noqa: BLE001 — contain the footgun; report it
@@ -960,15 +981,15 @@ def _pool_worker_main(conn, buf, worker_iso_opts: IsoOptions):
 
     channel = CudaIpcWorkerChannel(conn, buf)  # persistent; rebinds handlers per job
 
-    # Footgun containment: after CUDA is warm and base imports are done (both may open
-    # files), seccomp-block new fs/net/exec syscalls. Under the pool this locks the
-    # import set for ALL jobs (jobs whose user code triggers a NEW import will fail) —
-    # lockdown defaults off; document the trade-off. CUDA + the control Pipe + the IPC
-    # buffer use already-open fds.
-    if worker_iso_opts.lockdown:
-        from ._sandbox import lock_down
-
-        lock_down()
+    # Lockdown is NOT installed here: the job message (received + unpickled by ``conn.recv``
+    # below) and the mediator payload are host-authored, trusted data whose deserialization
+    # may need new imports (transformers loads its modeling submodules lazily, only at
+    # unpickle time). Installing seccomp before the first ``conn.recv`` blocks those opens
+    # and the worker dies (EPERM is an ``OSError`` → swallowed by the recv loop's
+    # ``except``). Instead ``_run_one_job`` installs lockdown after the first job's payload
+    # is deserialized, before its user code runs. The first ``conn.recv`` therefore runs
+    # unlocked; a warm pool's later recvs run under the first job's lockdown, so a NEW model
+    # type would need ``preimport=`` (a homogeneous model needs nothing — already imported).
 
     # One-time ready ack: the spawner consumes this before the channel reads protocol.
     conn.send("ready")
@@ -983,7 +1004,7 @@ def _pool_worker_main(conn, buf, worker_iso_opts: IsoOptions):
         if not (isinstance(msg, tuple) and msg and msg[0] == "job"):
             continue  # ignore stray control messages
         _, payload, extras, opts = msg
-        _run_one_job(channel, payload, extras, opts, device)
+        _run_one_job(channel, payload, extras, opts, device, worker_iso_opts.lockdown)
         # Job done; the worker is idle and recyclable. Loop for the next job/stop.
 
     # Skip interpreter atexit handlers: under seccomp lockdown, tempfile's atexit

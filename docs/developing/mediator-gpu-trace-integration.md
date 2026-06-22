@@ -249,7 +249,7 @@ benign CudaIPC release warning.
 | read / swap (`=`) / `.save()` (tensors) / skip / exception | six events over the channel; host-side hook registration; worker→host saves transmission at END | ✅ bit-identical |
 | multi-invoke + batch narrowing | per-invoke worker + host mediator; Batcher stays host-side | ✅ bit-identical |
 | single-forward `generate(...)` (no iter) | same as trace | ✅ verified |
-| seccomp lockdown (fs/net/exec) | `_sandbox.lock_down` after warm-up | ⚠️ broken since the warm-pool unification (§14): the worker locks down BEFORE receiving its first job, and unpickling the job's extras (Tokenizer) triggers a new `transformers` submodule import that seccomp blocks → the worker dies at job-recv. Pre-dates the 2026-06-10 refactors (reproduced on the pre-refactor commit). Mitigation now available: list the needed modules in `preimport=` so they load before lockdown ([threat-models](mediator-threat-models.md) §8); a default fix (auto-warm the model's transformers modules) is still open. |
+| seccomp lockdown (fs/net/exec) | `_sandbox.lock_down` after the first job's deserialize, in `_run_one_job` | ✓ a read under `lockdown=True` is `max|Δ|=0`, user-code `open`/`socket`/`exec` are blocked, and a warm pool keeps serving (`test_isolated_lockdown_safety.py` 4/4). The break — the worker locked down BEFORE receiving its first job, so unpickling the job message (its `transformers` lazy submodules load only at unpickle time) hit a seccomp-blocked `open` (an `OSError` the recv loop swallowed → silent death) — is fixed by deferring lockdown to after the (host-authored, trusted) first job is deserialized, before its user code. One-way and installed once: in a warm pool, a later job needing a *new* model's modules still needs `preimport=` (a homogeneous model needs nothing). |
 | `iter`/`all`/`next` (multi-token) | step stamped in the requester; host iter-hooks bump the tracker; live `default_all` piggyback (§9) | ✅ bit-identical (`iter[N]`, `iter[:]`, per-step swap) |
 | `tracer.barrier()` | worker sends the target count; host accumulates participants + runs the coordination loop (§10) | ✅ |
 | `cross_invoker` variable sharing | host variable store; worker pushes data locals, pulls the merged store; transmittable data only (§10) | ✅ |
@@ -431,10 +431,13 @@ model-weight-independent, linear in worker count) — and **MPS does not reduce 
 an 80 GB A100 but ~55% of a 16 GB T4) — the cap must be deliberate, with the cold-spawn fallback past it.
 (`probe_pool_gpu_footprint.py`.)
 
-**Lockdown + pool.** Seccomp lockdown happens once after warm-up (before the job loop), so a pooled worker
-locks the import set at warm time — a job whose user code triggers a *new* import fails (deterministically,
-since every worker shares the same warm-time import set). This is **stricter than the cold path**
-(`pool_size=0`), which deserializes the mediator *before* lockdown and so allows deserialize-time imports.
+**Lockdown + pool.** Seccomp lockdown is installed once, in `_run_one_job`, after the **first** job's
+(host-authored, trusted) payload is deserialized and before its user code runs — so deserialization's own
+imports (e.g. transformers' lazy modeling submodules, loaded only at unpickle time) succeed. It is one-way:
+in a warm pool, later jobs run under the first job's lockdown, so a later job whose deserialize needs a
+*new* import fails — true only across *different* models (a homogeneous model is already imported); pre-load
+the deployment's model set via `preimport=` to serve heterogeneous models under lockdown. The cold path
+(`pool_size=0`) is the same code, so it behaves identically (deserialize the one job, then lock down).
 Lockdown defaults off.
 
 **Hardening (independent review, 2026-06-08).** Both passes confirmed no Critical issue — the cross-request
@@ -603,11 +606,12 @@ documented as unsupported.
   (`CudaIpcHostChannel.wait_event`) and measures worker think-time. Host-side Triton compilation happens
   during the host's *forward execution* — never while the host is in `wait_event` — so a multi-second cold
   MoE autotune never false-trips the worker's hang-detector, in either direction.
-- *Lockdown ordering / cold-vs-pool.* `lock_down()` runs once after warm-up, before the job loop, in the
-  unified `_pool_worker_main` (the only worker entrypoint, used for cold via `poolable=False` and pooled via
-  `poolable=True`). So the import set is frozen at warm time for **both** paths — there is no
-  "cold deserializes before lockdown" advantage; the cold-vs-pool difference is recycle-vs-retire. (The
-  earlier §7 note describing a cold deserialize-before-lockdown window predates the warm-pool unification.)
+- *Lockdown ordering / cold-vs-pool.* `lock_down()` runs once in `_run_one_job`, after the first job's
+  payload is deserialized and before its user code runs — in the unified `_pool_worker_main` (the only
+  worker entrypoint, cold via `poolable=False`, pooled via `poolable=True`). So **both** paths deserialize
+  their first job before lockdown; the cold-vs-pool difference is recycle-vs-retire. The first `conn.recv`
+  (which unpickles the job message) runs unlocked, so a fresh worker's first job needs no `preimport=`; a
+  warm pool's *later* jobs run under the first job's lockdown (so a different model would need `preimport=`).
 
 **Coverage:** `prototypes/mediator-sandbox/gpu_sandbox/test_isolated_triton_model.py` — `host_compiles`
 (isolated + `lockdown=True` Triton-kernel model bit-identical to in-process, with a cold `TRITON_CACHE_DIR`
