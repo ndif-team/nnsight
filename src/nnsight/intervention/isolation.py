@@ -771,6 +771,7 @@ class WorkerMediator(Mediator):
         mediator._bwd_active = opts["backward_active"]
         mediator._bwd_prov = {}    # id(delivered clone) -> requester string
         mediator._bwd_tagged = []  # delivered clones made to require grad
+        mediator._bwd_swaps = {}   # requester string -> worker-tape swap value (grad-through-swap)
         interleaver.current = mediator
         return mediator
 
@@ -779,6 +780,17 @@ class WorkerMediator(Mediator):
         if self._bwd_active:
             self._tag_delivered(value, requester)
         return value
+
+    def swap(self, requester: str, value):
+        # Grad-through-swap: keep the worker-TAPE swap value (with grad_fn back to the
+        # delivered clones) before send() ships its detached copy. The backward block uses
+        # it to backprop the host-returned dL/d(swap leaf) into dL/d(delivered clone). Tuple
+        # outputs: the residual is element [0].
+        if self._bwd_active:
+            seam = value[0] if isinstance(value, tuple) else value
+            if torch.is_tensor(seam) and seam.requires_grad:
+                self._bwd_swaps[requester] = seam
+        return super().swap(requester, value)
 
     def _tag_delivered(self, value, requester: str) -> None:
         """Tag each delivered activation tensor with its requester provenance and make

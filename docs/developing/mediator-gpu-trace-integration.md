@@ -254,7 +254,7 @@ benign CudaIPC release warning.
 | `tracer.barrier()` | worker sends the target count; host accumulates participants + runs the coordination loop (§10) | ✅ |
 | `cross_invoker` variable sharing | host variable store; worker pushes data locals, pulls the merged store; transmittable data only (§10) | ✅ |
 | warm worker pool (`pool_size=N`, `warm_worker_pool`) | generic workers receive serialized mediators as jobs; clean-END recycle (§14) | ✅ ~21× faster per request once warm |
-| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path (§16) | ✅ read-path bit-identical (scalar loss; single invoke); multi-token backward is a clean-fail (in-process doesn't support it either); **grad through a swap** cleanly errors (the swapped value is a host-side leaf, so the host graph is severed at the seam) — §16 |
+| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path; **grad-through-swap** iterates the exchange — host returns `dL/d(swap leaf)`, worker backprops it through its swap tape, re-seeds the pre-swap graph (§16) | ✅ read-path AND grad-through-swap bit-identical (scalar loss; single invoke); multi-token backward is a clean-fail (in-process doesn't support it either) |
 | `tracer.cache()` (`modules=`, `include_inputs=`) | CACHE event → host registers the real cache hooks; host CacheDict swapped in at END, filled in-place by the forward (§15) | ✅ bit-identical |
 | part-2 primitives: `tracer.unembed` / `tracer.steer` / `tracer.patch` / `tracer.ablate` | host-routed weight read (UNEMBED event); replacement-swap injection/transplant/knockout (ride SWAP, no new event) — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (isolated and in-process) |
 | session cross-trace handoff (`.save()` used in a later trace; `.carry()` / `nnsight.carry(x)`) | inner-trace END writeback to the session frame: saved values re-registered host-side so the session exit-push keeps them; carried (non-saved) values written for the next trace only — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (`.carry()` is portable: harmless in-process, load-bearing under isolation) |
@@ -501,7 +501,7 @@ untested. `modules=None` (cache *all* modules) registers a hook per module on th
 
 ---
 
-## 16. `with tensor.backward()` — read-path DONE (2026-06-10)
+## 16. `with tensor.backward()` — read-path DONE (2026-06-10), grad-through-swap DONE (2026-06-23)
 
 **The gap (§11).** Clone-on-receive strips `grad_fn` — the worker's delivered activations are detached
 clones, the autograd graph lives only on the host, and `.grad` providers were keyed by `id(tensor)`
@@ -538,12 +538,22 @@ renamed model (`final_norm`/`output_projection`) `max|Δ|=0`; user-derived-tenso
 Independent review (7 finder angles, dedup + verify): **no silent-wrong in the in-scope path** (single
 invoke, on-path tensor-output target, scalar loss, no swaps).
 
+**Gradient-through-swap — DONE (2026-06-23).** An isolated SWAP installs a worker-computed value as a host
+*leaf* (clone-on-receive strips `grad_fn`), so the host backward used to dead-end at the swap — while
+in-process gradients flow through swaps. Now the seam is stitched by iterating the existing `Events.BACKWARD`
+exchange to a fixpoint. Host: `handle_swap_event` (under `_iso_backward`) makes the swap leaf
+`requires_grad_(True)` and retains it (`_iso_grad_swaps`), so the downstream forward tracks it and it is a
+backward target; `handle_backward_event` adds swap leaves to its targets and returns `dL/d(swap leaf)` under
+a reserved key. Worker: `WorkerMediator.swap` keeps the worker-tape swap value (with `grad_fn`); the backward
+block loops — send seeds, receive `dL/d(swap leaf)`, backprop it through the swap tape to `dL/d(delivered
+clone)`, re-seed the pre-swap graph, repeat — accumulating each read's gradient across rounds (a clone
+reached both directly and through a swap sums both paths). With no swaps the loop is the original single
+exchange. Chained swaps converge in N rounds. **Verified (`test_isolated_grad_through_swap.py`, gpt2 +
+renamed):** grad through `h*2`, `h+vec`, `tracer.steer`, and TWO chained swaps, plus the renamed model, all
+isolated-vs-in-process `max|Δ|=0`.
+
 **Limits / open:**
 - Scalar loss only — `loss.backward(gradient=...)` is not honored (scalar-only error).
-- **Gradient-through-swap unsupported** (next increment): an isolated SWAP splices a graph *leaf* into
-  the host forward (worker-computed values carry no host `grad_fn`), so the host backward dead-ends at
-  the swap — while in-process gradients DO flow through swaps. Fix = recursive seam stitch (host ships
-  `dL/d(swap)` to the worker, the worker tape backprops to its leaves, ships back).
 - Batched traces error with a cryptic shape mismatch (host retains the full-batch tensor, worker seeds
   the narrowed clone) — needs a clear error or narrowed retention.
 - Multi-token backward: **not supported in-process either** (characterized 2026-06-10,

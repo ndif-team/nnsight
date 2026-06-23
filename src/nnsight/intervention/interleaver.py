@@ -1000,6 +1000,12 @@ class Mediator:
         # non-backward isolated trace pays nothing.
         self._iso_backward = False
         self._iso_grad_reals: dict = {}
+        # Grad-through-swap: each isolated SWAP installs a worker-computed value as a host
+        # *leaf* (clone-on-receive strips grad_fn), severing the host graph at the seam.
+        # Keep the (tagged, requires_grad) swap leaf per requester so handle_backward_event
+        # can return dL/d(swap leaf); the worker backprops that through its swap tape and
+        # re-seeds the pre-swap graph (a second BACKWARD round). Gated on ``_iso_backward``.
+        self._iso_grad_swaps: dict = {}
 
         # Fast lane: the static safety verdict (set in start when fast_lane is on) and the
         # wall-clock watchdog for a confirmed-safe in-process run.
@@ -1188,6 +1194,7 @@ class Mediator:
         # Retained on-graph activations (isolated backward) pin the autograd graph;
         # drop them at trace end rather than waiting for the mediator to be GC'd.
         self._iso_grad_reals = {}
+        self._iso_grad_swaps = {}
         # Disarm the fast-lane watchdog (backstop to the thread-target finally) so a
         # generous deadline can't fire into an unrelated later computation.
         if self._fastlane_watchdog is not None:
@@ -1370,6 +1377,19 @@ class Mediator:
         """
         # If fulfilled by this processor, swap the value and respond with the value and continue processing events.
         if provider == requester:
+            # Grad-through-swap: the swap value arrived clone-on-receive (a detached host
+            # leaf), so the downstream host graph would dead-end here. Make the seam tensor
+            # require grad BEFORE the forward consumes it (so downstream tracks it and it is
+            # a backward target) and retain it; handle_backward_event returns dL/d(this leaf)
+            # for the worker to backprop through its swap tape. Tuple outputs: the residual is
+            # element [0].
+            if self._iso is not None and self._iso_backward:
+                seam = swap_value[0] if isinstance(swap_value, tuple) else swap_value
+                if (torch.is_tensor(seam) and seam.is_leaf
+                        and seam.is_floating_point() and not seam.requires_grad):
+                    seam.requires_grad_(True)
+                    self._iso_grad_swaps[requester] = seam
+
             # Swap the value in the batcher. Might only replace a slice of the value if this mediator is part of a batch group.
             self.interleaver.batcher.swap(self.batch_group, swap_value)
 
@@ -1551,8 +1571,11 @@ class Mediator:
         ``torch.autograd.grad`` on the host's graph with the worker-supplied seeds.
         """
         reals = self._iso_grad_reals
+        swaps = self._iso_grad_swaps
 
-        # The seeds: (real activation tensor, dL/d(activation) from the worker).
+        # The seeds: (real activation tensor, dL/d(activation) from the worker). Seeds key
+        # into the pre-swap reals — round 1 seeds the loss's delivered reads, round 2 (after
+        # the worker backprops a swap seam) seeds the pre-swap activation that was swapped.
         out_tensors, out_grads = [], []
         for path, grad in seed.items():
             real = reals.get(path)
@@ -1560,14 +1583,16 @@ class Mediator:
                 out_tensors.append(real)
                 out_grads.append(grad)
 
-        # The targets: every delivered activation still on the host graph. The worker
-        # reads a subset of these via ``.grad``; computing all keeps it source-agnostic.
-        target_paths = [
-            p for p, r in reals.items() if torch.is_tensor(r) and r.requires_grad
-        ]
-        target_tensors = [reals[p] for p in target_paths]
+        # The targets: every delivered activation AND every swap leaf still on the host
+        # graph. Reals serve `.grad` reads (and round-2 re-seeding); swap leaves let the
+        # worker continue the chain rule through a swap seam (grad-through-swap). Computing
+        # all keeps it source-agnostic. Kept as separate lists so a real and a swap sharing
+        # one requester path (read then swapped) don't collide.
+        real_paths = [p for p, r in reals.items() if torch.is_tensor(r) and r.requires_grad]
+        swap_paths = [p for p, s in swaps.items() if torch.is_tensor(s) and s.requires_grad]
+        target_tensors = [reals[p] for p in real_paths] + [swaps[p] for p in swap_paths]
 
-        if reals and not target_tensors:
+        if (reals or swaps) and not target_tensors:
             # Activations were delivered but NONE is on a graph — the forward ran
             # without gradient tracking (e.g. generate() runs grad-less). Tell the
             # worker so its .grad reads blame the real cause, not "off the path".
@@ -1583,9 +1608,16 @@ class Mediator:
                 allow_unused=True,
                 retain_graph=True,
             )
-            result = {
-                p: g for p, g in zip(target_paths, grads) if torch.is_tensor(g)
+            n = len(real_paths)
+            result = {p: g for p, g in zip(real_paths, grads[:n]) if torch.is_tensor(g)}
+            swap_grads = {
+                p: g for p, g in zip(swap_paths, grads[n:]) if torch.is_tensor(g)
             }
+            if swap_grads:
+                # The worker backprops these through its swap tape to dL/d(delivered clone)
+                # and re-seeds (a further BACKWARD round); kept under a reserved key so they
+                # are not mistaken for `.grad`-readable activation gradients.
+                result["__nnsight_swap_grads__"] = swap_grads
 
         self.respond(result)  # ack -> worker's send() returns the grad dict
         return True
@@ -1940,6 +1972,7 @@ class Mediator:
         self._isolated_worker = False
         self._iso_backward = False
         self._iso_grad_reals = {}
+        self._iso_grad_swaps = {}
         self._iso_caches = {}
         self._fastlane_verdict = None
         self._fastlane_watchdog = None

@@ -139,6 +139,7 @@ class BackwardsTracer(Invoker):
         forward_mediator = worker_mediator
         provenance = worker_mediator._bwd_prov
         tagged = [t for t in worker_mediator._bwd_tagged if t.requires_grad]
+        swaps = worker_mediator._bwd_swaps  # requester -> worker-tape swap value
 
         # Worker half of the chain rule: seed = dL/d(delivered leaf) for leaves the loss
         # actually depends on (allow_unused drops the rest).
@@ -151,11 +152,35 @@ class BackwardsTracer(Invoker):
                 if grad is not None:
                     seed[provenance[id(leaf)]] = grad
 
-        # Host runs its half and returns dL/d(activation) keyed by requester string.
-        worker_grads = forward_mediator.send(Events.BACKWARD, seed) or {}
-        # The host signals "no graph at all" (forward ran without gradient tracking,
-        # e.g. generate()) distinctly from "this particular read is off the path".
-        no_graph = bool(worker_grads.pop("__nnsight_backward_no_graph__", False))
+        # Stitch the chain across the boundary, iterating over swap seams. Each round the
+        # host returns dL/d(activation) for reads AND dL/d(swap leaf) (a swap installs a host
+        # leaf, severing the host graph at the seam). The worker backprops each swap-leaf
+        # grad through its swap tape to dL/d(delivered clone) and re-seeds the pre-swap graph
+        # (another BACKWARD round). A read reached both directly and through a swap sums its
+        # contributions across rounds. With no swaps this is the original single exchange.
+        worker_grads: dict = {}
+        no_graph = False
+        while seed:
+            resp = forward_mediator.send(Events.BACKWARD, seed) or {}
+            no_graph = no_graph or bool(resp.pop("__nnsight_backward_no_graph__", False))
+            swap_grads = resp.pop("__nnsight_swap_grads__", {})
+            for path, g in resp.items():
+                if torch.is_tensor(g):
+                    worker_grads[path] = g if path not in worker_grads else worker_grads[path] + g
+            # Next round's seed: backprop each returned swap-leaf grad through the worker's
+            # swap tape to its delivered-clone leaves.
+            seed = {}
+            for swap_path, sg in swap_grads.items():
+                swapped = swaps.get(swap_path)
+                if not (tagged and torch.is_tensor(swapped) and torch.is_tensor(sg)):
+                    continue
+                grads = torch.autograd.grad(
+                    swapped, tagged, grad_outputs=sg, allow_unused=True, retain_graph=True
+                )
+                for leaf, g in zip(tagged, grads):
+                    if g is not None:
+                        p = provenance[id(leaf)]
+                        seed[p] = g if p not in seed else seed[p] + g
 
         mediator = BackwardsMediator(fn, self.info)
         interleaver = Interleaver([mediator], self)
