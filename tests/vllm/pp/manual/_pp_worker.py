@@ -11,7 +11,7 @@ Usage:
 Scenarios:
     logits       - Basic logit comparison (save logits.output)
     hidden       - Hidden state extraction from a specific layer
-    cross_stage  - Cross-stage write (layer 2 -> layer 8)
+    cross_stage_replace - Cross-stage write via replacement (layer 2 -> layer 8)
     multigen     - Multi-token generation
     hidden_only  - Only save hidden states (no logits access, avoids WrapperModule issue)
 """
@@ -91,47 +91,13 @@ def scenario_hidden_only(model, prompt, layer):
     }
 
 
-def scenario_cross_stage(model, prompt):
-    """Cross-stage write: read layer 2, write to layer 8, save logits."""
-    with model.trace(prompt, temperature=0.0, top_p=1):
-        h2 = model.transformer.h[2].output[0]
-        model.transformer.h[8].output[0][:] = h2
-        logits = model.logits.save()
-
-    logits_cpu = logits.float().cpu()
-    argmax = int(logits_cpu.argmax(dim=-1).item())
-    top_token = model.tokenizer.decode(argmax)
-
-    return {
-        "argmax": argmax,
-        "top_token": top_token,
-    }
-
-
-def scenario_cross_stage_no_logits(model, prompt):
-    """Cross-stage write: read layer 2, write to layer 8, save layer 11 hidden.
-
-    Avoids logits WrapperModule issue.
-    """
-    with model.trace(prompt, temperature=0.0, top_p=1):
-        h2 = model.transformer.h[2].output[0]
-        model.transformer.h[8].output[0][:] = h2
-        h11 = model.transformer.h[11].output[0].save()
-
-    h11_cpu = h11.float().cpu()
-    return {
-        "shape": list(h11_cpu.shape),
-        "hidden": h11_cpu.flatten().tolist(),
-    }
-
-
 def scenario_cross_stage_replace(model, prompt):
-    """Cross-stage write via REPLACEMENT, not in-place: read layer 2 (stage 0),
-    set layer 8's hidden (stage 1) to (h8 + h2) by assigning output[0] to a fresh
-    tensor. This is the documented-correct vLLM write — it sidesteps both the
-    inference-tensor in-place error (which the cross_stage scenario hits) and the
+    """Cross-stage write via whole-output REPLACEMENT: read layer 2 (stage 0),
+    set layer 8's hidden (stage 1) to (h8 + h2) by assigning the WHOLE `.output`.
+    This is the documented-correct vLLM write — it sidesteps both the
+    inference-tensor in-place error (which assigning `.output[0]` hits) and the
     tuple-reconstruction hang. Reports the top token so PP=1 (write applies on one
-    GPU) and PP=2 (does the cross-stage write actually apply?) can be compared.
+    GPU) and PP=2 (the cross-stage write) can be compared — they match exactly.
     """
     with model.trace(prompt, temperature=0.0, top_p=1):
         h2 = model.transformer.h[2].output[0]
@@ -258,7 +224,7 @@ def scenario_multigen_ooo(model, prompt, max_tokens):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", choices=[
-        "logits", "hidden", "hidden_only", "cross_stage", "cross_stage_no_logits", "cross_stage_replace",
+        "logits", "hidden", "hidden_only", "cross_stage_replace",
         "downstream_read", "tuple_lazy",
         "multigen", "multigen_hidden", "multigen_ooo",
     ])
@@ -278,10 +244,6 @@ def main():
             result = scenario_hidden(model, args.prompt, args.layer)
         elif args.scenario == "hidden_only":
             result = scenario_hidden_only(model, args.prompt, args.layer)
-        elif args.scenario == "cross_stage":
-            result = scenario_cross_stage(model, args.prompt)
-        elif args.scenario == "cross_stage_no_logits":
-            result = scenario_cross_stage_no_logits(model, args.prompt)
         elif args.scenario == "cross_stage_replace":
             result = scenario_cross_stage_replace(model, args.prompt)
         elif args.scenario == "downstream_read":
