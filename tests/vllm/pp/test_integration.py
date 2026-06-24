@@ -14,27 +14,16 @@ Each test scenario runs PP=1 and PP=2 in separate subprocesses to avoid
 distributed environment conflicts and GPU memory contention. Results are
 compared in the parent process.
 
-STATUS: All PP=2 tests currently fail due to a **mediator deserialization
-failure** — the serialized mediator references module paths (like
-`model.transformer.h.6.ln_1`) that don't exist on non-owning PP ranks
-where those layers are `PPMissingLayer` stubs without children. The
-PP design doc (docs/developing/pp-design.md) describes `_pp_aware_load` as the solution,
-but it is not yet implemented in `serialization.py`'s `persistent_load`.
-
-Root cause chain:
-  1. Client serializes intervention with module references from the full meta model
-  2. Worker deserializes via `load()` -> `persistent_load()` resolves module PIDs
-  3. On rank 0: `model.transformer.h.6.ln_1` doesn't exist (PPMissingLayer stub)
-  4. On rank 1: `model.transformer.h.0.ln_1` doesn't exist (PPMissingLayer stub)
-  5. `_pickle.UnpicklingError: Unknown persistent id: Module:model.transformer.h.X.ln_1`
-  6. Mediator creation fails silently (no intervention hooks)
-  7. vLLM proceeds with generation (no NNsight involvement) -> completes "normally"
-
-Secondary issue (would hit after fixing deserialization):
-  - `model.logits` and `model.samples` are WrapperModules, not PPMissingLayer.
-    The Envoy `_is_pp_missing` check uses `type(module).__name__ == "PPMissingLayer"`
-    which won't match WrapperModules. Accessing `model.logits` on rank 0
-    would deadlock because the logits hook never fires on non-last ranks.
+STATUS: PP=2 cross-stage reads — final logits, early/late hidden states, and
+multi-token generation — match PP=1 and pass. (The mediator-deserialization
+failure once recorded here, where serialized mediators referenced module paths
+absent on non-owning ranks, has since been fixed.) The one remaining xfail is
+the cross-stage *write* test, and not for that old reason: its scenario does an
+in-place update `model.transformer.h[8].output[0][:] = h2`, which vLLM forbids
+on inference-mode tensors — PP=1 raises "Inplace update to inference tensor
+outside InferenceMode", and PP=2 does not error but silently drops the write
+(unperturbed output). Isolating whether a cross-stage write actually applies on
+PP=2 needs the documented replacement pattern; see CROSS_STAGE_WRITE_XFAIL_REASON.
 """
 
 import json
@@ -105,12 +94,15 @@ REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 )
 
-# Expected failure reason for PP=2 tests
-PP2_XFAIL_REASON = (
-    "PP=2 mediator deserialization fails: serialized mediator references "
-    "module paths (e.g. model.transformer.h.6.ln_1) that don't exist on "
-    "non-owning PP ranks where those layers are PPMissingLayer stubs. "
-    "Fix: implement _pp_aware_load in serialization.py's persistent_load."
+# Expected-failure reason for the cross-stage write test (the one remaining xfail).
+CROSS_STAGE_WRITE_XFAIL_REASON = (
+    "Cross-stage write uses an in-place update "
+    "(model.transformer.h[8].output[0][:] = h2), which vLLM forbids on its "
+    "inference-mode output tensors: PP=1 raises 'Inplace update to inference "
+    "tensor outside InferenceMode is not allowed'. On PP=2 the same op does not "
+    "error but is dropped (output is the unperturbed ' Paris'). Rework with the "
+    "documented replacement pattern to isolate whether a cross-stage write "
+    "actually applies on PP=2."
 )
 
 
@@ -182,7 +174,6 @@ class TestBasicLogits:
             f"PP=1 baseline failed: expected ' Paris', got {pp1['top_token']!r}"
         )
 
-    @pytest.mark.xfail(reason=PP2_XFAIL_REASON, strict=True)
     def test_logits_same_argmax_and_cosine(self):
         """Top-1 prediction should be identical, cosine sim > 0.99."""
         pp1 = _run_worker(GPU_PP1, "logits", ["--pp", "1", "--prompt", PROMPT])
@@ -209,7 +200,6 @@ class TestBasicLogits:
 class TestEarlyLayerHidden:
     """Compare hidden states from layer 0 (always on stage 0)."""
 
-    @pytest.mark.xfail(reason=PP2_XFAIL_REASON, strict=True)
     def test_layer0_cosine_similarity(self):
         """Layer 0 hidden states should be near-identical."""
         pp1 = _run_worker(GPU_PP1, "hidden_only", ["--pp", "1", "--prompt", PROMPT, "--layer", "0"])
@@ -231,7 +221,6 @@ class TestEarlyLayerHidden:
 class TestLateLayerHidden:
     """Compare hidden states from layer 11 (stage 1 for PP=2)."""
 
-    @pytest.mark.xfail(reason=PP2_XFAIL_REASON, strict=True)
     def test_layer11_cosine_similarity(self):
         """Layer 11 hidden states should be highly similar."""
         pp1 = _run_worker(GPU_PP1, "hidden_only", ["--pp", "1", "--prompt", PROMPT, "--layer", "11"])
@@ -258,7 +247,7 @@ class TestCrossStageWrite:
       - Layer 8 is on stage 1 (rank 1)
     """
 
-    @pytest.mark.xfail(reason=PP2_XFAIL_REASON, strict=True)
+    @pytest.mark.xfail(reason=CROSS_STAGE_WRITE_XFAIL_REASON, strict=True)
     def test_cross_stage_write_same_argmax(self):
         """Cross-stage write should produce same top-1 token."""
         pp1 = _run_worker(GPU_PP1, "cross_stage", ["--pp", "1", "--prompt", PROMPT])
@@ -282,7 +271,6 @@ class TestCrossStageWrite:
 class TestMultiTokenGeneration:
     """Compare multi-token generation between PP=1 and PP=2."""
 
-    @pytest.mark.xfail(reason=PP2_XFAIL_REASON, strict=True)
     def test_multi_token_same_argmax(self):
         """Each generation step should produce the same top-1 token."""
         num_tokens = 3
