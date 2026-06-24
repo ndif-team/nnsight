@@ -7,8 +7,8 @@ earlier CPU-only threat model + AWS deployment probe).
 
 This page is the security companion to the GPU-worker backend: *what* adversary each isolation
 configuration faces, what it can and cannot contain, and the resulting **cost coupling** that makes
-the "how much isolation" question concrete. It also records the one security fix landed in-branch — the
-worker→host **restricted-unpickler** codec.
+the "how much isolation" question concrete. It also records the one security fix landed in-branch: the
+worker→host **closed value-algebra codec**.
 
 ---
 
@@ -77,6 +77,16 @@ Two consequences:
    **R2** is the target (full host-OS isolation, fast path, accept the GPU-layer residual). If yes →
    you must pay **R3** for the co-batched path.
 
+**Shipped vs designed (R2 is the target, not the current state).** The code today is **R1 plus
+footgun-containment**: the spawned worker (shared GPU, CUDA-IPC), a seccomp **denylist** that EPERMs new
+filesystem (`open`/`openat`/`openat2`), network (`socket`/`connect`), and exec (`execve`/`execveat`)
+syscalls, and a GPU allocator memory-fraction cap. That contains careless or buggy interventions, matching
+the relaxed model in [gpu-sandbox.md](gpu-sandbox.md) ("contain footguns, not a determined adversary").
+The full **R2** jail in the ladder above (an allowlist-default seccomp filter that also blocks
+`ptrace`/`clone`/`fork`, plus net/mount/user namespaces and cgroups) is **designed, not yet built**, so
+R2's "closes ... against even a determined adversary" line is a roadmap target, not what ships today.
+Raising the posture to R2 is the §8 hardening work.
+
 ---
 
 ## 5. Security controls vs the shared-GPU design
@@ -91,7 +101,8 @@ lock-down-after-warm.)
 - **Network namespace** (no NIC) — zero GPU impact; kills exfil + IMDS. Take unconditionally.
 - **Mount namespace** (ro allowlist; bind only `/dev/nvidia*` + CUDA libs) — removes weights/secrets/
   other-tenant disk from view. Highest value.
-- **User namespace** (non-root, drop caps); **cgroups** (CPU/mem → OOM/forkbomb cap); **seccomp** (have it).
+- **User namespace** (non-root, drop caps); **cgroups** (CPU/mem → OOM/forkbomb cap); **seccomp** (today a
+  footgun **denylist** of fs/net/exec syscalls; the R2 target is allowlist-default plus `ptrace`/`clone`/`fork`).
 
 **Group B — in tension / incompatible (forces the CPU-transport fallback or hardware partition):**
 - **PID/IPC namespace** — cross-namespace CUDA-IPC is documented to fail; `CLONE_NEWPID` must be entered
@@ -153,31 +164,34 @@ which bypasses *every* other layer (seccomp, namespaces, row-bounding). The desi
 for the *inbound* user payload (unpickled inside the worker) but not the *outbound* results. This is a
 precondition for the isolation guarantee holding against a determined adversary.
 
-**Fix.** Worker→host now never plain-`pickle.loads`. Tensors already travel out-of-band (GPU bounce
-buffer / safetensors), so a frame is **tensor-free**; the remaining small structure is decoded with a
-**restricted unpickler** (`transport._RestrictedUnpickler` / `_safe_loads`) whose `find_class` allows
-**only torch `dtype`/`device`** and refuses every other class/function. `find_class` resolves a global
-*before* the `REDUCE` that would call it, so a gadget (`os.system`, …) is refused before it can execute.
-Supporting choices keep the allowlist minimal: the event rides as its string `.value` (no enum class),
-and exceptions ride as a `(type-name, message)` sentinel (no class). **Host→worker stays normal pickle**
-(host-authored, trusted).
+**Fix.** Worker→host now never `pickle.loads` at all. Tensors already travel out-of-band (GPU bounce
+buffer / safetensors), so a frame is **tensor-free**; the remaining small structure crosses as a **closed
+value algebra** encoded/decoded by a hand-written codec (`transport._codec_dumps` / `_codec_loads`). The
+algebra is exactly: `None | bool | int | float | str | bytes | list | tuple | dict | set | torch.dtype |
+torch.device | Array (out-of-band)`. Decode is **pure data assembly**: no `find_class`, no `REDUCE`, no
+global resolution, so there is no opcode that can construct or call an arbitrary object. It is bounded
+(a `_MAX_CODEC_BYTES` cap and bounds-checked reads guard against decode-bomb / OOB), and a value outside
+the algebra fails **loud at encode in the worker** (`BoundaryValueError`, naming the offending object),
+not at decode. The event rides as its string `.value`, and exceptions ride as a `(type-name, message)`
+sentinel, so neither pulls in a class. **Host→worker stays normal pickle** (host-authored, trusted).
 
-- **Why a restricted unpickler over a hand-rolled codec:** pickle handles all plain nested Python
-  structures natively (no per-type enumeration — an earlier hand-rolled JSON codec silently *missed* the
-  `Events.CACHE` event's `torch.dtype`/`torch.device` payload). Anything un-allowlisted now fails **loud
-  at decode with the exact refused class name**, easy to extend if legitimately safe.
-- **Cost:** ~plain-pickle speed (µs for the tiny tensor-free frame); `find_class` fires only on the
-  handful of globals per frame. Negligible vs the ~0.6 ms/hook round-trip.
-- **Why not `torch.load(weights_only=True)`:** it had an RCE bypass (CVE-2025-32434, fixed only in 2.6);
-  our unpickler is *tighter* — it enables no tensor-rebuild path at all (tensors aren't in the pickle).
-- **Capability narrowing (documented):** `.save()` of an arbitrary object / numpy array / framework type
-  (e.g. `ModelOutput`) is no longer transmittable from a worker — save a tensor (or basic data) instead.
+- **Why a closed codec rather than a restricted unpickler:** a restricted unpickler still runs the pickle
+  VM and gates classes at `find_class`; that gate has had RCE bypasses (e.g. `torch.load(weights_only=True)`,
+  CVE-2025-32434). Because the worker is the less-trusted side, running *any* pickle VM on its bytes is the
+  wrong shape. The codec removes the class of bug outright: there is no instruction that can call anything.
+  Per-type enumeration is the price, and it is small (the frame is tensor-free and the algebra is fixed).
+- **Cost:** measured ~1.25–1.6x the old restricted-unpickler frame round-trip, swamped by the ~0.6 ms/hook
+  GPU context-switch, so negligible end to end.
+- **Capability scope:** `.save()` / `.carry()` of a tensor, a numpy array, or basic scalars/containers
+  crosses; an arbitrary live object / framework type (e.g. `ModelOutput`) does not, and is refused at
+  encode with a clear error.
 
-Coverage: `prototypes/mediator-sandbox/gpu_sandbox/test_isolated_codec_security.py` — fidelity for
-VALUE/SWAP/END/**CACHE (dtype+device)**/EXCEPTION/push, and a real `__reduce__` gadget refused at decode
-without executing. (CPU is enough; needs torch.) The legacy AF_UNIX socket channels
-(`SocketHostChannel`/`ShmSocketHostChannel`) are unused by `isolate_mediators` and still plain-unpickle —
-route them through `_safe_loads` before wiring them to an untrusted worker.
+Coverage: `prototypes/mediator-sandbox/gpu_sandbox/test_isolated_codec_security.py` covers fidelity for
+VALUE/SWAP/END/**CACHE (dtype+device)**/EXCEPTION/push (including numpy + dtype/device), a `__reduce__`
+gadget and a custom object both refused at **encode**, and malformed/oversized frames raising at decode.
+(CPU is enough; needs torch.) The legacy AF_UNIX socket channels
+(`SocketHostChannel`/`ShmSocketHostChannel`) are unused by `isolate_mediators` and still plain-unpickle:
+route them through `_codec_loads` before wiring them to an untrusted worker.
 
 ---
 

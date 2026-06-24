@@ -316,8 +316,13 @@ is transparent to the single-trace path — and the in-process core (`test_lm.py
 
 - **The process-global `sys.addaudithook` backstop.** Its own failure mode (a leaked thread-local flag
   arms it during the model's *own* forward → server-wide outage) makes it net-negative when the static
-  default-deny gate already makes imports / `open` / `exec` / `socket` statically impossible in
-  fast-laned code. Documented as future hardening; the static gate is the confirmation.
+  default-deny gate already rejects `import` / `open` / `exec` / `socket` *nodes* outright in fast-laned
+  code (those AST forms route to ISOLATE, so they cannot appear in the in-process body). The remaining
+  boundary is **provenance, not the gate**: the fast lane is reachable only for `trust="local"`
+  (author-local) interventions, never remote/NDIF-submitted code, and the numpy/torch call-allowlist is a
+  **footgun selector, not an adversarial boundary** (a torch or numpy call runs arbitrary compute and both
+  have escape hatches). So fast-lane safety rests on the `trust="local"` cordon; the static gate only keeps
+  honest code honest. Documented as future hardening.
 - **A frozen-namespace `Compartment`** (SES-style) for fast-lane execution. The first slice relies on
   the static pass + the `trust` cordon; namespace shadowing is a later refinement.
 - *(none — the part-2 primitive set is complete.)* `unembed`, `steer`, `patch`, `ablate` are built, and

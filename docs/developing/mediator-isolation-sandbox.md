@@ -1,8 +1,16 @@
 # Mediator Isolation Sandbox — Design
 
-**Status:** Draft / design (prototype scope) · **Date:** 2026-06-05 · **Author:** zikai
+**Status:** SUPERSEDED (historical) · **Date:** 2026-06-05 · **Author:** zikai
 **Related:** `ndif` security regression suite (`src/services/ray/tests/security/`), `NDIF.md` §6–7,
 nnsight `src/nnsight/intervention/interleaver.py` (Mediator / event protocol).
+
+> **Superseded.** This is the earlier CPU-only, two-tier (fork-jail) design from 2026-06-05. On 2026-06-06
+> the project chose the GPU-sandbox approach (contain footguns, not a determined adversary), built and
+> documented in [gpu-sandbox.md](gpu-sandbox.md) and landed via the integration in
+> [mediator-gpu-trace-integration.md](mediator-gpu-trace-integration.md), which is the authoritative
+> current reference (plus [mediator-threat-models.md](mediator-threat-models.md) for the security posture).
+> Kept for historical context; the CPU-transport and two-tier op-interpreter details below do not reflect
+> the shipped code.
 
 ## 1. Motivation
 
@@ -283,8 +291,9 @@ pool. That caps pool size and the per-hook D2H/H2D budget (the per-hook D2H/H2D 
 ## 7. Future optimization (out of scope now)
 
 Where do user tensor ops execute? The prototype picks **per-hook D2H/H2D in the jail, on CPU** (D2H/H2D per hook).
-The destination is **the two-tier approach**: run the common tiny tensor algebra (read/write/project/ablate/steer/
-patch/topk/cache) on the host via a *validated op interpreter* (data never leaves the GPU, no jail in the
+The destination is **the two-tier approach**: run the common tiny tensor algebra (read/swap/save/unembed/steer/
+patch/ablate/cache, plus the `.carry()` cross-trace handoff; the realized primitive set, "capture" shipped as
+`.carry()`) on the host via a *validated op interpreter* (data never leaves the GPU, no jail in the
 hot path), and route only genuinely-arbitrary Python to the CPU jail. (B) GPU-in-jail via CUDA IPC is
 rejected (surface + breaks the pool); (C) fully symbolic host execution is a breaking change to nnsight's
 "real tensors" contract. The two-tier approach attacks the root — *arbitrary code next to the data* — rather than paying to

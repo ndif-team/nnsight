@@ -3,6 +3,14 @@
 **Status:** Built + tested (functional + safety pass) · **Date:** 2026-06-06
 **Supersedes** the CPU-only transport work (harness-plan Phases 5/5b/6) for the GPU path.
 
+> **Pre-integration prototype.** This page documents the standalone prototype under
+> `prototypes/mediator-sandbox/gpu_sandbox/` (`sandbox.py` seccomp, `gpu_worker.py`, `gpu_sandbox.py`). The
+> design has since landed in `src/nnsight/intervention/`: the prototype `sandbox.py` became `_sandbox.py`,
+> wired through `isolation.py` + `transport.py` + `interleaver.py`. For the shipped behavior and current
+> support matrix see [mediator-gpu-trace-integration.md](mediator-gpu-trace-integration.md) (authoritative)
+> and [mediator-threat-models.md](mediator-threat-models.md) (security posture). The "why this design"
+> rationale below still holds.
+
 ## Why this design
 
 The threat model was relaxed to **contain footguns, not defeat a determined adversary** — stop a careless

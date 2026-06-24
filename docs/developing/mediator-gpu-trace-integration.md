@@ -101,7 +101,7 @@ isolation the worker can't (no real module), so the host registers it.
 - **Where:** in the host `handle` loop, when a `VALUE`/`SWAP`/`SKIP` arrives for a requester `R` whose
   provider is not yet set up (the existing `handle_value_event` else-branch, `interleaver.py:1203`,
   that today does `history.add`/`restore_event`/`return False`).
-- **What:** `ensure_provider(R)` — parse `R` (`"<path>.<output|input>.i<N>"`) → `iteration = N`,
+- **What:** `ensure_isolated_provider(R)`: parse `R` (`"<path>.<output|input>.i<N>"`) → `iteration = N`,
   `kind`, `path`; resolve `envoy = root_envoy.get(path)` (`envoy.py:586`); call the **existing**
   `output_hook`/`input_hook(host_mediator, envoy._module, f"{path}.{kind}")` (`hooks.py:224`/`154`).
   The host-side mediator is passed, so the hook closure delivers over the channel.
@@ -113,7 +113,7 @@ isolation the worker can't (no real module), so the host registers it.
   across traces and need explicit per-trace cleanup. Keeping `eproperty`/`hooks.py` unchanged was the
   reason to register on a dead dummy rather than guard `_hook` with an `interleaver.isolated` flag;
   revisit if dummy-module accumulation shows up in profiling.
-- **Idempotency:** `ensure_provider` registers a given `R` once per mediator (tracked in a set on the
+- **Idempotency:** `ensure_isolated_provider` registers a given `R` once per mediator (tracked in a set on the
   host mediator), mirroring the `current_provider`-skip logic in `requires_output`.
 
 For a single forward pass the iteration is always `0`, so `R` is `"<path>.<kind>.i0"`. Multi-token
@@ -188,7 +188,7 @@ Single forward pass; single and multiple invokes; read (`.output`/`.input`/`.inp
 2. **Isolated `Mediator.start`** (`interleaver.py`): a branch that spawns the worker (CUDA → `spawn`),
    ships `self` via source-serialization with the model→path-only-envoy persistent-object map, and a
    worker bootstrap that builds the interleaver stub + path-only envoy mirror + runs the intervention.
-3. **Host-side on-demand hook registration** (`interleaver.py`): `ensure_provider(R)` in `handle`.
+3. **Host-side on-demand hook registration** (`interleaver.py`): `ensure_isolated_provider(R)` in `handle`.
 4. **Saves transmission + lifecycle** (`interleaver.py` + bootstrap): worker ships `Globals.saves`-
    filtered frame locals at END; host injects; `cancel()` kills the process.
 5. **Opt-in** (§12): `CONFIG.APP.ISOLATE_MEDIATORS` + `nnsight.isolate_mediators()` context.
@@ -206,7 +206,7 @@ Single forward pass; single and multiple invokes; read (`.output`/`.input`/`.inp
 ### Status: DONE (2026-06-06)
 Built and verified (TDD; harnesses in `prototypes/mediator-sandbox/gpu_sandbox/`):
 - **Code:** `transport.py` (`pack_cuda`/`unpack_cuda` + the two channel ends, clone-on-receive, per-wait
-  timeout); `isolation.py` (`isolate_mediators` + `spawn_isolated_worker` + `_worker_main` +
+  timeout); `isolation.py` (`isolate_mediators` + `_spawn_worker` + `_pool_worker_main` +
   `ensure_isolated_provider` + `_WorkerInterleaver`/`_WorkerPersistent`); `_sandbox.py` (seccomp
   `lock_down`, relocated from the prototype); `interleaver.py` seam (`_iso` field, isolated
   `Mediator.start` branch, the on-demand hook-registration call in `handle`, saves injection in
@@ -277,7 +277,7 @@ gained three pieces:
 - **Per-step hook registration:** `ensure_isolated_provider` parses the step `N` from the requester and
   passes `iteration=N` to `output_hook`/`input_hook` (new optional param), so the hook fires on step N —
   not the host mediator's iteration.
-- **Host iter-hooks:** `spawn_isolated_worker` calls `register_iter_hooks(host_mediator, real_model)` so
+- **Host iter-hooks:** `_spawn_worker` calls `register_iter_hooks(host_mediator, real_model)` so
   the host `iteration_tracker` advances per forward.
 - **Live host→worker piggyback:** `default_all` (= `generate(max_new_tokens)`) is set *after* the worker
   spawns, so it's piggybacked on each response frame (`CudaIpcHostChannel.meta_provider` →
@@ -303,7 +303,7 @@ Both isolated == in-process.
   can't count cross-invoke. `Barrier.__call__` (isolated) sends the TARGET count; the host accumulates
   participant names in `Interleaver._barrier_acc` and, once all arrive, runs the existing coordination
   loop (`handle_barrier_event` iterates the host mediators, `respond()`+`handle()` each over its own
-  channel). `Mediator._isolated_worker` (set in `_worker_main`) gates the worker-side behavior.
+  channel). `Mediator._isolated_worker` (set in `_pool_worker_main`) gates the worker-side behavior.
 - **Variable sharing (host store):** worker frames aren't shared across processes, so each worker pushes
   its *data* locals to `Interleaver._xinvoke_store` (a 4th `push` field on the event frame) and pulls the
   merged store back (piggybacked on the response, reusing the multi-token channel). Only **transmittable
@@ -422,7 +422,8 @@ hook-registration state; the worker rebuilds its interleaver + dummy modules per
 **Opt-in.** `isolate_mediators(..., pool_size=N)` routes through the pool (`pool_size=0`, the default, is
 the unchanged cold-spawn path). `warm_worker_pool(N, ...)` pre-warms at startup (blocks until N ack ready);
 `shutdown_worker_pool()` tears it down. Workers are pooled **per (device, arena_bytes, gpu_mem_fraction,
-lockdown) signature** — a worker is reused only for a matching signature, so a process hosting models on
+lockdown, preimport) signature** (the `IsoOptions.pool_key` 5-tuple; `preimport` and `lockdown` are
+warm-time, so they partition the pool); a worker is reused only for a matching signature, so a process hosting models on
 different GPUs gets a per-device sub-pool (NOT a shared pool whose bounce buffer is fixed to the first
 model's device — that would copy into the wrong-device buffer). Per-trace options (`default_all`,
 `cross_invoker`, `timeout`) ride each job.
@@ -433,7 +434,10 @@ Each warm worker costs **~0.55 GiB GPU per GPU it touches** (CUDA context + cuBL
 model-weight-independent, linear in worker count) — and **MPS does not reduce this** (Ampere MPS shares the
 *scheduler*, not context memory; measured identical under MPS). So at batch-16/single-GPU ≈ 8.7 GB (11% of
 an 80 GB A100 but ~55% of a 16 GB T4) — the cap must be deliberate, with the cold-spawn fallback past it.
-(`probe_pool_gpu_footprint.py`.)
+(`probe_pool_gpu_footprint.py`.) Note this ~0.55 GiB is the fixed CUDA-context cost and is distinct from
+`set_per_process_memory_fraction`: that knob caps the worker's **allocator pool** (so a runaway allocation
+can't exhaust the device, the 20 GB-symptom footgun), not the context, so it does not reduce the per-worker
+0.55 GiB.
 
 **Lockdown + pool.** Seccomp lockdown is installed once, in `_run_one_job`, after the **first** job's
 (host-authored, trusted) payload is deserialized and before its user code runs — so deserialization's own
