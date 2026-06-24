@@ -14,16 +14,14 @@ Each test scenario runs PP=1 and PP=2 in separate subprocesses to avoid
 distributed environment conflicts and GPU memory contention. Results are
 compared in the parent process.
 
-STATUS: PP=2 cross-stage reads — final logits, early/late hidden states, and
-multi-token generation — match PP=1 and pass. (The mediator-deserialization
-failure once recorded here, where serialized mediators referenced module paths
-absent on non-owning ranks, has since been fixed.) The one remaining xfail is
-the cross-stage *write* test, and not for that old reason: its scenario does an
-in-place update `model.transformer.h[8].output[0][:] = h2`, which vLLM forbids
-on inference-mode tensors — PP=1 raises "Inplace update to inference tensor
-outside InferenceMode", and PP=2 does not error but silently drops the write
-(unperturbed output). Isolating whether a cross-stage write actually applies on
-PP=2 needs the documented replacement pattern; see CROSS_STAGE_WRITE_XFAIL_REASON.
+STATUS: all PP=2 cases match PP=1 and pass — cross-stage reads (final logits,
+early/late hidden states, multi-token generation) AND the cross-stage write.
+(The mediator-deserialization failure once recorded here, where serialized
+mediators referenced module paths absent on non-owning ranks, has since been
+fixed.) The cross-stage write must use the documented vLLM pattern — assign the
+WHOLE `.output` (replacement). Assigning `.output[0]` instead is still an
+in-place inference-tensor write, which vLLM rejects (PP=1 errors; PP=2 silently
+drops it); that is a vLLM write restriction, not a PP limitation.
 """
 
 import json
@@ -93,18 +91,6 @@ WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "manual", "_pp_worker.py
 REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 )
-
-# Expected-failure reason for the cross-stage write test (the one remaining xfail).
-CROSS_STAGE_WRITE_XFAIL_REASON = (
-    "Cross-stage write uses an in-place update "
-    "(model.transformer.h[8].output[0][:] = h2), which vLLM forbids on its "
-    "inference-mode output tensors: PP=1 raises 'Inplace update to inference "
-    "tensor outside InferenceMode is not allowed'. On PP=2 the same op does not "
-    "error but is dropped (output is the unperturbed ' Paris'). Rework with the "
-    "documented replacement pattern to isolate whether a cross-stage write "
-    "actually applies on PP=2."
-)
-
 
 def _run_worker(cuda_visible_devices, scenario, extra_args=None):
     """Run a test scenario in a subprocess with specified CUDA_VISIBLE_DEVICES.
@@ -245,13 +231,18 @@ class TestCrossStageWrite:
     With PP=2:
       - Layer 2 is on stage 0 (rank 0)
       - Layer 8 is on stage 1 (rank 1)
+    The value read on stage 0 must cross to stage 1 and modify its forward.
+
+    Uses the documented vLLM write — assign the WHOLE `.output` (replacement),
+    not `.output[0]` (still an in-place inference-tensor write, which vLLM
+    rejects: PP=1 errors, PP=2 silently drops it).
     """
 
-    @pytest.mark.xfail(reason=CROSS_STAGE_WRITE_XFAIL_REASON, strict=True)
     def test_cross_stage_write_same_argmax(self):
-        """Cross-stage write should produce same top-1 token."""
-        pp1 = _run_worker(GPU_PP1, "cross_stage", ["--pp", "1", "--prompt", PROMPT])
-        pp2 = _run_worker(GPU_PP2, "cross_stage", ["--pp", "2", "--prompt", PROMPT])
+        """Cross-stage write (replacement pattern): PP=2 must match PP=1, and the
+        write must actually move the output off the unperturbed baseline."""
+        pp1 = _run_worker(GPU_PP1, "cross_stage_replace", ["--pp", "1", "--prompt", PROMPT])
+        pp2 = _run_worker(GPU_PP2, "cross_stage_replace", ["--pp", "2", "--prompt", PROMPT])
 
         print(f"\n[Test D] PP=1 cross-stage top-1: {pp1['top_token']!r}")
         print(f"[Test D] PP=2 cross-stage top-1: {pp2['top_token']!r}")
@@ -260,6 +251,12 @@ class TestCrossStageWrite:
             f"Cross-stage write argmax mismatch: "
             f"PP=1={pp1['top_token']!r} ({pp1['argmax']}), "
             f"PP=2={pp2['top_token']!r} ({pp2['argmax']})"
+        )
+        # Guard against a vacuous pass: a silently-dropped write would leave both
+        # PP=1 and PP=2 at the unperturbed baseline. The h2->h8 write moves this
+        # prompt off its natural ' Paris'.
+        assert pp1["top_token"] != " Paris", (
+            f"Write had no effect (still the unperturbed baseline): {pp1['top_token']!r}"
         )
 
 

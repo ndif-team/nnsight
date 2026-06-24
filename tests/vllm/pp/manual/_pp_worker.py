@@ -125,6 +125,30 @@ def scenario_cross_stage_no_logits(model, prompt):
     }
 
 
+def scenario_cross_stage_replace(model, prompt):
+    """Cross-stage write via REPLACEMENT, not in-place: read layer 2 (stage 0),
+    set layer 8's hidden (stage 1) to (h8 + h2) by assigning output[0] to a fresh
+    tensor. This is the documented-correct vLLM write — it sidesteps both the
+    inference-tensor in-place error (which the cross_stage scenario hits) and the
+    tuple-reconstruction hang. Reports the top token so PP=1 (write applies on one
+    GPU) and PP=2 (does the cross-stage write actually apply?) can be compared.
+    """
+    with model.trace(prompt, temperature=0.0, top_p=1):
+        h2 = model.transformer.h[2].output[0]
+        out8 = model.transformer.h[8].output
+        is_tuple = isinstance(out8, tuple)
+        hidden8 = out8[0] if is_tuple else out8
+        new_hidden = hidden8 + h2                 # fresh tensor, not an in-place mutation
+        # Assign the WHOLE .output (the nnbench-proven legal vLLM write); assigning
+        # .output[0] instead is still an in-place inference-tensor write and is rejected.
+        model.transformer.h[8].output = (new_hidden, *out8[1:]) if is_tuple else new_hidden
+        logits = model.logits.save()
+
+    logits_cpu = logits.float().cpu()
+    argmax = int(logits_cpu.argmax(dim=-1).item())
+    return {"argmax": argmax, "top_token": model.tokenizer.decode(argmax)}
+
+
 def scenario_downstream_read(model, prompt):
     """Read a DOWNSTREAM layer's output and MATERIALIZE it on the earlier
     (non-owning) rank — forces a backward stage1->stage0 pull, no write.
@@ -234,7 +258,7 @@ def scenario_multigen_ooo(model, prompt, max_tokens):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", choices=[
-        "logits", "hidden", "hidden_only", "cross_stage", "cross_stage_no_logits",
+        "logits", "hidden", "hidden_only", "cross_stage", "cross_stage_no_logits", "cross_stage_replace",
         "downstream_read", "tuple_lazy",
         "multigen", "multigen_hidden", "multigen_ooo",
     ])
@@ -258,6 +282,8 @@ def main():
             result = scenario_cross_stage(model, args.prompt)
         elif args.scenario == "cross_stage_no_logits":
             result = scenario_cross_stage_no_logits(model, args.prompt)
+        elif args.scenario == "cross_stage_replace":
+            result = scenario_cross_stage_replace(model, args.prompt)
         elif args.scenario == "downstream_read":
             result = scenario_downstream_read(model, args.prompt)
         elif args.scenario == "tuple_lazy":
