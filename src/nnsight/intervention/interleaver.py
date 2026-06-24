@@ -7,7 +7,6 @@ import weakref
 from collections import defaultdict
 from enum import Enum
 from functools import partial, wraps
-from threading import Thread
 from types import FrameType
 from typing import (
     TYPE_CHECKING,
@@ -21,7 +20,7 @@ from typing import (
     runtime_checkable,
 )
 
-import _thread
+from greenlet import greenlet
 
 import torch
 
@@ -785,9 +784,9 @@ class Mediator:
         info (Tracer.Info): Information about the tracing context associated with this mediator
         name (Optional[str]): Optional name for the mediator
         batch_group (Optional[List[int]]): Optional batch group for the mediator to determine which slice of tensors are being intervened on
-        event_queue (SimpleQueue): Where the mediator (worker thread) puts events to be processed by the interleaver (main thread). Will only ever have 1 or 0 items in the queue.
-        response_queue (SimpleQueue): Where the interleaver (main thread) puts responses to events, to then be processed by the mediator (worker thread). Will only ever have 1 or 0 items in the queue.
-        worker (Thread): The thread that runs the intervention function
+        event_queue (Pending): Single-slot holder where the worker greenlet's most recent event is parked for the interleaver (main greenlet) to process. Holds 1 or 0 events.
+        worker (greenlet): The greenlet that runs the intervention function. Switches back to ``_resumer`` whenever it needs a value.
+        _resumer (greenlet): The greenlet that most recently resumed the worker; refreshed on every resume so nested interleaving unwinds correctly.
         history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
         iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
             :func:`IteratorTracer.register_iter_hooks` (and by
@@ -820,12 +819,18 @@ class Mediator:
 
         pass
 
-    class Value:
+    class Pending:
+        """A single-slot holder for the worker greenlet's most recent event.
+
+        The greenlet ``switch`` itself hands over the thread of control and
+        provides all the synchronization, so — unlike the old thread-based
+        handoff — this needs no lock. It is just somewhere to park the event
+        the worker emitted until :meth:`Mediator.handle` consumes it (or
+        restores it, when the matching provider has not fired yet).
+        """
 
         def __init__(self):
             self.value = None
-            self.lock = _thread.allocate_lock()
-            self.lock.acquire()
             self.has_value = False
 
         def get(self):
@@ -836,14 +841,6 @@ class Mediator:
             self.has_value = False
 
             return value
-
-        def wait(self):
-            self.lock.acquire()
-
-        def put(self, value: Any):
-            self.restore(value)
-
-            self.lock.release()
 
         def restore(self, value: Any):
             self.value = value
@@ -875,10 +872,20 @@ class Mediator:
 
         self.interleaver = None
 
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        # The worker's pending event, parked here by the main side after each
+        # ``switch`` until ``handle`` processes it. No response queue is needed:
+        # the response is simply the return value of switching back into the
+        # worker (see :meth:`respond` / :meth:`send`).
+        self.event_queue = Mediator.Pending()
 
-        self.worker = None
+        # The worker greenlet, plus the greenlet it should switch back to the
+        # next time it needs a value. ``_resumer`` is refreshed on every resume
+        # (see :meth:`_resume`) rather than fixed once, so a worker that
+        # triggers a *sibling* mediator's hooks — e.g. by calling an attached
+        # module that is itself hooked — returns control to the exact point
+        # that resumed it. This is what makes nested interleaving work.
+        self.worker: Optional[greenlet] = None
+        self._resumer: Optional[greenlet] = None
 
         self.skip_container = None
 
@@ -941,7 +948,14 @@ class Mediator:
 
     def start(self, interleaver: Interleaver):
         """
-        Start the mediator's intervention thread.
+        Start the mediator's intervention greenlet.
+
+        The intervention runs as a greenlet on *this* OS thread rather than a
+        separate worker thread. Control ping-pongs between whoever drives the
+        model and the worker via ``switch`` (see :meth:`_resume`): only one is
+        ever running, so there is no real concurrency, no locks, and no
+        CUDA-stream divergence to repair — the worker shares the caller's
+        thread and therefore its current stream.
 
         Args:
             interleaver (Interleaver): The interleaver managing this mediator
@@ -961,36 +975,22 @@ class Mediator:
             len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER
         )
 
-        # Capture the current CUDA stream so the worker thread uses it.
-        # Worker threads default to the NULL stream (stream 0), but
-        # vLLM (and other frameworks) run on a non-default stream.
-        # PyTorch creates non-default streams with cudaStreamNonBlocking,
-        # which disables implicit synchronization with the NULL stream.
-        # Without propagating the stream, worker-thread CUDA ops (clone,
-        # fill) race with main-thread ops on the compute stream.
-        if torch.cuda.is_available():
-            _caller_stream = torch.cuda.current_stream()
-        else:
-            _caller_stream = None
-
         _intervention = self.intervention
         _args = (self, self.info, *self.args)
 
-        def _worker_target():
-            if _caller_stream is not None:
-                torch.cuda.set_stream(_caller_stream)
+        def _worker_target(*_):
+            # On the first switch, greenlet passes the switch value as an
+            # argument to the run function; it carries no meaning here.
             _intervention(*_args)
 
-        # Start the worker thread.
-        self.worker = Thread(
-            target=_worker_target,
-            daemon=True,
-            name=self.name,
-        )
+        self.worker = greenlet(run=_worker_target)
 
         self.interleaver.current = self
-        self.worker.start()
-        self.event_queue.wait()
+
+        # Start the worker and park the first event it emits. The switch
+        # return value is whatever the worker hands back via ``send`` / ``end``
+        # / ``exception``.
+        self.event_queue.restore(self._resume())
 
         # Handle the first event for each mediator to clear mediators that already ended.
         try:
@@ -1003,19 +1003,22 @@ class Mediator:
     ### Provider Methods ###
 
     def cancel(self):
-        """Cancel the intervention thread and its ephemeral state."""
+        """Cancel the intervention greenlet and its ephemeral state."""
 
         self.history = set()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
-        self.worker = None
 
+        # If the worker is still suspended waiting on a provider that never
+        # fired, resume it with a Cancelation so it unwinds its stack; the
+        # terminal event it emits on the way out is discarded.
         if self.event_queue.has_value:
             self.handle()
             if self.event_queue.has_value:
                 self.event_queue.get()
-                self.response_queue.put(Cancelation())
-                self.event_queue.get()
+                self._resume(Cancelation())
+
+        self.worker = None
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
         """Process a provided value against this mediator's pending event.
@@ -1308,9 +1311,23 @@ class Mediator:
             value (Optional[Any]): The value to provide
         """
 
-        # Respond and resume the mediator thread.
-        self.response_queue.put(value)
-        self.event_queue.wait()
+        # Resume the worker with the response and park whatever event it emits
+        # next. The switch return value IS the worker's next event (or its END
+        # / EXCEPTION signal) — there is no separate response queue.
+        self.event_queue.restore(self._resume(value))
+
+    def _resume(self, value: Optional[Any] = None) -> Any:
+        """Switch into the worker, returning the next event it emits.
+
+        Records the calling greenlet as ``_resumer`` first, so the worker
+        switches *back here* (via :meth:`send` / :meth:`end` / :meth:`exception`)
+        rather than to a fixed greenlet. That is what lets a worker resume a
+        sibling mediator mid-body and have control unwind correctly.
+        """
+
+        self._resumer = greenlet.getcurrent()
+
+        return self.worker.switch(value)
 
     ### Requester Methods ###
 
@@ -1331,12 +1348,10 @@ class Mediator:
         if self.cross_invoker:
             self.push()
 
-        # Send the event
-        self.event_queue.put((event, requester))
-
-        # Wait for the interleaver to process the event and respond with the value.
-        self.response_queue.wait()
-        response = self.response_queue.get()
+        # Hand control back to whoever resumed us with this event. The switch
+        # returns once the interleaver responds — with the value, or with an
+        # exception to raise here in the worker.
+        response = self._resumer.switch((event, requester))
 
         # If the response is an exception, raise it.
         if isinstance(response, Exception):
@@ -1387,7 +1402,8 @@ class Mediator:
 
         self.push()
 
-        self.event_queue.put((Events.END, None))
+        # Hand control back for good; the worker greenlet is done.
+        self._resumer.switch((Events.END, None))
 
     def exception(self, exception: Exception):
         """
@@ -1396,7 +1412,7 @@ class Mediator:
         Args:
             exception: The exception that occurred
         """
-        self.event_queue.put((Events.EXCEPTION, exception))
+        self._resumer.switch((Events.EXCEPTION, exception))
 
     @property
     def frame(self) -> FrameType:
@@ -1498,10 +1514,10 @@ class Mediator:
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
         self.iteration_tracker = state["iteration_tracker"]
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        self.event_queue = Mediator.Pending()
 
         self.worker = None
+        self._resumer = None
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()

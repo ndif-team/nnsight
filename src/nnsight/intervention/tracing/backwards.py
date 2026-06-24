@@ -103,8 +103,14 @@ class BackwardsTracer(Invoker):
 
         try:
             grad_patch.patch()
-            with interleaver:
-                self.fn(self.tensor, *self.args, **self.kwargs)
+            # Run the backward pass single-threaded so the autograd engine
+            # executes grad hooks on *this* thread. The interleaver drives the
+            # intervention as a greenlet, which can only be switched from the
+            # thread that created it; the default multithreaded engine fires
+            # CUDA grad hooks on a device worker thread, which cannot resume it.
+            with torch.autograd.set_multithreading_enabled(False):
+                with interleaver:
+                    self.fn(self.tensor, *self.args, **self.kwargs)
             interleaver.check_dangling_mediators()
 
         finally:
