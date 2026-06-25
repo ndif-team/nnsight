@@ -103,8 +103,9 @@ class BackwardsTracer(Invoker):
 
         try:
             grad_patch.patch()
-            with interleaver:
-                self.fn(self.tensor, *self.args, **self.kwargs)
+            with torch.autograd.set_multithreading_enabled(False):
+                with interleaver:
+                    self.fn(self.tensor, *self.args, **self.kwargs)
             interleaver.check_dangling_mediators()
 
         finally:

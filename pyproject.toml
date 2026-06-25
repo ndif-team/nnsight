@@ -43,6 +43,7 @@ dependencies = [
     "ipython",
     "rich",
     "zstandard",
+    "greenlet>=3.0.0",
 ]
 
 [project.optional-dependencies]

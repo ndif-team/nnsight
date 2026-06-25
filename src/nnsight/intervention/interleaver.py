@@ -4,10 +4,9 @@ import inspect
 import types
 import warnings
 import weakref
-from collections import defaultdict
+from collections import defaultdict, deque
 from enum import Enum
 from functools import partial, wraps
-from threading import Thread
 from types import FrameType
 from typing import (
     TYPE_CHECKING,
@@ -21,7 +20,7 @@ from typing import (
     runtime_checkable,
 )
 
-import _thread
+from greenlet import greenlet
 
 import torch
 
@@ -712,7 +711,7 @@ class Interleaver:
         for mediator in self.mediators:
 
             if mediator.alive:
-                requested_event, requester = mediator.event_queue.get()
+                requested_event, requester = mediator.event.popleft()
 
                 if isinstance(requester, tuple):
                     requester = requester[0]
@@ -785,9 +784,9 @@ class Mediator:
         info (Tracer.Info): Information about the tracing context associated with this mediator
         name (Optional[str]): Optional name for the mediator
         batch_group (Optional[List[int]]): Optional batch group for the mediator to determine which slice of tensors are being intervened on
-        event_queue (SimpleQueue): Where the mediator (worker thread) puts events to be processed by the interleaver (main thread). Will only ever have 1 or 0 items in the queue.
-        response_queue (SimpleQueue): Where the interleaver (main thread) puts responses to events, to then be processed by the mediator (worker thread). Will only ever have 1 or 0 items in the queue.
-        worker (Thread): The thread that runs the intervention function
+        event (deque): Single-slot holder for the worker greenlet's most recent event.
+        worker (greenlet): The greenlet that runs the intervention function.
+        resumer (greenlet): The greenlet the worker switches back to when it needs a value.
         history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
         iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
             :func:`IteratorTracer.register_iter_hooks` (and by
@@ -820,35 +819,6 @@ class Mediator:
 
         pass
 
-    class Value:
-
-        def __init__(self):
-            self.value = None
-            self.lock = _thread.allocate_lock()
-            self.lock.acquire()
-            self.has_value = False
-
-        def get(self):
-
-            value = self.value
-            self.value = None
-
-            self.has_value = False
-
-            return value
-
-        def wait(self):
-            self.lock.acquire()
-
-        def put(self, value: Any):
-            self.restore(value)
-
-            self.lock.release()
-
-        def restore(self, value: Any):
-            self.value = value
-            self.has_value = True
-
     def __init__(
         self,
         intervention: Callable,
@@ -875,10 +845,10 @@ class Mediator:
 
         self.interleaver = None
 
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        self.event = deque(maxlen=1)
 
-        self.worker = None
+        self.worker: Optional[greenlet] = None
+        self.resumer: Optional[greenlet] = None
 
         self.skip_container = None
 
@@ -941,7 +911,7 @@ class Mediator:
 
     def start(self, interleaver: Interleaver):
         """
-        Start the mediator's intervention thread.
+        Start the mediator's intervention greenlet.
 
         Args:
             interleaver (Interleaver): The interleaver managing this mediator
@@ -961,36 +931,17 @@ class Mediator:
             len(self.interleaver.mediators) > 1 and CONFIG.APP.CROSS_INVOKER
         )
 
-        # Capture the current CUDA stream so the worker thread uses it.
-        # Worker threads default to the NULL stream (stream 0), but
-        # vLLM (and other frameworks) run on a non-default stream.
-        # PyTorch creates non-default streams with cudaStreamNonBlocking,
-        # which disables implicit synchronization with the NULL stream.
-        # Without propagating the stream, worker-thread CUDA ops (clone,
-        # fill) race with main-thread ops on the compute stream.
-        if torch.cuda.is_available():
-            _caller_stream = torch.cuda.current_stream()
-        else:
-            _caller_stream = None
-
         _intervention = self.intervention
         _args = (self, self.info, *self.args)
 
-        def _worker_target():
-            if _caller_stream is not None:
-                torch.cuda.set_stream(_caller_stream)
+        def _worker_target(*_):
             _intervention(*_args)
 
-        # Start the worker thread.
-        self.worker = Thread(
-            target=_worker_target,
-            daemon=True,
-            name=self.name,
-        )
+        self.worker = greenlet(run=_worker_target)
 
         self.interleaver.current = self
-        self.worker.start()
-        self.event_queue.wait()
+
+        self.event.append(self.resume())
 
         # Handle the first event for each mediator to clear mediators that already ended.
         try:
@@ -1003,19 +954,19 @@ class Mediator:
     ### Provider Methods ###
 
     def cancel(self):
-        """Cancel the intervention thread and its ephemeral state."""
+        """Cancel the intervention greenlet and its ephemeral state."""
 
         self.history = set()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
-        self.worker = None
 
-        if self.event_queue.has_value:
+        if self.event:
             self.handle()
-            if self.event_queue.has_value:
-                self.event_queue.get()
-                self.response_queue.put(Cancelation())
-                self.event_queue.get()
+            if self.event:
+                self.event.popleft()
+                self.resume(Cancelation())
+
+        self.worker = None
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
         """Process a provided value against this mediator's pending event.
@@ -1052,13 +1003,13 @@ class Mediator:
         self.interleaver.batcher.current_provider = provider
 
         # Check to see if this mediator has an unprocessed eventto start.
-        process = self.event_queue.has_value
+        process = bool(self.event)
 
         # Continue processing events until there are no more events to process.
         # Means we can move on to the next mediator and continue the model execution.
         while process:
 
-            event, data = self.event_queue.get()
+            event, data = self.event.popleft()
 
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider)
@@ -1124,7 +1075,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the value event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.restore((Events.VALUE, requester))
+                self.event.append((Events.VALUE, requester))
 
                 return False
 
@@ -1162,7 +1113,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the swap event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.restore((Events.SWAP, (requester, swap_value)))
+                self.event.append((Events.SWAP, (requester, swap_value)))
 
                 return False
 
@@ -1296,7 +1247,7 @@ class Mediator:
                 return True
             else:
                 self.history.add(provider)
-                self.event_queue.restore((Events.SKIP, (requester, value)))
+                self.event.append((Events.SKIP, (requester, value)))
 
                 return False
 
@@ -1308,9 +1259,22 @@ class Mediator:
             value (Optional[Any]): The value to provide
         """
 
-        # Respond and resume the mediator thread.
-        self.response_queue.put(value)
-        self.event_queue.wait()
+        self.event.append(self.resume(value))
+
+    def resume(self, value: Optional[Any] = None) -> Any:
+        """
+        Switch into the worker, returning the next event it emits.
+
+        Args:
+            value (Optional[Any]): The value to resume the worker with.
+
+        Returns:
+            Any: The next event the worker emits.
+        """
+
+        self.resumer = greenlet.getcurrent()
+
+        return self.worker.switch(value)
 
     ### Requester Methods ###
 
@@ -1331,12 +1295,7 @@ class Mediator:
         if self.cross_invoker:
             self.push()
 
-        # Send the event
-        self.event_queue.put((event, requester))
-
-        # Wait for the interleaver to process the event and respond with the value.
-        self.response_queue.wait()
-        response = self.response_queue.get()
+        response = self.resumer.switch((event, requester))
 
         # If the response is an exception, raise it.
         if isinstance(response, Exception):
@@ -1387,7 +1346,7 @@ class Mediator:
 
         self.push()
 
-        self.event_queue.put((Events.END, None))
+        self.resumer.switch((Events.END, None))
 
     def exception(self, exception: Exception):
         """
@@ -1396,7 +1355,7 @@ class Mediator:
         Args:
             exception: The exception that occurred
         """
-        self.event_queue.put((Events.EXCEPTION, exception))
+        self.resumer.switch((Events.EXCEPTION, exception))
 
     @property
     def frame(self) -> FrameType:
@@ -1498,10 +1457,10 @@ class Mediator:
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
         self.iteration_tracker = state["iteration_tracker"]
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        self.event = deque(maxlen=1)
 
         self.worker = None
+        self.resumer = None
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()
