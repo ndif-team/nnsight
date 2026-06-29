@@ -254,7 +254,7 @@ benign CudaIPC release warning.
 | `tracer.barrier()` | worker sends the target count; host accumulates participants + runs the coordination loop (§10) | ✅ |
 | `cross_invoker` variable sharing | host variable store; worker pushes data locals, pulls the merged store; transmittable data only (§10) | ✅ |
 | warm worker pool (`pool_size=N`, `warm_worker_pool`) | generic workers receive serialized mediators as jobs; clean-END recycle (§14) | ✅ ~21× faster per request once warm |
-| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path; **grad-through-swap** iterates the exchange — host returns `dL/d(swap leaf)`, worker backprops it through its swap tape, re-seeds the pre-swap graph (§16) | ✅ read-path AND grad-through-swap bit-identical (scalar loss; single invoke); multi-token backward is a clean-fail (in-process doesn't support it either) |
+| `with tensor.backward()` / `.grad` | BACKWARD event: worker seeds `dL/d(delivered clone)`, host continues `torch.autograd.grad` on the real graph, `.grad` by provenance path; **grad-through-swap** iterates the exchange (host returns `dL/d(swap leaf)`, worker backprops it through its swap tape, re-seeds the pre-swap graph) (§16) | ✅ read-path AND grad-through-swap bit-identical (scalar loss; single mediator, including list-batched `trace([A,B,...])`); multi-invoke-context and multi-token backward are clean-fail parity (in-process does not support them either) |
 | `tracer.cache()` (`modules=`, `include_inputs=`) | CACHE event → host registers the real cache hooks; host CacheDict swapped in at END, filled in-place by the forward (§15) | ✅ bit-identical |
 | part-2 primitives: `tracer.unembed` / `tracer.steer` / `tracer.patch` / `tracer.ablate` | host-routed weight read (UNEMBED event); replacement-swap injection/transplant/knockout (ride SWAP, no new event) — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (isolated and in-process) |
 | session cross-trace handoff (`.save()` used in a later trace; `.carry()` / `nnsight.carry(x)`) | inner-trace END writeback to the session frame: saved values re-registered host-side so the session exit-push keeps them; carried (non-saved) values written for the next trace only — [fast-lane.md](fast-lane.md) §6 | ✅ bit-identical (`.carry()` is portable: harmless in-process, load-bearing under isolation) |
@@ -505,7 +505,7 @@ untested. `modules=None` (cache *all* modules) registers a hook per module on th
 
 ---
 
-## 16. `with tensor.backward()` — read-path DONE (2026-06-10), grad-through-swap DONE (2026-06-23)
+## 16. `with tensor.backward()`: read-path DONE (2026-06-10), grad-through-swap DONE (2026-06-23), batched (list) verified (2026-06-28)
 
 **The gap (§11).** Clone-on-receive strips `grad_fn` — the worker's delivered activations are detached
 clones, the autograd graph lives only on the host, and `.grad` providers were keyed by `id(tensor)`
@@ -558,8 +558,16 @@ isolated-vs-in-process `max|Δ|=0`.
 
 **Limits / open:**
 - Scalar loss only — `loss.backward(gradient=...)` is not honored (scalar-only error).
-- Batched traces error with a cryptic shape mismatch (host retains the full-batch tensor, worker seeds
-  the narrowed clone) — needs a clear error or narrowed retention.
+- **Batched backward (list input) works.** `model.trace([A, B, ...])` is one mediator over the padded
+  batch (no per-invoke narrowing, `batch_group=None`), so the worker's clone and the host's retained real
+  are both full-batch and their shapes match; the read-path and grad-through-swap seam-stitch run unchanged
+  on a `(batch, seq, hidden)` tensor. Verified bit-identical isolated-vs-in-process in
+  `test_isolated_batched_backward.py` (2-row, 3-row, upstream-block, batched grad-through-swap, renamed).
+- Backward inside MULTIPLE `tracer.invoke(...)` contexts is **not supported in-process either**: it raises
+  `MissedProviderError` (the `.grad` provider is never registered across invoke contexts), so it is a core
+  nnsight limitation, not an isolation gap. (The earlier "shape mismatch / narrowed retention" framing
+  predated checking the in-process baseline.) The isolated path also fails; making that failure as clean as
+  the in-process error is minor parity hygiene, not a capability.
 - Multi-token backward: **not supported in-process either** (characterized 2026-06-10,
   `test_isolated_multitoken_backward.py`) — `generate()` runs the forward without gradient tracking, so
   the first `.grad` read fails in-process ("cannot register a hook on a tensor that doesn't require
