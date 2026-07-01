@@ -146,7 +146,10 @@ class TransformersModel(HuggingFaceModel):
 
             warnings.filterwarnings("ignore", category=UserWarning)
 
-            model = _import_peft_model().from_pretrained(model, self.peft)
+            from peft import PeftConfig, get_peft_model
+
+            peft_config = PeftConfig.from_pretrained(self.peft)  # only reads adapter_config.json
+            model = get_peft_model(model, peft_config)
 
             warnings.filterwarnings("default", category=UserWarning)
 
