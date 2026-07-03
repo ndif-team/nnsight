@@ -1436,8 +1436,12 @@ class TestCache:
             rename={"transformer": "model", "h": "layers", "model.layers": "layers"},
         )
 
+        # Explicit subset (strided) with inputs, exercising ``.output``,
+        # ``.input`` and out-of-bounds indexing through the renamed path.
         with gpt2.trace(MSG_prompt) as tracer:
-            cache = tracer.cache(modules=[l for l in gpt2.layers[::2]]).save()
+            cache = tracer.cache(
+                modules=[l for l in gpt2.layers[::2]], include_inputs=True
+            ).save()
 
         for i in range(0, 12, 2):
             # dict-style (real key) and attribute-style (renamed) must agree.
@@ -1445,6 +1449,25 @@ class TestCache:
                 cache[f"model.transformer.h.{i}"].output,
                 cache.model.layers[i].output,
             )
+            assert torch.equal(
+                cache[f"model.transformer.h.{i}"].input,
+                cache.model.layers[i].input,
+            )
+
+        # Out-of-bounds on the renamed modulelist must raise IndexError, not
+        # leak a KeyError from the underlying dict.
+        with pytest.raises(IndexError):
+            cache.model.layers[999]
+
+        # Full cache (no ``modules=``): navigating into a submodule of a
+        # re-mounted block must resolve through the alias path too.
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache().save()
+
+        assert torch.equal(
+            cache["model.transformer.h.0.attn"].output[0],
+            cache.model.layers[0].attn.output[0],
+        )
 
     @torch.no_grad()
     def test_cache_rename_preserves_root(self, MSG_prompt: str):
