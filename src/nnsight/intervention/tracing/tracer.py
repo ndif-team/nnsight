@@ -99,30 +99,45 @@ class Cache:
             # (e.g. translating root key ``"model"`` → ``"transformer"``,
             # which is not in storage).
             super().__init__()
-            if data:
+            # Use the raw dict length, not the ``_path``-scoped ``__len__``:
+            # an alias-space sub-view (from a collapsing/re-mount rename) has a
+            # scoped length of 0 because no real key lives under its alias path,
+            # yet its full storage must still propagate to deeper children.
+            if dict.__len__(data):
                 for k in dict.__iter__(data):
                     dict.__setitem__(self, k, dict.__getitem__(data, k))
+
+        def _resolved_path(self):
+            """Resolve ``_path`` to a real storage key.
+
+            When navigation lands on an aliased path produced by a
+            collapsing/re-mount rename (e.g. ``"model.layers.0"`` from
+            ``rename={"model.layers": "layers"}``), the underlying storage key
+            is the un-renamed path (``"model.transformer.h.0"``). ``_alias_paths``
+            maps the former to the latter; real paths pass through unchanged.
+            """
+            return self._alias_paths.get(self._path, self._path)
 
         @property
         def output(self):
             """
             Returns the output attribute from the Cache.Entry at the current path.
             """
-            return dict.__getitem__(self, self._path).output
+            return dict.__getitem__(self, self._resolved_path()).output
 
         @property
         def inputs(self):
             """
             Returns the inputs attribute from the Cache.Entry at the current path.
             """
-            return dict.__getitem__(self, self._path).inputs
+            return dict.__getitem__(self, self._resolved_path()).inputs
 
         @property
         def input(self):
             """
             Returns the input property from the Cache.Entry at the current path.
             """
-            return dict.__getitem__(self, self._path).input
+            return dict.__getitem__(self, self._resolved_path()).input
 
         def _scoped_iter(self):
             """Iterate keys visible at the current ``_path`` scope.
@@ -183,13 +198,48 @@ class Cache:
             )
             return f"{{{body}}}"
 
+        def _child(self, path):
+            """Build a sub-view CacheDict scoped at ``path``."""
+            return Cache.CacheDict(
+                self,
+                path,
+                rename=self._rename,
+                alias=self._alias,
+                alias_paths=self._alias_paths,
+            )
+
+        def _alias_path_prefix(self, path):
+            """True if ``path`` is an alias path or a prefix of one.
+
+            Lets attribute/index navigation walk the authoritative
+            ``_alias_paths`` keyspace segment by segment, which is required for
+            collapsing/re-mount renames whose alias path (``"model.layers.0"``)
+            is not a prefix of any real storage key (``"model.transformer.h.0"``).
+            """
+            return any(
+                key == path or key.startswith(path + ".") for key in self._alias_paths
+            )
+
         def _add_alias_path(self, module_path):
             if self._rename:
-                alias_path = str(module_path)
+                # The root component (``cache.model``) is the fixed cache root
+                # and is never renamed in access space, so protect it from the
+                # substring replacements below. Without this a rename like
+                # ``{"model": "foo"}`` would also rewrite the root segment
+                # (``model.model.layers.0`` -> ``foo.foo.layers.0``) and the
+                # user-facing ``cache.model.foo.layers[0]`` would never match.
+                root, _, rest = str(module_path).partition(".")
+
+                if rest == "":
+                    return
+
+                alias_rest = rest
 
                 for path, alias in self._rename.items():
                     path = path.removeprefix(".")
-                    alias_path = alias_path.replace(path, alias)
+                    alias_rest = alias_rest.replace(path, alias)
+
+                alias_path = root + "." + alias_rest
 
                 if alias_path != module_path:
                     self._alias_paths[alias_path] = module_path
@@ -213,14 +263,10 @@ class Cache:
             if isinstance(name, int):
                 path = self._path + "." + f"{name}"
 
-                if any(key.startswith(path) for key in self):
-                    return Cache.CacheDict(
-                        self,
-                        path,
-                        rename=self._rename,
-                        alias=self._alias,
-                        alias_paths=self._alias_paths,
-                    )
+                if any(key.startswith(path) for key in self) or self._alias_path_prefix(
+                    path
+                ):
+                    return self._child(path)
                 elif any(
                     key.startswith(self._path + ".")
                     and len(key) >= len(self._path) + 1
@@ -236,22 +282,31 @@ class Cache:
         def __getattr__(self, attr: str):
             path = self._path + "." + attr if self._path != "" else attr
 
+            # (1) Direct route: ``path`` prefixes a real storage key.
             if any(key.startswith(path) for key in self):
-                return Cache.CacheDict(
-                    self,
-                    path,
-                    rename=self._rename,
-                    alias=self._alias,
-                    alias_paths=self._alias_paths,
-                )
-            elif self._alias and attr in self._alias:
-                name = self._alias[attr]
-                name = name.removeprefix(".")
-                return self.__getattr__(name)
-            else:
-                raise AttributeError(
-                    f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute."
-                )
+                return self._child(path)
+
+            # (2) Leaf-alias route: translate the aliased segment to its
+            #     underlying name and keep navigating in real-path space. If
+            #     that dead-ends (e.g. the alias value is a re-mount rooted
+            #     elsewhere, as with collapsing renames), fall through to the
+            #     alias-path route rather than raising.
+            if self._alias and attr in self._alias:
+                name = self._alias[attr].removeprefix(".")
+                try:
+                    return self.__getattr__(name)
+                except AttributeError:
+                    pass
+
+            # (3) Alias-path route: ``path`` prefixes an authoritative alias
+            #     path. Handles collapsing/re-mount renames whose alias path is
+            #     absent from the real storage keys.
+            if self._alias_path_prefix(path):
+                return self._child(path)
+
+            raise AttributeError(
+                f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute."
+            )
 
         def __getstate__(self):
             return self.__dict__.copy()

@@ -1294,6 +1294,52 @@ class TestCache:
             cache.model.model.h["second_layer"].output,
         )
 
+    @torch.no_grad()
+    def test_cache_collapsing_rename(self, MSG_prompt: str):
+        """Attribute access through a collapsing / re-mount rename (issue #535).
+
+        A rename whose key is a dotted path (e.g. ``"model.layers": "layers"``)
+        re-mounts a nested module at the root. The renamed access path
+        (``cache.model.layers[i]``) is not a prefix of any real storage key, so
+        it must resolve through the alias-path map rather than the real keys.
+        """
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2",
+            rename={"transformer": "model", "h": "layers", "model.layers": "layers"},
+        )
+
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache(modules=[l for l in gpt2.layers[::2]]).save()
+
+        for i in range(0, 12, 2):
+            # dict-style (real key) and attribute-style (renamed) must agree.
+            assert torch.equal(
+                cache[f"model.transformer.h.{i}"].output,
+                cache.model.layers[i].output,
+            )
+
+    @torch.no_grad()
+    def test_cache_rename_preserves_root(self, MSG_prompt: str):
+        """A rename matching the root component name must not corrupt the root.
+
+        With ``rename={"model": "foo"}`` the real key ``model.model.layers.0``
+        must alias to ``model.foo.layers.0`` (renaming only the nested
+        ``model``), not ``foo.foo.layers.0`` — the ``cache.model`` root is fixed
+        (issue #535, original example).
+        """
+        lm = nnsight.LanguageModel(
+            "yujiepan/llama-3.2-tiny-random",
+            rename={"model": "foo", "model.language_model": "foo"},
+        )
+
+        with lm.trace(MSG_prompt) as tracer:
+            cache = tracer.cache(modules=[lm.foo.layers[0]]).save()
+
+        assert torch.equal(
+            cache["model.model.layers.0"].output[0],
+            cache.model.foo.layers[0].output[0],
+        )
+
 
 # =============================================================================
 # Module Renaming
