@@ -262,16 +262,22 @@ class Cache:
 
             if isinstance(name, int):
                 path = self._path + "." + f"{name}"
+                prefix = self._path + "."
 
                 if any(key.startswith(path) for key in self) or self._alias_path_prefix(
                     path
                 ):
                     return self._child(path)
+                # Out-of-bounds on a modulelist: a sibling numeric index exists
+                # under ``_path`` but ``name`` isn't one of them. Check both the
+                # real keys and the alias-path keyspace so renamed/collapsed
+                # modulelists raise ``IndexError`` rather than leaking a
+                # ``KeyError`` from the ``dict.__getitem__`` fallback below.
                 elif any(
-                    key.startswith(self._path + ".")
-                    and len(key) >= len(self._path) + 1
-                    and key[len(self._path) + 1].isdigit()
-                    for key in self
+                    key.startswith(prefix)
+                    and len(key) > len(prefix)
+                    and key[len(prefix)].isdigit()
+                    for key in (*self, *self._alias_paths)
                 ):
                     raise IndexError(
                         f"Index {key} is out of bounds for modulelist or module does not allow indexing."
