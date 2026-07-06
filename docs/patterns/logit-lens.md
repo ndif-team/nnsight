@@ -87,6 +87,35 @@ for i, p in enumerate(target_probs):
     print(f"layer {i:2d}: P({target!r}) = {p.item():.3f}")
 ```
 
+### Token labels for heatmaps
+
+If you plot per-token logit lens values, tokenize the prompt outside the trace to
+build x-axis labels. This keeps the plotting code independent of trace internals:
+
+```python
+token_ids = model.tokenizer(prompt, return_tensors="pt")["input_ids"][0]
+token_labels = [model.tokenizer.decode([int(token_id)]) for token_id in token_ids]
+```
+
+Assume `layer_token_scores` is a `[layers, sequence]` array of values to plot.
+Use numeric x positions for Plotly heatmaps, then display the token strings as
+tick labels. That keeps repeated tokens in separate columns:
+
+```python
+import plotly.express as px
+
+x_positions = list(range(len(token_labels)))
+
+fig = px.imshow(
+    layer_token_scores,
+    x=x_positions,
+    y=list(range(layer_token_scores.shape[0])),
+    labels={"x": "input token", "y": "layer", "color": "score"},
+)
+fig.update_xaxes(tickmode="array", tickvals=x_positions, ticktext=token_labels)
+fig.show()
+```
+
 ### Tuned lens (use a learned linear map per layer)
 
 If you have a tuned-lens checkpoint with one affine map `A_L` per layer, replace `model.transformer.ln_f(hs)` with `A_L(hs)`:
