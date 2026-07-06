@@ -11,3 +11,9 @@ __pycache__/
 nnsight.log
 src/nnsight/_c/**.so
 src/nnsight/_version.py
+
+# AI tooling artifacts, not part of the project
+AGENTS.md
+.claude/
+files/
+files.zip
