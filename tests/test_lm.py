@@ -1614,6 +1614,45 @@ class TestCache:
             cache.model.blocks[0].output[0],
         )
 
+    @torch.no_grad()
+    def test_cache_navigation_matches_envoy(self, MSG_prompt: str):
+        """Cache navigation is equivalent to envoy navigation.
+
+        Both resolve aliases through ``Aliaser.resolve``, so every spelling
+        that reaches a module on the model — real names, leaf aliases,
+        collapsing re-mounts, and any mix — reaches the same entry on the
+        cache.
+        """
+        from nnsight import util
+
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2",
+            rename={"transformer": "model", "h": "layers", "model.layers": "layers"},
+        )
+
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache(modules=[gpt2.layers[0]]).save()
+
+        spellings = [
+            "transformer.h",
+            "transformer.layers",
+            "model.h",
+            "model.layers",
+            "layers",
+        ]
+
+        for spelling in spellings:
+            envoy = util.fetch_attr(gpt2, spelling)
+            assert envoy.path == "model.transformer.h"
+
+            view = cache.model
+            for segment in spelling.split("."):
+                view = getattr(view, segment)
+            assert torch.equal(
+                view[0].output[0],
+                cache["model.transformer.h.0"].output[0],
+            )
+
 
 # =============================================================================
 # Module Renaming

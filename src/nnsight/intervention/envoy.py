@@ -751,16 +751,16 @@ class Envoy(Batchable):
         root = build(self)
 
         # Second pass, once every node exists: link aliases to their target
-        # nodes. ``fetch_attr`` resolves dotted names through the aliasers
-        # themselves, so chained renames compose exactly as attribute access
-        # does.
+        # nodes through ``Aliaser.resolve`` — the same call envoy attribute
+        # access makes, so cache navigation cannot disagree with it (and
+        # chained renames compose exactly as attribute access does).
         def link(envoy: Envoy):
             aliaser = envoy._alias
             if aliaser is not None:
                 node = nodes[envoy.path]
-                for alias, name in aliaser.alias_to_name.items():
+                for alias in aliaser.alias_to_name:
                     try:
-                        target = util.fetch_attr(envoy, name)
+                        target = aliaser.resolve(envoy, alias)
                     except Exception:
                         continue
                     if isinstance(target, Envoy) and target.path in nodes:
@@ -1057,7 +1057,7 @@ class Envoy(Batchable):
         """
 
         if self._alias is not None and name in self._alias.alias_to_name:
-            return util.fetch_attr(self, self._alias.alias_to_name[name])
+            return self._alias.resolve(self, name)
 
         if hasattr(self._module, name):
             value = getattr(self._module, name)
@@ -1174,6 +1174,17 @@ class Aliaser:
         self.alias_to_name = {}
         self.name_to_aliases = {}
         self.extras = {}
+
+    def resolve(self, envoy: Envoy, alias: str) -> Any:
+        """Resolve ``alias`` to its target, starting from ``envoy``.
+
+        The single source of truth for what an alias means: both
+        :meth:`Envoy.__getattr__` (live attribute access like
+        ``model.layers``) and :meth:`Envoy._skeleton` (the cache's
+        navigation snapshot) route through here, so the two can never
+        disagree. Raises if ``alias`` is unknown or its target is missing.
+        """
+        return util.fetch_attr(envoy, self.alias_to_name[alias])
 
     def build(self, envoy: Envoy):
 
