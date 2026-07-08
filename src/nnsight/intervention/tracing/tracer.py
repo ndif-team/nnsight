@@ -198,13 +198,13 @@ class Cache:
         def __contains__(self, key):
             if not isinstance(key, str):
                 return False
-            if dict.__contains__(self, key):
-                if self._path == "":
-                    return True
-                return key == self._path or key.startswith(self._path + ".")
-            if self._path != "":
-                return dict.__contains__(self, self._path + "." + key)
-            return False
+            # Membership is defined as "lookup succeeds", so ``in`` and
+            # ``[]`` share one resolution semantics — renamed keys included.
+            try:
+                self[key]
+            except KeyError:
+                return False
+            return True
 
         def keys(self, alias: bool = False):
             if alias:
