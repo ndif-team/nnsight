@@ -1454,10 +1454,25 @@ class TestCache:
                 cache.model.layers[i].input,
             )
 
+        # Dict-style access with a path relative to a sub-view must resolve
+        # through the alias map too.
+        assert torch.equal(
+            cache.model["layers.0"].output,
+            cache["model.transformer.h.0"].output,
+        )
+
         # Out-of-bounds on the renamed modulelist must raise IndexError, not
         # leak a KeyError from the underlying dict.
         with pytest.raises(IndexError):
             cache.model.layers[999]
+
+        # Layer 1 is not cached (strided subset) but layer 10 is: index 1 must
+        # not segment-match ``h.10`` and hand back a broken sub-view. Both the
+        # renamed and the real route must raise IndexError.
+        with pytest.raises(IndexError):
+            cache.model.layers[1]
+        with pytest.raises(IndexError):
+            cache.model.transformer.h[1]
 
         # Full cache (no ``modules=``): navigating into a submodule of a
         # re-mounted block must resolve through the alias path too.
@@ -1490,6 +1505,77 @@ class TestCache:
             cache["model.model.layers.0"].output[0],
             cache.model.foo.layers[0].output[0],
         )
+
+    @torch.no_grad()
+    def test_cache_list_rename(self, MSG_prompt: str):
+        """Renames with a list of aliases must not break cache creation.
+
+        ``rename={"transformer": ["model", "mdl"]}`` is documented Aliaser
+        syntax; building the cache's alias dict from it must not crash, and
+        both aliases must navigate to the module.
+        """
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2",
+            rename={"transformer": ["model", "mdl"], "h": "layers"},
+        )
+
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache(modules=[gpt2.mdl.layers[0]]).save()
+
+        assert torch.equal(
+            cache["model.transformer.h.0"].output[0],
+            cache.model.model.layers[0].output[0],
+        )
+        assert torch.equal(
+            cache["model.transformer.h.0"].output[0],
+            cache.model.mdl.layers[0].output[0],
+        )
+
+    def test_cache_dict_state_isolated(self):
+        """CacheDict instances must not share alias/rename state.
+
+        Mutable default arguments would make ``_alias_paths`` a single dict
+        shared by every cache in the process, leaking alias paths registered
+        by one (renamed) cache into the navigation of all others.
+        """
+        from nnsight.intervention.tracing.tracer import Cache
+
+        a = Cache.CacheDict({}, rename={"h": "layers"})
+        b = Cache.CacheDict({})
+
+        assert a._alias_paths is not b._alias_paths
+        assert a._alias is not b._alias
+        assert a._rename is not b._rename
+
+        dict.__setitem__(
+            a, "model.transformer.h.0", Cache.Entry(output=1)
+        )
+        a._add_alias_path("model.transformer.h.0")
+
+        assert "model.transformer.layers.0" in a._alias_paths
+        assert not b._alias_paths
+
+    def test_cache_alias_never_shadows_real_key(self):
+        """A rename must not reroute access to a genuinely cached module.
+
+        With ``rename={"a": "b", "b": "a"}`` the alias path of ``model.x.b``
+        is ``model.x.a`` — which is also a real storage key. Real keys are
+        authoritative for both dict-style access and ``.output`` resolution.
+        """
+        from nnsight.intervention.tracing.tracer import Cache
+
+        rename = {"a": "b", "b": "a"}
+        cd = Cache.CacheDict(
+            {}, rename=rename, alias={v: k for k, v in rename.items()}
+        )
+        for path, out in (("model.x.a", "A"), ("model.x.b", "B")):
+            dict.__setitem__(cd, path, Cache.Entry(output=out))
+            cd._add_alias_path(path)
+
+        assert cd["model.x.a"].output == "A"
+        assert cd["model.x.b"].output == "B"
+        assert cd.model.x.a.output == "A"
+        assert cd.model.x.b.output == "B"
 
 
 # =============================================================================

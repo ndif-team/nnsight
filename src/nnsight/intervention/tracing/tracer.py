@@ -82,14 +82,17 @@ class Cache:
             self,
             data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]",
             path: str = "",
-            alias: Dict[str, str] = dict(),
-            rename: Dict[str, str] = dict(),
-            alias_paths: Dict[str, str] = dict(),
+            alias: Optional[Dict[str, str]] = None,
+            rename: Optional[Dict[str, str]] = None,
+            alias_paths: Optional[Dict[str, str]] = None,
         ):
             self._path = path
-            self._alias = alias
-            self._rename = rename
-            self._alias_paths = alias_paths
+            # ``None`` defaults instead of ``dict()``: a mutable default would
+            # be shared by every CacheDict in the process, so alias paths
+            # registered by one cache would leak into navigation of all others.
+            self._alias = alias if alias is not None else {}
+            self._rename = rename if rename is not None else {}
+            self._alias_paths = alias_paths if alias_paths is not None else {}
 
             # Copy underlying storage directly, bypassing any CacheDict
             # overrides (``__getitem__``, ``__iter__``, ``keys``) on
@@ -114,8 +117,12 @@ class Cache:
             collapsing/re-mount rename (e.g. ``"model.layers.0"`` from
             ``rename={"model.layers": "layers"}``), the underlying storage key
             is the un-renamed path (``"model.transformer.h.0"``). ``_alias_paths``
-            maps the former to the latter; real paths pass through unchanged.
+            maps the former to the latter. Real storage keys are authoritative:
+            a path present in storage is never rerouted through the alias map,
+            so an alias can't shadow a genuinely cached module of the same name.
             """
+            if dict.__contains__(self, self._path):
+                return self._path
             return self._alias_paths.get(self._path, self._path)
 
         @property
@@ -220,53 +227,104 @@ class Cache:
                 key == path or key.startswith(path + ".") for key in self._alias_paths
             )
 
+        @staticmethod
+        def _replace_segments(segments, pattern, replacement):
+            """Replace each non-overlapping occurrence of ``pattern`` (a
+            contiguous run of path segments) in ``segments`` with
+            ``replacement``. Matching is whole-segment, so a rename like
+            ``{"h": "layers"}`` rewrites the ``h`` component without
+            corrupting ``lm_head`` the way substring replacement would.
+            """
+            if not pattern or len(pattern) > len(segments):
+                return segments
+            out = []
+            i = 0
+            while i < len(segments):
+                if segments[i : i + len(pattern)] == pattern:
+                    out.extend(replacement)
+                    i += len(pattern)
+                else:
+                    out.append(segments[i])
+                    i += 1
+            return out
+
         def _add_alias_path(self, module_path):
-            if self._rename:
-                # The root component (``cache.model``) is the fixed cache root
-                # and is never renamed in access space, so protect it from the
-                # substring replacements below. Without this a rename like
-                # ``{"model": "foo"}`` would also rewrite the root segment
-                # (``model.model.layers.0`` -> ``foo.foo.layers.0``) and the
-                # user-facing ``cache.model.foo.layers[0]`` would never match.
-                root, _, rest = str(module_path).partition(".")
+            if not self._rename:
+                return
 
-                if rest == "":
-                    return
+            # The root component (``cache.model``) is the fixed cache root
+            # and is never renamed in access space, so protect it from the
+            # replacements below. Without this a rename like ``{"model":
+            # "foo"}`` would also rewrite the root segment
+            # (``model.model.layers.0`` -> ``foo.foo.layers.0``) and the
+            # user-facing ``cache.model.foo.layers[0]`` would never match.
+            root, _, rest = str(module_path).partition(".")
 
-                alias_rest = rest
+            if rest == "":
+                return
 
-                for path, alias in self._rename.items():
-                    path = path.removeprefix(".")
-                    alias_rest = alias_rest.replace(path, alias)
+            segments = rest.split(".")
 
-                alias_path = root + "." + alias_rest
+            for path, aliases in self._rename.items():
+                pattern = path.removeprefix(".").split(".")
+                if isinstance(aliases, str):
+                    aliases = [aliases]
+                # With multiple aliases for one module the first one names the
+                # alias path; the others stay reachable through the leaf-alias
+                # route in ``__getattr__``.
+                replacement = [
+                    s for s in aliases[0].removeprefix(".").split(".") if s
+                ]
+                segments = self._replace_segments(segments, pattern, replacement)
 
-                if alias_path != module_path:
-                    self._alias_paths[alias_path] = module_path
+            if not segments:
+                return
+
+            alias_path = ".".join([root, *segments])
+
+            if alias_path != module_path:
+                self._alias_paths[alias_path] = module_path
 
         def __getitem__(self, key):
+            # Real storage keys are authoritative: check them before any alias
+            # translation so a rename can never shadow a genuinely cached
+            # module of the same name (e.g. ``rename={"a": "b", "b": "a"}``).
+            # This also keeps IPython pretty-printers (which call ``obj[k]``
+            # for each ``k`` in ``keys()``) from getting a double-prefixed key
+            # like ``"model.transformer.h.0.model.transformer.h.0"``.
+            if isinstance(key, str) and dict.__contains__(self, key):
+                return dict.__getitem__(self, key)
+
             name = self._alias.get(key, key)
 
             if isinstance(name, str):
-                name = self._alias_paths.get(name, name)
-
-                # Absolute key: already a full path present in the underlying
-                # storage. Return it directly so IPython pretty-printers (which
-                # call ``obj[k]`` for each ``k`` in ``keys()``) don't get a
-                # double-prefixed key like ``"model.transformer.h.0.model.transformer.h.0"``.
                 if dict.__contains__(self, name):
                     return dict.__getitem__(self, name)
 
+                if name in self._alias_paths:
+                    return dict.__getitem__(self, self._alias_paths[name])
+
                 path = self._path + "." + name if self._path != "" else name
+
+                # A key relative to this sub-view may itself be an aliased
+                # path (e.g. ``cache.model["layers.0"]`` under
+                # ``rename={"model.layers": "layers"}``); resolve the composed
+                # path through the alias map when it isn't in real storage.
+                if not dict.__contains__(self, path):
+                    path = self._alias_paths.get(path, path)
+
                 return dict.__getitem__(self, path)
 
             if isinstance(name, int):
                 path = self._path + "." + f"{name}"
                 prefix = self._path + "."
 
-                if any(key.startswith(path) for key in self) or self._alias_path_prefix(
-                    path
-                ):
+                # Whole-segment matching (``== path`` / ``path + "."``): a bare
+                # ``startswith(path)`` would let index 1 match ``...h.10`` and
+                # hand back a bogus sub-view that later raises ``KeyError``.
+                if any(
+                    key == path or key.startswith(path + ".") for key in self
+                ) or self._alias_path_prefix(path):
                     return self._child(path)
                 # Out-of-bounds on a modulelist: a sibling numeric index exists
                 # under ``_path`` but ``name`` isn't one of them. Check both the
@@ -288,8 +346,10 @@ class Cache:
         def __getattr__(self, attr: str):
             path = self._path + "." + attr if self._path != "" else attr
 
-            # (1) Direct route: ``path`` prefixes a real storage key.
-            if any(key.startswith(path) for key in self):
+            # (1) Direct route: ``path`` is a real storage key or a
+            #     whole-segment prefix of one (``.ln`` must not match a key
+            #     ``...ln_f`` the way a bare ``startswith`` would).
+            if any(key == path or key.startswith(path + ".") for key in self):
                 return self._child(path)
 
             # (2) Leaf-alias route: translate the aliased segment to its
@@ -637,7 +697,14 @@ class InterleavingTracer(Tracer):
         rename_dict = (
             self.model._alias.rename if self.model._alias is not None else dict()
         )
-        alias_dict = {value: key for key, value in rename_dict.items()}
+        # Rename values may be a list of aliases (e.g. ``{"transformer":
+        # ["model", "mdl"]}``); map every alias back to its module name.
+        alias_dict = {}
+        for name, aliases in rename_dict.items():
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            for alias in aliases:
+                alias_dict[alias] = name
 
         if not self.model.interleaving:
             raise ValueError("Cannot create a cache outside an invoker.")
