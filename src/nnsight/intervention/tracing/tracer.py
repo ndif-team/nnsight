@@ -4,7 +4,7 @@ import inspect
 from dataclasses import dataclass
 
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -110,7 +110,7 @@ class Cache:
                 for k in dict.__iter__(data):
                     dict.__setitem__(self, k, dict.__getitem__(data, k))
 
-        def _resolved_path(self):
+        def _resolved_path(self) -> str:
             """Resolve ``_path`` to a real storage key.
 
             When navigation lands on an aliased path produced by a
@@ -126,27 +126,27 @@ class Cache:
             return self._alias_paths.get(self._path, self._path)
 
         @property
-        def output(self):
+        def output(self) -> Any:
             """
             Returns the output attribute from the Cache.Entry at the current path.
             """
             return dict.__getitem__(self, self._resolved_path()).output
 
         @property
-        def inputs(self):
+        def inputs(self) -> Any:
             """
             Returns the inputs attribute from the Cache.Entry at the current path.
             """
             return dict.__getitem__(self, self._resolved_path()).inputs
 
         @property
-        def input(self):
+        def input(self) -> Any:
             """
             Returns the input property from the Cache.Entry at the current path.
             """
             return dict.__getitem__(self, self._resolved_path()).input
 
-        def _scoped_iter(self):
+        def _scoped_iter(self) -> Iterator[str]:
             """Iterate keys visible at the current ``_path`` scope.
 
             For the root view (``_path == ""``) this is every key. For a
@@ -205,7 +205,7 @@ class Cache:
             )
             return f"{{{body}}}"
 
-        def _child(self, path):
+        def _child(self, path: str) -> "Cache.CacheDict":
             """Build a sub-view CacheDict scoped at ``path``."""
             return Cache.CacheDict(
                 self,
@@ -215,7 +215,7 @@ class Cache:
                 alias_paths=self._alias_paths,
             )
 
-        def _alias_path_prefix(self, path):
+        def _alias_path_prefix(self, path: str) -> bool:
             """True if ``path`` is an alias path or a prefix of one.
 
             Lets attribute/index navigation walk the authoritative
@@ -228,7 +228,9 @@ class Cache:
             )
 
         @staticmethod
-        def _replace_segments(segments, pattern, replacement):
+        def _replace_segments(
+            segments: List[str], pattern: List[str], replacement: List[str]
+        ) -> List[str]:
             """Replace each non-overlapping occurrence of ``pattern`` (a
             contiguous run of path segments) in ``segments`` with
             ``replacement``. Matching is whole-segment, so a rename like
@@ -248,7 +250,7 @@ class Cache:
                     i += 1
             return out
 
-        def _add_alias_path(self, module_path):
+        def _add_alias_path(self, module_path: str) -> None:
             if not self._rename:
                 return
 
@@ -285,7 +287,9 @@ class Cache:
             if alias_path != module_path:
                 self._alias_paths[alias_path] = module_path
 
-        def __getitem__(self, key):
+        def __getitem__(
+            self, key: Union[str, int]
+        ) -> "Union[Cache.CacheDict, Cache.Entry, List[Cache.Entry]]":
             # Real storage keys are authoritative: check them before any alias
             # translation so a rename can never shadow a genuinely cached
             # module of the same name (e.g. ``rename={"a": "b", "b": "a"}``).
@@ -343,7 +347,7 @@ class Cache:
 
             return dict.__getitem__(self, key)
 
-        def __getattr__(self, attr: str):
+        def __getattr__(self, attr: str) -> "Cache.CacheDict":
             path = self._path + "." + attr if self._path != "" else attr
 
             # (1) Direct route: ``path`` is a real storage key or a
