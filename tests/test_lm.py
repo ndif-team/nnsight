@@ -1484,6 +1484,14 @@ class TestCache:
             cache.model.layers[0].attn.output[0],
         )
 
+        # The alias paths the cache navigates are derived from the envoy
+        # tree itself, so they agree with what envoy attribute access
+        # resolves — including chained renames and re-mounts.
+        facing = gpt2._aliased_paths()
+        assert facing["model.transformer.h.0"] == "model.layers.0"
+        assert facing["model.transformer.h.0.attn"] == "model.layers.0.attn"
+        assert facing["model.lm_head"] == "model.lm_head"
+
     @torch.no_grad()
     def test_cache_rename_preserves_root(self, MSG_prompt: str):
         """A rename matching the root component name must not corrupt the root.
@@ -1532,7 +1540,7 @@ class TestCache:
         )
 
     def test_cache_dict_state_isolated(self):
-        """CacheDict instances must not share alias/rename state.
+        """CacheDict instances must not share alias state.
 
         Mutable default arguments would make ``_alias_paths`` a single dict
         shared by every cache in the process, leaking alias paths registered
@@ -1540,19 +1548,14 @@ class TestCache:
         """
         from nnsight.intervention.tracing.tracer import Cache
 
-        a = Cache.CacheDict({}, rename={"h": "layers"})
+        a = Cache.CacheDict({})
         b = Cache.CacheDict({})
 
         assert a._alias_paths is not b._alias_paths
         assert a._alias is not b._alias
-        assert a._rename is not b._rename
 
-        dict.__setitem__(
-            a, "model.transformer.h.0", Cache.Entry(output=1)
-        )
-        a._add_alias_path("model.transformer.h.0")
+        a._alias_paths["model.layers.0"] = "model.transformer.h.0"
 
-        assert "model.transformer.layers.0" in a._alias_paths
         assert not b._alias_paths
 
     def test_cache_alias_never_shadows_real_key(self):
@@ -1564,13 +1567,13 @@ class TestCache:
         """
         from nnsight.intervention.tracing.tracer import Cache
 
-        rename = {"a": "b", "b": "a"}
         cd = Cache.CacheDict(
-            {}, rename=rename, alias={v: k for k, v in rename.items()}
+            {},
+            alias={"b": "a", "a": "b"},
+            alias_paths={"model.x.a": "model.x.b", "model.x.b": "model.x.a"},
         )
         for path, out in (("model.x.a", "A"), ("model.x.b", "B")):
             dict.__setitem__(cd, path, Cache.Entry(output=out))
-            cd._add_alias_path(path)
 
         assert cd["model.x.a"].output == "A"
         assert cd["model.x.b"].output == "B"

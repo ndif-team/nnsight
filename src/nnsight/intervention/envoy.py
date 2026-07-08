@@ -717,6 +717,61 @@ class Envoy(Batchable):
                 return True
         return False
 
+    def _aliased_paths(self) -> Dict[str, str]:
+        """Map every descendant envoy's real path to its user-facing path.
+
+        The user-facing path is derived from the envoy tree itself — the same
+        per-envoy :class:`Aliaser` state and ``fetch_attr`` resolution that
+        answer aliased attribute access like ``model.layers`` — so consumers
+        (e.g. the activation cache) inherit rename semantics from one source
+        of truth instead of re-deriving them from the rename dict.
+
+        Two rename kinds contribute:
+
+        - Single-name renames (``{"h": "layers"}``): a child's segment is
+          replaced by its first alias at the envoy level where the alias is
+          registered.
+        - Dotted-path renames (``{"model.layers": "layers"}``, kept in
+          ``Aliaser.extras``): the target module is re-mounted — its
+          user-facing path becomes the declaring envoy's path plus the alias,
+          and its descendants chain off that re-mounted path.
+
+        Paths equal to their real path are included as identity entries.
+        """
+        facing = {self.path: self.path}
+        remounts = {}
+
+        def walk(envoy: Envoy):
+            base = facing[envoy.path]
+            aliaser = envoy._alias
+
+            if aliaser is not None:
+                for dotted, aliases in aliaser.extras.items():
+                    try:
+                        target = util.fetch_attr(envoy, dotted)
+                    except Exception:
+                        continue
+                    if isinstance(target, Envoy) and aliases:
+                        remounts[target.path] = (
+                            base + "." + aliases[0].removeprefix(".")
+                        )
+
+            for child in envoy._children:
+                name = child.path.rsplit(".", 1)[-1]
+                face = remounts.get(child.path)
+                if face is None:
+                    if aliaser is not None:
+                        aliases = aliaser.name_to_aliases.get(name)
+                        if aliases:
+                            name = aliases[0].removeprefix(".")
+                    face = base + "." + name
+                facing[child.path] = face
+                walk(child)
+
+        walk(self)
+
+        return facing
+
     def _add_envoy(self, module: torch.nn.Module, name: str) -> Envoy:
         """
         Adds a new Envoy for a given torch module under this Envoy.

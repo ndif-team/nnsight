@@ -83,7 +83,6 @@ class Cache:
             data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]",
             path: str = "",
             alias: Optional[Dict[str, str]] = None,
-            rename: Optional[Dict[str, str]] = None,
             alias_paths: Optional[Dict[str, str]] = None,
         ):
             self._path = path
@@ -91,7 +90,6 @@ class Cache:
             # be shared by every CacheDict in the process, so alias paths
             # registered by one cache would leak into navigation of all others.
             self._alias = alias if alias is not None else {}
-            self._rename = rename if rename is not None else {}
             self._alias_paths = alias_paths if alias_paths is not None else {}
 
             # Copy underlying storage directly, bypassing any CacheDict
@@ -210,7 +208,6 @@ class Cache:
             return Cache.CacheDict(
                 self,
                 path,
-                rename=self._rename,
                 alias=self._alias,
                 alias_paths=self._alias_paths,
             )
@@ -226,66 +223,6 @@ class Cache:
             return any(
                 key == path or key.startswith(path + ".") for key in self._alias_paths
             )
-
-        @staticmethod
-        def _replace_segments(
-            segments: List[str], pattern: List[str], replacement: List[str]
-        ) -> List[str]:
-            """Replace each non-overlapping occurrence of ``pattern`` (a
-            contiguous run of path segments) in ``segments`` with
-            ``replacement``. Matching is whole-segment, so a rename like
-            ``{"h": "layers"}`` rewrites the ``h`` component without
-            corrupting ``lm_head`` the way substring replacement would.
-            """
-            if not pattern or len(pattern) > len(segments):
-                return segments
-            out = []
-            i = 0
-            while i < len(segments):
-                if segments[i : i + len(pattern)] == pattern:
-                    out.extend(replacement)
-                    i += len(pattern)
-                else:
-                    out.append(segments[i])
-                    i += 1
-            return out
-
-        def _add_alias_path(self, module_path: str) -> None:
-            if not self._rename:
-                return
-
-            # The root component (``cache.model``) is the fixed cache root
-            # and is never renamed in access space, so protect it from the
-            # replacements below. Without this a rename like ``{"model":
-            # "foo"}`` would also rewrite the root segment
-            # (``model.model.layers.0`` -> ``foo.foo.layers.0``) and the
-            # user-facing ``cache.model.foo.layers[0]`` would never match.
-            root, _, rest = str(module_path).partition(".")
-
-            if rest == "":
-                return
-
-            segments = rest.split(".")
-
-            for path, aliases in self._rename.items():
-                pattern = path.removeprefix(".").split(".")
-                if isinstance(aliases, str):
-                    aliases = [aliases]
-                # With multiple aliases for one module the first one names the
-                # alias path; the others stay reachable through the leaf-alias
-                # route in ``__getattr__``.
-                replacement = [
-                    s for s in aliases[0].removeprefix(".").split(".") if s
-                ]
-                segments = self._replace_segments(segments, pattern, replacement)
-
-            if not segments:
-                return
-
-            alias_path = ".".join([root, *segments])
-
-            if alias_path != module_path:
-                self._alias_paths[alias_path] = module_path
 
         def __getitem__(
             self, key: Union[str, int]
@@ -392,7 +329,7 @@ class Cache:
         detach: Optional[bool] = True,
         include_output: bool = True,
         include_inputs: bool = False,
-        rename: Optional[Dict[str, str]] = None,
+        aliased_paths: Optional[Dict[str, str]] = None,
         alias: Optional[Dict[str, str]] = None,
     ):
         """Initialize a Cache with optional transformation parameters.
@@ -405,7 +342,10 @@ class Cache:
             detach: Whether to detach tensors from the computation graph.
             include_output: Whether to cache module outputs.
             include_inputs: Whether to cache module inputs.
-            rename: Rename mapping for alias path resolution.
+            aliased_paths: Real path → user-facing path for every module, as
+                computed from the envoy tree (:meth:`Envoy._aliased_paths`).
+                Renamed paths of cached modules are registered in the
+                ``CacheDict``'s alias-path map as values arrive.
             alias: Alias mapping for ``CacheDict`` attribute access.
         """
         self.device = device
@@ -414,11 +354,12 @@ class Cache:
         self.modules = modules
         self.include_output = include_output
         self.include_inputs = include_inputs
+        self.aliased_paths = aliased_paths if aliased_paths is not None else {}
 
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
 
-        self.cache = Cache.CacheDict({}, rename=rename, alias=alias).save()
+        self.cache = Cache.CacheDict({}, alias=alias).save()
 
     def add(self, module_path: str, key: str, value: Any):
         """Add a value to the cache with optional transformations.
@@ -446,7 +387,14 @@ class Cache:
 
         if module_path not in self.cache:
             self.cache[module_path] = Cache.Entry(**{key: value})
-            self.cache._add_alias_path(module_path)
+
+            # Register the module's user-facing path (derived from the envoy
+            # tree at cache creation) so aliased navigation can find it. Only
+            # cached modules get entries — navigation and IndexError semantics
+            # depend on the table mirroring what was actually recorded.
+            alias_path = self.aliased_paths.get(module_path)
+            if alias_path is not None and alias_path != module_path:
+                self.cache._alias_paths[alias_path] = module_path
         else:
             entry = self.cache[module_path]
 
@@ -698,6 +646,11 @@ class InterleavingTracer(Tracer):
             A :class:`Cache.CacheDict` that is populated during execution.
         """
 
+        # Both rename views come from the envoy tree, the source of truth for
+        # rename semantics: ``alias_dict`` (alias → module name) drives the
+        # leaf-alias route of CacheDict navigation, and ``aliased_paths``
+        # (real path → user-facing path, from Envoy._aliased_paths) drives
+        # the alias-path route for collapsing/re-mount renames.
         rename_dict = (
             self.model._alias.rename if self.model._alias is not None else dict()
         )
@@ -709,6 +662,10 @@ class InterleavingTracer(Tracer):
                 aliases = [aliases]
             for alias in aliases:
                 alias_dict[alias] = name
+
+        aliased_paths = (
+            self.model._aliased_paths() if self.model._alias is not None else {}
+        )
 
         if not self.model.interleaving:
             raise ValueError("Cannot create a cache outside an invoker.")
@@ -722,8 +679,8 @@ class InterleavingTracer(Tracer):
             detach,
             include_output,
             include_inputs,
-            rename_dict,
-            alias_dict,
+            aliased_paths=aliased_paths,
+            alias=alias_dict,
         )
 
         mediator = self.model.interleaver.current
