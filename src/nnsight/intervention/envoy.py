@@ -736,7 +736,9 @@ class Envoy(Batchable):
 
         Returns a super-root node (``path == ""``) whose single child is this
         envoy, so navigation and cache storage keys share the same first
-        segment (``cache.model...``).
+        segment (``cache.model...``). Intended for the root envoy: paths are
+        absolute, so a skeleton built from a sub-envoy is not navigable from
+        its super-root.
         """
         nodes: Dict[str, PathNode] = {}
 
@@ -764,7 +766,7 @@ class Envoy(Batchable):
                     except Exception:
                         continue
                     if isinstance(target, Envoy) and target.path in nodes:
-                        node.aliases[alias.removeprefix(".")] = nodes[target.path]
+                        node.aliases[alias] = nodes[target.path]
             for child in envoy._children:
                 link(child)
 
@@ -1207,4 +1209,7 @@ class Aliaser:
             self.name_to_aliases[name] = aliases
 
             for alias in aliases:
-                self.alias_to_name[alias] = name
+                # Normalize dot-prefixed alias values (``{".transformer.h":
+                # ".layers"}`` is documented) the same way names are, so
+                # lookup by attribute name finds them.
+                self.alias_to_name[alias.removeprefix(".")] = name

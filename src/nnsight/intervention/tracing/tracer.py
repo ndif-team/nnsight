@@ -137,6 +137,7 @@ class Cache:
             self._path = path
             self._node = node if node is not None else tree
             self._tree = tree
+            self._derived_len = None
 
             # Copy underlying storage directly, bypassing any CacheDict
             # overrides (``__getitem__``, ``__iter__``, ``keys``) on
@@ -245,22 +246,29 @@ class Cache:
         def _ensure_node(self) -> Optional[PathNode]:
             """This view's skeleton node, deriving a bare tree from the
             storage keys if none was provided (direct construction without a
-            model). The derived tree navigates real paths only — no aliases.
+            model). The derived tree navigates real paths only — no aliases —
+            and is rebuilt when storage has grown since it was derived.
             """
-            if self._node is None:
-                root = PathNode(path="")
-                for key in dict.__iter__(self):
-                    node = root
-                    prefix = ""
-                    for segment in key.split("."):
-                        prefix = segment if prefix == "" else prefix + "." + segment
-                        nxt = node.children.get(segment)
-                        if nxt is None:
-                            nxt = PathNode(path=prefix)
-                            node.children[segment] = nxt
-                        node = nxt
-                self._tree = root
-                self._node = root if self._path == "" else root.navigate(self._path)
+            if self._node is not None and (
+                self._derived_len is None
+                or self._derived_len == dict.__len__(self)
+            ):
+                return self._node
+
+            root = PathNode(path="")
+            for key in dict.__iter__(self):
+                node = root
+                prefix = ""
+                for segment in key.split("."):
+                    prefix = segment if prefix == "" else prefix + "." + segment
+                    nxt = node.children.get(segment)
+                    if nxt is None:
+                        nxt = PathNode(path=prefix)
+                        node.children[segment] = nxt
+                    node = nxt
+            self._derived_len = dict.__len__(self)
+            self._tree = root
+            self._node = root if self._path == "" else root.navigate(self._path)
             return self._node
 
         def _cached_under(self, node: PathNode) -> bool:
@@ -358,7 +366,7 @@ class Cache:
             # Guard the fields this method itself relies on: during
             # unpickling ``__getattr__`` can fire before ``__setstate__``
             # restores them, and falling through would recurse.
-            if attr in ("_path", "_node", "_tree"):
+            if attr in ("_path", "_node", "_tree", "_derived_len"):
                 raise AttributeError(attr)
 
             node = self._ensure_node()
@@ -381,6 +389,11 @@ class Cache:
 
         def __setstate__(self, state):
             self.__dict__.update(state)
+            # Caches pickled by versions without the skeleton carry none of
+            # its fields; default them so navigation falls back to the
+            # storage-derived trie instead of raising.
+            for name in ("_path", "_node", "_tree", "_derived_len"):
+                self.__dict__.setdefault(name, None if name != "_path" else "")
 
     def __init__(
         self,

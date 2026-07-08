@@ -1492,6 +1492,9 @@ class TestCache:
         assert root.aliases["model"].path == "model.transformer"
         assert "lm_head" in root.children
 
+        # keys(alias=True) enumerates one renamed spelling per cached module.
+        assert "model.layers.0" in cache.keys(alias=True)
+
     @torch.no_grad()
     def test_cache_rename_preserves_root(self, MSG_prompt: str):
         """A rename matching the root component name must not corrupt the root.
@@ -1555,6 +1558,26 @@ class TestCache:
         assert a.model.x.output == 1
         with pytest.raises(AttributeError):
             b.model
+
+        # The storage-derived fallback trie must pick up keys added after
+        # the first navigation.
+        dict.__setitem__(a, "model.y", Cache.Entry(output=2))
+        assert a.model.y.output == 2
+
+    def test_cache_dict_old_pickle_state(self):
+        """Caches pickled before the skeleton fields existed still navigate.
+
+        ``__setstate__`` defaults the missing fields so attribute access
+        falls back to the storage-derived trie instead of raising.
+        """
+        from nnsight.intervention.tracing.tracer import Cache
+
+        d = Cache.CacheDict({})
+        dict.__setitem__(d, "model.x", Cache.Entry(output=1))
+        d.__dict__.clear()
+        d.__setstate__({"_path": "", "_alias": {}, "_alias_paths": {}})
+
+        assert d.model.x.output == 1
 
     def test_cache_alias_never_shadows_real_key(self):
         """A rename must not reroute access to a genuinely cached module.
@@ -1704,6 +1727,18 @@ class TestRename:
 
         assert mlp_out_0 is not None
         assert mlp_out_1 is not None
+
+    @torch.no_grad()
+    def test_rename_dotted_alias_value(self, MSG_prompt: str):
+        """Alias values may carry a leading dot (documented Aliaser form)."""
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2", rename={".transformer.h": ".layers"}
+        )
+
+        with gpt2.trace(MSG_prompt):
+            out = gpt2.layers[0].output.save()
+
+        assert out is not None
 
     @torch.no_grad()
     def test_rename_module_list_path(self, MSG_prompt: str):
