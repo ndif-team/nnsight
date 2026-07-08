@@ -4,7 +4,7 @@ import inspect
 from dataclasses import dataclass, field
 
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeCopyMode, FakeTensorMode
@@ -149,27 +149,27 @@ class Cache:
                     dict.__setitem__(self, k, dict.__getitem__(data, k))
 
         @property
-        def output(self) -> Any:
+        def output(self):
             """
             Returns the output attribute from the Cache.Entry at the current path.
             """
             return dict.__getitem__(self, self._path).output
 
         @property
-        def inputs(self) -> Any:
+        def inputs(self):
             """
             Returns the inputs attribute from the Cache.Entry at the current path.
             """
             return dict.__getitem__(self, self._path).inputs
 
         @property
-        def input(self) -> Any:
+        def input(self):
             """
             Returns the input property from the Cache.Entry at the current path.
             """
             return dict.__getitem__(self, self._path).input
 
-        def _scoped_iter(self) -> Iterator[str]:
+        def _scoped_iter(self):
             """Iterate keys visible at the current ``_path`` scope.
 
             For the root view (``_path == ""``) this is every key. For a
