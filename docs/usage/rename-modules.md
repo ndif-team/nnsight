@@ -106,11 +106,11 @@ model._update_alias({"new_name": "transformer.h"})
 
 Cache storage keys are always the **real** module paths, but navigation
 understands the rename. At cache creation, `tracer.cache(...)`
-(`src/nnsight/intervention/tracing/tracer.py`) asks the envoy tree for every
-module's user-facing path (`Envoy._aliased_paths`,
-`src/nnsight/intervention/envoy.py`) — the same `Aliaser` state that resolves
-`model.layers` — and `Cache.CacheDict` uses that map to translate renamed
-access paths back to real storage keys:
+(`src/nnsight/intervention/tracing/tracer.py`) snapshots the envoy tree as a
+weights-free skeleton (`Envoy._skeleton`,
+`src/nnsight/intervention/envoy.py`) whose nodes carry children and aliases —
+resolved from the same `Aliaser` state that answers `model.layers` — and
+`Cache.CacheDict` navigates that skeleton to reach real storage keys:
 
 ```python
 with model.trace("Hello") as tracer:

@@ -1484,13 +1484,13 @@ class TestCache:
             cache.model.layers[0].attn.output[0],
         )
 
-        # The alias paths the cache navigates are derived from the envoy
-        # tree itself, so they agree with what envoy attribute access
-        # resolves — including chained renames and re-mounts.
-        facing = gpt2._aliased_paths()
-        assert facing["model.transformer.h.0"] == "model.layers.0"
-        assert facing["model.transformer.h.0.attn"] == "model.layers.0.attn"
-        assert facing["model.lm_head"] == "model.lm_head"
+        # Navigation resolves against a skeleton of the envoy tree, so
+        # aliases agree with what envoy attribute access resolves —
+        # including chained renames and re-mounts.
+        root = gpt2._skeleton().children["model"]
+        assert root.aliases["layers"].path == "model.transformer.h"
+        assert root.aliases["model"].path == "model.transformer"
+        assert "lm_head" in root.children
 
     @torch.no_grad()
     def test_cache_rename_preserves_root(self, MSG_prompt: str):
@@ -1540,38 +1540,43 @@ class TestCache:
         )
 
     def test_cache_dict_state_isolated(self):
-        """CacheDict instances must not share alias state.
+        """CacheDict instances must not share navigation state.
 
-        Mutable default arguments would make ``_alias_paths`` a single dict
-        shared by every cache in the process, leaking alias paths registered
-        by one (renamed) cache into the navigation of all others.
+        Each cache derives (or is given) its own skeleton; one cache's
+        storage or tree must never leak into another's navigation.
         """
         from nnsight.intervention.tracing.tracer import Cache
 
         a = Cache.CacheDict({})
         b = Cache.CacheDict({})
 
-        assert a._alias_paths is not b._alias_paths
-        assert a._alias is not b._alias
+        dict.__setitem__(a, "model.x", Cache.Entry(output=1))
 
-        a._alias_paths["model.layers.0"] = "model.transformer.h.0"
-
-        assert not b._alias_paths
+        assert a.model.x.output == 1
+        with pytest.raises(AttributeError):
+            b.model
 
     def test_cache_alias_never_shadows_real_key(self):
         """A rename must not reroute access to a genuinely cached module.
 
-        With ``rename={"a": "b", "b": "a"}`` the alias path of ``model.x.b``
-        is ``model.x.a`` — which is also a real storage key. Real keys are
-        authoritative for both dict-style access and ``.output`` resolution.
+        With a swap rename ``{"a": "b", "b": "a"}`` each name is both a real
+        child and an alias for the sibling. Real children are authoritative
+        in ``PathNode.resolve``, so navigation and dict access return each
+        module's own entry.
         """
-        from nnsight.intervention.tracing.tracer import Cache
+        from nnsight.intervention.tracing.tracer import Cache, PathNode
 
-        cd = Cache.CacheDict(
-            {},
-            alias={"b": "a", "a": "b"},
-            alias_paths={"model.x.a": "model.x.b", "model.x.b": "model.x.a"},
+        a = PathNode(path="model.x.a")
+        b = PathNode(path="model.x.b")
+        x = PathNode(
+            path="model.x",
+            children={"a": a, "b": b},
+            aliases={"a": b, "b": a},
         )
+        root = PathNode(path="model", children={"x": x})
+        tree = PathNode(path="", children={"model": root})
+
+        cd = Cache.CacheDict({}, tree=tree)
         for path, out in (("model.x.a", "A"), ("model.x.b", "B")):
             dict.__setitem__(cd, path, Cache.Entry(output=out))
 
@@ -1579,6 +1584,35 @@ class TestCache:
         assert cd["model.x.b"].output == "B"
         assert cd.model.x.a.output == "A"
         assert cd.model.x.b.output == "B"
+
+    @torch.no_grad()
+    def test_cache_collapsing_list_rename(self, MSG_prompt: str):
+        """Secondary aliases of a collapsing rename navigate too.
+
+        Skeleton nodes register every alias of a module, not just the first
+        one, so ``blocks`` works even though the collapsed target only
+        resolves through chained renames.
+        """
+        gpt2 = nnsight.LanguageModel(
+            "openai-community/gpt2",
+            rename={
+                "transformer": "model",
+                "h": "layers",
+                "model.layers": ["layers", "blocks"],
+            },
+        )
+
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache(modules=[gpt2.layers[0]]).save()
+
+        assert torch.equal(
+            cache["model.transformer.h.0"].output[0],
+            cache.model.layers[0].output[0],
+        )
+        assert torch.equal(
+            cache["model.transformer.h.0"].output[0],
+            cache.model.blocks[0].output[0],
+        )
 
 
 # =============================================================================

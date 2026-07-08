@@ -33,7 +33,7 @@ from .tracing.base import Tracer, WithBlockNotFoundError
 from .tracing.editing import EditingTracer
 from .tracing.globals import Object
 from .tracing.iterator import IteratorProxy, register_counters_for_active_iters
-from .tracing.tracer import InterleavingTracer, ScanningTracer
+from .tracing.tracer import InterleavingTracer, PathNode, ScanningTracer
 from .interleaver import Interleaver, Mediator, IEnvoy, eproperty
 from .hooks import (
     hooked_input,
@@ -717,60 +717,62 @@ class Envoy(Batchable):
                 return True
         return False
 
-    def _aliased_paths(self) -> Dict[str, str]:
-        """Map every descendant envoy's real path to its user-facing path.
+    def _skeleton(self) -> PathNode:
+        """Snapshot this envoy tree as a weights-free :class:`PathNode` tree.
 
-        The user-facing path is derived from the envoy tree itself — the same
-        per-envoy :class:`Aliaser` state and ``fetch_attr`` resolution that
-        answer aliased attribute access like ``model.layers`` — so consumers
-        (e.g. the activation cache) inherit rename semantics from one source
-        of truth instead of re-deriving them from the rename dict.
+        Each envoy becomes a node carrying only its path, its children by
+        real name, and its aliases — where every alias is resolved to its
+        target node using the same per-envoy :class:`Aliaser` state and
+        ``fetch_attr`` resolution that answer attribute access like
+        ``model.layers``. Consumers (the activation cache) navigate this
+        skeleton instead of re-deriving rename semantics, so they cannot
+        disagree with the envoy tree; and since nodes hold no modules, the
+        skeleton is picklable and keeps no weights alive.
 
-        Two rename kinds contribute:
+        An alias may point at a direct child (``{"h": "layers"}``) or at any
+        descendant (a dotted re-mount, ``{"model.layers": "layers"}``); both
+        become plain node references. Every alias of a module is linked, not
+        just the first one.
 
-        - Single-name renames (``{"h": "layers"}``): a child's segment is
-          replaced by its first alias at the envoy level where the alias is
-          registered.
-        - Dotted-path renames (``{"model.layers": "layers"}``, kept in
-          ``Aliaser.extras``): the target module is re-mounted — its
-          user-facing path becomes the declaring envoy's path plus the alias,
-          and its descendants chain off that re-mounted path.
-
-        Paths equal to their real path are included as identity entries.
+        Returns a super-root node (``path == ""``) whose single child is this
+        envoy, so navigation and cache storage keys share the same first
+        segment (``cache.model...``).
         """
-        facing = {self.path: self.path}
-        remounts = {}
+        nodes: Dict[str, PathNode] = {}
 
-        def walk(envoy: Envoy):
-            base = facing[envoy.path]
-            aliaser = envoy._alias
-
-            if aliaser is not None:
-                for dotted, aliases in aliaser.extras.items():
-                    try:
-                        target = util.fetch_attr(envoy, dotted)
-                    except Exception:
-                        continue
-                    if isinstance(target, Envoy) and aliases:
-                        remounts[target.path] = (
-                            base + "." + aliases[0].removeprefix(".")
-                        )
-
+        def build(envoy: Envoy) -> PathNode:
+            node = PathNode(path=envoy.path)
+            nodes[envoy.path] = node
             for child in envoy._children:
                 name = child.path.rsplit(".", 1)[-1]
-                face = remounts.get(child.path)
-                if face is None:
-                    if aliaser is not None:
-                        aliases = aliaser.name_to_aliases.get(name)
-                        if aliases:
-                            name = aliases[0].removeprefix(".")
-                    face = base + "." + name
-                facing[child.path] = face
-                walk(child)
+                node.children[name] = build(child)
+            return node
 
-        walk(self)
+        root = build(self)
 
-        return facing
+        # Second pass, once every node exists: link aliases to their target
+        # nodes. ``fetch_attr`` resolves dotted names through the aliasers
+        # themselves, so chained renames compose exactly as attribute access
+        # does.
+        def link(envoy: Envoy):
+            aliaser = envoy._alias
+            if aliaser is not None:
+                node = nodes[envoy.path]
+                for alias, name in aliaser.alias_to_name.items():
+                    try:
+                        target = util.fetch_attr(envoy, name)
+                    except Exception:
+                        continue
+                    if isinstance(target, Envoy) and target.path in nodes:
+                        node.aliases[alias.removeprefix(".")] = nodes[target.path]
+            for child in envoy._children:
+                link(child)
+
+        link(self)
+
+        super_root = PathNode(path="")
+        super_root.children[root.path] = root
+        return super_root
 
     def _add_envoy(self, module: torch.nn.Module, name: str) -> Envoy:
         """

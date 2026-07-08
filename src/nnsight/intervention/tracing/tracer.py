@@ -1,7 +1,7 @@
 import copy
 import inspect
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
@@ -23,6 +23,44 @@ if TYPE_CHECKING:
     from ..envoy import Envoy
 else:
     Envoy = Any
+
+
+@dataclass
+class PathNode:
+    """One node of a weights-free skeleton of the envoy tree.
+
+    Built by :meth:`Envoy._skeleton` when a cache is created and carried by
+    :class:`Cache.CacheDict` so navigation (``cache.model.layers[0]``) can be
+    resolved structurally — child by child, alias by alias — instead of by
+    string matching over flat storage keys. Nodes hold only names, paths and
+    references to other nodes: no modules, no tensors, so the skeleton is
+    cheap to pickle and keeps no model weights alive.
+
+    ``aliases`` mirrors the envoy-level :class:`Aliaser` resolution: a value
+    may be a direct child (single-name rename, ``{"h": "layers"}``) or any
+    descendant (dotted re-mount rename, ``{"model.layers": "layers"}``).
+    """
+
+    path: str
+    children: "Dict[str, PathNode]" = field(default_factory=dict)
+    aliases: "Dict[str, PathNode]" = field(default_factory=dict)
+
+    def resolve(self, name: str) -> "Optional[PathNode]":
+        """Resolve one path segment. Real children are authoritative: an
+        alias can never shadow a genuine sibling of the same name."""
+        child = self.children.get(name)
+        if child is not None:
+            return child
+        return self.aliases.get(name)
+
+    def navigate(self, dotted: str) -> "Optional[PathNode]":
+        """Resolve a dotted path relative to this node, or ``None``."""
+        node = self
+        for segment in dotted.split("."):
+            node = node.resolve(segment)
+            if node is None:
+                return None
+        return node
 
 
 class Cache:
@@ -82,67 +120,54 @@ class Cache:
             self,
             data: "Union[Cache.CacheDict, Dict[str, Cache.Entry]]",
             path: str = "",
-            alias: Optional[Dict[str, str]] = None,
-            alias_paths: Optional[Dict[str, str]] = None,
+            node: Optional[PathNode] = None,
+            tree: Optional[PathNode] = None,
         ):
+            """
+            Args:
+                data: Storage to copy — flat ``{real path: Entry}``.
+                path: Real path of this view ("" for the root view).
+                node: Skeleton node this view is scoped at. The root view's
+                    node is ``tree`` itself.
+                tree: Super-root of the model skeleton
+                    (:meth:`Envoy._skeleton`). When absent, a bare tree is
+                    derived from the storage keys on first navigation —
+                    real paths stay navigable, aliases don't exist.
+            """
             self._path = path
-            # ``None`` defaults instead of ``dict()``: a mutable default would
-            # be shared by every CacheDict in the process, so alias paths
-            # registered by one cache would leak into navigation of all others.
-            self._alias = alias if alias is not None else {}
-            self._alias_paths = alias_paths if alias_paths is not None else {}
+            self._node = node if node is not None else tree
+            self._tree = tree
 
             # Copy underlying storage directly, bypassing any CacheDict
             # overrides (``__getitem__``, ``__iter__``, ``keys``) on
             # ``data``. Overriding ``__iter__`` forces CPython's
             # ``dict.__init__`` slow path to call ``data.__getitem__``,
-            # which would apply alias translation and break the copy
-            # (e.g. translating root key ``"model"`` → ``"transformer"``,
-            # which is not in storage).
+            # which would apply alias resolution and break the copy.
             super().__init__()
-            # Use the raw dict length, not the ``_path``-scoped ``__len__``:
-            # an alias-space sub-view (from a collapsing/re-mount rename) has a
-            # scoped length of 0 because no real key lives under its alias path,
-            # yet its full storage must still propagate to deeper children.
             if dict.__len__(data):
                 for k in dict.__iter__(data):
                     dict.__setitem__(self, k, dict.__getitem__(data, k))
-
-        def _resolved_path(self) -> str:
-            """Resolve ``_path`` to a real storage key.
-
-            When navigation lands on an aliased path produced by a
-            collapsing/re-mount rename (e.g. ``"model.layers.0"`` from
-            ``rename={"model.layers": "layers"}``), the underlying storage key
-            is the un-renamed path (``"model.transformer.h.0"``). ``_alias_paths``
-            maps the former to the latter. Real storage keys are authoritative:
-            a path present in storage is never rerouted through the alias map,
-            so an alias can't shadow a genuinely cached module of the same name.
-            """
-            if dict.__contains__(self, self._path):
-                return self._path
-            return self._alias_paths.get(self._path, self._path)
 
         @property
         def output(self) -> Any:
             """
             Returns the output attribute from the Cache.Entry at the current path.
             """
-            return dict.__getitem__(self, self._resolved_path()).output
+            return dict.__getitem__(self, self._path).output
 
         @property
         def inputs(self) -> Any:
             """
             Returns the inputs attribute from the Cache.Entry at the current path.
             """
-            return dict.__getitem__(self, self._resolved_path()).inputs
+            return dict.__getitem__(self, self._path).inputs
 
         @property
         def input(self) -> Any:
             """
             Returns the input property from the Cache.Entry at the current path.
             """
-            return dict.__getitem__(self, self._resolved_path()).input
+            return dict.__getitem__(self, self._path).input
 
         def _scoped_iter(self) -> Iterator[str]:
             """Iterate keys visible at the current ``_path`` scope.
@@ -182,7 +207,12 @@ class Cache:
 
         def keys(self, alias: bool = False):
             if alias:
-                return self._alias_paths.keys()
+                facing = self._facing_paths()
+                return [
+                    facing[k]
+                    for k in self._scoped_iter()
+                    if facing.get(k, k) != k
+                ]
 
             if self._path == "":
                 return super().keys()
@@ -203,80 +233,124 @@ class Cache:
             )
             return f"{{{body}}}"
 
-        def _child(self, path: str) -> "Cache.CacheDict":
-            """Build a sub-view CacheDict scoped at ``path``."""
+        def _child(self, node: PathNode) -> "Cache.CacheDict":
+            """Build a sub-view CacheDict scoped at ``node``."""
             return Cache.CacheDict(
                 self,
-                path,
-                alias=self._alias,
-                alias_paths=self._alias_paths,
+                node.path,
+                node=node,
+                tree=self._tree,
             )
 
-        def _alias_path_prefix(self, path: str) -> bool:
-            """True if ``path`` is an alias path or a prefix of one.
-
-            Lets attribute/index navigation walk the authoritative
-            ``_alias_paths`` keyspace segment by segment, which is required for
-            collapsing/re-mount renames whose alias path (``"model.layers.0"``)
-            is not a prefix of any real storage key (``"model.transformer.h.0"``).
+        def _ensure_node(self) -> Optional[PathNode]:
+            """This view's skeleton node, deriving a bare tree from the
+            storage keys if none was provided (direct construction without a
+            model). The derived tree navigates real paths only — no aliases.
             """
+            if self._node is None:
+                root = PathNode(path="")
+                for key in dict.__iter__(self):
+                    node = root
+                    prefix = ""
+                    for segment in key.split("."):
+                        prefix = segment if prefix == "" else prefix + "." + segment
+                        nxt = node.children.get(segment)
+                        if nxt is None:
+                            nxt = PathNode(path=prefix)
+                            node.children[segment] = nxt
+                        node = nxt
+                self._tree = root
+                self._node = root if self._path == "" else root.navigate(self._path)
+            return self._node
+
+        def _cached_under(self, node: PathNode) -> bool:
+            """Whether anything was recorded at or below ``node``.
+
+            The skeleton knows the whole model; the cache only what was
+            cached. Navigation refuses to descend into empty subtrees so
+            ``cache.model.transformer.h[0].mlp`` raises when only ``h[0]``
+            itself was cached.
+            """
+            prefix = node.path + "."
             return any(
-                key == path or key.startswith(path + ".") for key in self._alias_paths
+                k == node.path or k.startswith(prefix)
+                for k in dict.__iter__(self)
             )
+
+        def _facing_paths(self) -> Dict[str, str]:
+            """Real path → canonical user-facing path, from the skeleton.
+
+            The canonical spelling uses, at each step, the first alias
+            registered for the child (or its real name), with re-mount
+            aliases overriding the whole subtree they re-mount.
+            """
+            facing: Dict[str, str] = {}
+            remounts: Dict[str, str] = {}
+
+            tree = self._tree
+            if tree is None:
+                return facing
+
+            def walk(node: PathNode, base: str):
+                children = {id(child) for child in node.children.values()}
+                for alias, target in node.aliases.items():
+                    if id(target) not in children:
+                        remounts[target.path] = (
+                            base + "." + alias if base else alias
+                        )
+                for name, child in node.children.items():
+                    face = remounts.get(child.path)
+                    if face is None:
+                        label = next(
+                            (a for a, t in node.aliases.items() if t is child),
+                            name,
+                        )
+                        face = base + "." + label if base else label
+                    facing[child.path] = face
+                    walk(child, face)
+
+            walk(tree, "")
+
+            return facing
 
         def __getitem__(
             self, key: Union[str, int]
         ) -> "Union[Cache.CacheDict, Cache.Entry, List[Cache.Entry]]":
-            # Real storage keys are authoritative: check them before any alias
-            # translation so a rename can never shadow a genuinely cached
-            # module of the same name (e.g. ``rename={"a": "b", "b": "a"}``).
-            # This also keeps IPython pretty-printers (which call ``obj[k]``
-            # for each ``k`` in ``keys()``) from getting a double-prefixed key
-            # like ``"model.transformer.h.0.model.transformer.h.0"``.
-            if isinstance(key, str) and dict.__contains__(self, key):
+            if isinstance(key, str):
+                # Real storage keys are authoritative: check them before any
+                # alias resolution so a rename can never shadow a genuinely
+                # cached module of the same name. This also keeps IPython
+                # pretty-printers (which call ``obj[k]`` for each ``k`` in
+                # ``keys()``) from re-resolving absolute keys.
+                if dict.__contains__(self, key):
+                    return dict.__getitem__(self, key)
+
+                node = self._ensure_node()
+
+                # Resolve the (possibly dotted, possibly aliased) key against
+                # the skeleton — relative to this view first, then as an
+                # absolute path from the root.
+                target = node.navigate(key) if node is not None else None
+                if target is None and self._tree is not None:
+                    target = self._tree.navigate(key)
+                if target is not None:
+                    return dict.__getitem__(self, target.path)
+
                 return dict.__getitem__(self, key)
 
-            name = self._alias.get(key, key)
+            if isinstance(key, int):
+                node = self._ensure_node()
+                target = node.resolve(str(key)) if node is not None else None
 
-            if isinstance(name, str):
-                if dict.__contains__(self, name):
-                    return dict.__getitem__(self, name)
+                if target is not None and self._cached_under(target):
+                    return self._child(target)
 
-                if name in self._alias_paths:
-                    return dict.__getitem__(self, self._alias_paths[name])
-
-                path = self._path + "." + name if self._path != "" else name
-
-                # A key relative to this sub-view may itself be an aliased
-                # path (e.g. ``cache.model["layers.0"]`` under
-                # ``rename={"model.layers": "layers"}``); resolve the composed
-                # path through the alias map when it isn't in real storage.
-                if not dict.__contains__(self, path):
-                    path = self._alias_paths.get(path, path)
-
-                return dict.__getitem__(self, path)
-
-            if isinstance(name, int):
-                path = self._path + "." + f"{name}"
-                prefix = self._path + "."
-
-                # Whole-segment matching (``== path`` / ``path + "."``): a bare
-                # ``startswith(path)`` would let index 1 match ``...h.10`` and
-                # hand back a bogus sub-view that later raises ``KeyError``.
-                if any(
-                    key == path or key.startswith(path + ".") for key in self
-                ) or self._alias_path_prefix(path):
-                    return self._child(path)
-                # Out-of-bounds on a modulelist: a sibling numeric index exists
-                # under ``_path`` but ``name`` isn't one of them. Check both the
-                # real keys and the alias-path keyspace so renamed/collapsed
-                # modulelists raise ``IndexError`` rather than leaking a
-                # ``KeyError`` from the ``dict.__getitem__`` fallback below.
-                elif any(
-                    key.startswith(prefix)
-                    and len(key) > len(prefix)
-                    and key[len(prefix)].isdigit()
-                    for key in (*self, *self._alias_paths)
+                # The index names no cached module, but numeric siblings
+                # exist: this is a modulelist and the index is out of bounds
+                # (or points at an uncached element) — IndexError, not a
+                # KeyError leak from the fallback below.
+                if node is not None and any(
+                    name.isdigit() for name in node.children
                 ):
                     raise IndexError(
                         f"Index {key} is out of bounds for modulelist or module does not allow indexing."
@@ -285,31 +359,22 @@ class Cache:
             return dict.__getitem__(self, key)
 
         def __getattr__(self, attr: str) -> "Cache.CacheDict":
-            path = self._path + "." + attr if self._path != "" else attr
+            # Guard the fields this method itself relies on: during
+            # unpickling ``__getattr__`` can fire before ``__setstate__``
+            # restores them, and falling through would recurse.
+            if attr in ("_path", "_node", "_tree"):
+                raise AttributeError(attr)
 
-            # (1) Direct route: ``path`` is a real storage key or a
-            #     whole-segment prefix of one (``.ln`` must not match a key
-            #     ``...ln_f`` the way a bare ``startswith`` would).
-            if any(key == path or key.startswith(path + ".") for key in self):
-                return self._child(path)
+            node = self._ensure_node()
+            target = node.resolve(attr) if node is not None else None
 
-            # (2) Leaf-alias route: translate the aliased segment to its
-            #     underlying name and keep navigating in real-path space. If
-            #     that dead-ends (e.g. the alias value is a re-mount rooted
-            #     elsewhere, as with collapsing renames), fall through to the
-            #     alias-path route rather than raising.
-            if self._alias and attr in self._alias:
-                name = self._alias[attr].removeprefix(".")
-                try:
-                    return self.__getattr__(name)
-                except AttributeError:
-                    pass
-
-            # (3) Alias-path route: ``path`` prefixes an authoritative alias
-            #     path. Handles collapsing/re-mount renames whose alias path is
-            #     absent from the real storage keys.
-            if self._alias_path_prefix(path):
-                return self._child(path)
+            if target is not None:
+                if self._cached_under(target):
+                    return self._child(target)
+                raise AttributeError(
+                    f"'{attr}' exists on the model but was never cached. "
+                    f"'{self.__class__.__name__}' has no matching attribute."
+                )
 
             raise AttributeError(
                 f"'{attr}' module path was never cached. '{self.__class__.__name__}' has no matching attribute."
@@ -329,8 +394,7 @@ class Cache:
         detach: Optional[bool] = True,
         include_output: bool = True,
         include_inputs: bool = False,
-        aliased_paths: Optional[Dict[str, str]] = None,
-        alias: Optional[Dict[str, str]] = None,
+        tree: Optional[PathNode] = None,
     ):
         """Initialize a Cache with optional transformation parameters.
 
@@ -342,11 +406,9 @@ class Cache:
             detach: Whether to detach tensors from the computation graph.
             include_output: Whether to cache module outputs.
             include_inputs: Whether to cache module inputs.
-            aliased_paths: Real path → user-facing path for every module, as
-                computed from the envoy tree (:meth:`Envoy._aliased_paths`).
-                Renamed paths of cached modules are registered in the
-                ``CacheDict``'s alias-path map as values arrive.
-            alias: Alias mapping for ``CacheDict`` attribute access.
+            tree: Weights-free skeleton of the model
+                (:meth:`Envoy._skeleton`) that ``CacheDict`` navigation
+                resolves attribute/index access against, including renames.
         """
         self.device = device
         self.dtype = dtype
@@ -354,12 +416,11 @@ class Cache:
         self.modules = modules
         self.include_output = include_output
         self.include_inputs = include_inputs
-        self.aliased_paths = aliased_paths if aliased_paths is not None else {}
 
         if self.modules is not None:
             self.modules = {m if isinstance(m, str) else m.path for m in self.modules}
 
-        self.cache = Cache.CacheDict({}, alias=alias).save()
+        self.cache = Cache.CacheDict({}, tree=tree).save()
 
     def add(self, module_path: str, key: str, value: Any):
         """Add a value to the cache with optional transformations.
@@ -387,14 +448,6 @@ class Cache:
 
         if module_path not in self.cache:
             self.cache[module_path] = Cache.Entry(**{key: value})
-
-            # Register the module's user-facing path (derived from the envoy
-            # tree at cache creation) so aliased navigation can find it. Only
-            # cached modules get entries — navigation and IndexError semantics
-            # depend on the table mirroring what was actually recorded.
-            alias_path = self.aliased_paths.get(module_path)
-            if alias_path is not None and alias_path != module_path:
-                self.cache._alias_paths[alias_path] = module_path
         else:
             entry = self.cache[module_path]
 
@@ -646,32 +699,15 @@ class InterleavingTracer(Tracer):
             A :class:`Cache.CacheDict` that is populated during execution.
         """
 
-        # Both rename views come from the envoy tree, the source of truth for
-        # rename semantics: ``alias_dict`` (alias → module name) drives the
-        # leaf-alias route of CacheDict navigation, and ``aliased_paths``
-        # (real path → user-facing path, from Envoy._aliased_paths) drives
-        # the alias-path route for collapsing/re-mount renames.
-        rename_dict = (
-            self.model._alias.rename if self.model._alias is not None else dict()
-        )
-        # Rename values may be a list of aliases (e.g. ``{"transformer":
-        # ["model", "mdl"]}``); map every alias back to its module name.
-        alias_dict = {}
-        for name, aliases in rename_dict.items():
-            if isinstance(aliases, str):
-                aliases = [aliases]
-            for alias in aliases:
-                alias_dict[alias] = name
-
-        aliased_paths = (
-            self.model._aliased_paths() if self.model._alias is not None else {}
-        )
-
         if not self.model.interleaving:
             raise ValueError("Cannot create a cache outside an invoker.")
 
         from ..hooks import cache_output_hook, cache_input_hook
 
+        # Weights-free skeleton of the envoy tree: CacheDict navigation
+        # resolves attribute/index access (including renames) against it,
+        # so rename semantics come from the same Aliaser state that answers
+        # ``model.layers`` — one source of truth.
         cache_obj = Cache(
             modules,
             device,
@@ -679,8 +715,7 @@ class InterleavingTracer(Tracer):
             detach,
             include_output,
             include_inputs,
-            aliased_paths=aliased_paths,
-            alias=alias_dict,
+            tree=self.model._skeleton(),
         )
 
         mediator = self.model.interleaver.current
