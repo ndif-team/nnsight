@@ -317,19 +317,16 @@ class Cache:
             self, key: Union[str, int]
         ) -> "Union[Cache.CacheDict, Cache.Entry, List[Cache.Entry]]":
             if isinstance(key, str):
-                # Real storage keys are authoritative: check them before any
-                # alias resolution so a rename can never shadow a genuinely
-                # cached module of the same name. This also keeps IPython
-                # pretty-printers (which call ``obj[k]`` for each ``k`` in
-                # ``keys()``) from re-resolving absolute keys.
+                # Real storage is authoritative — an alias must never shadow
+                # a genuinely cached key, and absolute keys from ``keys()``
+                # must round-trip for IPython pretty-printing.
                 if dict.__contains__(self, key):
                     return dict.__getitem__(self, key)
 
                 node = self._ensure_node()
 
-                # Resolve the (possibly dotted, possibly aliased) key against
-                # the skeleton — relative to this view first, then as an
-                # absolute path from the root.
+                # Aliased/dotted keys: relative to this view first, then
+                # absolute from the root.
                 target = node.navigate(key) if node is not None else None
                 if target is None and self._tree is not None:
                     target = self._tree.navigate(key)
@@ -345,10 +342,8 @@ class Cache:
                 if target is not None and self._cached_under(target):
                     return self._child(target)
 
-                # The index names no cached module, but numeric siblings
-                # exist: this is a modulelist and the index is out of bounds
-                # (or points at an uncached element) — IndexError, not a
-                # KeyError leak from the fallback below.
+                # Numeric siblings exist, so this is a modulelist — raise
+                # IndexError rather than leaking KeyError from the fallback.
                 if node is not None and any(
                     name.isdigit() for name in node.children
                 ):
@@ -704,10 +699,8 @@ class InterleavingTracer(Tracer):
 
         from ..hooks import cache_output_hook, cache_input_hook
 
-        # Weights-free skeleton of the envoy tree: CacheDict navigation
-        # resolves attribute/index access (including renames) against it,
-        # so rename semantics come from the same Aliaser state that answers
-        # ``model.layers`` — one source of truth.
+        # The cache navigates a weights-free snapshot of the envoy tree, so
+        # rename semantics come from one source of truth.
         cache_obj = Cache(
             modules,
             device,
