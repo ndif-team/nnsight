@@ -463,6 +463,14 @@ class Interleaver:
 
         self.current: Mediator = None
 
+        # Hook handles of mediators dropped from ``self.mediators`` before
+        # ``cancel()`` runs (dead-mediator pruning in ``__exit__``, the
+        # clear in ``check_dangling_mediators``). Persistent hooks (cache,
+        # iter trackers) must keep firing until the trace ends, so they are
+        # retired here and removed in ``cancel()`` — otherwise they leak
+        # onto the module and corrupt caches on the next trace.
+        self.retired_hooks: List[Any] = []
+
     def cancel(self):
         """Cancel all mediators / intervention threads.
 
@@ -476,6 +484,10 @@ class Interleaver:
         for mediator in self.mediators:
             mediator.cancel()
             mediator.remove_hooks()
+
+        for handle in self.retired_hooks:
+            handle.remove()
+        self.retired_hooks = []
 
         self.mediators = []
         self.tracer = None
@@ -641,8 +653,18 @@ class Interleaver:
         # Clear the interleaving flag on exit.
         self._interleaving = False
 
-        # Clear the mediators that are no longer alive.
-        self.mediators = [mediator for mediator in self.mediators if mediator.alive]
+        # Clear the mediators that are no longer alive, retiring their hook
+        # handles so ``cancel()`` can still remove them at the end of the
+        # trace (vLLM re-enters this context per engine step, so removal
+        # here would be premature for persistent cache/iter hooks).
+        alive = []
+        for mediator in self.mediators:
+            if mediator.alive:
+                alive.append(mediator)
+            else:
+                self.retired_hooks.extend(mediator.hooks)
+                mediator.hooks.clear()
+        self.mediators = alive
 
         # Swallow internal control-flow exceptions so they don't escape the
         # ``with self.interleaver:`` block in server worker paths and kill
@@ -733,6 +755,10 @@ class Interleaver:
                         warnings.warn(msg)
                 else:
                     mediator.handle()
+
+        for mediator in self.mediators:
+            self.retired_hooks.extend(mediator.hooks)
+            mediator.hooks.clear()
 
         self.mediators = []
 

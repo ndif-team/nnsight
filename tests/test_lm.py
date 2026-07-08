@@ -1495,6 +1495,12 @@ class TestCache:
         # keys(alias=True) enumerates one renamed spelling per cached module.
         assert "model.layers.0" in cache.keys(alias=True)
 
+        # Membership agrees with lookup, renamed spellings included.
+        assert "model.layers.0" in cache
+        assert "model.transformer.h.0" in cache
+        assert "layers.0" in cache.model
+        assert "model.layers.999" not in cache
+
     @torch.no_grad()
     def test_cache_rename_preserves_root(self, MSG_prompt: str):
         """A rename matching the root component name must not corrupt the root.
@@ -1563,6 +1569,37 @@ class TestCache:
         # the first navigation.
         dict.__setitem__(a, "model.y", Cache.Entry(output=2))
         assert a.model.y.output == 2
+
+    @torch.no_grad()
+    def test_cache_hooks_removed_after_trace(
+        self, gpt2: nnsight.LanguageModel, MSG_prompt: str
+    ):
+        """Cache hooks are removed when the trace exits.
+
+        They used to leak (dead mediators were pruned before ``cancel()``
+        could drain their hooks), so the next trace on the same model
+        re-fired them into the first trace's cache, silently turning its
+        entries into lists.
+        """
+        from nnsight.intervention.tracing.tracer import Cache
+
+        module = gpt2.transformer.h[0]._module
+        hooks_before = len(module._forward_hooks) + len(module._forward_pre_hooks)
+
+        with gpt2.trace(MSG_prompt) as tracer:
+            cache = tracer.cache(modules=[gpt2.transformer.h[0]]).save()
+
+        output = cache["model.transformer.h.0"].output
+
+        with gpt2.trace(MSG_prompt):
+            pass
+
+        hooks_after = len(module._forward_hooks) + len(module._forward_pre_hooks)
+        assert hooks_after == hooks_before
+
+        entry = dict.__getitem__(cache, "model.transformer.h.0")
+        assert isinstance(entry, Cache.Entry)
+        assert torch.equal(cache["model.transformer.h.0"].output, output)
 
     def test_cache_dict_old_pickle_state(self):
         """Caches pickled before the skeleton fields existed still navigate.
