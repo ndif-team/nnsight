@@ -278,11 +278,12 @@ class Cache:
             )
 
         def _facing_paths(self) -> Dict[str, str]:
-            """Real path → canonical user-facing path, from the skeleton.
+            """Real path → one display spelling, for ``keys(alias=True)``.
 
-            The canonical spelling uses, at each step, the first alias
-            registered for the child (or its real name), with re-mount
-            aliases overriding the whole subtree they re-mount.
+            Display only — navigation never consults this. Every alias of a
+            module navigates via :meth:`PathNode.resolve`; this just picks a
+            single spelling per module for enumeration (first alias at each
+            step, re-mount aliases overriding the subtree they re-mount).
             """
             facing: Dict[str, str] = {}
             remounts: Dict[str, str] = {}
