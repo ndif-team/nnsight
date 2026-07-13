@@ -2,9 +2,9 @@
 
 ## The problem
 
-There is growing demand for deploying interpretability at production scale: harvesting activations from frontier models for SAE training, steering and probing behavior during live serving. Hugging Face Transformers is the natural starting point for that work. At modest scale it works fine, but at production workload it falls short: weak support for distributed serving, and missing modern inference optimizations that production workload needs. Production engines like vLLM and SGLang fill both gaps, with distributed worker pools (multi-dimension parallelism, multi-node deployment) and modern inference optimizations (paged KV caches, continuous batching, request scheduling, fused kernels). All of these make interpretability substantially harder than on Transformers: the engine drives the forward pass, a single module's output can be sharded across GPUs and nodes, and the decode hot path runs through CUDA graphs or compiled code that Python hooks cannot access.
+There is growing demand for deploying interpretability at production scale: harvesting activations from frontier models for SAE training, steering and probing behavior during live serving, and study internals of models with hundreds of billions of parameters. Hugging Face Transformers is the natural starting point for interpretability work. At modest scale it works fine, but at production workload it falls short: weak support for distributed serving, and missing modern inference optimizations that production workload needs. Production engines like vLLM and SGLang fill both gaps, with distributed worker pools (multi-dimension parallelism, multi-node deployment) and modern inference optimizations (paged KV caches, continuous batching, request scheduling, fused kernels). All of these make interpretability substantially harder than on Transformers: the engine drives the forward pass, a single module's output can be sharded across GPUs and nodes, and the decode hot path runs through optimized implementation like CUDA graphs or compiled code that Python hooks cannot access.
 
-Two recent efforts have addressed specific slices of this. Goodfire [forked SGLang](https://www.goodfire.ai/blog/interpretability-infra-at-frontier-scale) to harvest activations from Kimi K2 Thinking for SAE training, with the fork tuned to that one workflow. UK AISI's [vllm-lens](https://github.com/UKGovernmentBEIS/vllm-lens) is a vLLM plugin for probes, steering, and activation oracles. Its authors describe it as "focussing exclusively on interaction with the residual stream."
+Some recent efforts have addressed specific slices of this. Goodfire [forked SGLang](https://www.goodfire.ai/blog/interpretability-infra-at-frontier-scale) to harvest activations from Kimi K2 Thinking for SAE training, with the fork tuned to that one workflow. UK AISI's [vLLM-Lens](https://github.com/UKGovernmentBEIS/vllm-lens) and IBM's [vLLM-Hook] (https://arxiv.org/abs/2603.06588v1) are vLLM plugins for probes, steering, and activation oracles. While they are compatible with the engine natively, they only cover fixed point interventions, no programmability so researchers are not allowed to define their intervention workflow on-the-fly.
 
 The broader problem is harder than what either slice addresses. Researchers and engineers want to:
 
@@ -14,7 +14,7 @@ The broader problem is harder than what either slice addresses. Researchers and 
 - **Iterate** on what they're looking at without spinning up a new pipeline branch.
 - **Scale** the work to production-grade inference infrastructure, not a single-GPU notebook.
 
-This is the problem NNsight's vLLM integration is built to solve. The user-facing surface is small:
+This is the problem NNsight's vLLM integration is built to solve. The user-facing surface is an in-process illusion:
 
 ```python
 from nnsight.modeling.vllm import VLLM
@@ -28,6 +28,8 @@ with model.trace("The Eiffel Tower is in", temperature=0.0):
     model.model.layers[40].output = out                # write the edit back
     logits = model.logits.save()                       # save final logits
 ```
+
+While the model is actually served by a highly efficient engine, the user writes the same code they would on a Hugging Face model.
 
 The rest of this post shows how that snippet runs on a production-level model like Kimi K2 across multiple GPUs.
 
@@ -96,11 +98,13 @@ The mediator sees none of this. Module access returns the correct activation in 
 
 The trace API has four guarantees: every read returns a whole tensor, parent-scope variables are shared across invokes, saves come back when the context exits, and errors raised inside a trace surface to its caller. At scale, vLLM breaks each of these. Sharding distributes a tensor across GPUs, multi-prompt traces become N independent requests on the engine, async generation outlives the `with` block, and a single bad intervention would crash the engine that's running everyone's requests. Each part needs its own fix.
 
-**Distribution.** Production-scale serving doesn't fit one GPU, and vLLM distributes work several ways: tensor parallelism shards a module's output across GPUs, expert parallelism shards MoE experts, pipeline parallelism splits whole layers across ranks, and multi-node setups push workers across machines. We handle TP transparently today. EP and PP change which modules even live on which rank, and they're still in active design.
+**Distribution.** Production-scale serving doesn't fit one GPU, and vLLM distributes work several ways: tensor parallelism shards a module's output across GPUs, expert parallelism shards MoE experts, pipeline parallelism splits whole layers across ranks, and multi-node setups push workers across machines. We handle TP and PP today.
 
 With `tensor_parallel_size > 1`, vLLM puts `ColumnParallelLinear` and `RowParallelLinear` layers in the model. Each rank's copy holds only a slice of the full weight and produces only a slice of the output. The batcher gathers, lazily: when a mediator touches a TP layer's value, the batcher runs an all-gather (column-parallel) or all-reduce (row-parallel). Every rank ends up with the same complete tensor, and the mediator runs the same intervention against it on every rank. When the mediator is done, a post-hook splits the tensor back so vLLM resumes on its sharded copy. TP layers that no mediator touches pay nothing. The gather and post-hook run on vLLM's compute stream (each mediator's worker thread inherits it on startup), so they don't race with the forward pass.
 
 ![Column-parallel (all-gather) vs row-parallel (all-reduce) at TP=2](nnsight_vllm_tp.svg)
+
+Pipeline parallelism is more complex. Each rank only sees a subset of the layers, so a mediator that touches layers on different ranks fails to find them. The naive solution is to ship all of the state variables in a mediator to its next rank, but this would be substantial overhead for large traces, like the workload that harvests activations from many layers. Our key observation is: the mediator on different ranks rarely need cross-rank states to be dereferenced. In this sense, we design a late-materialization mechanism: we wrap all missing layers with a stub that pulls the state from the canonical rank on dereference. The canonical rank is the one that owns the layer, and it is responsible for maintaining the state. The stub on other ranks only holds a reference to the canonical rank, and when the mediator accesses the layer, it fetches the state from the canonical rank. This way, we avoid shipping large states across ranks, and we only pay the cost of fetching when necessary.
 
 **Multi-prompt traces.** vLLM treats every prompt as an independent request: each has its own scheduling, decode lifecycle, and finish condition. NNsight inherits that, with one prompt per invoke and one mediator per request. A multi-prompt trace therefore becomes N independent requests on the worker. If the user defines shared state in the parent scope (say, `out_ids = [list() for _ in prompts].save()` outside the invokes), each mediator arrives with its own deserialized copy. An append in mediator 0 wouldn't show up in mediator 1.
 
@@ -202,7 +206,6 @@ These are vLLM's design choices that the user inherits, and they make `model.tra
 
 **What's planned.** Several extensions are in active design:
 
-- **Pipeline parallelism.** TP is handled today. PP, where different layers live on different ranks, needs cross-stage variable pulling and per-stage globals.
 - **Streaming saves.** Worker-side save collection already separates "collect saves" from "finalize and clean up," so per-step streaming on the async backend is a backend-side change away from working.
 - **Multimodal models.** vLLM's vision-encoder disaggregation puts the encoder on separate workers, and interception there needs its own hook point.
 - **Partial CUDA graphs.** vLLM V1's piecewise design captures attention separately from MLP, so we could keep graphs on the unhooked segments while running eager only at the layers a trace touches. This is the most likely lever for closing the eager-mode tax.
