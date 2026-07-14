@@ -7,6 +7,7 @@ paths to their owning PP rank.
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from typing import Optional
 
 import torch.nn as nn
@@ -49,6 +50,17 @@ PP_FINALIZE_JOIN_S = 5.0
 # Internal mechanics (not user-facing):
 PP_GATE_POLL_S = 1e-4          # readiness-gate spin granularity
 PP_LISTENER_BACKOFF_S = 0.5    # listener retry after a transient error
+
+# Pull-group gloo timeout. The listener blocks on an idle ``dist.recv`` for as
+# long as a server sits between requests — that is BY DESIGN, not a hang. But
+# ``dist.new_group`` otherwise inherits torch's 30-min default PG timeout, and
+# gloo closes the whole peer pair when that expires on the idle recv, which
+# permanently breaks every later cross-stage pull (a serve idle >30 min then
+# 500s its first intervention). Pull safety is governed by the app-level
+# park + error-reply protocol, not by this timeout, so set it effectively
+# infinite. (Per-op recv timeouts are deliberately avoided too — see
+# ``pp_listener`` module docstring on pair closure.)
+PP_PULL_GROUP_TIMEOUT = timedelta(days=365)
 
 
 def resolve_meta(meta_map: dict, path: str, root: str = "model"):

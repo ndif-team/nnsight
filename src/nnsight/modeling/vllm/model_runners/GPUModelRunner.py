@@ -18,7 +18,12 @@ from ....intervention.serialization import load
 from ....intervention.tracing.globals import Globals
 from ..batching import VLLMBatcher
 from ..lazy_remote_tensor import strip_lazy
-from ..pp import PP_FINALIZE_JOIN_S, PP_GATE_POLL_S, PP_GATE_TIMEOUT_S
+from ..pp import (
+    PP_FINALIZE_JOIN_S,
+    PP_GATE_POLL_S,
+    PP_GATE_TIMEOUT_S,
+    PP_PULL_GROUP_TIMEOUT,
+)
 
 if TYPE_CHECKING:
     from ..vllm import VLLM
@@ -575,7 +580,14 @@ class NNsightGPUModelRunner(GPUModelRunner):
                     pp_rank * tp_size + tp_offset
                     for pp_rank in range(pp_world_size)
                 ]
-                g = dist.new_group(ranks=pp_ranks_for_tp, backend="gloo")
+                # Effectively-infinite timeout: the listener's idle recv on this
+                # group is by-design, and gloo's default 30-min PG timeout would
+                # close the pair on that idle recv and break every later pull.
+                g = dist.new_group(
+                    ranks=pp_ranks_for_tp,
+                    backend="gloo",
+                    timeout=PP_PULL_GROUP_TIMEOUT,
+                )
                 if dist.get_rank() in pp_ranks_for_tp:
                     my_pull_group = g
             self.pp_pull_group = my_pull_group
