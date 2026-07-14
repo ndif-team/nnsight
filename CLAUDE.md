@@ -6,6 +6,64 @@ If you're new to nnsight, read [docs/concepts/index.md](docs/concepts/index.md) 
 
 ---
 
+## Dev commands
+
+Editable install (dev). Extras: `test`, `diffusers`, `vllm`, `all`.
+
+```bash
+pip install -e ".[test]"          # core + pytest
+pip install -e ".[all]"           # + diffusers + vllm
+```
+
+Tests use pytest. Config in `pytest.ini`; shared fixtures and CLI flags in `tests/conftest.py`. Most tests run on CPU — pass `--device cpu` when you have no GPU (default is `cuda:0` if available).
+
+```bash
+# Standard validation suite (matches CONTRIBUTING.md / CI) — run before a PR:
+pytest tests/test_lm.py tests/test_tiny.py tests/test_0516_features.py tests/test_debug.py tests/test_memory_cleanup.py tests/test_multiple_wrappers.py --device cpu
+
+pytest tests/test_tiny.py --device cpu -x            # fast smoke test
+pytest tests/test_lm.py::test_name --device cpu      # one test
+pytest tests/test_lm.py -k logit_lens --device cpu   # by name substring
+pytest tests/test_lm.py -m "iter or cache" --device cpu  # by marker
+```
+
+Test-selection flags (defined in `tests/conftest.py`): `--device`, `--tp <n>` (vLLM tensor-parallel), `--test-flux` (opt-in slow Flux tests). Markers registered in `pytest.ini`: `scan config order source skips iter cache rename`.
+
+Heavy / optional-dep suites: `pytest tests/test_vllm.py --tp 1` (needs GPU + vllm), `pytest tests/test_diffusion.py --device cpu`, `pytest tests/test_vlm.py --device cpu`. `tests/test_remote.py` needs an NDIF API key + network.
+
+No enforced formatter — match surrounding style. `black` (line-length 88) and `isort` (black profile) are configured in `pyproject.toml` if you want them. Version is derived from git tags by `setuptools-scm` into `src/nnsight/_version.py` (do not edit that file).
+
+Full test inventory: [docs/developing/testing.md](docs/developing/testing.md). Pre-PR checklist (what else to run based on what you touched): [docs/developing/contributing.md](docs/developing/contributing.md).
+
+---
+
+## Architecture at a glance
+
+The whole point of nnsight: a `with model.trace(input): ...` block is **not** run as ordinary Python. The body is captured, compiled, and executed in a worker thread; module value access (`.output`, `.input`) blocks that thread until a PyTorch hook delivers the real tensor mid-forward-pass. This deferred, thread-synchronized execution is why access order matters and why `.save()` exists. Read [docs/concepts/deferred-execution.md](docs/concepts/deferred-execution.md) if any behavior looks "out of order" or "blocking."
+
+Source layout (`src/nnsight/`):
+
+| Path | Role |
+|---|---|
+| `__init__.py` | Public API: `NNsight`, `LanguageModel`, `VisionLanguageModel`, `DiffusionModel`, `CONFIG`, `save`, ... |
+| `intervention/` | The engine. Everything that makes tracing work. |
+| `intervention/tracing/` | `Tracer` subclasses — `base.py` (capture→parse→compile), `tracer.py` (`InterleavingTracer`), `invoker.py`, `iterator.py`, `backwards.py`, `editing.py`, `globals.py`. |
+| `intervention/backends/` | Compile+exec (`base.py`, `execution.py`) plus `remote.py`, `editing.py`, `local_serve.py`, `local_simulation.py`. |
+| `intervention/envoy.py` | `Envoy` — the user-facing proxy over each `nn.Module` (`.output`/`.input`/`.inputs`/`.source`/`.skip`). |
+| `intervention/interleaver.py` | `Interleaver` (orchestration, main thread), `Mediator` (one worker thread per invoke), `eproperty` (descriptor for hookable values). |
+| `intervention/hooks.py` | One-shot, mediator-ordered PyTorch forward/pre hooks; the `requires_output`/`requires_input` decorators. |
+| `intervention/source.py` | `SourceAccessor` — rewrites a module's forward AST for `.source.<op>` access. |
+| `intervention/serialization.py` | Source-based pickling used to ship interventions to NDIF. |
+| `intervention/batching.py` | `Batcher` — narrows/swaps per-invoke groups into the batched input. |
+| `modeling/` | Model classes: `base.py`, `huggingface.py`, `language.py`, `transformers.py`, `vlm.py`, `diffusion.py`, and `vllm/`. |
+| `schema/` | Request/response schema for remote (NDIF) execution. |
+
+Data flow: **user code → `Tracer` (capture + compile) → `Backend` (exec) → `Interleaver` starts one `Mediator` per invoke → worker thread runs intervention → `eproperty` access installs a one-shot hook + blocks → model forward fires the hook → `Mediator.handle` delivers/swaps the value → worker unblocks.** Full walk with `file:line` refs: [docs/developing/architecture-overview.md](docs/developing/architecture-overview.md). Long-form design narrative: [NNsight.md](NNsight.md).
+
+`refactor/transform` branch specifics: hooks are lazy and one-shot per mediator (not permanent on every module), and module value access is a formal `eproperty` extension API. See [docs/developing/lazy-hook-system.md](docs/developing/lazy-hook-system.md) and [docs/developing/eproperty-deep-dive.md](docs/developing/eproperty-deep-dive.md).
+
+---
+
 ## How to use this file
 
 1. Find the user's intent in **"By task"** below and follow the link.
