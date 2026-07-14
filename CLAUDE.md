@@ -237,7 +237,7 @@ Agents must not propose any of the following patterns when writing new nnsight c
 | Deprecated | Replacement | Notes |
 |---|---|---|
 | `model.trace(input, scan=True, validate=True)` | `with model.scan(input): ...` (separate context) | The `scan=`/`validate=` kwargs on `.trace()` were removed long before `refactor/transform`. The dedicated [`model.scan(...)`](docs/usage/scan.md) context is the canonical replacement. |
-| `model.transformer.h[-1].next()` (`module.next()`) | `tracer.next()` | Still works but emits `DeprecationWarning` (`src/nnsight/intervention/envoy.py:440`). See [docs/usage/iter-all-next.md](docs/usage/iter-all-next.md). |
+| `model.transformer.h[-1].next()` (`module.next()`) | `tracer.next()` | Still works but emits `DeprecationWarning` (`src/nnsight/intervention/envoy.py:455`). See [docs/usage/iter-all-next.md](docs/usage/iter-all-next.md). |
 | `model.iter[...]` / `model.all()` | `tracer.iter[...]` / `tracer.all()` | `model`-level iteration helpers are deprecated; use the tracer-level equivalents. |
 | `nnsight.cond` | Plain Python `if` inside a trace | Removed in v0.5. Worker thread sees real tensors. |
 | `nnsight.list` / `nnsight.dict` / `nnsight.bool` etc. | Standard Python types + `.save()` / `nnsight.save(...)` | Removed in v0.5. |
