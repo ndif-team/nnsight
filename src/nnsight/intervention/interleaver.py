@@ -1016,6 +1016,11 @@ class Mediator:
         # cross-process-aware logic (e.g. Barrier) know it can't count locally.
         self._isolated_worker = False
 
+        # Host side of an isolated mediator: the final tagged requester of the
+        # event currently being handled, shipped back to the worker on the
+        # response's meta piggyback (the worker keys backward provenance off it).
+        self._iso_last_tag = None
+
         self.skip_container = None
 
         self.history = set()
@@ -1023,6 +1028,12 @@ class Mediator:
         self.hooks: List[Any] = list()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
+        # Number of `tracer.iter[...]` scopes currently open (IteratorTracer
+        # increments/decrements around each loop). Read by the isolated worker's
+        # interleaver stub to decide whether a requester's iteration must be
+        # resolved on the host (in-loop: the host owns the step counter and the
+        # pin-relaxation state) or locally (out-of-loop: the pin is authoritative).
+        self.iter_depth = 0
         self.all_stop: Optional[int] = stop
         self.args = list()
         self.cross_invoker = None
@@ -1190,6 +1201,7 @@ class Mediator:
         self.history = set()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
+        self.iter_depth = 0
         self.worker = None
         # Retained on-graph activations (isolated backward) pin the autograd graph;
         # drop them at trace end rather than waiting for the mediator to be GC'd.
@@ -1267,17 +1279,32 @@ class Mediator:
 
             event, data = self.channel.get_event()
 
-            # Host-side hook registration: in the isolated path the worker has no real module, so the
-            # host registers the one-shot hook on demand from the requester string
-            # the worker just sent.
+            # Isolated path: the worker has no real module, so the host both
+            # resolves the requester's iteration tag and registers the one-shot
+            # hook on demand. An in-loop requester crosses UNTAGGED (a marker
+            # tuple carrying the base path + the worker's live `tracer.iter` pin):
+            # the host is the single iteration authority, so the tag is computed
+            # here from the host mediator's own pin/step counter (the same state
+            # the in-process resolution reads). Out-of-loop requesters arrive
+            # already tagged and pass through. The resolved string is stashed on
+            # `_iso_last_tag` so the response's meta piggyback ships it back to
+            # the worker (backward provenance keys off it). Events restored by
+            # `handle_value_event` re-enter this loop already resolved, so the
+            # tag is never recomputed at a later (wrong) step.
             if self._iso is not None and event in (
                 Events.VALUE,
                 Events.SWAP,
                 Events.SKIP,
             ):
-                from .isolation import ensure_isolated_provider
+                from .isolation import ensure_isolated_provider, resolve_iso_requester
 
-                requester = data if event == Events.VALUE else data[0]
+                if event == Events.VALUE:
+                    data = resolve_iso_requester(self, data)
+                    requester = data
+                else:
+                    requester = resolve_iso_requester(self, data[0])
+                    data = (requester, *data[1:])
+                self._iso_last_tag = requester
                 ensure_isolated_provider(self, requester)
 
             if event == Events.VALUE:
@@ -1981,6 +2008,8 @@ class Mediator:
         self.user_cache: "Cache" = list()
         self.hooks: List[Any] = list()
         self.iteration = 0
+        self.iter_depth = 0
+        self._iso_last_tag = None
         self.args = list()
         self.original_globals = {}
         self.cross_invoker = None

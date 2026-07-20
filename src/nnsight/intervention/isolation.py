@@ -538,9 +538,14 @@ def _wire_host_channel(mediator, iso: _PooledWorker, worker_opts: dict) -> None:
     # ._execute), so a snapshot is stale. Piggyback the LIVE value + the cross_invoker
     # var store on each response; the worker reads default_all before bounding its
     # iter[:] loop and pulls the store before each access.
+    mediator._iso_last_tag = None
     chan.meta_provider = lambda: {
         "default_all": mediator.interleaver.default_all,
         "xinvoke_store": mediator.interleaver._xinvoke_store,
+        # Host-resolved tag of the event this response answers (in-loop
+        # requesters cross untagged; the worker keys backward provenance
+        # off the tag the host actually used).
+        "resolved": mediator._iso_last_tag,
     }
     chan.on_push = mediator.interleaver._xinvoke_store.update
     mediator.channel = chan
@@ -623,6 +628,36 @@ def path_to_envoy(mediator) -> dict:
     return iso.path2envoy
 
 
+# First element of the wire tuple an isolated worker sends for an in-loop
+# (`tracer.iter`) requester: ("<marker>", base_path, pin, pin_dirty). The host
+# resolves the iteration tag; out-of-loop requesters cross as plain tagged strings.
+ISO_ITER_REQ = "__nnsight_iso_iter_req__"
+
+
+def resolve_iso_requester(mediator, wire) -> str:
+    """Resolve a worker-sent requester into its final tagged string, host-side.
+
+    A plain string (out-of-loop, already tagged by the worker) passes through.
+    A marker tuple (in-loop) is resolved against the HOST mediator's state with
+    the exact in-process rule (`Interleaver.iterate_requester`): the pin if set,
+    else the per-path step counter. The worker's pin rides the tuple and is
+    applied only when `pin_dirty` says the worker's iter loop assigned it since
+    the last event; otherwise the host's own pin state (including fire-time
+    relaxation done by the one-shot hooks) is authoritative.
+    """
+    if isinstance(wire, str):
+        return wire
+    _, base, pin, pin_dirty = wire
+    if pin_dirty:
+        mediator.iteration = pin
+    iteration = (
+        mediator.iteration
+        if mediator.iteration is not None
+        else mediator.iteration_tracker[base]
+    )
+    return f"{base}.i{iteration}"
+
+
 def ensure_isolated_provider(mediator, requester: str) -> None:
     """Host-side hook registration: register the one-shot hook for ``requester`` on the *real* module.
 
@@ -684,8 +719,18 @@ class _WorkerInterleaver:
         # to run; set by generate(max_new_tokens=N) on the host and shipped over.
         self.default_all = default_all
 
-    def iterate_requester(self, requester: str) -> str:
+    def iterate_requester(self, requester: str):
         med = self.current
+        # Inside a `tracer.iter[...]` scope the step counter lives on the HOST
+        # (the worker's tracker never advances: its modules are dummies), so the
+        # requester crosses untagged and the host resolves it. The pin rides
+        # along, flagged dirty only if the loop assigned it since the last event,
+        # so host-side pin relaxation is not clobbered by a stale worker pin.
+        if med.iter_depth:
+            dirty, med._pin_dirty = med._pin_dirty, False
+            return (ISO_ITER_REQ, requester, med.iteration, dirty)
+        # Out of loop the pin is authoritative and lives here; resolve locally
+        # (same rule as in-process).
         iteration = (
             med.iteration if med.iteration is not None else med.iteration_tracker[requester]
         )
@@ -753,10 +798,31 @@ class WorkerMediator(Mediator):
     channel's ``on_meta`` / ``push_provider`` per job.
     """
 
+    # The `tracer.iter` pin, instrumented so `iterate_requester` can tell the host
+    # whether the worker's loop assigned it since the last event (dirty). The class
+    # swap in `adopt` makes this data descriptor shadow the deserialized instance
+    # attribute, which `adopt` migrates into `_iteration`.
+    @property
+    def iteration(self):
+        return self._iteration
+
+    @iteration.setter
+    def iteration(self, value):
+        self._iteration = value
+        self._pin_dirty = True
+
     @classmethod
     def adopt(cls, mediator, channel, interleaver, opts: dict, device) -> "WorkerMediator":
         """Turn a freshly-deserialized mediator into this job's worker mediator."""
         mediator.__class__ = cls
+        # Migrate the pin under the property; not dirty: the host mediator starts
+        # from the identical deserialized state, so there is nothing to push.
+        mediator._iteration = mediator.__dict__.pop("iteration")
+        mediator._pin_dirty = False
+        # Final tag of the last-delivered value, resolved on the host and shipped
+        # back on the response meta (None for out-of-loop requesters, which the
+        # worker tagged itself).
+        mediator._last_resolved = None
         mediator.channel = channel
         mediator.interleaver = interleaver
         mediator.idx = 0
@@ -775,22 +841,33 @@ class WorkerMediator(Mediator):
         interleaver.current = mediator
         return mediator
 
-    def request(self, requester: str):
+    def _resolved_tag(self, requester) -> str:
+        """The final tagged requester of the exchange that just completed: an
+        out-of-loop requester was tagged locally; an in-loop one crossed as a
+        marker tuple and its tag came back on the response meta."""
+        return requester if isinstance(requester, str) else self._last_resolved
+
+    def request(self, requester):
         value = super().request(requester)
         if self._bwd_active:
-            self._tag_delivered(value, requester)
+            self._tag_delivered(value, self._resolved_tag(requester))
         return value
 
-    def swap(self, requester: str, value):
+    def swap(self, requester, value):
         # Grad-through-swap: keep the worker-TAPE swap value (with grad_fn back to the
         # delivered clones) before send() ships its detached copy. The backward block uses
         # it to backprop the host-returned dL/d(swap leaf) into dL/d(delivered clone). Tuple
-        # outputs: the residual is element [0].
+        # outputs: the residual is element [0]. Keyed by the HOST-resolved tag (known
+        # only after the exchange), matching the host's `_iso_grad_swaps` keys.
+        seam = None
         if self._bwd_active:
             seam = value[0] if isinstance(value, tuple) else value
-            if torch.is_tensor(seam) and seam.requires_grad:
-                self._bwd_swaps[requester] = seam
-        return super().swap(requester, value)
+            if not (torch.is_tensor(seam) and seam.requires_grad):
+                seam = None
+        result = super().swap(requester, value)
+        if seam is not None:
+            self._bwd_swaps[self._resolved_tag(requester)] = seam
+        return result
 
     def _tag_delivered(self, value, requester: str) -> None:
         """Tag each delivered activation tensor with its requester provenance and make
@@ -838,8 +915,10 @@ class WorkerMediator(Mediator):
         super().exception(_transmissible_exc(exception))
 
     def apply_meta(self, m: dict) -> None:
-        # Live host state piggybacked on each response: the iter[:] bound and the
-        # cross_invoker var store (pulled into the frame so push()/pull() see it).
+        # Live host state piggybacked on each response: the iter[:] bound, the
+        # cross_invoker var store (pulled into the frame so push()/pull() see it),
+        # and the host-resolved tag of the event this response answers.
+        self._last_resolved = m["resolved"]
         self.interleaver.default_all = m.get(
             "default_all", self.interleaver.default_all
         )
