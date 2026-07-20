@@ -566,7 +566,10 @@ class Tracer:
             filtered_state = {
                 k: v for k, v in filtered_state.items() if id(v) in Globals.saves
             }
+            # Carried (.carry()) values are cross-trace handoffs, never surfaced to the
+            # user frame; clear them at the root/session exit alongside saves.
             Globals.saves.clear()
+            Globals.shared.clear()
 
         if target_frame is not None:
             # Push the filtered variables back to the original frame

@@ -355,6 +355,17 @@ class Events(Enum):
     EXCEPTION = "exception"  # Signal that an exception occurred
     SKIP = "skip"  # Signal that an operation should be skipped
     BARRIER = "barrier"  # Signal that a barrier should be set
+    CACHE = "cache"  # Register a tracer.cache() on the host's real modules (isolation)
+    BACKWARD = "backward"  # Run the backward pass on the host's real graph (isolation)
+    UNEMBED = "unembed"  # Run norm+unembed on the host's real weights (isolation)
+
+
+# A ``tracer.cache()`` placeholder is a custom ``CacheDict`` object that is NOT in the
+# worker->host value algebra (only data crosses, never live objects). The worker ships its
+# token as a plain-dict marker ``{_ISO_CACHE_TAG: token}`` instead; the host swaps in its
+# own forward-filled CacheDict by token in ``handle_end_event``. (Same shape as the
+# EXCEPTION ``(type, message)`` sentinel — a value standing in for an object.)
+_ISO_CACHE_TAG = "__nnsight_iso_cache__"
 
 
 class Cancelation(Exception):
@@ -462,6 +473,16 @@ class Interleaver:
         self.default_all = None
 
         self.current: Mediator = None
+
+        # Isolated BARRIER: workers can't count across processes, so each sends the
+        # target count and the host accumulates participant names here, coordinating
+        # when all have arrived. Unused on the in-process path.
+        self._barrier_acc: set = set()
+
+        # Isolated cross_invoker: per-worker frames aren't shared across processes, so
+        # workers push their locals here and pull the merged store back (host-mediated
+        # replacement for the shared-frame push/pull). Unused on the in-process path.
+        self._xinvoke_store: dict = {}
 
     def cancel(self):
         """Cancel all mediators / intervention threads.
@@ -712,7 +733,7 @@ class Interleaver:
         for mediator in self.mediators:
 
             if mediator.alive:
-                requested_event, requester = mediator.event_queue.get()
+                requested_event, requester = mediator.channel.get_event()
 
                 if isinstance(requester, tuple):
                     requester = requester[0]
@@ -771,6 +792,91 @@ class Interleaver:
         return self
 
 
+class MediatorChannel:
+    """Bidirectional, one-event-in-flight handoff between the worker thread (the
+    intervention fn) and the main thread (the model forward pass).
+
+    The six :class:`Events` (VALUE/SWAP/SKIP/BARRIER/END/EXCEPTION) ride on top of
+    this channel unchanged. Today the only implementation is in-process
+    (:class:`InProcessChannel`, two lock-based one-slot queues); the mediator
+    isolation refactor adds a socket-backed subclass so the worker can run in a
+    separate sandbox process. See docs/developing/mediator-isolation-harness-plan.md.
+
+    Direction conventions:
+    - ``*_event`` methods carry worker -> main messages (an ``(Events, requester)`` pair).
+    - ``*_response`` methods carry main -> worker replies (the value for a pending event).
+
+    Only one event is ever in flight, which is what enforces the "access modules in
+    forward-pass order" contract.
+    """
+
+    # --- worker -> main (event direction) ---
+    def put_event(self, item: Any) -> None:
+        raise NotImplementedError
+
+    def restore_event(self, item: Any) -> None:
+        """Stage an event back without releasing a waiter (used when a provider
+        fires that the worker is not currently requesting)."""
+        raise NotImplementedError
+
+    def get_event(self) -> Any:
+        raise NotImplementedError
+
+    def wait_event(self) -> None:
+        raise NotImplementedError
+
+    @property
+    def has_event(self) -> bool:
+        raise NotImplementedError
+
+    # --- main -> worker (response direction) ---
+    def put_response(self, value: Any) -> None:
+        raise NotImplementedError
+
+    def get_response(self) -> Any:
+        raise NotImplementedError
+
+    def wait_response(self) -> None:
+        raise NotImplementedError
+
+
+class InProcessChannel(MediatorChannel):
+    """The original transport: two :class:`Mediator.Value` one-slot lock queues.
+
+    Behaviour-identical to the pre-seam ``event_queue``/``response_queue`` pair —
+    this is the default channel and the regression baseline for the seam.
+    """
+
+    def __init__(self) -> None:
+        self._event = Mediator.Value()
+        self._response = Mediator.Value()
+
+    def put_event(self, item: Any) -> None:
+        self._event.put(item)
+
+    def restore_event(self, item: Any) -> None:
+        self._event.restore(item)
+
+    def get_event(self) -> Any:
+        return self._event.get()
+
+    def wait_event(self) -> None:
+        self._event.wait()
+
+    @property
+    def has_event(self) -> bool:
+        return self._event.has_value
+
+    def put_response(self, value: Any) -> None:
+        self._response.put(value)
+
+    def get_response(self) -> Any:
+        return self._response.get()
+
+    def wait_response(self) -> None:
+        self._response.wait()
+
+
 class Mediator:
     """
     Mediates between the model execution and a single intervention function.
@@ -785,8 +891,7 @@ class Mediator:
         info (Tracer.Info): Information about the tracing context associated with this mediator
         name (Optional[str]): Optional name for the mediator
         batch_group (Optional[List[int]]): Optional batch group for the mediator to determine which slice of tensors are being intervened on
-        event_queue (SimpleQueue): Where the mediator (worker thread) puts events to be processed by the interleaver (main thread). Will only ever have 1 or 0 items in the queue.
-        response_queue (SimpleQueue): Where the interleaver (main thread) puts responses to events, to then be processed by the mediator (worker thread). Will only ever have 1 or 0 items in the queue.
+        channel (MediatorChannel): The bidirectional one-event-in-flight handoff between the mediator (worker thread) and the interleaver (main thread). The worker puts events for the interleaver to process and the interleaver puts responses back; only ever 1 or 0 messages in flight in each direction. ``InProcessChannel`` by default; swappable for a socket-backed channel to run the worker in an isolated process.
         worker (Thread): The thread that runs the intervention function
         history (Set[str]): A set of providers that have been seen by the mediator. Used to detect out of order interventions.
         iteration_tracker (Dict[str, int]): Per-provider-path counter maintained by
@@ -875,10 +980,46 @@ class Mediator:
 
         self.interleaver = None
 
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        self.channel: MediatorChannel = InProcessChannel()
 
         self.worker = None
+
+        # Host-side handle (_PooledWorker) to an isolated worker process (set by
+        # isolation.acquire_isolated_worker). ``None`` => in-process (default).
+        self._iso = None
+
+        # Isolated tracer.cache(): token -> host Cache. The worker ships a CACHE event;
+        # the host registers cache hooks here on the REAL modules and swaps the host
+        # CacheDict in for the worker's empty placeholder when saves are injected.
+        self._iso_caches: dict = {}
+
+        # Isolated `with tensor.backward()`: when the trace uses backward, the host keeps
+        # a reference to each delivered (real, on-graph) activation tensor keyed by its
+        # requester string, so handle_backward_event can run the real backward and read
+        # gradients off the host's graph. ``_iso_backward`` gates the retention so a
+        # non-backward isolated trace pays nothing.
+        self._iso_backward = False
+        self._iso_grad_reals: dict = {}
+        # Grad-through-swap: each isolated SWAP installs a worker-computed value as a host
+        # *leaf* (clone-on-receive strips grad_fn), severing the host graph at the seam.
+        # Keep the (tagged, requires_grad) swap leaf per requester so handle_backward_event
+        # can return dL/d(swap leaf); the worker backprops that through its swap tape and
+        # re-seeds the pre-swap graph (a second BACKWARD round). Gated on ``_iso_backward``.
+        self._iso_grad_swaps: dict = {}
+
+        # Fast lane: the static safety verdict (set in start when fast_lane is on) and the
+        # wall-clock watchdog for a confirmed-safe in-process run.
+        self._fastlane_verdict = None
+        self._fastlane_watchdog = None
+
+        # True only inside an isolated worker process (set by _run_one_job). Lets
+        # cross-process-aware logic (e.g. Barrier) know it can't count locally.
+        self._isolated_worker = False
+
+        # Host side of an isolated mediator: the final tagged requester of the
+        # event currently being handled, shipped back to the worker on the
+        # response's meta piggyback (the worker keys backward provenance off it).
+        self._iso_last_tag = None
 
         self.skip_container = None
 
@@ -887,6 +1028,12 @@ class Mediator:
         self.hooks: List[Any] = list()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
+        # Number of `tracer.iter[...]` scopes currently open (IteratorTracer
+        # increments/decrements around each loop). Read by the isolated worker's
+        # interleaver stub to decide whether a requester's iteration must be
+        # resolved on the host (in-loop: the host owns the step counter and the
+        # pin-relaxation state) or locally (out-of-loop: the pin is authoritative).
+        self.iter_depth = 0
         self.all_stop: Optional[int] = stop
         self.args = list()
         self.cross_invoker = None
@@ -969,24 +1116,49 @@ class Mediator:
         else:
             _caller_stream = None
 
-        _intervention = self.intervention
-        _args = (self, self.info, *self.args)
+        from .isolation import isolation_state
 
-        def _worker_target():
-            if _caller_stream is not None:
-                torch.cuda.set_stream(_caller_stream)
-            _intervention(*_args)
+        if isolation_state()["on"]:
+            # Three execution tiers under isolation. The fast lane classifies each
+            # mediator once: a CONFIRMED-safe intervention runs IN-PROCESS (full model +
+            # weights, no worker, no per-hook channel) — the ONLY tier that can run the
+            # weight-reading interp majority, since the worker holds weightless dummy
+            # modules — while the unconfirmable remainder isolates and an introspection
+            # escape is rejected. The classifier is a footgun selector, never a malice
+            # boundary (see fastlane.py); it only moves a mediator isolate -> in-process.
+            from .fastlane import FAST, REJECT, FastLaneRejected, Watchdog
+            from .isolation import (
+                acquire_isolated_worker,
+                classify_for_fast_lane,
+                fast_lane_enabled,
+            )
 
-        # Start the worker thread.
-        self.worker = Thread(
-            target=_worker_target,
-            daemon=True,
-            name=self.name,
-        )
+            tier = "isolate"
+            if fast_lane_enabled():
+                verdict = classify_for_fast_lane(self)
+                self._fastlane_verdict = verdict
+                if verdict.tier == REJECT:
+                    raise FastLaneRejected(
+                        f"intervention cannot be confirmed for the in-process fast lane: "
+                        f"{verdict.reason}. Rewrite without introspection, or run without "
+                        f"isolate_mediators()."
+                    )
+                tier = verdict.tier
 
-        self.interleaver.current = self
-        self.worker.start()
-        self.event_queue.wait()
+            if tier == FAST:
+                deadline = isolation_state()["opts"].fast_lane_timeout
+                self._fastlane_watchdog = Watchdog(deadline)
+                self._run_in_process(_caller_stream, watchdog=self._fastlane_watchdog)
+            else:
+                # Isolated path: run the intervention in an isolated GPU worker process
+                # (warm pooled worker when pool_size>0, else a cold one-shot worker).
+                # Sets self.channel (host end), self.worker (the process), self._iso.
+                acquire_isolated_worker(self)
+                self.interleaver.current = self
+        else:
+            self._run_in_process(_caller_stream)
+
+        self.channel.wait_event()
 
         # Handle the first event for each mediator to clear mediators that already ended.
         try:
@@ -996,6 +1168,31 @@ class Mediator:
 
         self.interleaver.current = None
 
+    def _run_in_process(self, caller_stream, watchdog=None):
+        """Launch the intervention in a daemon thread (the in-process path, shared by the
+        isolation-off default and the confirmed-safe fast lane). ``watchdog`` (fast lane
+        only) bounds a runaway pure-Python loop: it is armed on the thread after start and
+        disarmed when the body returns (the ``finally``) — and again at ``cancel`` as a
+        backstop. The body's own ``try/except`` (invoker.compile) routes an injected
+        :class:`fastlane.FastLaneTimeout` through ``mediator.exception`` like any error."""
+        _intervention = self.intervention
+        _args = (self, self.info, *self.args)
+
+        def _worker_target():
+            try:
+                if caller_stream is not None:
+                    torch.cuda.set_stream(caller_stream)
+                _intervention(*_args)
+            finally:
+                if watchdog is not None:
+                    watchdog.disarm()
+
+        self.worker = Thread(target=_worker_target, daemon=True, name=self.name)
+        self.interleaver.current = self
+        self.worker.start()
+        if watchdog is not None:
+            watchdog.arm(self.worker.ident)
+
     ### Provider Methods ###
 
     def cancel(self):
@@ -1004,14 +1201,40 @@ class Mediator:
         self.history = set()
         self.iteration_tracker = defaultdict(int)
         self.iteration = 0
+        self.iter_depth = 0
         self.worker = None
+        # Retained on-graph activations (isolated backward) pin the autograd graph;
+        # drop them at trace end rather than waiting for the mediator to be GC'd.
+        self._iso_grad_reals = {}
+        self._iso_grad_swaps = {}
+        # Disarm the fast-lane watchdog (backstop to the thread-target finally) so a
+        # generous deadline can't fire into an unrelated later computation.
+        if self._fastlane_watchdog is not None:
+            self._fastlane_watchdog.disarm()
+            self._fastlane_watchdog = None
 
-        if self.event_queue.has_value:
+        # If the worker is still mid-protocol, unwind it with a Cancelation. For the
+        # isolated channel the get_event/put_response calls are host-local — they do NOT
+        # drain the worker's subsequent EXCEPTION from the cross-process pipe — so the
+        # pipe is left unbalanced; such a worker must NOT be recycled. Mark it dirty so
+        # release() retires (SIGKILLs) it.
+        dirty = False
+        if self.channel.has_event:
             self.handle()
-            if self.event_queue.has_value:
-                self.event_queue.get()
-                self.response_queue.put(Cancelation())
-                self.event_queue.get()
+            if self.channel.has_event:
+                self.channel.get_event()
+                self.channel.put_response(Cancelation())
+                self.channel.get_event()
+            dirty = True
+
+        # Release the isolated worker: recycle it if it ended cleanly (set above in
+        # handle_end_event), else retire it (the pool re-warms lazily). For a cold
+        # one-shot worker (pool_size=0) this just kills it and frees the buffer.
+        if self._iso is not None:
+            from .isolation import release_isolated_worker
+
+            release_isolated_worker(self._iso, dirty=dirty)
+            self._iso = None
 
     def handle(self, provider: Optional[str] = None, value: Optional[Any] = None):
         """Process a provided value against this mediator's pending event.
@@ -1048,13 +1271,41 @@ class Mediator:
         self.interleaver.batcher.current_provider = provider
 
         # Check to see if this mediator has an unprocessed eventto start.
-        process = self.event_queue.has_value
+        process = self.channel.has_event
 
         # Continue processing events until there are no more events to process.
         # Means we can move on to the next mediator and continue the model execution.
         while process:
 
-            event, data = self.event_queue.get()
+            event, data = self.channel.get_event()
+
+            # Isolated path: the worker has no real module, so the host both
+            # resolves the requester's iteration tag and registers the one-shot
+            # hook on demand. An in-loop requester crosses UNTAGGED (a marker
+            # tuple carrying the base path + the worker's live `tracer.iter` pin):
+            # the host is the single iteration authority, so the tag is computed
+            # here from the host mediator's own pin/step counter (the same state
+            # the in-process resolution reads). Out-of-loop requesters arrive
+            # already tagged and pass through. The resolved string is stashed on
+            # `_iso_last_tag` so the response's meta piggyback ships it back to
+            # the worker (backward provenance keys off it). Events restored by
+            # `handle_value_event` re-enter this loop already resolved, so the
+            # tag is never recomputed at a later (wrong) step.
+            if self._iso is not None and event in (
+                Events.VALUE,
+                Events.SWAP,
+                Events.SKIP,
+            ):
+                from .isolation import ensure_isolated_provider, resolve_iso_requester
+
+                if event == Events.VALUE:
+                    data = resolve_iso_requester(self, data)
+                    requester = data
+                else:
+                    requester = resolve_iso_requester(self, data[0])
+                    data = (requester, *data[1:])
+                self._iso_last_tag = requester
+                ensure_isolated_provider(self, requester)
 
             if event == Events.VALUE:
                 process = self.handle_value_event(data, provider)
@@ -1066,8 +1317,14 @@ class Mediator:
                 process = self.handle_skip_event(provider, *data)
             elif event == Events.BARRIER:
                 process = self.handle_barrier_event(provider, data)
+            elif event == Events.CACHE:
+                process = self.handle_cache_event(data)
+            elif event == Events.BACKWARD:
+                process = self.handle_backward_event(data)
+            elif event == Events.UNEMBED:
+                process = self.handle_unembed_event(data)
             elif event == Events.END:
-                process = self.handle_end_event()
+                process = self.handle_end_event(data)
 
         value = self.interleaver.batcher.current_value
 
@@ -1090,6 +1347,13 @@ class Mediator:
 
         # If fulfilled by this processor, respond with the value and continue processing events.
         if provider == requester:
+
+            # Isolated backward: keep a reference to the REAL (on-graph) activation tensor,
+            # keyed by its requester string, so handle_backward_event can run the host's
+            # real backward and read this activation's gradient. The worker only ever got a
+            # detached clone, so its half of the graph can't be differentiated there.
+            if self._iso is not None and self._iso_backward:
+                self._iso_grad_reals[provider] = self.interleaver.batcher.current_value
 
             # Potentially only select a slice of the value if this mediator is part of a batch group.
             value = self.interleaver.batcher.narrow(self.batch_group)
@@ -1120,7 +1384,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the value event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.restore((Events.VALUE, requester))
+                self.channel.restore_event((Events.VALUE, requester))
 
                 return False
 
@@ -1140,6 +1404,19 @@ class Mediator:
         """
         # If fulfilled by this processor, swap the value and respond with the value and continue processing events.
         if provider == requester:
+            # Grad-through-swap: the swap value arrived clone-on-receive (a detached host
+            # leaf), so the downstream host graph would dead-end here. Make the seam tensor
+            # require grad BEFORE the forward consumes it (so downstream tracks it and it is
+            # a backward target) and retain it; handle_backward_event returns dL/d(this leaf)
+            # for the worker to backprop through its swap tape. Tuple outputs: the residual is
+            # element [0].
+            if self._iso is not None and self._iso_backward:
+                seam = swap_value[0] if isinstance(swap_value, tuple) else swap_value
+                if (torch.is_tensor(seam) and seam.is_leaf
+                        and seam.is_floating_point() and not seam.requires_grad):
+                    seam.requires_grad_(True)
+                    self._iso_grad_swaps[requester] = seam
+
             # Swap the value in the batcher. Might only replace a slice of the value if this mediator is part of a batch group.
             self.interleaver.batcher.swap(self.batch_group, swap_value)
 
@@ -1158,7 +1435,7 @@ class Mediator:
             else:
                 # If the requester has not been seen before, add it to the history and put the swap event back in the event queue to be processed later.
                 self.history.add(provider)
-                self.event_queue.restore((Events.SWAP, (requester, swap_value)))
+                self.channel.restore_event((Events.SWAP, (requester, swap_value)))
 
                 return False
 
@@ -1174,6 +1451,14 @@ class Mediator:
         Returns:
             bool: Flag to stop processing events.
         """
+
+        if self._iso is not None:
+            # An EXCEPTION event means the isolated worker's intervention raised and the
+            # worker looped back idle with a BALANCED pipe (it sent one event, the host
+            # consumed it, no response is sent) — the worker is healthy and recyclable.
+            # cancel() honors this unless it finds a still-pending event (dirty), in
+            # which case it retires the worker instead.
+            self._iso.clean = True
 
         self.cancel()
 
@@ -1224,6 +1509,19 @@ class Mediator:
         carries the swap forward to the outer handle context.
         """
 
+        # Isolated path: the worker can't count participants across processes, so it
+        # sends the TARGET count (an int). Accumulate names host-side; only coordinate
+        # once all participants have arrived. Until then this mediator stays blocked at
+        # the barrier (return False without responding).
+        if isinstance(participants, int):
+            n = participants
+            acc = self.interleaver._barrier_acc
+            acc.add(self.name)
+            if len(acc) < n:
+                return False
+            participants = set(acc)
+            acc.clear()
+
         if participants is not None:
 
             prev_current = self.interleaver.current
@@ -1246,10 +1544,210 @@ class Mediator:
 
         return False
 
-    def handle_end_event(self):
+    def handle_cache_event(self, spec: Any):
+        """Isolated ``tracer.cache()``: register the persistent cache hooks on the
+        HOST's REAL modules (the worker's are dummies, so its hooks never fire).
+
+        The host ``Cache``'s ``CacheDict`` is filled IN-PLACE by the forward pass (the
+        hooks are ``mediator_idx=inf``, firing after intervention hooks).
+        :meth:`handle_end_event` swaps this host ``CacheDict`` in for the worker's empty
+        placeholder (matched by token) when the saved variables are injected, so the
+        user's variable *is* the forward-filled host cache. The hooks live on
+        ``self.hooks`` and are dropped at teardown by ``remove_hooks`` — exactly like the
+        in-process path. Acks so the worker's ``send`` returns and it proceeds to END.
+        """
+        from .hooks import cache_input_hook, cache_output_hook
+        from .isolation import path_to_envoy
+        from .tracing.tracer import Cache
+
+        path2envoy = path_to_envoy(self)
+        targets = [path2envoy[p] for p in spec["paths"] if p in path2envoy]
+
+        cache_obj = Cache(
+            spec["paths"],
+            spec["device"],
+            spec["dtype"],
+            spec["detach"],
+            spec["include_output"],
+            spec["include_inputs"],
+            spec["rename"],
+            spec["alias"],
+        )
+        batcher = self.interleaver.batcher
+        for envoy in targets:
+            if spec["include_output"]:
+                cache_output_hook(cache_obj, envoy._module, envoy.path, batcher, self)
+            if spec["include_inputs"]:
+                cache_input_hook(cache_obj, envoy._module, envoy.path, batcher, self)
+
+        self._iso_caches[spec["token"]] = cache_obj
+        self.set_user_cache(cache_obj)
+
+        self.respond(None)  # ack -> worker's send() returns, it proceeds to END
+        return True
+
+    def handle_backward_event(self, seed: dict):
+        """Run the backward pass on the host's real graph (isolation).
+
+        The worker computed its half of the chain rule — ``seed`` maps each delivered
+        activation's requester string to ``dL/d(that activation)`` (the gradient at the
+        worker→host seam, computed on the worker's local tape). The host continues the
+        chain rule on its own graph: it differentiates the seeded activations and returns
+        ``dL/d(activation)`` for every delivered activation the worker might read via
+        ``.grad`` (keyed by the same requester strings). No user code runs here — only
+        ``torch.autograd.grad`` on the host's graph with the worker-supplied seeds.
+        """
+        reals = self._iso_grad_reals
+        swaps = self._iso_grad_swaps
+
+        # The seeds: (real activation tensor, dL/d(activation) from the worker). Seeds key
+        # into the pre-swap reals — round 1 seeds the loss's delivered reads, round 2 (after
+        # the worker backprops a swap seam) seeds the pre-swap activation that was swapped.
+        out_tensors, out_grads = [], []
+        for path, grad in seed.items():
+            real = reals.get(path)
+            if torch.is_tensor(real) and real.requires_grad and torch.is_tensor(grad):
+                out_tensors.append(real)
+                out_grads.append(grad)
+
+        # The targets: every delivered activation AND every swap leaf still on the host
+        # graph. Reals serve `.grad` reads (and round-2 re-seeding); swap leaves let the
+        # worker continue the chain rule through a swap seam (grad-through-swap). Computing
+        # all keeps it source-agnostic. Kept as separate lists so a real and a swap sharing
+        # one requester path (read then swapped) don't collide.
+        real_paths = [p for p, r in reals.items() if torch.is_tensor(r) and r.requires_grad]
+        swap_paths = [p for p, s in swaps.items() if torch.is_tensor(s) and s.requires_grad]
+        target_tensors = [reals[p] for p in real_paths] + [swaps[p] for p in swap_paths]
+
+        if (reals or swaps) and not target_tensors:
+            # Activations were delivered but NONE is on a graph — the forward ran
+            # without gradient tracking (e.g. generate() runs grad-less). Tell the
+            # worker so its .grad reads blame the real cause, not "off the path".
+            self.respond({"__nnsight_backward_no_graph__": True})
+            return True
+
+        result: dict = {}
+        if out_tensors and target_tensors:
+            grads = torch.autograd.grad(
+                out_tensors,
+                target_tensors,
+                grad_outputs=out_grads,
+                allow_unused=True,
+                retain_graph=True,
+            )
+            n = len(real_paths)
+            result = {p: g for p, g in zip(real_paths, grads[:n]) if torch.is_tensor(g)}
+            swap_grads = {
+                p: g for p, g in zip(swap_paths, grads[n:]) if torch.is_tensor(g)
+            }
+            if swap_grads:
+                # The worker backprops these through its swap tape to dL/d(delivered clone)
+                # and re-seeds (a further BACKWARD round); kept under a reserved key so they
+                # are not mistaken for `.grad`-readable activation gradients.
+                result["__nnsight_swap_grads__"] = swap_grads
+
+        self.respond(result)  # ack -> worker's send() returns the grad dict
+        return True
+
+    def handle_unembed_event(self, data):
+        """Run a residual through the host's REAL final-norm + unembed (isolation).
+
+        The worker holds weightless dummy modules, so a ``F.linear(normed, head.weight)``
+        readout — what every logit-lens / steering-direction / attribution-metric cell
+        does — cannot run there. The worker instead ships the residual VALUE plus the
+        module PATHS via ``Events.UNEMBED``; the host resolves the real envoys, runs
+        ``head(norm(residual))`` on the real weights, and ships back only the logits.
+        Weights never cross the boundary (no containment regression, no model-binding of
+        the generic worker); only the result does. ``spec`` =
+        ``{"norm_path", "head_path", "formulation"}`` (``formulation`` ∈ weight|module).
+        """
+        import torch.nn.functional as F
+
+        from .isolation import path_to_envoy
+
+        residual, spec = data
+        p2e = path_to_envoy(self)
+        head = p2e.get(spec["head_path"])
+        if head is None:
+            self.respond(
+                KeyError(f"unembed: head path {spec['head_path']!r} not found on the model")
+            )
+            return True
+        norm = p2e.get(spec["norm_path"]) if spec.get("norm_path") else None
+        if spec.get("norm_path") and norm is None:
+            self.respond(
+                KeyError(f"unembed: norm path {spec['norm_path']!r} not found on the model")
+            )
+            return True
+
+        normed = norm._module(residual) if norm is not None else residual
+        if spec["formulation"] == "weight":
+            logits = F.linear(normed, head._module.weight)
+        else:
+            logits = head._module(normed)
+
+        self.respond(logits)  # ack -> worker's send() returns the logits
+        return True
+
+    def handle_end_event(self, payload: Optional[Any] = None):
         """
         Handle an end event by stopping the mediator.
+
+        Worker→host saves transmission: in the isolated path the worker bundles its
+        ``.save()``'d and ``.carry()``'d values into the END event as
+        ``(values, saved_names)``, since the worker's frame + ``Globals`` live in another
+        process. ``values`` is the union of saved + carried locals; ``saved_names`` is the
+        ``.save()``'d subset.
+
+        The host injects these into the tracer's ``info.frame`` — the **user** frame for a
+        root trace, or the **session** frame for an inner trace within ``model.session()``.
+        For an inner trace (the target carries ``__nnsight_tracing_info__``), it replicates
+        the in-process two-hop push: write ALL values so the next trace sees them, and
+        re-register the SAVED values' host ids in ``Globals.saves`` so the session's exit-push
+        keeps them (the worker's ids live in another process; without this the session's
+        root filter would drop everything). Carried values are written for the next trace but
+        not registered, so they drop at session exit — matching in-process non-saved
+        semantics. For a root trace, only the saved subset surfaces to the user frame.
         """
+        from .tracing.globals import Globals
+
+        if self._iso is not None:
+            # A consumed END means the worker ended cleanly => recyclable by the pool.
+            # cancel() (below) reads this to recycle vs retire the worker.
+            self._iso.clean = True
+            values, saved_names = (payload if payload else ({}, []))
+            if values:
+                if self._iso_caches:
+                    # tracer.cache(): the worker shipped a ``{_ISO_CACHE_TAG: token}``
+                    # marker in place of its placeholder CacheDict; swap in the HOST cache
+                    # (matched by token), which the forward fills in-place after this
+                    # injection. The user's variable then IS the forward-filled host cache.
+                    values = dict(values)
+                    for name, val in list(values.items()):
+                        if isinstance(val, dict) and _ISO_CACHE_TAG in val:
+                            host_cache = self._iso_caches.get(val[_ISO_CACHE_TAG])
+                            if host_cache is not None:
+                                values[name] = host_cache.cache
+                tracer = self.interleaver.tracer
+                user_frame = (
+                    tracer.info.frame
+                    if tracer is not None and tracer.info.frame is not None
+                    else self.info.frame
+                )
+                if user_frame is not None:
+                    nested = "__nnsight_tracing_info__" in user_frame.f_locals
+                    if nested:
+                        # inner trace in a session: all values cross to the next trace;
+                        # only saved values are registered so they survive the session push.
+                        push_variables(user_frame, values)
+                        for name in saved_names:
+                            if name in values:
+                                Globals.saves.add(id(values[name]))
+                    else:
+                        # root trace: only saved values surface to the user frame.
+                        saved_only = {k: values[k] for k in saved_names if k in values}
+                        push_variables(user_frame, saved_only)
+
         self.cancel()
 
         return False
@@ -1292,7 +1790,7 @@ class Mediator:
                 return True
             else:
                 self.history.add(provider)
-                self.event_queue.restore((Events.SKIP, (requester, value)))
+                self.channel.restore_event((Events.SKIP, (requester, value)))
 
                 return False
 
@@ -1305,8 +1803,8 @@ class Mediator:
         """
 
         # Respond and resume the mediator thread.
-        self.response_queue.put(value)
-        self.event_queue.wait()
+        self.channel.put_response(value)
+        self.channel.wait_event()
 
     ### Requester Methods ###
 
@@ -1328,11 +1826,11 @@ class Mediator:
             self.push()
 
         # Send the event
-        self.event_queue.put((event, requester))
+        self.channel.put_event((event, requester))
 
         # Wait for the interleaver to process the event and respond with the value.
-        self.response_queue.wait()
-        response = self.response_queue.get()
+        self.channel.wait_response()
+        response = self.channel.get_response()
 
         # If the response is an exception, raise it.
         if isinstance(response, Exception):
@@ -1383,7 +1881,7 @@ class Mediator:
 
         self.push()
 
-        self.event_queue.put((Events.END, None))
+        self.channel.put_event((Events.END, None))
 
     def exception(self, exception: Exception):
         """
@@ -1392,7 +1890,7 @@ class Mediator:
         Args:
             exception: The exception that occurred
         """
-        self.event_queue.put((Events.EXCEPTION, exception))
+        self.channel.put_event((Events.EXCEPTION, exception))
 
     @property
     def frame(self) -> FrameType:
@@ -1494,15 +1992,24 @@ class Mediator:
         self.intervention = state["intervention"]
         self.all_stop = state["all_stop"]
         self.iteration_tracker = state["iteration_tracker"]
-        self.event_queue = Mediator.Value()
-        self.response_queue = Mediator.Value()
+        self.channel: MediatorChannel = InProcessChannel()
 
         self.worker = None
+        self._iso = None
+        self._isolated_worker = False
+        self._iso_backward = False
+        self._iso_grad_reals = {}
+        self._iso_grad_swaps = {}
+        self._iso_caches = {}
+        self._fastlane_verdict = None
+        self._fastlane_watchdog = None
         self.interleaver = None
         self.history = set()
         self.user_cache: "Cache" = list()
         self.hooks: List[Any] = list()
         self.iteration = 0
+        self.iter_depth = 0
+        self._iso_last_tag = None
         self.args = list()
         self.original_globals = {}
         self.cross_invoker = None

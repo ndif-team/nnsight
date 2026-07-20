@@ -54,7 +54,7 @@ except PackageNotFoundError:
     except ImportError:
         __version__ = "unknown version"
 
-from .intervention.tracing.globals import save
+from .intervention.tracing.globals import carry, save
 from .ndif import *
 
 from IPython import get_ipython

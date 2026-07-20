@@ -614,19 +614,239 @@ class InterleavingTracer(Tracer):
                         targets.append(envoy)
 
         # Register persistent cache hooks on each target module
-        for envoy in targets:
-            if include_output:
-                cache_output_hook(
-                    cache_obj, envoy._module, envoy.path, batcher, mediator
-                )
-            if include_inputs:
-                cache_input_hook(
-                    cache_obj, envoy._module, envoy.path, batcher, mediator
-                )
+        if mediator._isolated_worker:
+            # Isolated: the worker's modules are DUMMIES, so cache hooks registered
+            # here would never fire. Ship the spec via a CACHE event so the HOST
+            # registers the hooks on its real modules and fills this cache. The
+            # returned CacheDict is a token-tagged placeholder the user binds +
+            # .save()s; the host swaps in its own (forward-filled) CacheDict when the
+            # saved variables are injected into the user frame (matched by token).
+            from ..interleaver import Events
+
+            token = id(cache_obj.cache)
+            cache_obj.cache._iso_cache_token = token
+            spec = {
+                "token": token,
+                "paths": [envoy.path for envoy in targets],
+                "device": device,
+                "dtype": dtype,
+                "detach": detach,
+                "include_output": include_output,
+                "include_inputs": include_inputs,
+                "rename": rename_dict,
+                "alias": alias_dict,
+            }
+            mediator.send(Events.CACHE, spec)
+        else:
+            for envoy in targets:
+                if include_output:
+                    cache_output_hook(
+                        cache_obj, envoy._module, envoy.path, batcher, mediator
+                    )
+                if include_inputs:
+                    cache_input_hook(
+                        cache_obj, envoy._module, envoy.path, batcher, mediator
+                    )
 
         mediator.set_user_cache(cache_obj)
 
         return cache_obj.cache
+
+    def unembed(self, residual, norm, head, formulation: str = "weight"):
+        """Project ``residual`` through the final norm + unembed → logits, on the host's
+        REAL weights even when the intervention is isolated.
+
+        The readout every logit-lens / steering-direction / attribution-metric cell does
+        — ``F.linear(norm(residual), head.weight)`` — reads the host model's real
+        weights. In-process (incl. the fast lane) that just runs the real modules. In an
+        isolated worker the modules are weightless dummies, so this ships the residual
+        VALUE plus the module PATHS to the host (``Events.UNEMBED``); the host runs the
+        real norm + unembed and ships back only the logits. Weights never cross the
+        boundary — so this works on the isolated tier without binding the generic worker
+        to a model or placing host weight memory in the (less-trusted) worker.
+
+        Args:
+            residual: the residual-stream tensor to project (a block ``.output``; a tuple
+                is untupled to ``[0]``).
+            norm: the final-norm Envoy (e.g. ``model.transformer.ln_f``), or ``None`` to
+                skip normalization.
+            head: the unembed Envoy (e.g. ``model.lm_head``).
+            formulation: ``"weight"`` → ``F.linear(normed, head.weight)`` (portable; the
+                form the workloads use); ``"module"`` → ``head(normed)``.
+
+        Returns:
+            The logits tensor.
+        """
+        import torch.nn.functional as F
+
+        if isinstance(residual, tuple):
+            residual = residual[0]
+
+        mediator = self.model.interleaver.current
+
+        if mediator._isolated_worker:
+            # the worker's modules are dummies — route the real compute to the host.
+            from ..interleaver import Events
+
+            spec = {
+                "norm_path": norm.path if norm is not None else None,
+                "head_path": head.path,
+                "formulation": formulation,
+            }
+            return mediator.send(Events.UNEMBED, (residual, spec))
+
+        # in-process / fast lane: the real modules + weights are right here.
+        normed = norm(residual) if norm is not None else residual
+        if formulation == "weight":
+            return F.linear(normed, head.weight)
+        return head(normed)
+
+    def steer(self, envoy, direction, alpha: float = 1.0):
+        """Add ``alpha * direction`` to ``envoy``'s output residual via a **replacement**
+        boundary write — the activation-steering / injection every steering cell does, made
+        to work on the isolated tier where an in-place ``hidden[:] = …`` silently no-ops.
+
+        Steering reads the delivered activation and writes a modified one back. Done in
+        place (``hidden[:] = hidden + …``) that mutation never crosses the isolation
+        boundary: the worker mutates its *delivered clone*, no SWAP fires, and the host's
+        real activation is untouched — a silent no-op (the save of the steered residual
+        looks right, but nothing downstream changes). ``tracer.steer`` always performs a
+        *replacement* swap (assign ``envoy.output``), which ships the steered value back
+        over the existing ``Events.SWAP`` path, so it is correct in-process, on the fast
+        lane, AND in the isolated worker. Unlike :meth:`unembed`, steering touches no host
+        weights — only the delivered activation — so it needs no host round-trip and no
+        isolated/in-process branch: the eproperty setter routes the swap on either tier.
+
+        Tuple outputs (attention modules, and transformer blocks on transformers <5) are
+        replaced whole — element ``[0]`` is steered and the rest of the tuple rides through
+        unchanged.
+
+        Args:
+            envoy: the module whose output residual to steer (e.g.
+                ``model.transformer.h[6]``).
+            direction: the steering vector, broadcast over the residual and cast to its
+                dtype/device (so a float32 direction steers a float16 residual cleanly).
+            alpha: the steering coefficient — a scalar or any tensor broadcastable over the
+                residual. Defaults to ``1.0``.
+
+        Returns:
+            The steered residual tensor (element ``[0]`` for tuple outputs).
+        """
+        out = envoy.output
+        is_tuple = isinstance(out, tuple)
+        hidden = out[0] if is_tuple else out
+
+        direction = direction.to(dtype=hidden.dtype, device=hidden.device)
+        steered = hidden + alpha * direction
+
+        if is_tuple:
+            envoy.output = (steered, *out[1:])
+        else:
+            envoy.output = steered
+
+        return steered
+
+    def patch(self, envoy, value):
+        """Transplant ``value`` into ``envoy``'s output residual via a **replacement**
+        boundary write — the activation-patching / resampling transplant every patching cell
+        does, made to work on the isolated tier where an in-place ``hidden[:] = value``
+        silently no-ops.
+
+        Patching replaces a module's delivered activation with one captured elsewhere (a clean
+        run, a different prompt, a precomputed mean). Done in place that write never crosses the
+        isolation boundary: the worker mutates its *delivered clone*, no SWAP fires, and the
+        host's real activation is untouched — a silent no-op. ``tracer.patch`` always performs a
+        *replacement* swap (assign ``envoy.output``), which ships the transplanted value back
+        over the existing ``Events.SWAP`` path, so it is correct in-process, on the fast lane,
+        AND in the isolated worker. Like :meth:`steer`, it touches no host weights — only the
+        delivered activation — so it needs no host round-trip and no isolated/in-process branch.
+
+        ``value`` replaces the residual whole (element ``[0]`` for tuple outputs); construct a
+        full-shape value (e.g. clone the residual and edit a slice) for partial patches, the
+        standard nnsight idiom. The value is cast to the residual's dtype/device, so a value
+        precomputed on CPU (the isolation case) transplants cleanly.
+
+        Tuple outputs (attention modules, and transformer blocks on transformers <5) are
+        replaced whole — element ``[0]`` is transplanted and the rest of the tuple rides
+        through unchanged.
+
+        Args:
+            envoy: the module whose output residual to replace (e.g.
+                ``model.transformer.h[6]``).
+            value: the replacement activation, broadcast/cast to the residual's dtype/device.
+                Must match the residual's shape (element ``[0]`` for tuple outputs).
+
+        Returns:
+            The transplanted residual tensor (element ``[0]`` for tuple outputs).
+        """
+        out = envoy.output
+        is_tuple = isinstance(out, tuple)
+        hidden = out[0] if is_tuple else out
+
+        value = value.to(dtype=hidden.dtype, device=hidden.device)
+
+        if is_tuple:
+            envoy.output = (value, *out[1:])
+        else:
+            envoy.output = value
+
+        return value
+
+    def ablate(self, envoy, mode: str = "zero"):
+        """Knock out ``envoy``'s output residual via a **replacement** boundary write — the
+        lesion-study ablation every ablation cell does, made to work on the isolated tier where
+        an in-place ``hidden[:] = 0`` silently no-ops.
+
+        Ablation replaces a component's output with a baseline to measure how the prediction
+        degrades. Done in place that write never crosses the isolation boundary: the worker
+        mutates its *delivered clone*, no SWAP fires, and the host's real activation is
+        untouched — a silent no-op (the model never sees the lesion). ``tracer.ablate`` always
+        performs a *replacement* swap, riding the existing ``Events.SWAP`` path, so it is
+        correct in-process, on the fast lane, AND in the isolated worker. Like :meth:`steer`, it
+        touches no host weights, so it needs no host round-trip and no isolated/in-process
+        branch.
+
+        Modes:
+            ``"zero"`` — replace with zeros (zero ablation; pushes the residual off-distribution
+                but is the simplest knockout).
+            ``"mean"`` — replace with the within-sequence mean: each position becomes the
+                per-example mean over the token dimension, keeping the average magnitude while
+                removing position-specific deviation. This is the *self-contained* mean. For
+                *reference-distribution* mean ablation (the mean activation over a dataset, per
+                docs/patterns/ablation.md), precompute that mean and transplant it via
+                :meth:`patch` — that mean is not derivable from a single forward.
+
+        Tuple outputs (attention modules, and transformer blocks on transformers <5) are
+        replaced whole — element ``[0]`` is ablated and the rest of the tuple rides through
+        unchanged.
+
+        Args:
+            envoy: the module whose output residual to ablate (e.g.
+                ``model.transformer.h[6]``).
+            mode: ``"zero"`` (default) or ``"mean"``.
+
+        Returns:
+            The ablated residual tensor (element ``[0]`` for tuple outputs).
+        """
+        out = envoy.output
+        is_tuple = isinstance(out, tuple)
+        hidden = out[0] if is_tuple else out
+
+        if mode == "zero":
+            ablated = torch.zeros_like(hidden)
+        elif mode == "mean":
+            ablated = hidden.mean(dim=-2, keepdim=True).expand_as(hidden).contiguous()
+        else:
+            raise ValueError(
+                f"tracer.ablate mode must be 'zero' or 'mean', got {mode!r}"
+            )
+
+        if is_tuple:
+            envoy.output = (ablated, *out[1:])
+        else:
+            envoy.output = ablated
+
+        return ablated
 
     def barrier(self, n_participants: int):
         """
@@ -734,6 +954,13 @@ class Barrier:
     def __call__(self):
 
         mediator = self.model.interleaver.current
+
+        # Isolated worker: each invoke runs in its own process with its own Barrier
+        # copy, so it can't count cross-invoke. Send the TARGET count and let the host
+        # accumulate participants across mediators (see handle_barrier_event).
+        if mediator._isolated_worker:
+            mediator.send(Events.BARRIER, self.n_participants)
+            return
 
         self.participants.add(mediator.name)
 

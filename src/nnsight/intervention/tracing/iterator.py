@@ -230,6 +230,11 @@ class IteratorTracer(Tracer):
         # in the finally block below so they don't leak outside the loop.
         iter_handles = register_iter_hooks(mediator, self.model)
 
+        # Mark the iter scope open. In an isolated worker this routes requester
+        # tagging to the host (the worker's tracker never advances on its dummy
+        # modules); in-process nothing reads it.
+        mediator.iter_depth += 1
+
         try:
             if isinstance(self.iteration, slice):
 
@@ -284,6 +289,7 @@ class IteratorTracer(Tracer):
 
                 yield self.iteration
         finally:
+            mediator.iter_depth -= 1
             mediator.iteration = original_iteration
 
             # Remove the iteration-tracking hooks.
@@ -331,6 +337,7 @@ class IteratorTracer(Tracer):
         mediator.push()
 
         iter_handles = register_iter_hooks(mediator, self.model)
+        mediator.iter_depth += 1
 
         def do_iteration(iter: int):
 
@@ -381,6 +388,7 @@ class IteratorTracer(Tracer):
 
                 do_iteration(self.iteration)
         finally:
+            mediator.iter_depth -= 1
             mediator.iteration = original_iteration
 
             for handle in iter_handles:

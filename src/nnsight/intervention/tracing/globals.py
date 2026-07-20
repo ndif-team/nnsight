@@ -10,20 +10,40 @@ _mounted = False
 
 
 def _ensure_mounted():
-    """Mount Object.save as the universal `.save` method.
+    """Mount Object.save / Object.carry as the universal `.save` / `.carry` methods.
 
-    Lazy one-time setup. Called from .save() / nnsight.save() so we only
-    pay the C-level mount cost once, on first use.
+    Lazy one-time setup, run at trace setup (``_setup_interleaver``) and from
+    ``.save()`` / ``.carry()`` so we only pay the C-level mount cost once.
     """
     global _mounted
     if CONFIG.APP.PYMOUNT and not _mounted:
         mount(Object.save, "save")
+        mount(Object.carry, "carry")
         _mounted = True
 
 
 def save(object: Any):
 
     Globals.saves.add(id(object))
+
+    return object
+
+
+def carry(object: Any):
+    """Mark ``object`` to be handed to a later trace in the same ``model.session()``
+    WITHOUT surfacing it as a saved output.
+
+    The portable counterpart to relying on an inner trace's locals flowing implicitly:
+    in-process a non-saved value already crosses to the next trace, but under isolation
+    each inner trace runs in a worker that only ships its outputs home, so a non-saved
+    value would vanish. ``.carry()`` explicitly registers the value to cross the boundary
+    — so the same code is correct in-process AND isolated. Unlike :func:`save`, a carried
+    value is dropped at session exit (it is not in ``Globals.saves``), so it never appears
+    in the caller's frame; use it for cross-trace handoffs (an activation to patch into a
+    later run) that are not themselves results.
+    """
+
+    Globals.shared.add(id(object))
 
     return object
 
@@ -43,6 +63,24 @@ class Object(torch.Tensor):
         """
 
         save(self)
+
+        return self
+
+    def carry(self, _=0):
+        """Hand this value to a later trace in the same ``model.session()`` without saving
+        it as an output. See :func:`carry`.
+
+        Examples:
+
+        >>> with model.session():
+        ...     with model.trace("clean prompt"):
+        ...         act = model.transformer.h[6].output.carry()   # not a result
+        ...     with model.trace("corrupt prompt") as tracer:
+        ...         tracer.patch(model.transformer.h[6], act)     # transplanted in
+        ...         logits = model.lm_head.output.save()
+        """
+
+        carry(self)
 
         return self
 
@@ -100,10 +138,14 @@ class TracingCache:
 class Globals:
     """Process-wide tracing state.
 
-    Holds two pieces of true global state:
+    Holds these pieces of true global state:
     - ``saves``: set of ``id()`` for objects marked via ``.save()``.
       The root tracer's ``push()`` filters its frame locals against this
       set so only saved values propagate out of the trace.
+    - ``shared``: set of ``id()`` for objects marked via ``.carry()`` —
+      cross-trace handoffs within a ``model.session()`` that are NOT surfaced
+      as outputs. Consulted by the isolated worker's ``end()`` to ship carried
+      values across the boundary; dropped at session exit (not in ``saves``).
     - ``cache``: source/AST/code-object memoization across traces.
 
     Root-vs-inner detection lives on the tracer itself — see
@@ -113,9 +155,12 @@ class Globals:
 
     saves = set()
 
+    shared = set()
+
     cache = TracingCache()
 
     @staticmethod
     def clear():
         Globals.saves.clear()
+        Globals.shared.clear()
         Globals.cache.clear()
