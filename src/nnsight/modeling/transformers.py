@@ -101,6 +101,15 @@ class TransformersModel(HuggingFaceModel):
             X        X          no-op
             X        Y          unload X, load Y
             X        None       unload X
+
+        ``self.peft`` is updated step by step rather than once at the end, so
+        that it always describes the module actually held. Assigning it only
+        after a successful load means a raising ``from_pretrained`` (adapter
+        repo id that doesn't resolve, OOM mid-load) leaves an already-unwrapped
+        module labelled with the old adapter — after which requests for that
+        adapter short-circuit as a no-op and silently run *base* weights, and
+        requests for any other adapter fail trying to unload a model that isn't
+        wrapped.
         """
 
         requested = env.get("peft_repo_id") if env else None
@@ -112,12 +121,12 @@ class TransformersModel(HuggingFaceModel):
             Envoy.__init__(
                 self, self._module.unload(), interleaver=self.interleaver
             )
+            self.peft = None
 
         if requested:
             peft_model = _import_peft_model().from_pretrained(self._module, requested)
             Envoy.__init__(self, peft_model, interleaver=self.interleaver)
-
-        self.peft = requested
+            self.peft = requested
 
     def _load_config(self, repo_id: str, revision: Optional[str] = None, **kwargs):
 

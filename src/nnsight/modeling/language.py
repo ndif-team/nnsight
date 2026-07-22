@@ -69,36 +69,60 @@ class LanguageModel(TransformersModel):
         self,
         *args,
         tokenizer: Optional[PreTrainedTokenizer] = None,
-        automodel: Type[AutoModel] = AutoModelForCausalLM,
+        automodel: Optional[Type[AutoModel]] = None,
         **kwargs,
     ) -> None:
 
         self.tokenizer: PreTrainedTokenizer = tokenizer
 
-        super().__init__(*args, automodel=automodel, **kwargs)
+        # `None` means "not specified" so that _resolve_automodel can tell an
+        # explicit AutoModelForCausalLM (leave it alone) apart from the default
+        # (promote it for multimodal repos). Defaulting the parameter itself to
+        # AutoModelForCausalLM would make those two cases indistinguishable.
+        self._automodel_explicit = automodel is not None
+
+        super().__init__(
+            *args,
+            automodel=AutoModelForCausalLM if automodel is None else automodel,
+            **kwargs,
+        )
 
         self.generator: Envoy = LanguageModel.Generator()
 
-    def _check_is_text_only(self, repo_id: str) -> None:
-        """Warn if ``self.config`` belongs to a multimodal model.
+    def _resolve_automodel(self, repo_id: str) -> None:
+        """Promote ``self.automodel`` to the class ``self.config`` is registered with.
 
         Modern multimodal models (Qwen-VL, Llama-Vision, Kimi, etc.) register
         their config class with ``AutoModelForImageTextToText`` rather than
         ``AutoModelForCausalLM``, and nest text-side fields (``vocab_size``,
         ``num_hidden_layers``, …) under ``config.text_config``. Loading them
-        through ``LanguageModel`` errors deep inside HuggingFace with a
-        confusing ``AttributeError: '...Config' object has no attribute
-        'vocab_size'``. Catch the case up front and warn the user to use
-        ``VisionLanguageModel`` instead.
+        through ``AutoModelForCausalLM`` either errors deep inside HuggingFace
+        with a confusing ``AttributeError: '...Config' object has no attribute
+        'vocab_size'``, or — for models that do expose a text-only causal-LM
+        class — quietly builds a *different module tree* than the one the repo
+        is canonically loaded as. That second case is the dangerous one: the
+        text stack sits at ``model.layers.*`` instead of
+        ``model.language_model.layers.*``, so checkpoints trained against the
+        canonical model (notably PEFT adapters) match zero parameter names and
+        silently apply nothing.
 
-        Only fires when ``automodel`` is the default ``AutoModelForCausalLM``;
-        if the user has chosen a non-default automodel, we don't second-guess.
+        So load the model as what it says it is. ``VisionLanguageModel`` is
+        still the right entry point when you need to pass images — it adds an
+        ``AutoProcessor`` on top — but text-only tracing works from here.
+
+        Only fires when the caller left ``automodel`` unset; passing any
+        ``automodel=`` explicitly (including ``AutoModelForCausalLM``, to force
+        the text-only tree) opts out.
         """
+
+        if getattr(self, "_automodel_explicit", False):
+            return
 
         if self.automodel is not AutoModelForCausalLM:
             return
 
         try:
+            from transformers import AutoModelForImageTextToText
             from transformers.models.auto.modeling_auto import (
                 MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES,
             )
@@ -107,11 +131,15 @@ class LanguageModel(TransformersModel):
 
         model_type = getattr(self.config, "model_type", None)
         if model_type and model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
+            self.automodel = AutoModelForImageTextToText
             warnings.warn(
-                f"{repo_id!r} ({model_type}) is registered with "
-                f"AutoModelForImageTextToText — it's a multimodal model. "
-                f"LanguageModel(...) may fail to load it; consider using "
-                f"VisionLanguageModel instead:\n\n"
+                f"{repo_id!r} ({model_type}) is a multimodal model registered "
+                f"with AutoModelForImageTextToText, so it is being loaded with "
+                f"that class rather than AutoModelForCausalLM. Module paths are "
+                f"therefore the repo's canonical ones (e.g. "
+                f"'model.language_model.layers.0'). Pass an explicit "
+                f"'automodel=' to override, or use VisionLanguageModel if you "
+                f"need to pass images:\n\n"
                 f"    from nnsight import VisionLanguageModel\n"
                 f"    model = VisionLanguageModel({repo_id!r}, ...)"
             )
@@ -126,7 +154,7 @@ class LanguageModel(TransformersModel):
 
         self._load_config(repo_id, revision=revision, **kwargs)
 
-        self._check_is_text_only(repo_id)
+        self._resolve_automodel(repo_id)
 
         self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
@@ -146,7 +174,7 @@ class LanguageModel(TransformersModel):
 
         self._load_config(repo_id, revision=revision, **kwargs)
 
-        self._check_is_text_only(repo_id)
+        self._resolve_automodel(repo_id)
 
         self._load_tokenizer(repo_id, revision=revision, **tokenizer_kwargs)
 
