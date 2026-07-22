@@ -3,6 +3,7 @@ import torch
 from ...intervention.batching import Batcher, apply
 from ...intervention.envoy import Envoy
 from ...intervention.hooks import add_ordered_hook
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -69,6 +70,20 @@ class VLLMBatcher(Batcher):
                 self.parallel = not module.gather_output
             elif isinstance(module, RowParallelLinear):
                 self.parallel = not module.reduce_results
+            elif isinstance(module, FusedMoE):
+                # MoE models that defer the combine (reduce_results=False,
+                # e.g. Qwen-MoE/DeepSeek) return per-rank partial sums the
+                # outer block all-reduces afterwards. Partial under both
+                # layouts of the same ranks: tensor-sliced experts (TP) and
+                # whole-expert placement (EP), hence the tp*ep group size.
+                # A combine kernel that already reduced across ranks
+                # (must_reduce_shared_expert_outputs) leaves nothing to
+                # gather.
+                self.parallel = (
+                    not module.reduce_results
+                    and module.tp_size * module.ep_size > 1
+                    and not module.must_reduce_shared_expert_outputs()
+                )
 
         def post_output_hook(module: torch.nn.Module, args: Any, output: Any):
 
@@ -92,6 +107,16 @@ class VLLMBatcher(Batcher):
                     output = apply(
                         output, lambda x: x / self.current_module.tp_size, torch.Tensor
                     )
+
+                elif isinstance(self.current_module, FusedMoE):
+
+                    # Undo the gather (or scale a swapped-in full value) so the
+                    # block's own downstream all_reduce reconstructs it exactly
+                    # once instead of double-counting.
+                    group_size = (
+                        self.current_module.tp_size * self.current_module.ep_size
+                    )
+                    output = apply(output, lambda x: x / group_size, torch.Tensor)
 
             self.parallel = False
             self.gathered = False
@@ -118,6 +143,11 @@ class VLLMBatcher(Batcher):
             if isinstance(module._module, (RowParallelLinear, ColumnParallelLinear)):
                 add_ordered_hook(module._module, pre_input_hook, "input")
                 add_ordered_hook(module._module, post_input_hook, "input")
+                add_ordered_hook(module._module, pre_output_hook, "output")
+                add_ordered_hook(module._module, post_output_hook, "output")
+            elif isinstance(module._module, FusedMoE):
+                # Output only: the inputs (hidden states, router logits) are
+                # full replicated tensors under both expert layouts.
                 add_ordered_hook(module._module, pre_output_hook, "output")
                 add_ordered_hook(module._module, post_output_hook, "output")
 
@@ -147,6 +177,18 @@ class VLLMBatcher(Batcher):
 
                 elif self.type == "output":
 
+                    self.current_value = apply(
+                        self.current_value,
+                        lambda x: tensor_model_parallel_all_reduce(x),
+                        torch.Tensor,
+                    )
+
+            elif isinstance(self.current_module, FusedMoE):
+
+                if self.type == "output":
+
+                    # Sum the per-rank partials into the full combined value
+                    # (the same collective the outer block runs afterwards).
                     self.current_value = apply(
                         self.current_value,
                         lambda x: tensor_model_parallel_all_reduce(x),

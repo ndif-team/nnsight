@@ -185,6 +185,17 @@ with model.trace("Hello", temperature=0.0):
 
 `VLLMBatcher` (`batching.py:15`) registers pre/post hooks on `ColumnParallelLinear` and `RowParallelLinear` modules. When your intervention reads from one, the batcher gathers the sharded tensor; when you write back, it re-shards. Every TP rank runs the same intervention code on the same complete tensor.
 
+### Mixture-of-experts models and expert parallelism
+
+MoE models (Qwen-MoE, DeepSeek, Mixtral, ...) work with the same transparency, in both expert layouts vLLM offers on the same ranks:
+
+- **default** (`enable_expert_parallel=False`): every rank holds a slice of every expert's matrices (the dense-MLP TP sharding, fused across experts);
+- **expert parallel** (`enable_expert_parallel=True`): each rank holds `num_experts / world_size` whole experts.
+
+The router (`mlp.gate`, a `ReplicatedLinear`) is full and identical on every rank, so reading router logits or swapping them (expert steering / expert-masking ablation) needs no gathering at all. The fused-experts module (`mlp.experts`, a `FusedMoE`) is the one MoE-specific case the batcher handles: models that build it with `reduce_results=False` (the Qwen-MoE/DeepSeek pattern) make it return **per-rank partial sums** that the outer block all-reduces afterwards, so on access the batcher all-reduces the partials into the true value and on write-back divides by the group size so the block's own all-reduce reconstructs a swapped value exactly once. Covered by `tests/vllm/test_moe_batching.py` against an HF reference.
+
+Individual experts are **not** addressable as submodules: vLLM stacks all local experts into fused weight tensors consumed by one grouped kernel, so there is no `experts[3]` to hook at any parallelism level. To ablate an expert, mask its router logit to `-inf` in `mlp.gate.output` instead.
+
 ### Async mode
 
 Pass `mode="async"` to get token-by-token streaming:
